@@ -30,6 +30,8 @@ import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTrac
 import { buildRendererCrashMarkdown } from '../rendererRecovery.js';
 import { workspaceIoDiagnosticsMarkdown } from './workspaceIoDiagnostics.js';
 import { buildJobCompensationSnapshot } from './bugReport/jobCompensationSnapshot.js';
+import { buildOfficialPostingSnapshot } from './bugReport/officialPostingSnapshot.js';
+import { buildOfficialPostingDiscoveryMarkdown } from './officialPostingDiscoveryDiagnostics.js';
 import { applicationCitationDiagnosticsMarkdown } from './applicationCitationDiagnostics.js';
 import { applicationCorrectionDiagnosticsMarkdown } from './applicationCorrectionDiagnostics.js';
 import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
@@ -2110,6 +2112,7 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
 
 const AIHANDOFF_MAIN_PROCESS_LOG_PATTERN = /non-api ai|non-api-ai|manual ai|manual handoff|handoff code|validation|jsonrepair/i;
 const BRIDGE_MAIN_PROCESS_LOG_PATTERN = /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i;
+const OFFICIAL_POSTING_MAIN_PROCESS_LOG_PATTERN = /official[- ]?posting|job-official-posting|OfficialPosting/i;
 
 function buildRecentMainProcessLogLines({ filter } = {}) {
   let mainProcessLogLines = [];
@@ -2718,14 +2721,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // hit stdout (which users never see) are surfaced here. Skip lines older
   // than this process start so we don't drag in stale logs from a previous
   // run that happened to share the ring buffer state.
-  // AIHANDOFF and BRIDGE are intentionally focused lenses. Their renderer Event History is
+  // AIHANDOFF, BRIDGE and OFFDISC are intentionally focused lenses. Their renderer Event History is
   // already filtered by the code vocabulary; apply the equivalent predicate to
   // the otherwise-global main-process ring as well. FULL remains byte-for-byte
-  // global even when combined with either code.
-  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT'))
+  // global even when combined with a focused code.
+  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT') || reportCodes.has('OFFDISC'))
     ? entry => {
       const message = String(entry?.message || '');
       return (reportCodes.has('AIHANDOFF') && AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(message))
+        || (reportCodes.has('OFFDISC') && OFFICIAL_POSTING_MAIN_PROCESS_LOG_PATTERN.test(message))
         || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
     }
     : null;
@@ -2937,6 +2941,16 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     try { jobCompensationMarkdown = buildJobCompensationSnapshot(nodes, payload.jobCompensationSnapshot); }
     catch { jobCompensationMarkdown = diagnosticRenderFailureMarkdown('Job Card Salary Audit (JOBPAY)', new Error('could not inspect salary assessments')); }
   }
+  let officialPostingMarkdown = '';
+  if (isFullReport || reportCodes.has('OFFICIAL')) {
+    try { officialPostingMarkdown = buildOfficialPostingSnapshot(nodes, payload.officialPostingSnapshot); }
+    catch { officialPostingMarkdown = diagnosticRenderFailureMarkdown('Official Posting Card Audit (OFFICIAL)', new Error('could not inspect saved official posting results')); }
+  }
+  let officialPostingDiscoveryMarkdown = '';
+  if (isFullReport || reportCodes.has('OFFDISC')) {
+    try { officialPostingDiscoveryMarkdown = buildOfficialPostingDiscoveryMarkdown(); }
+    catch { officialPostingDiscoveryMarkdown = diagnosticRenderFailureMarkdown('Official Posting Discovery Diagnostics (OFFDISC)', new Error('could not inspect lookup discovery observations')); }
+  }
   if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
     const rawJobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
       ? payload.filterStats.jobBoardStates
@@ -3144,7 +3158,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

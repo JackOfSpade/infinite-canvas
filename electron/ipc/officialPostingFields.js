@@ -1,5 +1,6 @@
 // Pure shared wire schema: main-process records and renderer whitelists use
 // the same field list. Scraped identity fields remain separate from these.
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, officialPostingNegativeNeedsRecheck } from './officialPostingNegativePolicy.js';
 export const OFFICIAL_POSTING_ROW_FIELDS = Object.freeze(['postedBy', 'applyOptions', 'salaryProvenance', 'officialPosting', 'boardClosed', 'listingLiveness', 'alternateListings']);
 export const LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS = 80_000;
 // Generation receipts cover the final queue boundary; search/cache retention
@@ -12,17 +13,17 @@ const FETCH_FAILURE_CODES = Object.freeze(['fetch-failed', 'fetch-timeout', 'uns
 export const OFFICIAL_FETCH_FAILURE_LIMIT = 8;
 export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown']);
 export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
-  'comparative-match', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
+  'comparative-match', 'comparative-equivalent', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
 ]);
 export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
   'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
   'bridge-research', 'bridge-timeout', 'bridge-unavailable', 'bridge-aborted', 'research-miss',
-  'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant',
+  'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'source-unproven', 'poster-tenant',
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
   'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'storage-failed', 'failed',
-  'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow',
+  'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
   ...['a', 'b', 'choice'].flatMap(run => ['none', 'uncertain', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
@@ -39,17 +40,19 @@ export function officialPostingComparativeTrail({ validA = false, validB = false
 }
 
 const DURABILITY_TRAIL_CODES = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor',
+  'source-unproven',
+  ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor', 'reverify-failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** Host trail compaction must retain the evidence that prevents persistence. */
 export function boundedOfficialPostingTrail(values) {
   const codes = [...new Set((Array.isArray(values) ? values : []).filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))];
   if (codes.length <= 32) return codes;
-  const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code) || code === 'semantic-match-v1');
+  const durableProof = code => code === 'semantic-match-v1' || code === OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL;
+  const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code) || durableProof(code));
   const comparison = codes.filter(code => code.startsWith('comparative-') && !DURABILITY_TRAIL_CODES.has(code));
   const required = [...durability, ...comparison].slice(0, 32);
   const room = 32 - required.length;
-  const others = codes.filter(code => !DURABILITY_TRAIL_CODES.has(code) && code !== 'semantic-match-v1' && !code.startsWith('comparative-'));
+  const others = codes.filter(code => !DURABILITY_TRAIL_CODES.has(code) && !durableProof(code) && !code.startsWith('comparative-'));
   return [...required, ...(room ? others.slice(-room) : [])];
 }
 export const OFFICIAL_POSTING_LABELS = Object.freeze({
@@ -252,19 +255,21 @@ export function listingStateRank(job) {
 
 // Trail codes meaning the research step did not run, did not finish, or hit a
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
-const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
-  'fetch-failed', 'fetch-timeout', 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
+export const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+  'source-unproven',
+  ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
 export function officialResearchSettled(value) {
   const posting = value && typeof value === 'object' ? value : null;
   if (!posting || !['not-found', 'ambiguous', 'closed'].includes(posting.outcome)) return false;
+  if (officialPostingNegativeNeedsRecheck(posting)) return false;
   const trail = Array.isArray(posting.trail) ? posting.trail : [];
   const officialClosed = ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && posting.outcome === 'closed'
     && officialHttpsUrl(posting.sourceUrl) && trail.includes('closed') && trail.includes('semantic-match-v1')
     && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.inputHash || '') && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash || '');
   if (!['L5', 'L6'].includes(posting.level) && !officialClosed) return false;
-  if (trail.some(code => RESEARCH_UNSETTLED_TRAIL.includes(code))) return false;
+  if (posting.fetchFailures?.length || trail.some(code => RESEARCH_UNSETTLED_TRAIL.includes(code))) return false;
   return posting.outcome === 'closed' || trail.includes('bridge-research')
     || trail.includes('comparative-none') || trail.includes('comparative-disagree');
 }
@@ -287,7 +292,7 @@ export function officialPostingLookupStatus(value) {
       posting.outcome === 'link-only' ? 'The official link is verified; the application uses the original listing text.' : '',
       false, posting.sourceUrl || '', posting.officialApplyUrl || '');
   }
-  const unsettled = [...trail].some(code => RESEARCH_UNSETTLED_TRAIL.includes(code));
+  const unsettled = Boolean(posting.fetchFailures?.length) || [...trail].some(code => RESEARCH_UNSETTLED_TRAIL.includes(code));
   if (!unsettled && (officialResearchSettled(posting) || (official && posting.outcome === 'closed'))) {
     if (posting.outcome === 'closed') return result('closed', 'Official posting closed', 'The official posting is no longer accepting applications.', false);
     if (posting.outcome === 'ambiguous' || trail.has('comparative-disagree')) return result('ambiguous', 'Several official postings match', 'The completed lookup could not identify one exact match. The original listing is retained.', false);
@@ -306,15 +311,19 @@ export function officialPostingLookupStatus(value) {
     return `${detail}\n${retained}`;
   };
   if (trail.has('storage-failed')) return result('incomplete', 'Official posting check could not be saved', retained, true);
+  if (trail.has('source-unproven')) return result('incomplete', 'Employer source verification incomplete',
+    `Possible postings were found, but their employer ownership could not be verified. ${retained}`, true);
   if (trail.has('bridge-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Reconnect ChatGPT research, then retry the official posting lookup in the app.', true);
   if (trail.has('bridge-timeout')) return result('incomplete', 'Official lookup incomplete: research timed out', retry, true);
   if (trail.has('bridge-aborted')) return result('incomplete', 'Official lookup incomplete: research interrupted', retry, true);
   if (trail.has('fetch-timeout')) return result('incomplete', 'Employer site verification timed out', fetchDetail(), true);
   if (trail.has('crawl-budget') || trail.has('crawl-partial')) return result('incomplete', 'Official lookup incomplete: search coverage limited', retry, true);
-  if (trail.has('fetch-failed') || posting.fetchFailures?.length) return result('incomplete', 'Employer site verification incomplete', fetchDetail(), true);
+  if (FETCH_FAILURE_CODES.some(code => trail.has(code)) || posting.fetchFailures?.length) return result('incomplete', 'Employer site verification incomplete', fetchDetail(), true);
   if (posting.outcome === 'ambiguous' || ['semantic-uncertain', 'semantic-overflow', 'comparative-invalid', 'comparative-truncated', 'insufficient-text', 'official-liveness-unconfirmed'].some(code => trail.has(code))) {
     return result('incomplete', 'Official posting match uncertain', `An exact, current official match has not been verified. ${retry}`, true);
   }
   if (posting.outcome === 'unreadable' || ['official-text-missing', 'unreadable', 'stub-text', 'invalid-text'].some(code => trail.has(code))) return result('incomplete', 'Official lookup incomplete: posting could not be read', retry, true);
+  if (officialPostingNegativeNeedsRecheck(posting)) return result('incomplete', 'Outdated lookup · check again',
+    `This result predates improved employer-source verification. ${retry}`, true);
   return result('incomplete', 'Official posting lookup incomplete', `The lookup did not finish, so no exact-match conclusion was reached. ${retry}`, true);
 }

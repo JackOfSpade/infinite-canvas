@@ -1072,6 +1072,14 @@ export function buildJobTreeNodes({
         hubId,
         title: job.title, company: job.company, location: job.location,
         salary: job.salary, snippet: job.snippet, matchScore: job.matchScore,
+        // Keep the original semantic source on the card. Dropping these fields
+        // would invalidate its lookup receipt on Generate or the next Combine.
+        description: job.description, employer: job.employer, hiringOrganization: job.hiringOrganization,
+        locations: job.locations, workMode: job.workMode, remote: job.remote,
+        remoteCountry: job.remoteCountry, remoteRegion: job.remoteRegion,
+        employmentType: job.employmentType, seniority: job.seniority, jobLevel: job.jobLevel,
+        identifier: job.identifier, requisitionId: job.requisitionId, reqId: job.reqId,
+        sourceUrl: job.sourceUrl, provenance: job.provenance,
         descriptionCapture: job.descriptionCapture,
         // Always overwrite a protected card's prior resolution, including
         // clearing it when the latest source row has none.

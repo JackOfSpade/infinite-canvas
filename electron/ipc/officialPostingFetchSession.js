@@ -1,4 +1,7 @@
 import { fetchOfficialPosting, OfficialPostingFetchError, officialPostingFetchUrl, OFFICIAL_FETCH_HOP_CAPABILITY } from './officialPostingFetch.js';
+import { createHash } from 'node:crypto';
+import { officialPostingResourceHeaders } from './officialPostingResourceHeaders.js';
+import { normalizeOfficialPostingPublicSearchHeaders } from './officialPostingReadOnlySearch.js';
 
 export const OFFICIAL_FETCH_NEGATIVE_CACHE_MS = 10 * 60 * 1_000;
 export const OFFICIAL_FETCH_GLOBAL_LIMIT = 8;
@@ -47,7 +50,8 @@ function hostFailure(error) {
 
 /** One host-owned run cache and scheduler. A caller signal cancels only its
  * subscription; the factory's run signal owns the shared network requests. */
-export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting, signal: parentSignal, now = Date.now, sleep = delay } = {}) {
+export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting, signal: parentSignal, now = Date.now, sleep = delay,
+  upgradeSameHostRedirects = fetch === fetchOfficialPosting } = {}) {
   const controller = new AbortController(); const signal = controller.signal;
   const abortRun = () => controller.abort(parentSignal?.reason);
   if (parentSignal?.aborted) abortRun(); else parentSignal?.addEventListener('abort', abortRun, { once: true });
@@ -145,48 +149,56 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
     seen.add(entry);
     return [...entry.waitsFor].some(next => reaches(next, target, seen));
   };
-  const runFetch = (key, owner) => {
+  const runFetch = (key, owner, resource, resourceHeaders, publicSearchHeaders, resourcePrefix) => {
+    const cacheKey = url => resource ? `${resourcePrefix}|${url}` : url;
     const hooks = { beforeRequest: async (url, { signal: hopSignal }) => {
-      const alias = officialPostingFetchUrl(url).href; const existing = cached(alias);
+      const alias = officialPostingFetchUrl(url).href; const existing = cached(cacheKey(alias));
       if (existing && existing !== owner) {
         if (reaches(existing, owner)) throw new OfficialPostingFetchError('unsafe-url');
         stats.cacheHits += 1; owner.waitsFor.add(existing);
         return { reuse: existing.promise.finally(() => owner.waitsFor.delete(existing)) };
       }
-      cache.set(alias, owner);
+      cache.set(cacheKey(alias), owner);
       return acquire(alias, hopSignal);
     } };
-    if (fetch[OFFICIAL_FETCH_HOP_CAPABILITY] === true) return fetch(key, { signal, now: clock, hopHooks: hooks });
+    if (fetch[OFFICIAL_FETCH_HOP_CAPABILITY] === true) return fetch(key, { signal, now: clock, hopHooks: hooks, resource, resourceHeaders, publicSearchHeaders, upgradeSameHostRedirects });
     // Injected test fetches without the hop contract represent one request.
     // Production forwarding wrappers explicitly copy the capability marker.
     return (async () => {
       const lease = await acquire(key, signal); let error; let result;
-      try { lease.start(); result = await waitFor(Promise.resolve().then(() => fetch(key, { signal })), signal); return result; }
+      try { lease.start(); result = await waitFor(Promise.resolve().then(() => fetch(key, { signal, resource, resourceHeaders, publicSearchHeaders })), signal); return result; }
       catch (caught) { error = caught; throw caught; }
       finally { lease.release(error, result); }
     })();
   };
-  const fetchCached = (value, { signal: callerSignal } = {}) => {
+  const fetchCached = (value, { signal: callerSignal, resource = false, resourceHeaders: suppliedHeaders, publicSearchHeaders: suppliedSearchHeaders } = {}) => {
     if (signal?.aborted) return Promise.reject(aborted(signal));
     if (callerSignal?.aborted) return Promise.reject(aborted(callerSignal));
     let key;
     try { key = officialPostingFetchUrl(value).href; } catch (error) { return Promise.reject(error); }
+    resource = resource === true;
+    const resourceHeaders = resource ? officialPostingResourceHeaders(suppliedHeaders) : {};
+    const publicSearchHeaders = resource ? normalizeOfficialPostingPublicSearchHeaders(key, suppliedSearchHeaders) || {} : {};
+    const representation = { ...resourceHeaders, ...publicSearchHeaders };
+    const resourcePrefix = Object.keys(representation).length
+      ? `resource:${createHash('sha256').update(JSON.stringify(representation)).digest('hex')}` : 'resource';
+    const cacheKey = url => resource ? `${resourcePrefix}|${url}` : url;
     // A shared or aliased transfer is the same bytes, never the same request: each caller is told the URL it asked for, so an
     // apex reader and a www reader of one redirect chain cannot change each other's origin checks.
     const asked = result => (result && typeof result === 'object' ? { ...result, requestedUrl: key } : result);
-    let entry = cached(key);
+    let entry = cached(cacheKey(key));
     if (entry) { stats.cacheHits += 1; return waitFor(entry.promise, callerSignal).then(asked); }
     entry = { expiresAt: Infinity, waitsFor: new Set(), promise: null };
-    entry.promise = Promise.resolve().then(() => runFetch(key, entry)).then(result => {
+    entry.promise = Promise.resolve().then(() => runFetch(key, entry, resource, resourceHeaders, publicSearchHeaders, resourcePrefix)).then(result => {
       const recorded = result && typeof result === 'object' ? { ...result, requestedUrl: result.requestedUrl || key } : result;
       const final = result?.url || result?.sourceUrl;
-      if (final) { try { const alias = officialPostingFetchUrl(final).href; if (!cached(alias)) cache.set(alias, entry); } catch { /* The transport owns result validation. */ } }
+      if (final) { try { const alias = cacheKey(officialPostingFetchUrl(final).href); if (!cached(alias)) cache.set(alias, entry); } catch { /* The transport owns result validation. */ } }
       return recorded;
     }, error => { entry.failure = error; entry.expiresAt = clock() + OFFICIAL_FETCH_NEGATIVE_CACHE_MS; throw error; });
     // A row may detach before a shared operation settles. Its eventual
     // rejection still belongs to the cache, never the unhandled-rejection queue.
     void entry.promise.catch(() => {});
-    cache.set(key, entry);
+    cache.set(cacheKey(key), entry);
     return waitFor(entry.promise, callerSignal).then(asked);
   };
   const retryFailedUrls = values => {

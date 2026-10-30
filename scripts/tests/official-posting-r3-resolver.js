@@ -11,6 +11,7 @@ import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPos
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import { readOfficialExpiryCandidates } from '../../electron/ipc/listingLivenessStore.js';
 import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 
 const EMPLOYER = 'Northwind Labs';
 const DESCRIPTION = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
@@ -211,12 +212,14 @@ export default [
     },
   },
   {
-    name: 'R3 miss durability requires clean research or definitive checks and always refuses an aborted signal',
+    name: 'R3 miss durability requires current ownership discovery plus clean research and refuses legacy negatives or aborted signals',
     run() {
       assert.equal(shouldPersistOfficialPostingResult(miss()), false);
-      assert.equal(shouldPersistOfficialPostingResult(miss(), { researchRan: true }), true);
+      assert.equal(shouldPersistOfficialPostingResult(miss(), { researchRan: true }), false);
+      assert.equal(shouldPersistOfficialPostingResult(miss([OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL]), { researchRan: true }), true);
       for (const trail of [['bridge-research'], ['closed'], ['title-mismatch'], ['ambiguous']]) {
-        assert.equal(shouldPersistOfficialPostingResult({ posting: miss(trail) }), true);
+        assert.equal(shouldPersistOfficialPostingResult({ posting: miss(trail) }), false);
+        assert.equal(shouldPersistOfficialPostingResult({ posting: miss([...trail, OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL]) }), true);
       }
       for (const code of ['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss', 'fetch-failed', 'fetch-timeout', 'crawl-budget', 'failed']) {
         assert.equal(shouldPersistOfficialPostingResult(miss(['bridge-research', 'closed', code]), { researchRan: true }), false, code);
@@ -292,7 +295,8 @@ export default [
         const result = await resolveOfficialPosting(row(), { store, candidateUrls: [other, first], fetch: async url => {
           seen.push(url); if (url === failed) throw error(code); return network(pages)(url);
         } });
-        assert.equal(result.officialPosting.level, 'L3', JSON.stringify(result.officialPosting));
+        // The actual fetched employer root links this exact ATS posting.
+        assert.equal(result.officialPosting.level, 'L2', JSON.stringify(result.officialPosting));
         assert.ok(seen.includes(board), 'same-tenant board adapter is read even after the text winner');
         assert.equal(result.officialPosting.trail.includes('crawl-partial'), failed === board);
         assert.equal(store.saved.length, failed === board ? 0 : 1, `${failed} / ${code}`);
@@ -354,16 +358,18 @@ export default [
     },
   },
   {
-    name: 'R3 standalone resolver persists clean NOT FOUND and definitive host failure but service can own all writes',
+    name: 'R3 legacy standalone negative checks remain non-durable while the service can own verified-result writes',
     async run() {
       const clean = memoryStore();
-      await resolveOfficialPosting(row(), { store: clean, research: async () => [] });
-      assert.equal(clean.saved.length, 1); assert.ok(clean.saved[0].officialPosting.trail.includes('bridge-research'));
+      const researched = await resolveOfficialPosting(row(), { store: clean, research: async () => [] });
+      assert.equal(clean.saved.length, 0); assert.ok(researched.officialPosting.trail.includes('bridge-research'));
+      assert.equal(officialPostingLookupStatus(researched.officialPosting).retryable, true);
+      assert.equal(researched.officialPosting.trail.includes(OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL), false);
       const closed = memoryStore();
       await resolveOfficialPosting(row({ url: 'https://northwind.test/jobs/closed' }), {
         store: closed, fetch: async () => { throw error('closed'); },
       });
-      assert.equal(closed.saved.length, 1);
+      assert.equal(closed.saved.length, 0, 'a closed-page legacy lookup supplies no new semantic negative proof');
       const delegated = memoryStore();
       await resolveOfficialPosting(row(), { store: delegated, persistResults: false, research: async () => [] });
       assert.equal(delegated.saved.length, 0);
@@ -386,7 +392,7 @@ export default [
           assert.equal(researches, 1, `historical ${code} must not suppress retry`);
           assert.ok(!result.officialPosting.trail.includes('recent-miss'));
         }
-        await store.save(job, { officialPosting: miss(['bridge-research']) });
+        await store.save(job, { officialPosting: miss(['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL]) });
         const settled = await resolveOfficialPosting(job, { store, research: async () => { throw new Error('unexpected research'); } });
         assert.ok(settled.officialPosting.trail.includes('recent-miss'));
         await store.save(job, { officialPosting: verified(['fetch-failed']) });
@@ -529,14 +535,16 @@ export default [
   {
     name: 'R3 cumulative host time excludes handoff wait and aborts a stalled fetch without persisting it',
     async run() {
-      let clock = 0; const requests = []; const budget = createOfficialPostingRowBudget({ timeoutMs: 10, now: () => clock });
+      // The root names no careers page, so its conventional /careers path is the second read of the first pass.
+      let clock = 0; const requests = []; const budget = createOfficialPostingRowBudget({ timeoutMs: 15, now: () => clock });
       try {
         const fetch = async url => { requests.push(url); clock += 6; return html(`<title>${EMPLOYER}</title>`, url); };
         await resolveOfficialPosting(row(), { rowBudget: budget, fetch, candidateUrls: ['https://northwind.test/'] });
         assert.equal(budget.signal.aborted, false);
         clock += 1_000_000;
         const second = await resolveOfficialPosting(row(), { rowBudget: budget, fetch, candidateUrls: ['https://northwind.test/jobs/one'] });
-        assert.equal(requests.length, 2, 'the handoff gap does not consume the remaining host time');
+        assert.deepEqual(requests, ['https://northwind.test/', 'https://northwind.test/careers', 'https://northwind.test/jobs/one'],
+          'the handoff gap does not consume the remaining host time');
         assert.equal(budget.signal.reason.code, 'fetch-timeout'); assert.ok(second.officialPosting.trail.includes('fetch-timeout'));
       } finally { budget.dispose(); }
       const stalled = createOfficialPostingRowBudget({ timeoutMs: 30 }); const store = memoryStore(); const started = Date.now();
@@ -667,7 +675,7 @@ export default [
     },
   },
   {
-    name: 'Amendment 6 resolver compares one merged requisition and settles distinct requisitions with identical text without handoffs',
+    name: 'Amendment 6 legacy resolver compares merged requisitions while unexamined distinct requisitions remain non-durable',
     async run() {
       for (const same of [false, true]) {
         const fixture = comparisonFixture([{ id: 'one', extra: same ? { identifier: 'request-shared' } : {} },
@@ -677,7 +685,7 @@ export default [
           match: async (_job, options) => { calls++; assert.equal(options.length, 1); return comparisonAnswer(options, fixture); } });
         assert.equal(calls, same ? 2 : 0);
         assert.equal(result.officialPosting.outcome, same ? 'found' : 'ambiguous');
-        assert.equal(store.saved.length, 1);
+        assert.equal(store.saved.length, same ? 1 : 0);
         if (!same) {
           assert.ok(result.officialPosting.trail.includes('ambiguous'));
           assert.ok(!result.officialPosting.trail.includes('comparative-invalid'));
@@ -841,14 +849,16 @@ export default [
     },
   },
   {
-    name: 'Amendment 5 resolver persists none-none as a settled miss but invalid timeout and unavailable runs stay retryable',
+    name: 'Amendment 5 legacy none-none comparisons remain non-durable without upgraded semantic discovery',
     async run() {
       const fixture = comparisonFixture();
       const settled = memoryStore();
       const none = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store: settled,
         match: async () => comparisonAnswer([], fixture, 'none') });
       assert.equal(none.officialPosting.outcome, 'not-found'); assert.ok(none.officialPosting.trail.includes('comparative-none'));
-      assert.equal(none.comparison.none, true); assert.equal(settled.saved.length, 1);
+      assert.equal(none.comparison.none, true); assert.equal(settled.saved.length, 0);
+      assert.equal(none.officialPosting.trail.includes(OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL), false);
+      assert.equal(officialPostingLookupStatus(none.officialPosting).retryable, true);
       for (const code of ['bridge-timeout', 'bridge-aborted', 'comparative-unavailable']) {
         const store = memoryStore();
         const result = await resolveOfficialPosting(comparisonRow(), { ...fixture, researchRan: true, store,
@@ -876,7 +886,7 @@ export default [
         assert.equal(vetoed.officialPosting.outcome, 'not-found'); assert.ok(vetoed.officialPosting.trail.includes('salary-mismatch'));
         assert.equal(vetoed.comparison, undefined); assert.equal(calls, 0);
         assert.equal(vetoed.officialPosting.trail.includes('comparative-invalid'), false);
-        assert.equal(shouldPersistOfficialPostingResult(vetoed, { researchRan: true }), true); assert.equal(store.saved.length, 1);
+        assert.equal(shouldPersistOfficialPostingResult(vetoed, { researchRan: true }), false); assert.equal(store.saved.length, 0);
       }
       const closed = comparisonFixture([{ id: 'one', closed: true }, { id: 'two', quotes: [...COMPARATIVE_OFFICIAL, 'Additional requirements cover internal accounting tools and monthly billing workflows.'] }]);
       let calls = 0;
@@ -886,7 +896,7 @@ export default [
     },
   },
   {
-    name: 'Amendment 6 late agreed-choice pay and sibling vetoes retain definitive reasons and remain durable',
+    name: 'Amendment 6 late agreed-choice vetoes preserve reasons while only closed facts remain durable without upgraded discovery',
     async run() {
       for (const veto of ['salary-mismatch', 'closed-winner', 'outranked']) {
         const fixture = comparisonFixture(veto === 'salary-mismatch' ? [{ id: 'one' }]
@@ -910,7 +920,8 @@ export default [
         assert.equal(result.officialPosting.trail.includes('comparative-invalid'), false, veto);
         assert.ok(result.officialPosting.trail.includes(veto === 'closed-winner' ? 'closed' : veto === 'outranked' ? 'no-anchor' : veto));
         assert.equal(result.officialPosting.outcome, veto === 'closed-winner' ? 'closed' : 'not-found');
-        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), true, veto); assert.equal(store.saved.length, 1);
+        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), veto === 'closed-winner', veto);
+        assert.equal(store.saved.length, veto === 'closed-winner' ? 1 : 0);
       }
     },
   },

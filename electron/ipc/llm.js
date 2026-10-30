@@ -217,8 +217,8 @@ const TASK_MAX_TOKENS = {
   // A bounded candidate board produces at most eight IDs and a boolean.
   'job-official-posting-shortlist': ({ optionCount = 1 } = {}) =>
     1024 + Math.min(64, Math.max(1, Math.floor(Number(optionCount) || 1))) * 16,
-  'job-official-posting-match': ({ optionCount = 1 } = {}) =>
-    Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 4096 + Math.min(8, Math.max(1, Math.floor(Number(optionCount) || 1))) * 900),
+  // Each judgment copies the whole official description verbatim, so it gets the full usable answer.
+  'job-official-posting-match': MANUAL_AI_USABLE_OUTPUT_TOKENS,
   // Location-based cohort consolidation makes this per-job structured output
   // materially larger than the old city-fragmented cohorts. 12,288 preserves
   // headroom through roughly 17 normal rows before the ceiling applies.
@@ -415,7 +415,7 @@ function assertStructuredResponseSchema(responseSchema, caller) {
  * the human can tell it's the same boilerplate across a run.
  */
 export async function callLLMText(prompt, opts = {}) {
-  const { signal, task, hints, responseSchema, cachedPrefix, retryOnTruncation, displayOnlyPromptSuffix, responseValidator, legacyReplay, manualHandoff } = normalizeOpts(opts);
+  const { signal, task, hints, grounding, responseSchema, cachedPrefix, retryOnTruncation, displayOnlyPromptSuffix, responseValidator, legacyReplay, manualHandoff } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMText');
   // Optional by-reference out-param: callers pass `meta: {}` and read back
   // `meta.model` for per-stage telemetry. There is only one transport, so
@@ -424,11 +424,11 @@ export async function callLLMText(prompt, opts = {}) {
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const capHints = { promptLength: (prompt?.length || 0) + (cachedPrefix?.length || 0), ...hints };
   const { maxTokens, formulaSeed, handoffSettings } = manualRequestConfig(task, capHints, {
-    cachedPrefix, requestKind: 'structured-text',
+    cachedPrefix, grounding, requestKind: 'structured-text',
     exactLegacyPriceSynthesisHandoff: opts?.exactLegacyPriceSynthesisHandoff === true,
   });
   const result = await requestNonApiAi({
-    prompt, cachedPrefix, task, responseSchema, maxOutputTokens: maxTokens,
+    prompt, cachedPrefix, task, responseSchema, grounding, maxOutputTokens: maxTokens,
     formulaSeed, handoffSettings, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
     itemsDone: hints.itemsDone, itemsTotal: hints.itemsTotal, planItemCount: hints.planItemCount, matchCount: hints.matchCount,
     progressScopeId: hints.progressScopeId, progressUnitId: hints.progressUnitId, progressUnits: hints.progressUnits,

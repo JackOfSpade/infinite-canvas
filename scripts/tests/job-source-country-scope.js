@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { assert } from './testHelpers.js';
 import { buildJobTasks } from '../test-dependencies.js';
-import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
+import { normalizeLocationInput, filterProvablyOutsideCountryScope } from '../../src/utils/jobLocation.js';
 import {
   JOB_SOURCE_COUNTRY_FILTER_STRENGTH,
   classifyJobTargetLocation,
@@ -169,6 +170,71 @@ export default [
       ).find(task => task.sourceId === 'glassdoor');
       assert(!noScope.resolveGlassdoorLocation, 'with neither a location nor a country there is nothing to resolve');
       return { softScope: true };
+    },
+  },
+  {
+    name: 'recovery country scope: the shared filter drops a definite US row in a Canada-only scope and keeps Toronto',
+    run: () => {
+      const rows = [
+        { source: 'indeed', location: 'Austin, TX', title: 'A' },
+        { source: 'indeed', location: 'Toronto, ON', title: 'B' },
+      ];
+      const scoped = filterProvablyOutsideCountryScope(rows, 'Canada');
+      assert(scoped.jobs.length === 1 && scoped.jobs[0].location === 'Toronto, ON', 'Austin dropped, Toronto kept');
+      assert(scoped.dropped === 1, 'one row dropped');
+      assert(filterProvablyOutsideCountryScope(rows, '').jobs.length === 2, 'empty location keeps every row');
+    },
+  },
+  {
+    name: 'recovery country scope: resume-job-source and resolve-job-source both apply the country filter',
+    run: () => {
+      const src = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      const grab = (start, end) => {
+        const a = src.indexOf(start);
+        const b = src.indexOf(end, a);
+        assert(a > 0 && b > a, `region ${start} found`);
+        return src.slice(a, b);
+      };
+      const resume = grab("handleSafe('resume-job-source'", 'const ageFiltered');
+      assert(resume.includes('filterProvablyOutsideCountryScope(extracted, location)'), 'resume filters by country before the age filter');
+      const resolve = grab("handleSafe('resolve-job-source'", 'const ageFiltered');
+      assert(resolve.includes('filterProvablyOutsideCountryScope(admittedRows, resolveLocation)'), 'resolve filters by country before the age filter');
+      assert(/handleSafe\('resolve-job-source'[^\n]*preferredLocation/.test(src), 'resolve destructures preferredLocation');
+    },
+  },
+  {
+    name: 'recovery country scope: Solve (resolveJobSource) call object carries hub canonicalLocation as preferredLocation',
+    run: () => {
+      const src = readFileSync(new URL('../../src/nodes/JobSourceCardNode.jsx', import.meta.url), 'utf8');
+      const start = src.indexOf('window.electronAPI.resolveJobSource({');
+      assert(start > 0, 'resolveJobSource call found');
+      let depth = 0; let end = -1;
+      for (let i = src.indexOf('{', start); i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}' && --depth === 0) { end = i; break; }
+      }
+      assert(end > start, 'call argument object closed');
+      const region = src.slice(start, end);
+      assert(
+        /^\s*preferredLocation:\s*getNode\(data\.hubId\)\?\.data\?\.canonicalLocation\s*\|\|\s*''\s*,/m.test(region),
+        'resolveJobSource passes preferredLocation from the hub canonicalLocation',
+      );
+    },
+  },
+  {
+    name: 'recovery country scope: country-only location drops US on-site rows, keeps remote and Canadian rows',
+    run: () => {
+      const rows = [
+        { source: 'indeed', location: 'Austin, TX' },
+        { source: 'indeed', location: 'Toronto, ON' },
+        { source: 'indeed', location: 'Remote' },
+        { source: 'indeed', location: 'Remote - Canada' },
+      ];
+      const out = filterProvablyOutsideCountryScope(rows, 'Canada');
+      assert(out.dropped === 1, 'exactly the US on-site row is dropped');
+      assert(!out.jobs.some(j => j.location === 'Austin, TX'), 'US on-site row removed');
+      assert(out.jobs.length === 3, 'Canadian and remote rows kept');
+      assert(filterProvablyOutsideCountryScope(rows, '').dropped === 0, 'no location drops nothing (the unfixed Solve behaviour)');
     },
   },
 ];

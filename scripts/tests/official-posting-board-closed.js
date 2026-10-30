@@ -27,6 +27,7 @@ import {
 import { createOfficialPostingRecoveryPassResolver, mergeOfficialPostingTelemetry, officialPostingDedup } from '../../electron/ipc/officialPostingService.js';
 import { shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import {
   composeDetailBlockReprobeResult, didDetailBlockReprobeRecover, unavailableDetailDisposition,
 } from '../../electron/ipc/browser/manualScraper.js';
@@ -56,6 +57,13 @@ function posting(extra = {}) {
   };
 }
 const miss = (trail, extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Acme Talent Partners', trail, ...extra });
+// Protocol fixtures that represent a completed lookup carry the host's current
+// discovery marker. Transient and pre-upgrade fixtures keep their prior shape.
+const currentMiss = (trail, extra = {}) => {
+  const value = miss(trail, extra);
+  const current = { ...value, trail: [...trail, OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] };
+  return ['not-found', 'ambiguous'].includes(value.outcome) && officialResearchSettled(current) ? current : value;
+};
 const row = (extra = {}) => ({
   source: 'remoteok', title: 'Platform Engineer', company: 'Northwind Labs', location: 'Remote', salary: '',
   posted: 'today', url: 'https://listing.example.test/platform', snippet: longText('Platform'), ...extra,
@@ -74,7 +82,10 @@ const pendingClosedRow = (extra = {}, basis = 'closed-marker') => {
 const scrapedSafe = job => filterJobsByDescriptionEvidence([job]).jobs.length === 1;
 const viewOf = text => async job => ({ employer: job.company, title: job.title, location: job.location, salary: '',
   description: text, officialPosting: normalizeOfficialPosting(job.officialPosting) || undefined });
-const semanticPosting = (job, value) => ({ ...value, trail: [...(value.trail || []), 'semantic-match-v1'],
+const semanticPosting = (job, value) => ({ ...value, trail: [...(value.trail || []), 'semantic-match-v1',
+  ...(!value.trail?.includes(OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL)
+    && ['not-found', 'ambiguous'].includes(value.outcome) && officialResearchSettled({ ...value,
+    trail: [...(value.trail || []), OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] }) ? [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] : [])],
   semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job),
     ...(['L1', 'L2', 'L3', 'L4'].includes(value.level) ? { sourceHash: 'b'.repeat(64) } : {}) } });
 
@@ -102,6 +113,14 @@ const pureTests = [
   {
     name: 'production board-closed settlement requires current semantic proof for both official rescue and settled retirement',
     async run() {
+      const oldSemantic = confirmedClosedRow();
+      oldSemantic.officialPosting = { ...miss(['bridge-research']), trail: ['bridge-research', 'semantic-match-v1'],
+        semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(oldSemantic) } };
+      const before = structuredClone(oldSemantic);
+      const preUpgrade = await settle([oldSemantic], undefined, { requireSemantic: true });
+      assert.deepEqual(preUpgrade.kept, [oldSemantic], 'a matching semantic input hash cannot retire a pre-upgrade no-match');
+      assert.equal(preUpgrade.dispositions.get(oldSemantic), BOARD_CLOSED_DISPOSITIONS.keptUnchecked);
+      assert.deepEqual(oldSemantic, before, 'retaining a legacy miss does not rewrite its saved facts');
       for (const value of [posting(), miss(['bridge-research'])]) {
         const legacy = confirmedClosedRow({ officialPosting: value });
         const unchecked = await settle([legacy], undefined, { requireSemantic: true });
@@ -148,7 +167,7 @@ const pureTests = [
     async run() {
       for (const safe of [true, false]) {
         const input = confirmedClosedRow({ snippet: safe ? longText('Synthetic expiry') : '',
-          officialPosting: miss(['bridge-research', 'closed']) });
+          officialPosting: currentMiss(['bridge-research', 'closed']) });
         const pending = await settle([input], null, { expiryCandidatesConfirmedClosed: () => false });
         if (safe) {
           assert.deepEqual(pending.kept, [input]);
@@ -490,7 +509,7 @@ const pureTests = [
   {
     name: 'Amendment 4 renderer merge protects every verified pending closed level from an unchecked or missed open copy',
     run() {
-      for (const level of ['L1', 'L2', 'L3', 'L4']) for (const incomingPosting of [undefined, miss(['bridge-unavailable']), miss(['bridge-research'])]) {
+      for (const level of ['L1', 'L2', 'L3', 'L4']) for (const incomingPosting of [undefined, miss(['bridge-unavailable']), currentMiss(['bridge-research'])]) {
         const closed = closedRow({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/31',
           officialPosting: posting({ level, outcome: level === 'L4' ? 'link-only' : 'found' }) });
         const incoming = row({ source: 'indeed', url: 'https://www.indeed.com/viewjob?jk=31', jobkey: '31', officialPosting: incomingPosting });
@@ -527,13 +546,13 @@ const pureTests = [
       assert.equal((await settle([bare], null)).dropped.length, 1, 'no view reader: no official evidence');
 
       // A confirmed close with a settled miss or a live link without usable text is retired.
-      for (const outcome of [miss(['bridge-research']), miss(['closed'], { outcome: 'closed' }), posting({ level: 'L4', outcome: 'link-only' })]) {
+      for (const outcome of [currentMiss(['bridge-research']), miss(['closed'], { outcome: 'closed' }), posting({ level: 'L4', outcome: 'link-only' })]) {
         const result = await settle([withPosting(confirmedClosedRow({ snippet: '' }), outcome)]);
         assert.equal(result.kept.length, 0, JSON.stringify(outcome)); assert.equal(result.dropped[0].disposition, 'dropped-no-description');
       }
       // An unsettled or ambiguous answer is held for retry, not retired.
       for (const outcome of [undefined, miss(['bridge-unavailable']), miss(['bridge-timeout']), miss([], { outcome: 'failed' }),
-        miss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' })]) {
+        currentMiss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' })]) {
         const result = await settle([withPosting(confirmedClosedRow({ snippet: '' }), outcome)]);
         assert.equal(result.kept.length, 0, JSON.stringify(outcome)); assert.equal(result.dropped[0].disposition, 'deferred-unchecked');
       }
@@ -541,13 +560,13 @@ const pureTests = [
         'deferred-unchecked', 'a deferral marker means no score-safe description');
 
       // A description (the LinkedIn case): DROP only on a settled research conclusion.
-      for (const settled of [miss(['bridge-research']), miss(['bridge-research', 'no-anchor'], { outcome: 'not-found' }),
-        miss(['recent-miss', 'bridge-research']), miss(['closed'], { outcome: 'closed' }),
-        miss(['title-mismatch'], { outcome: 'closed' }), { ...miss(['bridge-research']), level: 'L6', employer: '' }]) {
+      for (const settled of [currentMiss(['bridge-research']), currentMiss(['bridge-research', 'no-anchor'], { outcome: 'not-found' }),
+        currentMiss(['recent-miss', 'bridge-research']), miss(['closed'], { outcome: 'closed' }),
+        miss(['title-mismatch'], { outcome: 'closed' }), { ...currentMiss(['bridge-research']), level: 'L6', employer: '' }]) {
         const result = await settle([withPosting(confirmedClosedRow(), settled)]);
         assert.equal(result.kept.length, 0, JSON.stringify(settled)); assert.equal(result.dropped[0].disposition, BOARD_CLOSED_DISPOSITIONS.droppedSettled);
       }
-      for (const ambiguous of [miss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }), miss(['comparative-disagree'], { outcome: 'not-found' })]) {
+      for (const ambiguous of [currentMiss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }), currentMiss(['comparative-disagree'], { outcome: 'not-found' })]) {
         const input = withPosting(confirmedClosedRow(), ambiguous);
         const result = await settle([input]);
         assert.deepEqual(result.kept, [input]); assert.equal(result.dispositions.get(input), BOARD_CLOSED_DISPOSITIONS.keptAmbiguous);
@@ -555,7 +574,7 @@ const pureTests = [
       // Research that did not run, did not finish or hit a transient failure: KEEP, flagged, unchecked.
       for (const unsettled of [undefined, miss(['bridge-unavailable']), miss(['bridge-timeout']), miss(['bridge-aborted']), miss(['crawl-budget']),
         miss(['bridge-research', 'research-miss']), miss(['bridge-research', 'bridge-timeout']), miss(['bridge-research', 'fetch-failed']),
-        miss(['bridge-research', 'fetch-timeout']), miss([], { outcome: 'failed' }), miss(['bridge-research'], { outcome: 'unreadable' }),
+        miss(['bridge-research', 'fetch-timeout']), miss([], { outcome: 'failed' }), currentMiss(['bridge-research'], { outcome: 'unreadable' }),
         miss(['no-anchor'])]) {
         const input = withPosting(confirmedClosedRow(), unsettled);
         const result = await settle([input]);
@@ -566,8 +585,8 @@ const pureTests = [
       assert.equal((await settle([l4])).dispositions.get(l4), 'kept-official');
 
       // Unflagged rows pass through untouched and are never counted.
-      const plain = withPosting(row({ snippet: '' }), miss(['bridge-research']));
-      const mixed = await settle([plain, withPosting(confirmedClosedRow({ snippet: '' }), miss(['bridge-research']))]);
+      const plain = withPosting(row({ snippet: '' }), currentMiss(['bridge-research']));
+      const mixed = await settle([plain, withPosting(confirmedClosedRow({ snippet: '' }), currentMiss(['bridge-research']))]);
       assert.deepEqual(mixed.kept, [plain]); assert.equal(mixed.dispositions.size, 0);
     },
   },
@@ -600,8 +619,8 @@ const pureTests = [
       const legacy = closedRow({ source: 'linkedin', snippet: '', url: 'https://www.linkedin.com/jobs/view/802' });
       const described = pendingClosedRow({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/803' });
       assert.equal(listingStateRank(blank), 3); assert.equal(listingStateRank(legacy), 3);
-      for (const postingState of [undefined, miss(['bridge-unavailable']), miss(['bridge-research']),
-        miss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }), posting({ level: 'L4', outcome: 'link-only' })]) {
+      for (const postingState of [undefined, miss(['bridge-unavailable']), currentMiss(['bridge-research']),
+        currentMiss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }), posting({ level: 'L4', outcome: 'link-only' })]) {
         for (const candidate of [blank, legacy]) {
           const input = { ...candidate, officialPosting: postingState };
           const result = await settle([input], null);
@@ -638,9 +657,9 @@ const pureTests = [
     async run() {
       const rows = [
         { ...closedRow({ title: 'A', snippet: '' }), boardClosed: marker('ziprecruiter', 'detail-page-not-found'), officialPosting: posting() },
-        { ...confirmedClosedRow({ title: 'B', snippet: '', boardClosed: marker('ziprecruiter', 'detail-page-not-found') }), officialPosting: miss(['bridge-research']) },
+        { ...confirmedClosedRow({ title: 'B', snippet: '', boardClosed: marker('ziprecruiter', 'detail-page-not-found') }), officialPosting: currentMiss(['bridge-research']) },
         { ...confirmedClosedRow({ title: 'C' }), officialPosting: miss(['bridge-unavailable']) },
-        { ...confirmedClosedRow({ title: 'D' }), officialPosting: miss(['bridge-research']) },
+        { ...confirmedClosedRow({ title: 'D' }), officialPosting: currentMiss(['bridge-research']) },
         { ...confirmedClosedRow({ title: 'E', snippet: '', boardClosed: marker('indeed', 'indeed-job-unavailable') }), officialPosting: undefined },
         row({ title: 'Open' }),
       ];
@@ -652,7 +671,7 @@ const pureTests = [
         linkedin: { detected: 3, keptOfficial: 0, keptUnchecked: 1, dropped: 2 },
         indeed: { detected: 1, keptOfficial: 0, keptUnchecked: 0, dropped: 1 },
       });
-      const ambiguous = { ...confirmedClosedRow({ title: 'Ambiguous' }), officialPosting: miss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }) };
+      const ambiguous = { ...confirmedClosedRow({ title: 'Ambiguous' }), officialPosting: currentMiss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }) };
       assert.deepEqual(boardClosedTelemetryBlock({ input: [ambiguous], settled: await settle([ambiguous]) }).linkedin,
         { detected: 1, keptOfficial: 0, keptUnchecked: 0, dropped: 0 }, 'kept-ambiguous is not counted as kept-unchecked');
       assert.deepEqual(mergeBoardClosedTelemetry(block, block, null, 'x', { 'bad key': { detected: 9 }, linkedin: { detected: 1.9, dropped: -4, junk: 7 } }).linkedin,
@@ -684,7 +703,10 @@ const pureTests = [
   {
     name: 'board-closed display: open-on-official-site, not-checked and settled labels with the board name',
     run() {
-      const display = job => officialPostingDisplay({ title: 'Platform Engineer', company: 'Northwind Labs', url: 'https://listing.example.test/p', ...job });
+      const display = job => {
+        const current = { title: 'Platform Engineer', company: 'Northwind Labs', url: 'https://listing.example.test/p', ...job };
+        return officialPostingDisplay({ ...current, ...(job.officialPosting ? { officialPosting: semanticPosting(current, job.officialPosting) } : {}) });
+      };
       for (const [board, label] of [['linkedin', 'LinkedIn'], ['indeed', 'Indeed'], ['ziprecruiter', 'ZipRecruiter'], ['glassdoor', 'Glassdoor'], ['dice', 'Dice']]) {
         for (const level of ['L1', 'L2', 'L3']) {
           assert.equal(display({ boardClosed: marker(board, 'detail-page-not-found'), officialPosting: posting({ level }) }).statusLabel,
@@ -699,14 +721,14 @@ const pureTests = [
       assert.equal(display({ boardClosed: marker(), officialPosting: { ...miss(['bridge-unavailable']), level: 'L6', employer: '' } }).statusLabel,
         'poster, employer unknown · Closed on LinkedIn · Official lookup incomplete: research unavailable');
       // Settled after a later Generate-time check: say what is known, not "not checked".
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research']) }).statusLabel, 'Closed on LinkedIn · No exact official posting found');
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research'], { outcome: 'closed' }) }).statusLabel, 'Closed on LinkedIn · Official posting closed');
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }) }).statusLabel,
+      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['bridge-research']) }).statusLabel, 'Closed on LinkedIn · No exact official posting found');
+      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['bridge-research'], { outcome: 'closed' }) }).statusLabel, 'Closed on LinkedIn · Official posting closed');
+      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['bridge-research', 'ambiguous'], { outcome: 'ambiguous' }) }).statusLabel,
         'Closed on LinkedIn · Several official postings match');
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss(['comparative-disagree']) }).statusLabel,
+      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['comparative-disagree']) }).statusLabel,
         'Closed on LinkedIn · Several official postings match');
       // Unflagged and invalid markers change nothing; the link logic is untouched.
-      assert.equal(display({ officialPosting: miss(['bridge-research']) }).statusLabel, 'No exact official posting found');
+      assert.equal(display({ officialPosting: currentMiss(['bridge-research']) }).statusLabel, 'No exact official posting found');
       assert.equal(display({ boardClosed: { board: 'linkedin' }, officialPosting: posting() }).statusLabel, 'Exact official posting verified');
       assert.equal(display({ boardClosed: marker(), officialPosting: posting() }).applyUrl, display({ officialPosting: posting() }).applyUrl);
       assert.equal(display({ boardClosed: marker(), officialPosting: posting() }).levelLabel, 'ATS linked from careers page');
@@ -724,7 +746,7 @@ const pureTests = [
         boardClosed: marker('indeed', 'indeed-page-unavailable'), url: 'https://www.indeed.com/viewjob?jk=7' });
       const legacy = row({ title: 'Legacy', snippet: '', descriptionDeferredReason: 'indeed-job-unavailable', source: 'indeed', url: 'https://www.indeed.com/viewjob?jk=4' });
       const throttled = row({ title: 'Throttled', snippet: '', descriptionDeferredReason: 'description-rate-limited', source: 'indeed', url: 'https://www.indeed.com/viewjob?jk=5' });
-      const described = { ...confirmedClosedRow({ title: 'Described', source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/6' }), officialPosting: miss(['bridge-research']) };
+      const described = { ...confirmedClosedRow({ title: 'Described', source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/6' }), officialPosting: currentMiss(['bridge-research']) };
       const plainKept = row({ title: 'Plain', source: 'remoteok', url: 'https://listing.example.test/plain' });
       const settled = await settle([keptL2, unresolved, unresolvedLegacy, described, plainKept]);
       const resolution = { jobs: settled.kept, boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
@@ -1131,7 +1153,7 @@ handlerTests.push(
             return ({
             jobs: jobs.map(job => ({ ...job, officialPosting: semanticPosting(job, job.title === 'Kept Engineer'
               ? posting({ employer: 'Kept Engineer Co', title: 'Kept Engineer' })
-              : miss(job.title === 'Deferred Engineer' ? ['bridge-unavailable'] : ['bridge-research'])) })),
+              : currentMiss(job.title === 'Deferred Engineer' ? ['bridge-unavailable'] : ['bridge-research'])) })),
             telemetry: { total: jobs.length },
             });
           },

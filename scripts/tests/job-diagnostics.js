@@ -85,8 +85,112 @@ import { checkListingForGeneration } from '../../electron/ipc/listingLivenessPro
 import { collectJobCompensationReport } from '../../src/utils/jobCompensationReport.js';
 import { buildJobCompensationSnapshot } from '../../electron/ipc/bugReport/jobCompensationSnapshot.js';
 import { normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
+import { collectOfficialPostingReport } from '../../src/utils/officialPostingReport.js';
+import { buildOfficialPostingSnapshot } from '../../electron/ipc/bugReport/officialPostingSnapshot.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
+import { createHash } from 'node:crypto';
 
 export default [
+  {
+    name: 'Official posting audit captures collapsed and nested saved results without private listing fields',
+    run() {
+      const nodes = [{ id: 'synthetic-official-root', type: 'jobcard', hidden: true, data: {
+        title: 'PRIVATE_TITLE', company: 'PRIVATE_COMPANY', snippet: 'PRIVATE_LISTING_TEXT',
+        officialPosting: { level: 'L5', outcome: 'failed', employer: 'PRIVATE_EMPLOYER',
+          sourceUrl: 'https://private.example.test/listing?private=PRIVATE_QUERY',
+          trail: ['fetch-failed', 'bridge-research'], fetchedAt: '2026-10-28T20:00:00.000Z',
+          fetchFailures: [{ url: 'https://private.example.test/PRIVATE_PATH', code: 'fetch-failed', reason: 'access-denied', statusCode: 403 }],
+          semanticMatch: { version: 1, inputHash: 'a'.repeat(64) } },
+      } }, { id: 'synthetic-official-group', type: 'group', data: { canvasData: { nodes: [
+        { id: 'synthetic-official-nested', type: 'jobcard', hidden: true, data: {
+          officialPosting: { level: 'L5', outcome: 'not-found', employer: '', trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
+        } },
+        { id: 'synthetic-official-absent', type: 'jobcard', data: {} },
+        { id: 'synthetic-official-invalid', type: 'jobcard', data: { officialPosting: { level: 'PRIVATE_LEVEL' } } },
+      ] } } }];
+      const snapshot = collectOfficialPostingReport(nodes);
+      assert(snapshot.inspectedCards === 4 && snapshot.rows.length === 4 && !snapshot.scanTruncated);
+      const failed = snapshot.rows.find(row => row.id === 'synthetic-official-root');
+      assert(failed.state === 'incomplete' && failed.retryable && !failed.settled && failed.semanticProof === 'input-only');
+      const miss = snapshot.rows.find(row => row.id === 'synthetic-official-nested');
+      assert(miss.state === 'not-found' && !miss.retryable && miss.settled && miss.semanticProof === 'absent');
+      assert(snapshot.rows.find(row => row.id === 'synthetic-official-invalid').record === 'invalid');
+      const report = buildOfficialPostingSnapshot([], snapshot);
+      assert(report.includes('fetch-failed/access-denied/HTTP-403') && report.includes('outcome failed')
+        && report.includes('status not-found') && report.includes('absent=1') && report.includes('invalid=1'));
+      const expectedHash = createHash('sha256').update('synthetic-official-root').digest('hex').slice(0, 10);
+      assert(report.includes(`card #${expectedHash}`), 'card digests must match the other report sections');
+      for (const content of [JSON.stringify(snapshot), report]) {
+        assert(!content.includes('PRIVATE_') && !content.includes('private.example.test') && !content.includes('a'.repeat(64)),
+          'neither trust boundary may carry listing identities, URLs, text or proof hashes');
+      }
+    },
+  },
+  {
+    name: 'Official posting audit sanitizes renderer rows and marks missing failure details',
+    run() {
+      const report = buildOfficialPostingSnapshot([], { inspectedCards: 2, rows: [
+        { id: 'PRIVATE_CARD_ID', record: 'valid', level: 'L5', outcome: 'failed', state: 'incomplete', retryable: true,
+          settled: false, trail: ['fetch-timeout', 'PRIVATE_TRAIL'], semanticProof: 'PRIVATE_PROOF',
+          fetchFailures: [{ code: 'PRIVATE_CODE', reason: 'PRIVATE_REASON', url: 'PRIVATE_URL' }], title: 'PRIVATE_TITLE' },
+        { id: 'synthetic-malicious-enum', record: 'valid', level: 'PRIVATE_LEVEL', outcome: 'PRIVATE_OUTCOME',
+          state: 'PRIVATE_STATE', retryable: 'PRIVATE_RETRY', trail: ['PRIVATE_TRAIL'] },
+      ] });
+      assert(!report.includes('PRIVATE_'));
+      assert(report.includes('trail fetch-timeout') && report.includes('fetch details not recorded (failure detail missing)')
+        && report.includes('semantic proof absent') && report.includes('record invalid'));
+      const fetches = buildOfficialPostingSnapshot([], { rows: [{ id: 'synthetic-http', record: 'valid', level: 'L5',
+        outcome: 'failed', state: 'incomplete', retryable: true, settled: false,
+        fetchFailures: [{ code: 'fetch-failed', reason: 'PRIVATE_REASON', statusCode: 999, url: 'PRIVATE_URL' },
+          { code: 'fetch-timeout', reason: 'access-denied', statusCode: 504 }] }] });
+      assert(!fetches.includes('PRIVATE_') && !fetches.includes('999') && !fetches.includes('access-denied')
+        && fetches.includes('fetch-failed, fetch-timeout/HTTP-504'));
+    },
+  },
+  {
+    name: 'FULL and OFFICIAL retain saved-card lookup evidence after a restart without current search telemetry',
+    run() {
+      const telemetry = getJobsTelemetry(); const saved = structuredClone(telemetry);
+      try {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        const nodes = [{ id: 'synthetic-restarted-official', type: 'jobcard', hidden: true, data: {
+          officialPosting: { level: 'L5', outcome: 'failed', employer: '', trail: ['bridge-unavailable'] },
+        } }];
+        const snapshot = collectOfficialPostingReport(nodes, { flat: true });
+        const filter = applyBugReportCode(['unrelated', 'official-posting research failed'], {}, 'OFFICIAL');
+        assert(!filter.unknownCodes.length && filter.sectionExclusions.has('nodes'));
+        for (const filterCode of ['FULL', 'OFFICIAL', 'FULL+XNODES']) {
+          const report = generateMarkdown({ filterCode, description: 'Synthetic lookup diagnostic',
+            nodes: [], edges: [], drawings: [], frontEndState: {}, officialPostingSnapshot: snapshot,
+            nodeInternals: [], nodeComponentStates: [], eventLogs: [],
+          }).markdown;
+          assert(report.includes('Official Posting Card Audit (OFFICIAL)') && report.includes('1 inspected')
+            && report.includes('trail bridge-unavailable') && report.includes('retryable yes'));
+          assert(report.includes('this live snapshot does not prove a disk save'),
+            'retained card evidence must not imply a successful workspace save');
+        }
+        assert(!generateMarkdown({ filterCode: 'JOBPAY', nodes: [], edges: [], drawings: [], frontEndState: {},
+          officialPostingSnapshot: snapshot, eventLogs: [] }).markdown.includes('Official Posting Card Audit (OFFICIAL)'));
+      } finally {
+        for (const key of Object.keys(telemetry)) delete telemetry[key];
+        Object.assign(telemetry, saved);
+      }
+    },
+  },
+  {
+    name: 'Official posting audit bounds cyclic and oversized graphs and reports omitted cards',
+    run() {
+      const nodes = Array.from({ length: 20_001 }, (_, index) => ({ id: `synthetic-bounded-${index}`, type: 'jobcard', data: {} }));
+      const snapshot = collectOfficialPostingReport(nodes);
+      assert(snapshot.inspectedCards === 20_000 && snapshot.rows.length === 1000 && snapshot.scanTruncated);
+      const report = buildOfficialPostingSnapshot([], snapshot);
+      assert(report.includes('20000 inspected · 1000 shown · 19000 omitted · scan truncated: yes'));
+      const cyclic = []; cyclic.push({ type: 'group', data: { canvasData: { nodes: cyclic } } }, nodes[0]);
+      assert(collectOfficialPostingReport(cyclic).inspectedCards === 1, 'cyclic child arrays must not duplicate cards or loop');
+      const hostileSnapshot = { inspectedCards: Infinity, rows: Array.from({ length: 1001 }, () => ({ record: 'absent' })) };
+      assert(buildOfficialPostingSnapshot([], hostileSnapshot).includes('1001 inspected · 1000 shown · 1 omitted'));
+    },
+  },
   {
     name: 'Salary audit includes bounded personal-guidance validation without private amounts or evidence',
     run() {

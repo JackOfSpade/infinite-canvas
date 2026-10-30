@@ -69,6 +69,7 @@ import { officialPostingEmployerText, officialPostingLookupStatus, normalizeAlte
 export { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 import { unresolvedOfficialPosting } from './officialPostingResolver.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
+import { projectOfficialPostingSourceFields } from './officialPostingSourceProjection.js';
 import { frozenOfficialEmployer } from './officialPostingMatch.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 import { getPreparedOfficialPosting, registerOfficialPostingGenerationHandlers } from './officialPostingGeneration.js';
@@ -10092,6 +10093,7 @@ function throwIfAborted(signal) {
 function safeJob(raw = {}) {
   const listingLinkUrl = officialHttpsUrl(raw.listingLinkUrl);
   return {
+    ...projectOfficialPostingSourceFields(raw),
     title: cleanText(raw.title, 500).trim(), company: cleanText(raw.company, 500).trim(),
     snippet: cleanText(raw.snippet, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS).trim(), location: cleanText(raw.location, 500).trim(),
     salary: cleanText(raw.salary, 500).trim(), url: cleanText(raw.url, 2_000).trim(),

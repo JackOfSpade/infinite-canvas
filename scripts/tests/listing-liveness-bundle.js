@@ -16,6 +16,7 @@ import {
 } from '../../electron/ipc/localAiApplication.js';
 import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 import { LISTING_LIVENESS_RULES } from '../../electron/ipc/listingLiveness.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 
 const at = '2026-10-26T12:00:00.000Z';
@@ -95,7 +96,7 @@ export default [
     const prepared = await prepareOfficialPostingForGeneration({ job: primary }, {
       projectJob: project, store: { find: async () => null },
       resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: {
-        level: 'L5', outcome: 'not-found', employer: primary.company, trail: ['bridge-research'],
+        level: 'L5', outcome: 'not-found', employer: primary.company, trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL],
       } }], telemetry: {} }),
       bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
       listingProbe: { probe: async url => { visits.push(url); return page; } },
@@ -209,7 +210,7 @@ export default [
       const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
       const raw = base();
       const officialPosting = { level: 'L5', outcome: 'not-found', employer: raw.company,
-        trail: ['bridge-research'] };
+        trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] };
       const prepared = await prepareOfficialPostingForGeneration({ job: raw }, {
         projectJob: project, store: { find: async () => null },
         resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting }], telemetry: {} }),
@@ -287,7 +288,7 @@ export default [
       const prepared = await prepareOfficialPostingForGeneration({ job: primary }, {
         projectJob: project, store: { find: async () => null },
         resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: {
-          level: 'L5', outcome: 'not-found', employer: primary.company, trail: ['bridge-research'],
+          level: 'L5', outcome: 'not-found', employer: primary.company, trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL],
         } }], telemetry: {} }),
         bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
         listingProbe: { probe: async () => page },

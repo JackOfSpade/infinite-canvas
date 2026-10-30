@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
-import { resolveOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
+import { createOfficialPostingRowBudget, resolveOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { resolveSemanticOfficialPosting } from '../../electron/ipc/officialPostingSemanticResolution.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from '../../electron/ipc/officialPostingSemantic.js';
 import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
+import { _resetOfficialPostingDiscoveryDiagnosticsForTests, getOfficialPostingDiscoveryDiagnosticsSnapshot } from '../../electron/ipc/officialPostingDiscoveryDiagnostics.js';
 
 const SCRAPED = 'Create delivery planning tools for regional operations teams. Talk with distribution coordinators to learn what slows their work. Turn their findings into dependable systems and improve the way schedules are prepared.';
 const OFFICIAL = 'Engineers improve route allocation services used by depot supervisors. Interview operational partners about freight handoffs, then design software that makes dispatch decisions easier. Maintain reliable release procedures while refining the product around customer feedback.';
@@ -21,6 +22,8 @@ function fixture(extra = {}) {
   const requests = [];
   const fetch = async target => {
     requests.push(target);
+    // The root names no careers page, so its conventional path is read; this site has none (404), which is not a failed read.
+    if (target === 'https://northwind.test/careers' && !(target in pages)) throw Object.assign(new Error('Not found'), { code: 'closed' });
     if (!(target in pages)) throw Object.assign(new Error('Synthetic page not retained'), { code: 'fetch-failed' });
     return typeof pages[target] === 'string' ? html(pages[target], target) : pages[target];
   };
@@ -40,6 +43,143 @@ const noMatch = reason => ({ choice: 'none', evidence: [], distinguishing: [], c
 const uncertain = reason => ({ choice: 'uncertain', evidence: [], distinguishing: [], conflicts: [reason] });
 
 export default [
+  {
+    name: 'Discovery finality keeps empty research incomplete and preserves a completed two-comparison miss',
+    async run() {
+      _resetOfficialPostingDiscoveryDiagnosticsForTests();
+      try {
+        const job = row();
+        for (const code of ['fetch-failed', 'fetch-timeout']) {
+          const result = await resolveOfficialPosting(job, { semanticMatching: true, researchRan: true,
+            candidateUrls: ['https://northwind.test/careers'], persistResults: false, render: null,
+            fetch: async () => { throw Object.assign(new Error('Synthetic denied read'), { code, statusCode: 403 }); } });
+          const diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+          assert.equal(diagnostic.candidateCount, 0); assert.equal(diagnostic.eligibleCount, 0);
+          assert.equal(diagnostic.comparisonRuns, 0); assert.equal(diagnostic.semanticSettled, false);
+          assert.equal(diagnostic.stage, 'final'); assert.equal(diagnostic.settled, false);
+          assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
+        }
+        const f = fixture(); f.pages['https://northwind.test/careers'] = '<h1>Careers</h1><p>There are no open roles to display.</p>';
+        for (const code of ['MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND', 'ENOENT']) {
+          const partial = await resolveOfficialPosting(job, { semanticMatching: true, researchRan: true,
+            candidateUrls: ['https://northwind.test/careers'], persistResults: false, fetch: f.fetch,
+            render: async () => { throw Object.assign(new Error('PRIVATE_MODULE_PATH'), { code }); } });
+          assert.ok(partial.officialPosting.trail.includes('crawl-partial'));
+          const diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+          assert.equal(diagnostic.settled, false);
+          assert.equal(diagnostic.renderStats.attempts, 1); assert.equal(diagnostic.renderStats.successes, 0);
+          assert.equal(diagnostic.renderStats.cacheReuses, 0);
+          assert.equal(diagnostic.renderStats.failures['renderer-unavailable'], 1);
+          assert.equal(JSON.stringify(diagnostic).includes('PRIVATE_MODULE_PATH'), false);
+        }
+        const result = await resolveOfficialPosting(job, { semanticMatching: true, researchRan: true,
+          candidateUrls: ['https://northwind.test/careers'], persistResults: false, render: null, fetch: f.fetch });
+        let diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+        assert.equal(diagnostic.candidateCount, 0); assert.equal(diagnostic.semanticSettled, false);
+        assert.equal(diagnostic.stage, 'final'); assert.equal(diagnostic.settled, false);
+        assert.ok(result.officialPosting.trail.includes('research-miss'));
+        assert.equal(result.officialPosting.semanticMatch, undefined);
+        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
+        const compared = await resolveOfficialPosting(job, { semanticMatching: true, researchRan: true,
+          candidateUrls: [f.url], fetch: f.fetch, match: async () => noMatch('The complete official posting describes a different role.') });
+        diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+        assert.equal(diagnostic.candidateCount, 1); assert.equal(diagnostic.comparisonRuns, 2);
+        assert.equal(diagnostic.semanticSettled, true); assert.equal(diagnostic.settled, true);
+        assert.equal(shouldPersistOfficialPostingResult(compared, { researchRan: true }), true);
+      } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
+    },
+  },
+  {
+    name: 'Discovery rendering counts distinguish completed rendering from shared rendered cache reuse',
+    async run() {
+      _resetOfficialPostingDiscoveryDiagnosticsForTests();
+      let previous;
+      try {
+        const f = fixture(); f.pages['https://northwind.test/careers'] = '<main>Current openings load using JavaScript.</main>';
+        for (const phase of ['initial', 'cached']) {
+          const budget = createOfficialPostingRowBudget({ previous });
+          await resolveOfficialPosting(row(), { semanticMatching: true, researchRan: true, rowBudget: budget,
+            candidateUrls: ['https://northwind.test/careers'], fetch: f.fetch,
+            render: async url => ({ url, contentType: 'text/html', body: '<main>No current openings.</main>' }) });
+          const stats = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].renderStats;
+          assert.equal(stats.attempts, phase === 'initial' ? 1 : 0);
+          assert.equal(stats.successes, phase === 'initial' ? 1 : 0);
+          assert.equal(stats.cacheReuses > 0, phase === 'cached');
+          assert.ok(Object.values(stats.failures).every(value => value === 0));
+          budget.dispose(); previous = budget;
+        }
+      } finally { previous?.dispose(); _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
+    },
+  },
+  {
+    name: 'Discovery keeps verified identity finality, marks save failures incomplete and leaves cached attempt counts untouched',
+    async run() {
+      _resetOfficialPostingDiscoveryDiagnosticsForTests();
+      try {
+        const f = fixture(); const job = row();
+        const result = await resolveOfficialPosting(job, { semanticMatching: true,
+          candidateUrls: [f.url, 'https://northwind.test/jobs/synthetic-unavailable'], fetch: f.fetch,
+          match: async (_job, options) => choose(options[0]) });
+        let diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+        assert.equal(result.officialPosting.outcome, 'found'); assert.equal(diagnostic.outcome, 'found');
+        assert.equal(diagnostic.stage, 'final'); assert.equal(diagnostic.settled, true);
+        assert.equal(diagnostic.semanticSettled, true); assert.equal(diagnostic.comparisonRuns, 2);
+        const beforeCache = getOfficialPostingDiscoveryDiagnosticsSnapshot();
+        const cached = await resolveOfficialPosting(job, { semanticMatching: true,
+          store: { find: async () => ({ aliases: officialPostingAliases(job), officialPosting: result.officialPosting }) },
+          fetch: async () => { throw new Error('A cache hit must not fetch'); } });
+        assert.ok(cached.officialPosting.trail.includes('cache-hit'));
+        assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot(), beforeCache);
+        const failed = await resolveOfficialPosting(job, { semanticMatching: true,
+          candidateUrls: [f.url], fetch: f.fetch, match: async (_job, options) => choose(options[0]),
+          store: { find: async () => null, save: async () => { throw new Error('Synthetic storage failure'); } } });
+        diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+        assert.equal(failed.officialPosting.outcome, 'failed'); assert.equal(diagnostic.outcome, 'failed');
+        assert.equal(diagnostic.stage, 'final'); assert.equal(diagnostic.settled, false);
+        assert.equal(diagnostic.semanticSettled, true); assert.equal(diagnostic.comparisonRuns, 2);
+        const controller = new AbortController();
+        await resolveOfficialPosting(job, { semanticMatching: true, signal: controller.signal,
+          candidateUrls: [f.url], fetch: f.fetch, match: async (_job, options) => choose(options[0]),
+          store: { find: async () => null, save: async (_job, record) => { controller.abort(); return record; } } });
+        diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+        assert.equal(diagnostic.semanticSettled, true); assert.equal(diagnostic.settled, false,
+          'cancellation during an awaited save is reflected in finality');
+        const direct = await resolveSemanticOfficialPosting(job, []);
+        diagnostic = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
+        assert.equal(direct.settled, false, 'empty candidate inventory cannot establish absence');
+        assert.equal(diagnostic.semanticSettled, false); assert.equal(diagnostic.settled, null);
+        assert.equal(diagnostic.stage, 'semantic', 'direct comparison has no final crawl or persistence outcome');
+      } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
+    },
+  },
+  {
+    name: 'fetched postings without employer ownership proof cannot establish a settled semantic miss',
+    async run() {
+      const candidate = { sourceUrl: 'https://jobs.ashbyhq.com/northwind-synthetic/dispatch-17',
+        employer: 'Northwind Labs', title: 'Dispatch Systems Engineer', description: OFFICIAL };
+      let calls = 0;
+      const result = await resolveSemanticOfficialPosting(row(), [candidate], {
+        match: async () => { calls++; return noMatch('No comparison may admit an unproved source.'); },
+      });
+      assert.equal(calls, 0); assert.equal(result.settled, false);
+      assert.ok(result.trail.includes('source-unproven'));
+      const empty = await resolveSemanticOfficialPosting(row(), []);
+      assert.equal(empty.outcome, 'ambiguous'); assert.equal(empty.settled, false);
+      assert.ok(empty.trail.includes('research-miss'));
+      const mixed = await resolveSemanticOfficialPosting(row(), [candidate,
+        { ...candidate, sourceUrl: 'https://northwind.test/jobs/dispatch-17', employerDomainProven: true }], {
+        match: async (_job, options) => { calls++; assert.equal(options.length, 1); return choose(options[0]); },
+      });
+      assert.equal(calls, 2); assert.equal(mixed.outcome, 'found'); assert.equal(mixed.settled, true);
+      const partialNegative = await resolveSemanticOfficialPosting(row(), [candidate,
+        { ...candidate, sourceUrl: 'https://northwind.test/jobs/other-role', employerDomainProven: true }], {
+        match: async () => noMatch('The eligible source describes a different role; the unproved source was not compared.'),
+      });
+      assert.equal(partialNegative.settled, false, 'comparison covers only the eligible subset');
+      assert.ok(partialNegative.trail.includes('comparative-none'));
+      assert.ok(partialNegative.trail.includes('source-unproven'));
+    },
+  },
   {
     name: 'fresh shared resolution retains a bound historical identity when its exact official URL now returns 404 or 410',
     async run() {
@@ -62,7 +202,9 @@ export default [
           const rejected = await resolveOfficialPosting(job, { priorOfficialRecord: changed, semanticMatching: true, bypassCache: true,
             candidateUrls: [f.url], fetch: async () => { throw Object.assign(new Error('Gone'), { code: 'closed', statusCode }); },
             match: async () => { throw new Error('No historical identity should be admitted'); } });
-          assert.equal(rejected.officialPosting.outcome, 'not-found');
+          assert.equal(rejected.officialPosting.outcome, 'ambiguous');
+          assert.ok(rejected.officialPosting.trail.includes('research-miss'));
+          assert.equal(shouldPersistOfficialPostingResult(rejected, { researchRan: true }), false);
         }
       }
     },
@@ -162,6 +304,81 @@ export default [
       assert.equal(shouldPersistOfficialPostingResult({ ...posting, semanticMatch: { version: 1, inputHash: posting.semanticMatch.inputHash } }), false);
       assert.equal(shouldPersistOfficialPostingResult({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs',
         trail: ['crawl-partial', 'semantic-match-v1', 'comparative-none'] }, { researchRan: true }), false);
+    },
+  },
+  {
+    name: 'Semantic equivalent representations of one live posting settle on a deterministic representative; every other split stays unsettled',
+    async run() {
+      const src = (extra = {}) => ({ employerDomainProven: true, employer: 'Northwind Labs', title: 'Dispatch Systems Engineer',
+        description: OFFICIAL, location: { display: 'Lakeview, Canada' }, sourceUrl: 'https://northwind.test/jobs/dispatch-17', ...extra });
+      const split = async (candidates, pick) => {
+        const seen = [];
+        const result = await resolveSemanticOfficialPosting(row(), candidates, { match: async (_job, options, { run }) => {
+          seen.push(options); return pick(options, run); } });
+        return { result, options: seen[0] };
+      };
+      const aThenB = (a, b) => (options, run) => { const wanted = run === 'A' ? a : b; return wanted === 'none' ? noMatch('Not this one.') : choose(options.find(item => item.id === wanted)); };
+      // Same canonical URL, conflicting representations: the proven, fuller one wins whichever run picked it.
+      const sameUrl = [src({ tenantProven: true, description: `${OFFICIAL} Extra duties.` }), src({ description: OFFICIAL, location: { display: 'Harbor, United States' } })];
+      for (const [a, b] of [['P1', 'P2'], ['P2', 'P1']]) {
+        const { result, options } = await split(sameUrl, aThenB(a, b));
+        const rep = options.find(item => item.candidate.tenantProven === true).id.toLowerCase();
+        assert.equal(result.outcome, 'found'); assert.equal(result.settled, true);
+        assert.deepEqual(result.trail.slice(-3), ['comparative-equivalent', `comparative-choice-${rep}`, 'comparative-match']);
+        assert.ok(result.trail.includes('comparative-a-valid') && result.trail.includes('comparative-b-valid'));
+        assert.equal(result.trail.includes('comparative-disagree'), false);
+        assert.equal(result.candidate.tenantProven, true);
+        assert.equal(result.comparison.disagreement, false);
+        assert.equal(result.comparison.accepted, true);
+      }
+      // Equal proof and length: the lower option id represents the posting.
+      const tie = await split([src({ identifier: 'a' }), src({ identifier: 'b' })], aThenB('P2', 'P1'));
+      assert.equal(tie.result.outcome, 'found'); assert.ok(tie.result.trail.includes('comparative-choice-p1'));
+      // Different URLs of one requisition (identifier bound in the URL).
+      const req = await split([src({ identifier: 'REQ-445566', sourceUrl: 'https://northwind.test/jobs/REQ-445566' }),
+        src({ identifier: 'REQ-445566', sourceUrl: 'https://northwind.test/careers/opening?id=REQ-445566' })], aThenB('P1', 'P2'));
+      assert.equal(req.result.outcome, 'found'); assert.ok(req.result.trail.includes('comparative-equivalent'));
+      // Negatives: nothing is manufactured.
+      const urlB = 'https://northwind.test/jobs/dispatch-18';
+      const negatives = {
+        'different titles': [[src(), src({ title: 'Dispatch Systems Architect' })], ['P1', 'P2']],
+        'different requisitions': [[src({ identifier: 'REQ-111111', sourceUrl: 'https://northwind.test/jobs/REQ-111111' }),
+          src({ identifier: 'REQ-222222', sourceUrl: urlB })], ['P1', 'P2']],
+        'one closed one live': [[src(), src({ isListed: false })], ['P1', 'P2']],
+        'different employers': [[src(), src({ employer: 'Southwind Labs' })], ['P1', 'P2']],
+        'A none B option': [[src(), src({ description: `${OFFICIAL} More.` })], ['none', 'P1']],
+        'A option B none': [[src(), src({ description: `${OFFICIAL} More.` })], ['P2', 'none']],
+      };
+      for (const [name, [candidates, [a, b]]] of Object.entries(negatives)) {
+        const { result } = await split(candidates, aThenB(a, b));
+        assert.equal(result.outcome, 'ambiguous', name); assert.equal(result.settled, false, name);
+        assert.equal(result.trail.includes('comparative-equivalent'), false, name);
+        assert.equal(result.trail.includes('comparative-match'), false, name);
+        assert.equal(result.comparison.disagreement, true, name);
+      }
+      const unsure = await split(sameUrl, (options, run) => run === 'A' ? choose(options[0]) : uncertain('Cannot tell.'));
+      assert.equal(unsure.result.outcome, 'ambiguous'); assert.equal(unsure.result.trail.includes('comparative-equivalent'), false);
+    },
+  },
+  {
+    name: 'a partial crawl keeps an equivalent split durable only for the exact representative shape',
+    run() {
+      const base = ['crawl-partial', 'semantic-match-v1', 'comparative-a-valid', 'comparative-b-valid', 'comparative-a-p1', 'comparative-b-p2',
+        'comparative-equivalent', 'comparative-choice-p1', 'comparative-match'];
+      const posting = { level: 'L1', outcome: 'found', employer: 'Northwind Labs', trail: base,
+        semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row()), sourceHash: 'e'.repeat(64) } };
+      assert.equal(shouldPersistOfficialPostingResult(posting), true);
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: base.map(code => code === 'comparative-choice-p1' ? 'comparative-choice-p2' : code) }), true);
+      // Without the equivalence code a split is not an agreement.
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: base.filter(code => code !== 'comparative-equivalent') }), false);
+      // The representative must be one run's choice, and the other run must have a real option.
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: base.map(code => code === 'comparative-choice-p1' ? 'comparative-choice-p3' : code) }), false);
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: base.map(code => code === 'comparative-b-p2' ? 'comparative-b-none' : code) }), false);
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: base.filter(code => code !== 'comparative-match') }), false);
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: base.filter(code => code !== 'comparative-b-valid') }), false);
+      // A plain non-equivalent split never persists under a partial crawl.
+      assert.equal(shouldPersistOfficialPostingResult({ ...posting, trail: ['crawl-partial', 'semantic-match-v1', 'comparative-a-valid',
+        'comparative-b-valid', 'comparative-a-p1', 'comparative-b-p2', 'comparative-disagree'] }), false);
     },
   },
   {

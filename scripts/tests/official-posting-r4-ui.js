@@ -28,6 +28,7 @@ import { JobCardNode } from ${source('src/nodes/JobCardNode.jsx')};
 import { CanvasNavigationContext } from ${source('src/contexts/CanvasNavigationContext.jsx')};
 import { ModuleRunQueueContext } from ${source('src/contexts/moduleRunQueueShared.js')};
 import { ToastProvider } from ${source('src/components/ToastProvider.jsx')};
+export { beginOfficialPostingPreparation as beginProbePreparation } from ${source('src/utils/officialPostingPreparation.js')};
 export function CardProbe({navigation, queue, cards}) {
   return <ReactFlowProvider><CanvasNavigationContext.Provider value={navigation}><ModuleRunQueueContext.Provider value={queue}><ToastProvider>
     {cards.map((card, index) => <JobCardNode key={index} id={card.id} data={card.data} />)}
@@ -39,6 +40,62 @@ export function CardProbe({navigation, queue, cards}) {
 }
 
 export default [
+  {
+    name: 'real saved JobCard permits standalone Retry while generation stays protected and unresolved applications fence clicks',
+    async run() {
+      const { bundle, directory } = await cardBundle();
+      try {
+        const { React, act, createRoot, CardProbe } = bundle.module;
+        await withDom(async window => withConsoleCollector(async entries => {
+          const saved = { id: 'synthetic-saved-application', status: 'saved', savedDir: '/synthetic/saved-bundle' };
+          let card = { id: 'saved-lookup-card', type: 'jobcard', data: job({ localApplication: saved, additionalNotes: 'Preserve synthetic notes.' }) };
+          const original = structuredClone(card.data);
+          const board = { id: 'board', type: 'jobboard', data: {} };
+          let release; let lookups = 0; let applications = 0; let leases = 0;
+          const updates = []; const retired = [];
+          window.electronAPI = {
+            refreshOfficialPostings: () => { lookups++; return new Promise(resolve => { release = resolve; }); },
+            queueLocalApplication: async () => { applications++; return { success: false }; },
+            completeNonApiAiRun: async id => { retired.push(id); },
+          };
+          const navigation = { getCurrentFile: () => null, enumerateAllNodes: () => [card, board], enumerateAllEdges: () => [],
+            updateNodeDataGlobally: (_id, patch) => { updates.push(patch); card.data = { ...card.data, ...patch }; } };
+          const queue = { snapshot: { active: null, activeRuns: [], queued: [] },
+            acquireModuleRun: async () => { leases++; throw new Error('A posting lookup must not generate an application'); }, cancelQueuedRunsForNode() {} };
+          const root = createRoot(window.document.getElementById('root'));
+          const render = cards => act(async () => root.render(React.createElement(React.StrictMode, null,
+            React.createElement(CardProbe, { navigation, queue, cards }))));
+          const clickHandler = element => element[Object.keys(element).find(key => key.startsWith('__reactProps$'))].onClick;
+          try {
+            await render([card]);
+            const retry = button(window, 'Retry lookup'); assert.ok(retry); assert.equal(retry.disabled, false);
+            assert.equal(button(window, 'Generate'), undefined, 'saved output retains its existing generation protection');
+            const stale = clickHandler(retry);
+            card.data = { ...card.data, localApplication: { ...saved, status: 'queued' } };
+            await act(async () => stale({ stopPropagation() {} }));
+            assert.equal(lookups, 0, 'a stale enabled callback cannot race a newly queued live application');
+            card.data = { ...card.data, localApplication: saved };
+            await act(async () => retry.click());
+            assert.equal(lookups, 1); assert.equal(button(window, 'Checking official posting…').disabled, true);
+            await act(async () => release({ success: true, entries: [{ cardId: card.id, officialPosting: posting(), postedBy: original.postedBy }] }));
+            assert.equal(updates.length, 1); assert.equal(retired.length, 1);
+            assert.deepEqual(card.data.localApplication, saved);
+            for (const [key, value] of Object.entries(original)) if (key !== 'officialPosting') assert.deepEqual(card.data[key], value, key);
+            assert.equal(applications, 0); assert.equal(leases, 0);
+            for (const status of ['queued', 'running', 'completed', 'importing', 'status-error']) {
+              await render([]);
+              card = { id: `busy-lookup-${status}`, type: 'jobcard', data: job({ localApplication: { ...saved, status } }) };
+              await render([card]);
+              const blocked = button(window, 'Retry lookup'); assert.ok(blocked); assert.equal(blocked.disabled, true, status);
+              await act(async () => clickHandler(blocked)({ stopPropagation() {} }));
+              assert.equal(lookups, 1, `${status} click guard agrees with its disabled button`);
+            }
+          } finally { await act(async () => { release?.({ success: false }); root.unmount(); }); }
+          assert.deepEqual(entries, [], 'saved lookup and unresolved-state controls emit no React warnings');
+        }));
+      } finally { await bundle.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+    },
+  },
   {
     name: 'R4 unnamed L4 card and every dock item identify an unknown employer before the poster without changing job facts',
     run() {
@@ -127,7 +184,7 @@ export default [
           window.electronAPI = {
             prepareOfficialPostingForGeneration: () => { prepares++; return new Promise(resolve => { release = resolve; }); },
             queueLocalApplication: async () => { queues++; return { success: false }; },
-            cancelNodeTaskAndWait: async (...args) => { cancels.push(args); },
+            cancelNodeTaskAndWait: async (...args) => { cancels.push(args); return { settled: true }; },
             completeNonApiAiRun: async id => { retired.push(id); },
           };
           const navigation = { getCurrentFile: () => '/synthetic/remount.json',
@@ -160,6 +217,65 @@ export default [
             assert.deepEqual(data, before, 'transient ownership and cancellation never change the job projection');
           } finally { await act(async () => { release?.({ success: false, cancelled: true }); root.unmount(); }); }
           assert.deepEqual(entries, [], 'the real card lifecycle emits no React warnings');
+        }));
+      } finally { await bundle.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'real card standalone lookup exposes retry and cancel across remount without career data or an application lane',
+    async run() {
+      const { bundle, directory } = await cardBundle();
+      try {
+        const { React, act, createRoot, CardProbe, beginProbePreparation } = bundle.module;
+        await withDom(async window => withConsoleCollector(async entries => {
+          const data = job({ careerSnapshotId: undefined }); const before = structuredClone(data);
+          const card = { id: 'standalone-remount-card', type: 'jobcard', data };
+          const board = { id: 'board', type: 'jobboard', data: {} };
+          let release; let acknowledgeCancellation; let finishRetirement;
+          const retirement = new Promise(resolve => { finishRetirement = resolve; });
+          let lookups = 0; let applications = 0; let leases = 0;
+          const cancelled = []; const retired = []; const updates = [];
+          window.electronAPI = {
+            refreshOfficialPostings: () => { lookups++; return new Promise(resolve => { release = resolve; }); },
+            queueLocalApplication: async () => { applications++; return { success: false }; },
+            cancelNodeTaskAndWait: async (...args) => {
+              cancelled.push(args);
+              return new Promise(resolve => { acknowledgeCancellation = () => resolve({ settled: true }); });
+            },
+            completeNonApiAiRun: async id => { retired.push(id); finishRetirement(); },
+          };
+          const navigation = { getCurrentFile: () => null, enumerateAllNodes: () => [card, board], enumerateAllEdges: () => [],
+            updateNodeDataGlobally: (_id, patch) => { updates.push(patch); card.data = { ...card.data, ...patch }; } };
+          const queue = { snapshot: { active: null, activeRuns: [], queued: [] },
+            acquireModuleRun: async () => { leases++; throw new Error('A standalone lookup must not take an application lane'); },
+            cancelQueuedRunsForNode() {} };
+          const root = createRoot(window.document.getElementById('root'));
+          const render = cards => act(async () => root.render(React.createElement(React.StrictMode, null,
+            React.createElement(CardProbe, { navigation, queue, cards }))));
+          try {
+            await render([card]);
+            assert.match(window.document.body.textContent, /Previous official posting · check again/u);
+            let boardClaim;
+            await act(async () => { boardClaim = beginProbePreparation({ canvasFilePath: null, nodeId: 'board', purpose: 'lookup' }); });
+            assert.equal(button(window, 'Retry lookup').disabled, true); assert.equal(button(window, 'Generate').disabled, true);
+            await act(async () => boardClaim.finish());
+            assert.equal(button(window, 'Retry lookup').disabled, false);
+            await act(async () => button(window, 'Retry lookup').click());
+            assert.equal(lookups, 1); assert.equal(button(window, 'Checking official posting…').disabled, true);
+            assert.equal(button(window, 'Generate').disabled, true);
+            assert.equal(button(window, 'Finding official posting…'), undefined, 'standalone work must not use application progress');
+            await render([]); await render([card]);
+            assert.equal(button(window, 'Checking official posting…').disabled, true);
+            await act(async () => button(window, 'Cancel').click());
+            await act(async () => release({ success: true, entries: [{ cardId: card.id, officialPosting: posting(), postedBy: '' }] }));
+            assert.deepEqual(cancelled, [[card.id, 'official-posting-cancelled']]);
+            assert.equal(retired.length, 0, 'work completion cannot release ownership before host cancellation acknowledgment');
+            assert.equal(button(window, 'Generate').disabled, true);
+            await act(async () => { acknowledgeCancellation(); await retirement; });
+            assert.equal(retired.length, 1); assert.equal(applications, 0); assert.equal(leases, 0); assert.equal(updates.length, 0);
+            assert.equal(button(window, 'Generate').disabled, false); assert.deepEqual(data, before);
+          } finally { await act(async () => { acknowledgeCancellation?.(); release?.({ success: false, cancelled: true }); root.unmount(); }); }
+          assert.deepEqual(entries, []);
         }));
       } finally { await bundle.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
     },

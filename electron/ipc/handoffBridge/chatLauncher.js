@@ -93,6 +93,7 @@ const FOCUS = `function run(argv) {
 // logged, put in a URL, or sent to a renderer.
 const EDITOR = `(() => { const editor = document.querySelector('form [contenteditable="true"][role="textbox"]');
   return JSON.stringify({ready: !!editor, empty: (editor?.innerText || '').trim() === '', url: location.href,
+    draft: editor ? [...editor.children].map(paragraph => paragraph.textContent).join('\\n') : '',
     attachments: document.querySelectorAll('form button[aria-label^="Remove "]').length}); })()`;
 const READ_MODE = `(() => {
   const controls = [...document.querySelectorAll('button[aria-pressed]')];
@@ -334,6 +335,9 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
   const tabs = new Map();
   const chatIds = new Map();
   const usedIds = new Set();
+  // Starters this launcher typed. ChatGPT keeps an unsent composer draft across new tabs, so a launch that stopped after
+  // typing (a slow profile menu, say) leaves its own starter behind; only that exact text may be replaced, never a person's.
+  const ownDrafts = new Set();
   const pendingCloses = [];
   const MAX_PENDING_CLOSES = 32;
   const state = (owner, stage, reason = null) => { try { onState(owner, stage, reason); } catch { /* status is optional */ } };
@@ -489,7 +493,7 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
         if (!ready) return { ok: false, reason: 'editor_timeout' };
         if (ready.attachments !== 0) return { ok: false, reason: 'attachment_draft_present' };
         if (continueChat && ready.url.match(CHAT_ID)?.[1] !== tab.chatId) return { ok: false, reason: 'chat_changed' };
-        if (ready.empty !== true) return { ok: false, reason: 'editor_not_empty' };
+        if (ready.empty !== true && !ownDrafts.has(ready.draft)) return { ok: false, reason: 'editor_not_empty' };
         state(owner, 'checking');
         if (!continueChat && !await poll(() => js(tab, SELECT_CHAT), value => value === 'selected', 10_000)) {
           return { ok: false, reason: 'chat_mode_unavailable' };
@@ -497,12 +501,15 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
         if (!await poll(() => readMode(tab), value => value === 'chat', 10_000)) {
           return { ok: false, reason: 'chat_mode_mismatch' };
         }
+        ownDrafts.add(message);
+        while (ownDrafts.size > 16) ownDrafts.delete(ownDrafts.values().next().value);
         if (await js(tab, INSERT(message)) !== 'match') return { ok: false, reason: 'insert_mismatch' };
         const configured = await configureModelAndEffort(tab);
         if (!configured.ok) return configured;
         const observed = { ...configured.observed, mode: 'chat' };
         if (await js(tab, OPEN_PROFILE) !== 'opened') return { ok: false, reason: 'account_unknown' };
-        const profileRead = await poll(() => js(tab, READ_PROFILE), value => value.includes('"signedIn":true'), 3000);
+        // The menu can take a few seconds to render in a background tab.
+        const profileRead = await poll(() => js(tab, READ_PROFILE), value => value.includes('"signedIn":true'), 10_000);
         if (!profileRead) return { ok: false, reason: 'account_unknown' };
         const account = JSON.parse(profileRead);
         if (account.signedIn !== true) return { ok: false, reason: 'account_unknown' };
@@ -637,7 +644,10 @@ export function createChatLauncher({ run = runUserChromeScript, delay = sleep, o
       if (!tab.chatId || url.match(CHAT_ID)?.[1] !== tab.chatId) return { reason: 'chat_changed', assistantPresent: false };
       const value = JSON.parse(await js(tab, DIAGNOSE(pluginName)));
       return { reason: ['none', 'approval_required', 'delivery_timeout', 'conversation_unavailable', 'reconnect_required', 'usage_limit', 'plugin_missing', 'safety_block'].includes(value?.reason)
-        ? value.reason : 'none', assistantPresent: value?.assistantPresent === true, responding: value?.responding === true };
+        ? value.reason : 'none', assistantPresent: value?.assistantPresent === true,
+        // Missing or malformed data does not establish whether a response
+        // control is visible. Absence alone never proves a stopped chat.
+        responding: typeof value?.responding === 'boolean' ? value.responding : null };
     } catch { return { reason: 'chrome_unavailable', assistantPresent: false, responding: false }; }
   };
   const javascriptReady = async owner => {

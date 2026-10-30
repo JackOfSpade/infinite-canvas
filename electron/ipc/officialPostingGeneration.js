@@ -20,6 +20,7 @@ import { LISTING_LIVENESS_RULES, classifyListingLiveness, evidenceFromHtml } fro
 import { cappedHandoff } from './officialPostingService.js';
 import { callLLMText } from './llm.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches, officialPostingSemanticSourceHash } from './officialPostingSemantic.js';
+import { registerOfficialPostingRefreshHandler } from './officialPostingRefresh.js';
 
 export const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
 const PREPARED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -226,7 +227,9 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
   catch { return preserve('unreadable'); }
   let authoritativeBoard = false;
   if (!candidates.length && route && route.tenant === prior.tenant && (!prior.ats || prior.ats === route.ats)) {
-    const adapter = officialPostingAdapterUrl(route, url);
+    // Delisting needs the complete board, whereas discovery prefers a small
+    // exact-detail response. Absence from one detail response is no board proof.
+    const adapter = officialPostingAdapterUrl(route, route.ats === 'greenhouse' ? new URL('/', url).href : url);
     if (adapter) try {
       const board = await fetch(adapter, { signal }); active(signal);
       if (officialHttpsUrl(board.url || board.sourceUrl || adapter) === officialHttpsUrl(adapter)
@@ -555,4 +558,5 @@ export function registerOfficialPostingGenerationHandlers({ projectJob, ...depen
   if (typeof projectJob !== 'function') throw new TypeError('Official posting preparation needs the queue job projection.');
   handleSafe('prepare-official-posting-for-generation', (_event, args, signal) => prepareOfficialPostingForGeneration(args,
     { ...dependencies, projectJob, signal }), { validateArgs, additionalNodeIds: args => [args.cardId], reportCancellation: true });
+  registerOfficialPostingRefreshHandler({ ...dependencies, projectJob });
 }

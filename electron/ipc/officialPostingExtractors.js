@@ -5,7 +5,13 @@ import { htmlToText } from 'html-to-text';
 import { walkJsonLdJobPostings } from '../extractors/jobPostingJsonLd.js';
 import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
 import { normalizeCountry } from '../../src/utils/jobLocation.js';
-import { extractAtsTenant } from './officialSourceHosts.js';
+import { OFFICIAL_SEARCH_PARAM, extractAtsTenant, isOfficialCareersUrl, sameOwnershipHost, strictEmployerEqual } from './officialSourceHosts.js';
+import { extractOfficialPostingVendorCandidates } from './officialPostingVendorAdapters.js';
+import { extractOfficialPostingCurrentJobData, extractOfficialPostingPageData } from './officialPostingPageData.js';
+import { scanEmbeddedOfficialJobLinks } from './officialPostingEmbeddedLinks.js';
+import { extractOfficialCareersCmsFacts, phenomSearchForm, phenomSearchJobLinks } from './officialPostingCareersCms.js';
+import { scanOfficialPostingPaylocityInventory } from './officialPostingPaylocityLinks.js';
+import { scanOfficialPostingSsgNavigationInventory } from './officialPostingSsgNavigation.js';
 
 const MAX_RAW_BYTES = 3 * 1024 * 1024;
 const plain = value => typeof value === 'string' ? value.trim() : '';
@@ -79,15 +85,19 @@ function addressText(value) {
   return [...new Set(parts)].join(', ') || plain(value.name);
 }
 
-function location(display, { remote = false, workMode = '', remoteCountry = '', remoteRegion = '' } = {}) {
-  return { display: plain(display), workMode: workMode || (remote ? 'remote' : ''), remote, remoteCountry: plain(remoteCountry), remoteRegion: plain(remoteRegion) };
+function location(display, { remote, workMode = '', remoteCountry = '', remoteRegion = '' } = {}) {
+  return { display: plain(display), workMode: workMode || (remote === true ? 'remote' : ''),
+    ...(typeof remote === 'boolean' ? { remote } : /^(?:remote|onsite|hybrid)$/u.test(workMode) ? { remote: workMode === 'remote' } : {}),
+    remoteCountry: plain(remoteCountry), remoteRegion: plain(remoteRegion) };
 }
 
 function jsonLocation(node) {
   const display = [...new Set(array(node.jobLocation).map(addressText).filter(Boolean))].join(' | ');
-  const remote = /^TELECOMMUTE$/iu.test(node.jobLocationType || '');
+  const declared = plain(node.jobLocationType).toLowerCase().replace(/^on[- ]site$/u, 'onsite');
+  const workMode = declared === 'telecommute' ? 'remote' : /^(?:remote|onsite|hybrid)$/u.test(declared) ? declared : '';
+  const remote = workMode ? workMode === 'remote' : undefined;
   const countries = array(node.applicantLocationRequirements).map(value => typeof value === 'string' ? value : value?.name).map(plain).filter(Boolean);
-  return location(display || (remote ? 'Remote' : ''), { remote, remoteCountry: remote ? [...new Set(countries)].join(' | ') : '' });
+  return location(display || (remote ? 'Remote' : ''), { remote, workMode, remoteCountry: remote ? [...new Set(countries)].join(' | ') : '' });
 }
 
 const SALARY_UNITS = Object.freeze({
@@ -142,6 +152,13 @@ export function extractJsonLdPostings(html, options = {}) {
     if (!valid) return '';
     const url = new URL(valid);
     for (const key of [...url.searchParams.keys()]) if (/^utm_/iu.test(key)) url.searchParams.delete(key);
+    // Some first-party careers pages repeat their numeric path identifier in
+    // Greenhouse's gh_jid query parameter while their JSON-LD uses the clean
+    // canonical URL. Drop only the redundant, single matching identifier;
+    // other query parameters and mismatched IDs remain identity-bearing.
+    const pathId = /^\/jobs\/(\d+)(?:\/|$)/u.exec(url.pathname)?.[1];
+    const greenhouseIds = url.searchParams.getAll('gh_jid');
+    if (pathId && greenhouseIds.length === 1 && greenhouseIds[0] === pathId) url.searchParams.delete('gh_jid');
     url.pathname = url.pathname.replace(/\/+$/u, '') || '/';
     return url.href;
   };
@@ -160,6 +177,47 @@ export function extractJsonLdPostings(html, options = {}) {
     validThrough: node.validThrough, description: officialDescriptionText(node.description),
     sourceUrl: options.sourceUrl, officialApplyUrl: options.sourceUrl,
   }, { ...options, html })).filter(Boolean);
+}
+
+function preferCompleteCurrentJob(html, jsonLd, options) {
+  const native = extractOfficialPostingCurrentJobData({ body: html, ...options });
+  if (native.length !== 1 || jsonLd.length !== 1) return jsonLd;
+  const current = native[0]; const structured = jsonLd[0];
+  const sameText = (a, b) => plain(a).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase()
+    === plain(b).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase();
+  if (!current.identifier || current.identifier !== structured.identifier
+    || !sameText(current.title, structured.title) || !strictEmployerEqual(current.employer, structured.employer)) return jsonLd;
+  const canonical = value => {
+    const valid = httpsUrl(value, options.sourceUrl); if (!valid) return '';
+    const url = new URL(valid); url.pathname = url.pathname.replace(/\/+$/u, '') || '/'; return url.href;
+  };
+  const closedText = value => /\b(?:no longer accepting applications|position has been filled|job is no longer available)\b/iu.test(value || '');
+  let bound = false; let explicitlyClosed = false;
+  const rawRecords = [];
+  walkJsonLdJobPostings(html, raw => { rawRecords.push(raw); });
+  // The ordinary normalized JSON-LD result intentionally has a small schema.
+  // Inspect closure only on this same URL/title/employer/requisition record;
+  // related roles cannot contribute status or any other replacement facts.
+  for (const raw of rawRecords) {
+    const org = Array.isArray(raw.hiringOrganization) ? raw.hiringOrganization[0] : raw.hiringOrganization;
+    const samePage = raw.url ? canonical(raw.url) === canonical(options.sourceUrl) : rawRecords.length === 1;
+    if (!samePage
+      || identifier(raw.identifier) !== current.identifier || !sameText(officialDescriptionText(raw.title), current.title)
+      || !strictEmployerEqual(officialDescriptionText(typeof org === 'string' ? org : org?.name), current.employer)) continue;
+    bound = true;
+    const falseFlags = ['isListed', 'is_listed', 'active', 'published'].some(key => raw[key] === false);
+    const trueFlags = ['closed', 'is_closed'].some(key => raw[key] === true);
+    const closedStatus = ['status', 'jobStatus', 'employmentStatus'].some(key =>
+      /^(?:closed|filled|unpublished|inactive|archived)$/iu.test(plain(raw[key])));
+    explicitlyClosed ||= falseFlags || trueFlags || closedStatus || closedText(officialDescriptionText(raw.description));
+  }
+  if (!bound) return jsonLd;
+  // Choose one whole representation. Only conservative status/expiry cues from
+  // that same role survive the choice; salary/location/identity are not merged.
+  const preferred = current.description.length > structured.description.length ? current : structured;
+  return [{ ...preferred, validThrough: structured.validThrough || '',
+    isListed: current.isListed !== false && structured.isListed !== false && !explicitlyClosed,
+    live: current.live !== false && structured.live !== false && !explicitlyClosed }];
 }
 
 function ashbySalary(job) {
@@ -183,7 +241,7 @@ export function extractAshbyPostings(body, options = {}) {
     const knownWorkplaceType = /^(?:remote|hybrid|onsite)$/u.test(workplaceType);
     // Some boards keep the legacy remote flag set for hybrid postings. The
     // explicit workplace type supplies the more precise work arrangement.
-    const remote = knownWorkplaceType ? workplaceType === 'remote' : job.isRemote === true;
+    const remote = knownWorkplaceType ? workplaceType === 'remote' : typeof job.isRemote === 'boolean' ? job.isRemote : undefined;
     return posting({
       title: job.title, employer: job.hiringOrganization?.name || job.companyName || options.employer || '',
       hiringOrganization: job.hiringOrganization, sameAs: job.hiringOrganization?.sameAs || '',
@@ -218,7 +276,7 @@ export function extractLeverPostings(body, options = {}) {
     const range = job.salaryRange;
     return posting({ title: job.text, employer: job.company || options.employer || '',
       location: location([...new Set([plain(job.categories?.location), ...array(job.categories?.allLocations).map(plain)].filter(Boolean))].join(' | '), {
-        remote: /^remote$/iu.test(job.workplaceType || ''), workMode: /^(?:remote|hybrid|onsite)$/iu.test(job.workplaceType || '') ? job.workplaceType.toLowerCase() : '',
+        workMode: /^(?:remote|hybrid|onsite)$/iu.test(job.workplaceType || '') ? job.workplaceType.toLowerCase() : '',
       }), salary: range && typeof range === 'object' ? numericSalary({ min: range.min, max: range.max, currency: range.currency, interval: range.interval }) : unknownSalary(),
       identifier: job.id, description, sourceUrl: job.hostedUrl, officialApplyUrl: job.applyUrl || job.hostedUrl,
     }, { ...options, ats: 'lever' });
@@ -265,7 +323,7 @@ export function extractSmartRecruitersPostings(body, options = {}) {
   }).join('\n\n');
   const result = posting({ title: job.name, employer: job.company.name,
     location: location(addressText({ addressLocality: job.location?.city, addressRegion: job.location?.region,
-      addressCountry: job.location?.country }), { remote: job.location?.remote === true }),
+      addressCountry: job.location?.country }), { remote: typeof job.location?.remote === 'boolean' ? job.location.remote : undefined }),
     salary: unknownSalary(), identifier: job.refNumber || job.id, description,
     sourceUrl: job.postingUrl, officialApplyUrl: job.applyUrl || job.postingUrl, isListed: job.active,
   }, { ...options, ats: 'smartrecruiters', tenant });
@@ -305,7 +363,7 @@ export function extractSmartRecruitersHtmlPostings(body, options = {}) {
   const result = posting({ title: field(node, 'title'), employer, hiringOrganization: { name: employer, sameAs }, sameAs,
     location: location(addressText({ addressLocality: field(address, 'addressLocality'),
       addressRegion: field(address, 'addressRegion'), addressCountry: field(address, 'addressCountry') }), {
-      workMode, remote: workMode === 'remote',
+      workMode,
     }), salary: unknownSalary(), description: officialDescriptionText(description.innerHTML),
     sourceUrl: options.sourceUrl, officialApplyUrl: options.sourceUrl,
   }, { ...options, ats: 'smartrecruiters', tenant: route.tenant.toLowerCase() });
@@ -328,7 +386,8 @@ export function extractTeamtailorRss(body, options = {}) {
     const remoteStatus = read(item, 'remoteStatus');
     return posting({ title: read(item, 'title'), employer: options.employer || '',
       location: location(places.join(' | ') || read(item, 'location'), {
-        remote: remoteStatus === 'fully', workMode: remoteStatus === 'hybrid' ? 'hybrid' : '',
+        remote: ['fully', 'hybrid', 'none'].includes(remoteStatus) ? remoteStatus === 'fully' : undefined,
+        workMode: remoteStatus === 'hybrid' ? 'hybrid' : '',
       }), salary: unknownSalary(), identifier: read(item, 'guid'),
       description: officialDescriptionText(content), sourceUrl: link, officialApplyUrl: link,
     }, { ...options, ats: 'teamtailor' });
@@ -350,7 +409,13 @@ export function scanOfficialCareersPage(html, sourceUrl) {
     }
     return parts.join('');
   };
-  const links = []; const seen = new Set();
+  // Public board inventories precede navigation filters. This is authored
+  // source order only; every detail still passes normal fetch/ownership gates.
+  const inventory = scanOfficialPostingPaylocityInventory({ body: html, sourceUrl });
+  const links = inventory.links;
+  const seen = new Set(links.map(link => link.url)); const searchForms = [];
+  const organizationNames = new Set(); const organizations = [];
+  let organizationOverflow = false;
   let siteName = ''; let title = ''; let foundSiteName = false; let foundTitle = false;
   const pending = [document];
   while (pending.length) {
@@ -361,20 +426,92 @@ export function scanOfficialCareersPage(html, sourceUrl) {
     if (tag === 'meta' && !foundSiteName && attributeValue(node, 'property') === 'og:site_name') {
       foundSiteName = true; siteName = plain(attributeValue(node, 'content'));
     }
+    if (tag === 'script' && /^application\/ld\+json$/iu.test(attributeValue(node, 'type') || '')) {
+      try {
+        const records = [JSON.parse(textContent(node))]; let visited = 0;
+        while (records.length && visited++ < 4096) {
+          const record = records.pop();
+          if (!record || typeof record !== 'object') continue;
+          if (array(record['@type']).some(type => /^(?:Organization|Corporation)$/u.test(type))) {
+            const claimed = httpsUrl(record.url || record['@id'], sourceUrl);
+            if (claimed && new URL(claimed).pathname === '/' && sameOwnershipHost(claimed, sourceUrl)
+              && plain(record.name) && record.name.length <= 500) {
+              const name = plain(record.name); organizationNames.add(name);
+              const legalName = typeof record.legalName === 'string' && record.legalName.length <= 500 ? plain(record.legalName) : '';
+              const alternateNames = array(record.alternateName).filter(value => typeof value === 'string' && value.length <= 500).slice(0, 8).map(plain).filter(Boolean);
+              organizations.push({ name, legalName, alternateNames });
+            }
+          }
+          for (const value of Object.values(record)) if (value && typeof value === 'object') records.push(...(Array.isArray(value) ? value : [value]));
+        }
+        if (records.length) organizationOverflow = true;
+      } catch { /* Invalid structured branding cannot establish ownership. */ }
+    }
+    // A plain GET search form is a keyword-search entry point. Reported separately from links: following it is the resolver's decision.
+    if (tag === 'form' && /^(?:get)?$/iu.test(String(attributeValue(node, 'method') || '').trim()) && searchForms.length < 4) {
+      const action = httpsUrl(String(attributeValue(node, 'action') || '').trim() || sourceUrl, sourceUrl);
+      const inner = [...(node.childNodes || [])]; let visited = 0; let param = '';
+      while (inner.length && visited++ < 512 && !param) {
+        const child = inner.shift();
+        if (child.tagName === 'input' && /^(?:|text|search)$/iu.test(attributeValue(child, 'type') || '')
+          && OFFICIAL_SEARCH_PARAM.test(attributeValue(child, 'name') || '')) param = attributeValue(child, 'name');
+        inner.push(...(child.childNodes || []));
+      }
+      if (action && param) searchForms.push({ url: action, param });
+    }
     if (tag === 'a' || tag === 'script' || tag === 'iframe') {
       const attribute = tag === 'a' ? 'href' : 'src';
-      const url = httpsUrl(attributeValue(node, attribute), sourceUrl);
+      const rawHref = String(attributeValue(node, attribute) || '').trim();
+      // A bare "name@host" is an email address, not a relative path.
+      const bareEmail = tag === 'a' && rawHref.includes('@') && !/^[a-z][a-z0-9+.-]*:/iu.test(rawHref) && !/[/.?#]/u.test(rawHref[0]) && !rawHref.includes('/');
+      const url = bareEmail ? '' : httpsUrl(attributeValue(node, attribute), sourceUrl);
       if (url && !seen.has(url)) { seen.add(url); links.push({ url, tag, attribute }); }
+      // Phenom's public careers links can carry their destination in this
+      // typed action attribute instead of href. Limit it to the observed anchor
+      // action shape and hosted ATS destinations; it still goes through the
+      // normal branded-root and exact-tenant ownership checks.
+      if (tag === 'a' && attributeValue(node, 'ph-href') && attributeValue(node, 'ph-tevent') === 'static_content_click') {
+        const destination = httpsUrl(attributeValue(node, 'data-ph-href'), sourceUrl);
+        if (destination && extractAtsTenant(destination) && !seen.has(destination)) {
+          seen.add(destination); links.push({ url: destination, tag, attribute: 'data-ph-href' });
+        }
+      }
     }
     // Template content belongs to its separate fragment and was never part of
     // document.querySelectorAll. Ordinary childNodes retain document order.
     for (let index = (node.childNodes?.length || 0) - 1; index >= 0; index--) pending.push(node.childNodes[index]);
   }
-  return { links, siteName, title, teamtailor: extractAtsTenant(sourceUrl, { html })?.ats === 'teamtailor' };
+  // Keep actual anchor receipts when authored navigation declares the same
+  // destination. Typed menu data adds navigation, never employer authority.
+  const ssgNavigation = scanOfficialPostingSsgNavigationInventory({ body: html, sourceUrl });
+  for (const link of ssgNavigation.links) {
+    if (!seen.has(link.url)) { seen.add(link.url); links.push(link); }
+  }
+  if (isOfficialCareersUrl(sourceUrl)) {
+    for (const link of scanEmbeddedOfficialJobLinks(html, sourceUrl)) {
+      if (!seen.has(link.url)) { seen.add(link.url); links.push(link); }
+    }
+    // Phenom: the site's own keyword search (a lead) and, on a search page, the result jobs' detail links.
+    const phenomForm = phenomSearchForm(html, sourceUrl);
+    if (phenomForm && searchForms.length < 4) searchForms.push(phenomForm);
+    // Result jobs go first: the resolver follows a bounded number of links per page, and page chrome must not crowd them out.
+    const results = phenomSearchJobLinks(html, sourceUrl).filter(link => !seen.has(link.url));
+    for (const link of results) seen.add(link.url);
+    links.unshift(...results);
+    for (const link of extractOfficialCareersCmsFacts({ body: html, sourceUrl })?.links || []) {
+      if (!seen.has(link.url)) { seen.add(link.url); links.push({ url: link.url, tag: 'declaration', attribute: 'url' }); }
+    }
+  }
+  if (!foundSiteName && !organizationOverflow && organizationNames.size === 1) siteName = [...organizationNames][0];
+  return { links, siteName, title, teamtailor: extractAtsTenant(sourceUrl, { html })?.ats === 'teamtailor', ...(searchForms.length ? { searchForms } : {}),
+    ...(inventory.coverageIncomplete === true || ssgNavigation.coverageIncomplete === true ? { coverageIncomplete: true } : {}),
+    ...(!organizationOverflow && organizationNames.size === 1 ? { organizations } : {}) };
 }
 
 export function extractOfficialPostingCandidates({ body, sourceUrl, contentType = '', ats = '', tenant = '', employer = '', now } = {}) {
   const options = { sourceUrl, ats, tenant, employer, now };
+  const vendorCandidates = extractOfficialPostingVendorCandidates({ body, contentType, ...options });
+  if (vendorCandidates.length) return vendorCandidates;
   const json = /json/iu.test(contentType) || (typeof body === 'string' && /^\s*[[{]/u.test(body));
   if (ats === 'ashby') return json ? extractAshbyPostings(body, options) : extractJsonLdPostings(body, options);
   if (ats === 'greenhouse') return json ? extractGreenhousePostings(body, options) : extractJsonLdPostings(body, options);
@@ -382,6 +519,6 @@ export function extractOfficialPostingCandidates({ body, sourceUrl, contentType 
   if (ats === 'smartrecruiters') return json ? extractSmartRecruitersPostings(body, options)
     : [...extractJsonLdPostings(body, options), ...extractSmartRecruitersHtmlPostings(body, options)];
   if (ats === 'teamtailor' && /(?:xml|rss)/iu.test(contentType)) return extractTeamtailorRss(body, options);
-  // Workday and iCIMS intentionally have no application-state or DOM fallback.
-  return extractJsonLdPostings(body, options);
+  const jsonLd = extractJsonLdPostings(body, options);
+  return jsonLd.length ? preferCompleteCurrentJob(body, jsonLd, options) : extractOfficialPostingPageData({ body, ...options });
 }

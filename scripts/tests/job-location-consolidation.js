@@ -3,7 +3,7 @@ import {
   isConsolidationCandidate, descriptionFingerprint, buildPostingVariant,
   postingVariantKey, isSafeSourceUrl, MULTIPLE_LOCATIONS_LABEL, MIN_DESCRIPTION_ALNUM,
   isProtectedJobCard, emptyBoardCascadeStats, descriptionSimilarity,
-  findSimilarLocationCandidates,
+  findSimilarLocationCandidates, attachProtectedCards,
 } from '../../src/utils/jobLocationConsolidation.js';
 import { confirmSimilarJobLocationPairs } from '../../electron/ipc/jobLocationConsolidation.js';
 import { migrateConsolidateBoardLocations, CURRENT_SCHEMA_VERSION } from '../../src/utils/serializationUtils.js';
@@ -510,6 +510,51 @@ export default [
         && isConsolidationCandidate(caseOnly),
       'title/company normalization ignores case and surrounding whitespace');
       assert(buildPostingVariant(a).location === 'Remote - US', 'variant location preserves readable casing');
+      return true;
+    },
+  },
+  {
+    name: 'attachProtectedCards: one protected card attaches to at most one union row',
+    run: () => {
+      const mk = (id, url) => ({ id, title: 'Engineer', company: 'Acme', location: 'Austin, TX', url });
+      const card = {
+        id: 'cardA', type: 'jobcard',
+        data: { hubId: 'b', title: 'Engineer', company: 'Acme', location: 'Austin, TX', url: 'https://x.com/1', localApplication: { state: 'done' } },
+      };
+      // URL match wins even when the other row is listed first.
+      for (const order of [['j1', 'j2'], ['j2', 'j1']]) {
+        const rows = { j1: mk('j1', 'https://x.com/1'), j2: mk('j2', 'https://x.com/2') };
+        const { jobs, unmatchedProtected } = attachProtectedCards(order.map(k => rows[k]), [card]);
+        const reused = jobs.filter(j => j.reuseCardId);
+        assert(reused.length === 1 && reused[0].id === 'j1' && reused[0].cardId === 'cardA',
+          'only the URL-matching row reuses the card');
+        const other = jobs.find(j => j.id === 'j2');
+        assert(!other.reuseCardId && !other.reuseCardData && !other.protected && other.cardId === undefined,
+          'the distinct posting gets no reuse fields');
+        assert(unmatchedProtected.length === 0, 'the claimed card is not reported unmatched');
+      }
+      // Fallback-only rows (no URL/id match): the card is still claimed once.
+      const { jobs } = attachProtectedCards([mk('j3', 'https://x.com/3'), mk('j2', 'https://x.com/2')], [card]);
+      assert(jobs.filter(j => j.reuseCardId === 'cardA').length === 1, 'key fallback claims the card once');
+      return true;
+    },
+  },
+  {
+    name: 'attachProtectedCards: id match still wins and duplicate-key cards pair one-to-one',
+    run: () => {
+      const data = (url) => ({ hubId: 'b', title: 'Engineer', company: 'Acme', location: 'Austin, TX', url });
+      const cards = [
+        { id: 'c1', type: 'jobcard', data: data('https://x.com/1') },
+        { id: 'c2', type: 'jobcard', data: data('https://x.com/2') },
+      ];
+      const row = (id, url) => ({ id, title: 'Engineer', company: 'Acme', location: 'Austin, TX', url });
+      const byId = attachProtectedCards([row('c2', 'https://x.com/9')], cards);
+      assert(byId.jobs[0].reuseCardId === 'c2', 'a row whose id is a card id reuses that card');
+      assert(byId.unmatchedProtected.map(c => c.reuseCardId).join() === 'c1', 'the other card stays unmatched');
+      const two = attachProtectedCards([row('n1', 'https://x.com/7'), row('n2', 'https://x.com/8')], cards);
+      assert(two.jobs[0].reuseCardId !== two.jobs[1].reuseCardId
+        && two.jobs.every(j => j.reuseCardId) && two.unmatchedProtected.length === 0,
+      'two same-key cards pair with two same-key rows without duplication');
       return true;
     },
   },

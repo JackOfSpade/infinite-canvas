@@ -5,6 +5,7 @@ import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.
 import { boundedOfficialPostingTrail, normalizeOfficialPosting, OFFICIAL_POSTING_TRAIL, officialPostingComparativeTrail } from '../../electron/ipc/officialPostingFields.js';
 import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { mergeOfficialPostingTelemetry, partitionOfficialPostingRows as partitionRows, resolveOfficialPostings as resolveRows } from '../../electron/ipc/officialPostingService.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 // These legacy fixtures pin the earlier deterministic/comparative contract.
 const partitionOfficialPostingRows = (jobs, options) => partitionRows(jobs, { semanticMatching: false, ...options });
 const resolveOfficialPostings = (jobs, options) => resolveRows(jobs, { semanticMatching: false, ...options });
@@ -120,7 +121,7 @@ export default [
       rows[7].officialPosting = { ...posting(), extra: 'invalid' };
       const valid = record(rows[0], posting({ level: 'L1', outcome: 'found' }), now);
       const wrong = record(job(200, { title: 'Finance Analyst' }), posting(), now);
-      const clean = record(rows[3], posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-research'] }), now - 1_000);
+      const clean = record(rows[3], posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] }), now - 1_000);
       const transient = record(rows[4], posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-aborted'] }), now - 1_000);
       const unproven = record(rows[5], posting({ level: 'L5', outcome: 'not-found' }), now - 1_000);
       const expired = record(rows[6], posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-research'] }), now - 24 * 60 * 60 * 1_000);
@@ -142,7 +143,7 @@ export default [
     name: 'R3 service skips all twenty-one handoffs for 250 definitive cached misses and chunks only thirty unresolved input rows',
     async run() {
       const rows = Array.from({ length: 250 }, (_, index) => job(index));
-      const store = memoryStore(rows.map(row => [row.sourceJobKey, record(row, posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-research'] }))]));
+      const store = memoryStore(rows.map(row => [row.sourceJobKey, record(row, posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] }))]));
       const result = await resolveOfficialPostings(rows, { store, fetch: noNetwork, callRaw: () => { throw new Error('250 settled rows must dispatch zero handoffs'); } });
       assert.equal(result.jobs.length, 250); assert.equal(result.telemetry.handoffs, 0); assert.equal(result.telemetry.levels.L5, 250);
       assert.equal(store.saves.length, 0);
@@ -208,7 +209,8 @@ export default [
         assert.ok(['L5', 'L6'].includes(result.jobs[0].officialPosting.level));
         assert.equal(calls, code === 'bridge-unavailable' ? 0 : 1);
         let retried = 0;
-        const healthy = await resolveOfficialPostings([row], { store, fetch: noNetwork, resolve: async value => unresolvedOfficialPosting(value),
+        const healthy = await resolveOfficialPostings([row], { store, fetch: noNetwork,
+          resolve: async value => unresolvedOfficialPosting(value, { trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] }),
           callRaw: async prompt => { retried++; return response(prompt); } });
         assert.equal(retried, 1, `${code} remains retryable on the next run`); assert.equal(store.saves.length, 1);
         assert.ok(healthy.jobs[0].officialPosting.trail.includes('bridge-research'));
@@ -216,7 +218,7 @@ export default [
     },
   },
   {
-    name: 'R3 service retries old persisted transient misses through the real resolver and stores only the new clean researched conclusion',
+    name: 'R3 legacy service retries old transient misses without persisting an unupgraded negative conclusion',
     async run() {
       const row = job(1, { snippet: `${description} The engineer reviews daily route records and explains delayed dispatch issues to experienced operational partners. Additional responsibilities include validating service changes and documenting useful release decisions with regional teams.` });
       const old = record(row, posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-timeout'] }));
@@ -224,7 +226,8 @@ export default [
       const result = await resolveOfficialPostings([row], { store, fetch: async () => { fetched++; const error = new Error('closed'); error.code = 'closed'; throw error; },
         callRaw: async prompt => { researched++; return response(prompt); } });
       assert.equal(researched, 1); assert.equal(fetched, 1, 'the shared negative cache prevents another host request in pass two');
-      assert.equal(store.saves.length, 1); assert.equal(result.jobs[0].officialPosting.level, 'L5');
+      assert.equal(store.saves.length, 0); assert.equal(result.jobs[0].officialPosting.level, 'L5');
+      assert.equal(result.jobs[0].officialPosting.trail.includes(OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL), false);
       assert.ok(result.jobs[0].officialPosting.trail.includes('bridge-research')); assert.equal(result.jobs[0].officialPosting.trail.includes('bridge-timeout'), false);
       assert.equal(result.jobs[0].officialPosting.trail.includes('recent-miss'), false);
     },
@@ -234,7 +237,7 @@ export default [
     async run() {
       const row = job(1); const store = memoryStore();
       const result = await resolveOfficialPostings([row], { store, fetch: noNetwork,
-        resolve: async value => unresolvedOfficialPosting(value, { outcome: 'ambiguous', trail: ['ambiguous'], alternatives: [
+        resolve: async value => unresolvedOfficialPosting(value, { outcome: 'ambiguous', trail: ['ambiguous', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], alternatives: [
           { title: 'Dispatch Engineer', url: 'https://northwind.test/jobs/alternative-one' },
           { title: 'Dispatch Engineer', url: 'https://northwind.test/jobs/alternative-two' },
         ] }),
@@ -382,25 +385,28 @@ export default [
     },
   },
   {
-    name: 'Amendment 5 service persists settled none and disagreement while retaining only bounded comparative decisions',
+    name: 'Amendment 5 legacy none and disagreement preserve bounded decisions but retry without current discovery proof',
     async run() {
       for (const kind of ['none', 'disagree']) {
         const fixture = comparativeServiceFixture([{ id: 'one' }, { id: 'two', quotes: COMPARATIVE_SIBLING }]);
         const row = comparisonRow(); const store = memoryStore();
-        const result = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession, callRaw: fixture.research,
-          callMatch: async (prompt, options) => JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt), kind === 'none' ? 'none' : options.hints.comparisonRun === 'A' ? 'P1' : 'P2')) });
+        const callMatch = async (prompt, options) => JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt),
+          kind === 'none' ? 'none' : options.hints.comparisonRun === 'A' ? 'P1' : 'P2'));
+        const result = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession, callRaw: fixture.research, callMatch });
         assert.equal(result.jobs[0].officialPosting.outcome, kind === 'none' ? 'not-found' : 'ambiguous');
-        assert.equal(store.saves.length, 1); assert.equal(result.telemetry.comparisons, 1);
+        assert.equal(store.saves.length, 0); assert.equal(result.telemetry.comparisons, 1);
+        assert.equal(result.jobs[0].officialPosting.trail.includes(OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL), false);
         assert.equal(result.telemetry.comparativeAgreements, kind === 'none' ? 1 : 0);
         assert.equal(result.telemetry.comparativeDisagreements, kind === 'disagree' ? 1 : 0);
         assert.equal(result.telemetry.comparativeNone, kind === 'none' ? 1 : 0);
         assert.equal(result.telemetry.comparativeInvalidRuns, 0); assert.equal(result.telemetry.comparativeMatches, 0);
         if (kind === 'disagree') assert.equal(result.jobs[0].officialPosting.alternatives.length, 2);
-        assert.equal(/Quote|description|distinguishing/u.test(JSON.stringify(store.saves[0].payload.officialPosting)), false);
+        assert.equal(/Quote|description|distinguishing/u.test(JSON.stringify(result.jobs[0].officialPosting)), false);
         let calls = 0;
         const replay = await resolveOfficialPostings([row], { store, fetchSession: fixture.fetchSession,
-          callRaw: async () => { calls++; throw new Error('A settled miss must replay without another handoff'); } });
-        assert.equal(calls, 0); assert.ok(replay.jobs[0].officialPosting.trail.includes('recent-miss'));
+          callRaw: async (...args) => { calls++; return fixture.research(...args); }, callMatch });
+        assert.equal(calls, 1); assert.equal(replay.jobs[0].officialPosting.trail.includes('recent-miss'), false);
+        assert.equal(store.saves.length, 0);
       }
     },
   },

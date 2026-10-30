@@ -13,7 +13,9 @@ import { normalizePersonalSalaryRecommendation } from './personalSalaryRecommend
 const VARIABLE_PAY_RE = /\b(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?))\b/i;
 const NON_CASH_RE = /\b(?:medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)\b/i;
 const BASE_PAY_RE = /\b(?:base salary|base pay|salary range|salary|hourly rate|pay range|wage|rate)\b/i;
-const MONEY_RE = /(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)\s*([\d,.]+)\s*([km])?/gi;
+// A k/m suffix is a magnitude unless it begins an ordinary word: "$3,000 monthly" is not $3,000 million, but
+// "$90kCAD" is $90,000 and "$1.5 million" is $1,500,000.
+const MONEY_RE = /(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)\s*([\d,.]+)\s*(?:([km])(?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?/gi;
 
 function amount(raw, suffix = '') {
   const n = Number(String(raw).replace(/,/g, ''));
@@ -46,7 +48,7 @@ function bareSalaryAmounts(text, cadence) {
 
 function rangeSalaryAmounts(text, cadence) {
   const source = String(text || '');
-  const pattern = /(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*([km])?\s*(?:[-–—]|\bto\b)\s*(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*([km])?/gi;
+  const pattern = /(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*(?:([km])(?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?\s*(?:[-–—]|\bto\b)\s*(?:US\$|C\$|CA\$|CAD\s*|USD\s*|\$|€|£)?\s*([\d,.]+)\s*(?:([km])(?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?/gi;
   // A work-schedule range ("20-25 hrs/week") has the identical shape as a
   // bare pay range and carries no currency symbol either, so the naive
   // first-match scan below would report the hours as the rate whenever the
@@ -87,7 +89,7 @@ function rangeSalaryAmounts(text, cadence) {
 // value when it is close to an excluded label, leaving the base value for the
 // regular range parser below.
 function removeExcludedPayAmounts(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*[km]?`;
+  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
   const excluded = String.raw`(?:commission(?:[-\s]?only)?|tips?|on[-\s]?target earnings|OTE|bonus(?:es)?|equity|stock(?:\s+options?)?|restricted stock|RSUs?|total\s+(?:comp(?:ensation)?|rewards?)|medical|dental|vision|health(?:care)? benefits?|insurance|retirement|pension|401\s*\(?k\)?|paid time off|PTO)`;
   // "€100k OTE", "equity worth $100k", "bonus: $20,000", and the
   // occasional parenthetical qualifier are all treated as excluded.  A short
@@ -98,17 +100,38 @@ function removeExcludedPayAmounts(text) {
     .replace(new RegExp(`${excluded}\\b(?:\\s|,|:|\\(|\\[|\\+|\\-|–|—|/){0,12}(?:worth\\s+|up\\s+to\\s+|target\\s+)?${money}`, 'gi'), ' ');
 }
 
+// Remove only amounts locally tied to an extra, before detecting pay cadence.
+// The bounded gaps avoid reaching back across a separately stated salary.
+function removeExtraPayAmounts(text) {
+  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]*\d[\d,.]*\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
+  const range = String.raw`${money}(?:\s*(?:[-–—]|\bto\b)\s*${money})?`;
+  const amountNoun = String.raw`(?:stipends?|allowances?|budgets?|reimbursements?|relocation|sign(?:ing|-on)(?:\s+bonus)?)`;
+  const extra = String.raw`(?:${amountNoun}|tuition|housing)`;
+  const unit = String.raw`(?:\s*(?:\/\s*(?:year|yr|month|mo|week|wk|hour|hr|day)\b|(?:per|a|an)\s+(?:year|yr|annum|month|mo|week|wk|hour|hr|day)\b|(?:annual(?:ly)?|yearly|monthly|weekly|hourly|daily)\b))?`;
+  const modifier = String.raw`\s+(?!(?:per|plus|and|or|with|to|a|an|the|year|years|yr|hour|hours|hr|month|months|mo|week|weeks|day|days|salary|base|pay|range|annually)\b)[a-z-]+\b`;
+  const connector = String.raw`(?:\s*(?:\b(?:of|up|to|worth|valued|at|package|assistance|bonus)\b|[:\-(]))`;
+  const before = new RegExp(String.raw`(?<![\w.,$€£])${range}${unit}(?:${modifier}){0,3}\s+\b${amountNoun}\b`, 'gi');
+  const after = new RegExp(String.raw`\b${extra}\b${connector}{0,4}\s*${range}${unit}`, 'gi');
+  // Preserve separately delimited, shorthand benefit clauses such as
+  // "$80k/year; $5k housing" without treating "housing included" as a noun.
+  const standaloneBenefit = new RegExp(String.raw`[;,]\s*${range}${unit}\s+\b(?:tuition|housing)\b(?=\s*(?:[;,.]|$))`, 'gi');
+  const original = String(text || '');
+  const remaining = original.replace(before, ' ').replace(after, ' ').replace(standaloneBenefit, ' ');
+  // A lone stipend or allowance may itself be the stated pay.
+  return new RegExp(money, 'i').test(remaining) ? remaining : original;
+}
+
 // When a listing explicitly labels an amount as base salary/base pay, prefer
 // that local span over broad clause surgery.  In particular,
 // "commission + $80k base salary" is a usable $80k offer—not a commission
 // figure—and the inverse wording is equally common.  Keeping only the marked
 // span also ensures a following OTE/bonus number cannot leak back in.
 function explicitBasePayText(text) {
-  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*[km]?`;
+  const money = String.raw`(?:US\$|C\$|CA\$|(?:CAD|USD)\s*\$?|\$|€|£)?\s*[\d,.]+\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?`;
   // The unit belongs to the base figure too. Leaving `/hour`, `/week`, or
   // `/month` behind while extracting the marked span would silently turn a
   // valid rate into an annual $45/$2,000/$8,000 offer.
-  const cadence = String.raw`(?:\s*(?:\/\s*(?:h|hr|hour|wk|week|mo|month|day)|(?:per|an?)\s+(?:hour|hr|week|wk|month|mo|day|year)|\b(?:hourly|weekly|monthly|daily|annual(?:ly)?|yearly)\b))?`;
+  const cadence = String.raw`(?:\s*(?:\/\s*(?:h|hr|hour|wk|week|mo|month|day)|(?:per|an?)\s+(?:hour|hr|week|wk|month|mo|day|year)|every\s+(?:two|2)\s+weeks|\b(?:hourly|bi-?\s?weekly|fortnightly|semi-?\s?monthly|weekly|monthly|daily|annual(?:ly)?|yearly)\b))?`;
   const cashAmount = String.raw`${money}(?:\s*(?:[-–—]|\bto\b)\s*${money})?(?:\s*(?:CAD|USD|EUR|GBP)\b)?${cadence}`;
   const portions = [];
   const seen = new Set();
@@ -126,6 +149,23 @@ function explicitBasePayText(text) {
   return portions.length ? portions.join(' ') : '';
 }
 
+/**
+ * Remove work-schedule phrases ("40 hours/week", "8 hours/day, 5 days/week",
+ * "40 hours weekly") so the hours worked cannot decide the pay cadence.
+ */
+function stripScheduleText(text) {
+  return String(text || '')
+    .replace(/\b\d+(?:\.\d+)?\s*(?:hours?|hrs?|days?)\s*(?:(?:\/|per|a)\s*(?:day|week|wk)|weekly|daily)\b/gi, ' ');
+}
+
+// A pay-period marker counts only when it is attached to an amount ("$60,000 per year", "$2,000 biweekly"), so
+// "reviewed yearly" or "52 weeks a year" elsewhere in the text cannot decide the cadence.
+const ATTACHED_AMOUNT = String.raw`\d[\d,.]*\s*(?:[km](?=$|[^a-z]|(?:usd|cad|eur|gbp|illion)\b))?\s*(?:usd|cad|eur|gbp)?\s*`;
+const ANNUAL_ATTACHED_RE = new RegExp(`${ATTACHED_AMOUNT}(?:\\/\\s*(?:yr|year)\\b|(?:per|a|an)\\s+(?:year|annum)\\b|annual(?:ly)?\\b|yearly\\b)`, 'i');
+const OTHER_ATTACHED_RE = new RegExp(`${ATTACHED_AMOUNT}(?:\\/\\s*(?:h|hr|hour|wk|week|mo|month|day)\\b|(?:per|an?)\\s+(?:hour|hr|week|month|day)\\b|(?:hourly|bi-?\\s?weekly|fortnightly|semi-?\\s?monthly|weekly|monthly|daily|mo)\\b|every\\s+(?:two|2)\\s+weeks\\b|twice\\s+(?:a|per)\\s+month\\b)`, 'i');
+// "Paid bi-weekly" says when a salary is paid, not what it is: on its own it does not set the pay period.
+const PAYROLL_PHRASE_RE = /\b(?:paid|pay\s+(?:schedule|period)|payroll)\b[^.;,)]{0,20}?\b(?:bi-?\s?weekly|semi-?\s?monthly|fortnightly|weekly|monthly|twice\s+(?:a|per)\s+month|every\s+(?:two|2|other)\s+weeks?)\b/gi;
+
 /** Parse only stated, recurring cash compensation. Never manufactures an offer. */
 export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   // Scrapers occasionally leave `salary` as whitespace while preserving a
@@ -139,7 +179,11 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   // base remains usable, but never let a second variable-pay figure inflate the
   // range: evaluate only the portion before an additive "plus" clause.
   const explicitBase = BASE_PAY_RE.test(text);
-  const containsExcludedComponent = VARIABLE_PAY_RE.test(text) || NON_CASH_RE.test(text);
+  // A quantified signing bonus is an extra, not evidence that the salary is
+  // variable-only. Keep the existing exclusion rule for other bonus wording.
+  const exclusionText = !explicitBase && /\bsign(?:ing|-on)\s+bonus\b/i.test(text)
+    ? removeExtraPayAmounts(text) : text;
+  const containsExcludedComponent = VARIABLE_PAY_RE.test(exclusionText) || NON_CASH_RE.test(exclusionText);
   if (containsExcludedComponent && !explicitBase) {
     return { usable: false, reasonCode: 'variable_or_non_cash_only' };
   }
@@ -152,19 +196,54 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   // With an explicitly marked base span there is nothing left to trim. For
   // unmarked salary fields retain the old conservative additive-clause cutoff.
   if (!markedBase) cashText = cashText.split(/\s*(?:\+|\bplus\b)\s*/i)[0];
-  const cadence = /(?:\/\s*(?:h|hr|hour)|(?:per|an?)\s+(?:hour|hr)|\bhourly\b)/i.test(cashText)
+  cashText = removeExtraPayAmounts(cashText);
+  // A work-schedule phrase ("40 hours/week") names hours, not the pay period.
+  // Detect the pay cadence on text without it, so "$60,000 per year; 40
+  // hours/week" stays annual instead of matching the weekly pattern.
+  const periodText = value => stripScheduleText(value).replace(PAYROLL_PHRASE_RE, ' ');
+  const payrollPhrase = new RegExp(PAYROLL_PHRASE_RE.source, 'i').test(stripScheduleText(cashText));
+  let cadenceText = periodText(cashText);
+  let annualAttached = ANNUAL_ATTACHED_RE.test(cadenceText);
+  // An annual figure beside a shorter-period one is the same pay restated only when it is at least ten times
+  // larger ("$5,000 per month ($60,000 a year)"); a smaller one is an extra ("$500 annual stipend"), so the
+  // shorter-period figure is the pay then.
+  if (annualAttached && OTHER_ATTACHED_RE.test(cadenceText)) {
+    const clauses = cadenceText.split(/[;()]|,\s(?=\D)|\bor\b|\.\s/i).filter(clause => clause.trim());
+    const annualClauses = clauses.filter(clause => ANNUAL_ATTACHED_RE.test(clause));
+    const otherClauses = clauses.filter(clause => !ANNUAL_ATTACHED_RE.test(clause) && OTHER_ATTACHED_RE.test(clause));
+    const largest = list => Math.max(0, ...list.flatMap(clause => [...clause.matchAll(MONEY_RE)].map(m => amount(m[1], m[2]) || 0)));
+    if (annualClauses.length && (!otherClauses.length || largest(annualClauses) >= 10 * largest(otherClauses))) {
+      cashText = annualClauses.join('; ');
+    } else if (otherClauses.length) {
+      cashText = otherClauses.join('; ');
+      annualAttached = false;
+    }
+    cadenceText = periodText(cashText);
+  }
+  const cadence = /(?:\/\s*(?:h|hr|hour)|(?:per|an?)\s+(?:hour|hr)|\bhourly\b)/i.test(cadenceText)
     ? 'hourly'
-    : /(?:\/\s*(?:wk|week)|per\s+week|\bweekly\b)/i.test(cashText)
-      ? 'weekly'
-      : /(?:\/\s*(?:mo|month)|per\s+month|\bmonthly\b)/i.test(cashText)
-        ? 'monthly'
-        : /(?:\/\s*(?:day)|per\s+day|\bdaily\b)/i.test(cashText)
-          ? 'daily'
-          : 'annual';
+    : annualAttached
+      ? 'annual'
+    : /(?:\bbi-?\s?weekly\b|\bfortnightly\b|\bevery\s+(?:two|2)\s+weeks\b)/i.test(cadenceText)
+      ? 'biweekly'
+      : /(?:\bsemi-?\s?monthly\b|\btwice\s+(?:a|per)\s+month\b)/i.test(cadenceText)
+        ? 'semimonthly'
+        : /(?:\/\s*(?:wk|week)|per\s+week|\bweekly\b)/i.test(cadenceText)
+          ? 'weekly'
+          : /(?:\/\s*(?:mo|month)|per\s+month|\bmonthly\b|\d\s*mo\.?(?![a-z]))/i.test(cadenceText)
+            ? 'monthly'
+            : /(?:\/\s*(?:day)|per\s+day|\bdaily\b)/i.test(cadenceText)
+              ? 'daily'
+              : 'annual';
   const rangeAmounts = rangeSalaryAmounts(cashText, cadence);
   const symbolAmounts = [...cashText.matchAll(MONEY_RE)].map(m => amount(m[1], m[2])).filter(Boolean);
   const numbers = rangeAmounts.length ? rangeAmounts : symbolAmounts.length ? symbolAmounts : bareSalaryAmounts(cashText, cadence);
   if (!numbers.length) return { usable: false, reasonCode: 'unparseable_cash_salary' };
+  // A payroll phrase beside a figure with no stated period: a salary-sized figure ($20,000 or more) can only be
+  // annual; a smaller one leaves the period unknown, so never guess it.
+  if (payrollPhrase && cadence === 'annual' && !annualAttached && !numbers.every(value => value >= 20_000)) {
+    return { usable: false, reasonCode: 'pay_period_unclear' };
+  }
   // "From", "minimum", and "starting" state only a floor, not the maximum
   // the applicant could receive. They cannot support the product's exact
   // maximum-vs-market-floor comparison. An explicit range still has a maximum
@@ -181,6 +260,10 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
     multiplier = hoursPerWeek * 52;
   } else if (cadence === 'weekly') {
     multiplier = 52;
+  } else if (cadence === 'biweekly') {
+    multiplier = 26;
+  } else if (cadence === 'semimonthly') {
+    multiplier = 24;
   } else if (cadence === 'monthly') {
     multiplier = 12;
   } else if (cadence === 'daily') {
@@ -204,7 +287,7 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   const inferred = inferSalaryCurrency(cashText, comparisonDisplay || job.location || '');
   const currency = statedCurrency || inferred?.currency || '';
   if (!currency) return { usable: false, reasonCode: 'currency_unclear' };
-  if (/\bstarting\s+(?:at|from)\b/i.test(text) && !/\b(?:to|–|—|-)\b/.test(text)) {
+  if (!rangeAmounts.length && /\bstarting\s+(?:at|from)\b/i.test(text)) {
     return { usable: false, reasonCode: 'salary_maximum_unstated' };
   }
   return {

@@ -247,14 +247,14 @@ export function registerHandoffBridgeUi({
   const TRANSIENT_LAUNCHES = new Set(TRANSIENT_LAUNCH_REASONS);
   const LAUNCH_RETRY_DELAYS_MS = Object.freeze([15_000, 45_000, 90_000]);
   const launchRetryCounts = new Map();
-  // owner -> { firstCallAt, restarts, lastCallAt, count }: consecutive
-  // diagnoses of this chat showing an assistant turn without a visible Stop
-  // control and no bridge call in between.
-  const stallStreaks = new Map();
+  // Only connected-tab observations can be superseded by newer bridge
+  // liveness. Launch failures and consent/refusal states keep their handling.
+  const observedFailureEvidence = new Map();
   // Launch progress is shown in the dock and, for outcomes, written to the
   // serve ledger as reason codes only.
   const setLaunchProgress = (owner, progress) => {
     const prior = launchProgress.get(owner);
+    observedFailureEvidence.delete(owner);
     launchProgress.set(owner, progress);
     if (!['failed', 'retrying', 'presented'].includes(progress?.stage)) return;
     // The launcher's own state callback repeats the failure runWorkerLaunch
@@ -392,9 +392,9 @@ export function registerHandoffBridgeUi({
   };
   function canAutomaticallyRestartWorker(worker, generation) {
     const reason = launchProgress.get(workerOwner(generation, worker?.ordinal))?.reason;
-    // A polling chat that ChatGPT visibly stopped (delivery alert, or no
-    // active turn twice in a row) and that has not called for a minute is
-    // dead; the engine double-checks that it owns no unanswered handoff.
+    // An explicit transport failure in a polling chat that has not called
+    // for a minute permits recovery; the engine double-checks that it owns
+    // no unanswered handoff.
     if (worker?.state === 'waiting') {
       return worker.firstCallAt != null && Number.isFinite(worker.lastCallAt)
         && Number(now()) - worker.lastCallAt >= OBSERVED_FAILURE_SILENCE_MS
@@ -402,11 +402,30 @@ export function registerHandoffBridgeUi({
     }
     if (worker?.state !== 'quiet') return false;
     if (['fresh_context_required', 'polling_stopped'].includes(worker.quietReason)) return true;
-    // Only an observed failure, never the absence of a response, may
-    // automatically replace a chat that still owns an unanswered handoff. A
-    // chat still writing shows a Stop control, so 'chat_stopped' is observed.
+    // Only an explicit failure may replace an answer-silent owner. A missing
+    // Stop control does not distinguish long tool waits from a stopped chat.
     return worker.quietReason === 'answer_silent'
       && ['safety_block', ...OBSERVED_CHAT_FAILURES].includes(reason);
+  }
+  function clearRecoveredWorkerFailures(pool) {
+    for (const worker of pool?.workers || []) {
+      const owner = workerOwner(pool.generation, worker.ordinal);
+      const evidence = observedFailureEvidence.get(owner);
+      if (!evidence) continue;
+      if (worker.firstCallAt !== evidence.firstCallAt || worker.restarts !== evidence.restarts) {
+        observedFailureEvidence.delete(owner);
+        continue;
+      }
+      if (!Number.isFinite(worker.lastCallAt) || worker.lastCallAt <= evidence.lastCallAt) continue;
+      const progress = launchProgress.get(owner);
+      if (progress?.stage === 'failed' && progress.reason === evidence.reason) {
+        setLaunchProgress(owner, { stage: 'presented', reason: null });
+      } else observedFailureEvidence.delete(owner);
+    }
+  }
+  function setObservedWorkerFailure(owner, reason, observed) {
+    setLaunchProgress(owner, { stage: 'failed', reason });
+    observedFailureEvidence.set(owner, { ...observed, reason });
   }
   async function runWorkerLaunch({ generation, workerOrdinal, restart = false, failedLaunch = false } = {}) {
     const owner = workerOwner(generation, workerOrdinal);
@@ -439,7 +458,6 @@ export function registerHandoffBridgeUi({
     // The old chat's key is retired now. Close its tab before anything below
     // can fail, so a starter or attachment failure never orphans it.
     if (restart) {
-      stallStreaks.delete(owner);
       await launcher.close(owner);
     }
     let starter;
@@ -611,8 +629,9 @@ export function registerHandoffBridgeUi({
     return true;
   }
   // Observe owned tabs for consent and explicit ChatGPT transport failures.
-  // Silence alone never authorizes replacing an unanswered chat; a turn that
-  // shows no Stop control on two consecutive looks is an observed stop.
+  // Silence and the absence of a Stop control never establish that ChatGPT
+  // stopped. The engine's quiet state already represents overdue answers;
+  // only affirmative consent or transport evidence changes launch status.
   function diagnoseConnectedWorkers(snapshot) {
     const pool = snapshot?.chat?.pool;
     const observing = pool?.active && snapshot.serving === 'live' && launcher.diagnose
@@ -641,7 +660,8 @@ export function registerHandoffBridgeUi({
       // A polling worker that called recently is healthy; only an overdue
       // poll is worth a look at its tab.
       if (worker.state === 'waiting' && !(Number(now()) - worker.lastCallAt >= WAITING_DIAGNOSIS_AFTER_MS)) continue;
-      const observed = { state: worker.state, firstCallAt: worker.firstCallAt, restarts: worker.restarts, lastCallAt: worker.lastCallAt };
+      const observed = { state: worker.state, quietReason: worker.quietReason,
+        firstCallAt: worker.firstCallAt, restarts: worker.restarts, lastCallAt: worker.lastCallAt };
       workerDiagnosis.set(owner, Number(now()));
       workerDiagnosisInFlight.add(owner);
       void Promise.resolve().then(() => launcher.diagnose(owner, snapshot.config?.pluginName)).then(result => {
@@ -649,35 +669,19 @@ export function registerHandoffBridgeUi({
         const current = currentStatus();
         const live = current?.chat?.pool;
         const liveWorker = live?.workers?.find(item => item.ordinal === worker.ordinal);
-        const sameState = observed.state === 'waiting' ? liveWorker?.state === 'waiting'
-          : ['working', 'quiet'].includes(liveWorker?.state);
+        const sameState = liveWorker?.state === observed.state
+          && (observed.state !== 'quiet' || liveWorker?.quietReason === observed.quietReason);
         if (!live?.active || live.generation !== pool.generation || current.serving !== 'live'
           || !liveWorker || !sameState
           || liveWorker.firstCallAt !== observed.firstCallAt || liveWorker.restarts !== observed.restarts
           || liveWorker.lastCallAt !== observed.lastCallAt) return;
         const prior = launchProgress.get(owner);
-        const stalled = result?.reason === 'none' && result?.responding === false && result?.assistantPresent === true;
-        if (!stalled) stallStreaks.delete(owner);
         if (result?.reason === 'approval_required') {
           if (prior?.reason === 'approval_required') return;
           setLaunchProgress(owner, { stage: 'presented', reason: 'approval_required' });
         } else if (['delivery_timeout', 'conversation_unavailable'].includes(result?.reason)) {
           if (prior?.reason === result.reason) return;
-          setLaunchProgress(owner, { stage: 'failed', reason: result.reason });
-        } else if (stalled) {
-          // Consecutive 15s-cadence looks at the same chat with no bridge call
-          // in between. One look can catch the instant between two polls; two
-          // cannot, and any call in between is liveness that starts over.
-          const streak = stallStreaks.get(owner);
-          const count = streak?.firstCallAt === observed.firstCallAt && streak?.restarts === observed.restarts
-            && streak?.lastCallAt === observed.lastCallAt ? streak.count + 1 : 1;
-          stallStreaks.set(owner, { firstCallAt: observed.firstCallAt, restarts: observed.restarts, lastCallAt: observed.lastCallAt, count });
-          if (count >= 2) {
-            if (prior?.reason === 'chat_stopped') return;
-            setLaunchProgress(owner, { stage: 'failed', reason: 'chat_stopped' });
-          } else if (prior?.reason === 'approval_required') {
-            setLaunchProgress(owner, { stage: 'presented', reason: null });
-          } else return;
+          setObservedWorkerFailure(owner, result.reason, observed);
         } else if (result?.reason === 'none' && (prior?.reason === 'approval_required'
           || (result?.responding === true && OBSERVED_CHAT_FAILURES.includes(prior?.reason)))) {
           setLaunchProgress(owner, { stage: 'presented', reason: null });
@@ -693,12 +697,13 @@ export function registerHandoffBridgeUi({
       autoLaunchPaused = null;
       launchAttempted.clear();
       workerDiagnosis.clear();
-      stallStreaks.clear();
+      observedFailureEvidence.clear();
     }
+    clearRecoveredWorkerFailures(pool);
     diagnoseConnectedWorkers(snapshot);
     if (!pool?.active) {
       for (const owner of launchProgress.keys()) { void launcher.close(owner); launchProgress.delete(owner); }
-      stallStreaks.clear();
+      observedFailureEvidence.clear();
       autoLaunchPaused = null;
       maybeAutoStartPool(snapshot);
       return;
@@ -714,7 +719,7 @@ export function registerHandoffBridgeUi({
     }
     const live = new Set((pool.workers || []).map(worker => workerOwner(pool.generation, worker.ordinal)));
     for (const owner of launchProgress.keys()) if (!live.has(owner)) { void launcher.close(owner); launchProgress.delete(owner); }
-    for (const owner of [...stallStreaks.keys()]) if (!live.has(owner)) stallStreaks.delete(owner);
+    for (const owner of [...observedFailureEvidence.keys()]) if (!live.has(owner)) observedFailureEvidence.delete(owner);
     for (const attempt of launchAttempted) {
       const owner = attempt.split(':').slice(0, 3).join(':');
       if (!live.has(owner)) launchAttempted.delete(attempt);
@@ -1697,6 +1702,7 @@ export function registerHandoffBridgeUi({
     for (const timer of chromePermissionRetryTimers.values()) try { timers.clearTimeout?.(timer); } catch { /* optional */ }
     chromePermissionRetryTimers.clear();
     workerDiagnosis.clear();
+    observedFailureEvidence.clear();
     if (workerDiagnosisTimer !== null) timers.clearTimeout?.(workerDiagnosisTimer);
     workerDiagnosisTimer = null;
     poolAutoStartStopped = true;

@@ -16928,7 +16928,7 @@ Return a JSON object with four arrays of search query strings:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, secondTabUrl, collectionLimits, enabledSourceIds, continuationIntentId = null, continuationLeaseToken = null, careerSnapshotId = null, operationAuthority = null, parentArtifactFingerprint = null } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, preferredLocation, secondTabUrl, collectionLimits, enabledSourceIds, continuationIntentId = null, continuationLeaseToken = null, careerSnapshotId = null, operationAuthority = null, parentArtifactFingerprint = null } = {}, signal) => {
     requireSavedJobRecoveryCanvas(canvasFilePath);
     const continuationAdmission = await admitContinuationProviderWork(event, {
       canvasFilePath, nodeId, jobRunId, continuationIntentId, continuationLeaseToken,
@@ -17772,7 +17772,14 @@ Return a JSON object with four arrays of search query strings:
     // provider text, then preserve every returned result.
     repairJobsMojibake(extractedRaw);
     normalizeJobsMarkup(extractedRaw);
-    const extracted = acceptProviderSearchResults(extractedRaw);
+    const admittedRows = acceptProviderSearchResults(extractedRaw);
+    // Same conservative country backstop as the main search: a recovered row
+    // that affirmatively names a different country never reaches scoring.
+    const resolveSnapshotLocation = sourceRecoverySnapshot?.locationSnapshot?.searchLocation;
+    const resolveLocation = String(
+      preferredLocation || (typeof resolveSnapshotLocation === 'string' ? resolveSnapshotLocation : ''),
+    ).trim();
+    const extracted = filterProvablyOutsideCountryScope(admittedRows, resolveLocation).jobs;
     const enrichmentMeta = result?.diag?.postprocessMeta || null;
     const relevanceDropped = 0;
     const relevanceRejected = [];
@@ -18388,8 +18395,13 @@ Return a JSON object with four arrays of search query strings:
     // renderer so its collected counter remains in the same dimension as the
     // initial search's `gatheredCount`.
     const gathered = Math.max(0, Number(extracted.length) || 0);
-    const ageFiltered = filterJobsByPostedSince(extracted, activeSearchWindow.startTimestamp);
-    const ageDropped = extracted.length - ageFiltered.length;
+    // Same conservative country backstop as the main search path.
+    const countryScope = filterProvablyOutsideCountryScope(extracted, location);
+    if (countryScope.dropped > 0) {
+      logger.info(`[Jobs][${nodeId}] Resume country scope dropped ${countryScope.dropped} listing(s) outside ${location}`);
+    }
+    const ageFiltered = filterJobsByPostedSince(countryScope.jobs, activeSearchWindow.startTimestamp);
+    const ageDropped = countryScope.jobs.length - ageFiltered.length;
     // The deterministic pinned-title gate is gone; age-filtered rows flow
     // straight into history dedup, matching the main search path.
     let items = ageFiltered;
@@ -18421,7 +18433,7 @@ Return a JSON object with four arrays of search query strings:
     };
     const resolved = items.length > 0 || !result?.warning;
     const warning = result?.warning || null;
-    const funnelDetail = `extracted=${extracted.length}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, new=${items.length}`;
+    const funnelDetail = `extracted=${extracted.length}, countryScopeDropped=${countryScope.dropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, new=${items.length}`;
     logger.info(`[Jobs][${nodeId}] Indeed resume complete: ${funnelDetail}`);
 
     // Resume occurs after the original search already wrote its final source

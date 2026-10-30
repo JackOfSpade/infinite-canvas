@@ -1809,7 +1809,10 @@ export default [
       assert(source.includes('snapshot: moduleRunSnapshot') && source.includes('const displayedApplicationRun = queuedApplicationRun')
         && source.includes('const hasApplicationRun = displayedApplicationRun.state !== \'idle\';')
         && source.includes('applicationSubmissionRef.current || hasApplicationRun || localJobPending')
-        && source.includes('disabled={hasApplicationRun || localJobPending || effectiveLock}'),
+        && source.includes('disabled={hasApplicationRun || !!officialPostingLookup || !!boardPostingPreparation || localJobPending || effectiveLock}')
+        && source.includes('const boardPostingPreparation = useSyncExternalStore(')
+        && generationScope.includes('if (boardPostingCheckActive(getLiveNode(idRef.current))) return;')
+        && generationScope.includes('if (boardPostingCheckActive(cardBeforeQueue) || !startDecision.allowed)'),
       'the application-lane snapshot must keep a remounted card visibly disabled and synchronously reject a duplicate enqueue');
       assert(canvasSource.includes('const getCurrentFile = useCallback(() => currentFileRef.current, []);')
         && canvasSource.includes('currentFile, getCurrentFile'),
@@ -1828,7 +1831,7 @@ export default [
       'a hidden-but-extant card must persist or deliberately replace its durable handoff globally, while an actually deleted or superseded card discards that exact handoff');
       assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
         && generationScope.includes('queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId))')
-        && generationScope.includes('if (!decision.allowed) {') && generationScope.includes('cancelledBeforeStart = true;'),
+        && generationScope.includes('if (boardPostingCheckActive(card) || !decision.allowed) {') && generationScope.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
       assert(source.includes('Additional notes for AI')
         && source.includes('additionalNotes: String(cardBeforeQueue.data?.additionalNotes ?? additionalNotes).trim()')

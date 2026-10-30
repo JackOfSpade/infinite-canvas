@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter, getEventListeners } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { fetchOfficialPosting, isPublicOfficialAddress, OfficialPostingFetchError, OFFICIAL_FETCH_MAX_BYTES, OFFICIAL_FETCH_FAILURE_REASONS } from '../../electron/ipc/officialPostingFetch.js';
+import { fetchOfficialPosting, isPublicOfficialAddress, OfficialPostingFetchError, OFFICIAL_FETCH_MAX_BYTES, OFFICIAL_FETCH_SCRIPT_MAX_BYTES, OFFICIAL_FETCH_FAILURE_REASONS } from '../../electron/ipc/officialPostingFetch.js';
 import { normalizeApplyOptions, normalizeOfficialLocation, normalizeOfficialPosting, OFFICIAL_POSTING_ROW_FIELDS } from '../../electron/ipc/officialPostingFields.js';
 
 const publicLookup = async () => [{ address: '1.1.1.1', family: 4 }];
@@ -25,6 +25,75 @@ function transport(pages, requests = []) {
 }
 
 export default [
+  {
+    name: 'Official trusted sessions recover same-host legacy redirects using HTTPS only and retain every redirect safety check',
+    async run() {
+      const requests = [];
+      const options = { lookup: publicLookup, upgradeSameHostRedirects: true,
+        request: transport([{ status: 302, headers: { location: 'http://careers.northwind.test/us/en/' } }, { body: 'Regional homepage' }], requests) };
+      const result = await fetchOfficialPosting('https://careers.northwind.test/', options);
+      assert.equal(result.url, 'https://careers.northwind.test/us/en/');
+      assert.equal(result.requestedUrl, 'https://careers.northwind.test/');
+      assert.ok(requests.every(row => row.url.startsWith('https://careers.northwind.test/')));
+      for (const destination of ['http://another.test/us/', 'http://careers.northwind.test:8080/us/',
+        'http://user:secret@careers.northwind.test/us/', 'http://127.0.0.1/us/']) {
+        await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/', { ...options,
+          request: transport([{ status: 302, headers: { location: destination } }]) }), { code: 'unsafe-url' });
+      }
+      await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/', { lookup: publicLookup,
+        request: transport([{ status: 302, headers: { location: 'http://careers.northwind.test/us/' } }]) }), { code: 'unsafe-url' });
+    },
+  },
+  {
+    name: 'Official render resources keep DNS pinning and text bounds without widening posting document formats',
+    async run() {
+      const url = 'https://careers.northwind.test/assets/careers.js';
+      const pages = () => [{ body: 'window.careers = true;', headers: { 'content-type': 'application/javascript' } }];
+      await assert.rejects(fetchOfficialPosting(url, { lookup: publicLookup, request: transport(pages()) }), { code: 'unsupported-content-type' });
+      const requests = [];
+      const result = await fetchOfficialPosting(url, { resource: true, lookup: publicLookup, request: transport(pages(), requests) });
+      assert.equal(result.body, 'window.careers = true;'); assert.equal(requests[0].address, '1.1.1.1');
+      const script = `const literal = '${String.fromCharCode(127)}';`;
+      assert.equal((await fetchOfficialPosting(url, { resource: true, lookup: publicLookup,
+        request: transport([{ body: script, headers: { 'content-type': 'text/javascript' } }]) })).body, script);
+      await assert.rejects(fetchOfficialPosting(url, { resource: true, lookup: publicLookup,
+        request: transport([{ body: script, headers: { 'content-type': 'application/json' } }]) }), { code: 'invalid-text' });
+      const bundle = 'x'.repeat(OFFICIAL_FETCH_MAX_BYTES + 1);
+      assert.equal((await fetchOfficialPosting(url, { resource: true, lookup: publicLookup,
+        request: transport([{ body: bundle, headers: { 'content-type': 'application/javascript' } }]) })).body.length, bundle.length);
+      await assert.rejects(fetchOfficialPosting(url, { resource: true, lookup: publicLookup,
+        request: transport([{ body: bundle, headers: { 'content-type': 'application/json' } }]) }), { code: 'oversize' });
+      await assert.rejects(fetchOfficialPosting(url, { resource: true, lookup: publicLookup,
+        request: transport([{ body: '', headers: { 'content-type': 'application/javascript', 'content-length': OFFICIAL_FETCH_SCRIPT_MAX_BYTES + 1 } }]) }), { code: 'oversize' });
+      await assert.rejects(fetchOfficialPosting(url, { resource: true,
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }], request: transport(pages()) }), { code: 'unsafe-address' });
+      await assert.rejects(fetchOfficialPosting(url, { resource: true, lookup: publicLookup,
+        request: transport([{ body: 'binary', headers: { 'content-type': 'application/octet-stream' } }]) }), { code: 'unsupported-content-type' });
+    },
+  },
+  {
+    name: 'Bounded UTF-8 SVG boot assets remain resource-only and retain strict text DNS and document-size limits',
+    async run() {
+      const url = 'https://careers.northwind.test/assets/sprite.svg';
+      const svg = '<svg xmlns="http://www.w3.org/2000/svg"><symbol id="careers"><path d="M0 0h1v1z"/></symbol></svg>';
+      const page = (body = svg, headers = {}) => ({ body, headers: { 'content-type': 'image/svg+xml; charset=utf-8', ...headers } });
+      const options = { lookup: publicLookup, resource: true };
+      const requests = [];
+      const result = await fetchOfficialPosting(url, { ...options, request: transport([page()], requests) });
+      assert.equal(result.body, svg); assert.equal(result.contentType, 'image/svg+xml');
+      assert.equal(requests[0].address, '1.1.1.1'); assert.equal(requests[0].options.method, 'GET');
+      await assert.rejects(fetchOfficialPosting(url, { lookup: publicLookup, request: transport([page()]) }), { code: 'unsupported-content-type' });
+      for (const invalid of [svg + '\0', svg + String.fromCharCode(127), Buffer.from([0xc3, 0x28])]) {
+        await assert.rejects(fetchOfficialPosting(url, { ...options, request: transport([page(invalid)]) }), { code: 'invalid-text' });
+      }
+      await assert.rejects(fetchOfficialPosting(url, { ...options, request: transport([page('x'.repeat(OFFICIAL_FETCH_MAX_BYTES + 1))]) }), { code: 'oversize' });
+      await assert.rejects(fetchOfficialPosting(url, { ...options, request: transport([page(svg, { 'content-length': OFFICIAL_FETCH_MAX_BYTES + 1 })]) }), { code: 'oversize' });
+      await assert.rejects(fetchOfficialPosting(url, { ...options, request: transport([page(svg, { 'content-encoding': 'gzip' })]) }), { code: 'unsupported-content-type' });
+      await assert.rejects(fetchOfficialPosting(url, { ...options, request: transport([page(svg, { 'content-type': 'image/png' })]) }), { code: 'unsupported-content-type' });
+      await assert.rejects(fetchOfficialPosting(url, { ...options, lookup: async () => [{ address: '127.0.0.1', family: 4 }],
+        request: transport([page()]) }), { code: 'unsafe-address' });
+    },
+  },
   {
     name: 'Official posting HTTP failures distinguish blocked access, rate limits and server failures while retaining status and retry headers',
     async run() {

@@ -90,6 +90,11 @@ export default defineConfig({
                 'puppeteer-core',
                 'puppeteer-extra',
                 'puppeteer-extra-plugin-stealth',
+                // Playwright resolves package metadata, browser descriptors and
+                // injected scripts relative to its own installed package.
+                // Bundling it relocates those reads to dist-electron and makes
+                // official careers rendering fail before a browser can launch.
+                'playwright',
                 // The SDK loads runtime files relative to its own package and
                 // launches the user's installed Claude Code executable.
                 '@anthropic-ai/claude-agent-sdk',

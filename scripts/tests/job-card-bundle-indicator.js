@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert';
 import { runInNewContext } from 'node:vm';
-import { canRegenerateLocalApplication, canSaveImportedLocalApplication } from '../../src/utils/localAiApplicationLifecycle.js';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication, localApplicationBlocksOfficialPostingLookup } from '../../src/utils/localAiApplicationLifecycle.js';
 import * as localAiFallback from '../../src/utils/localAiFallback.js';
 
 import {
@@ -57,6 +57,21 @@ function fallbackManagerFixture(api) {
 }
 
 export default [
+  {
+    name: 'saved application ownership permits a posting lookup without releasing duplicate generation or unresolved Local AI work',
+    run() {
+      const saved = { id: 'synthetic-saved', status: 'saved', savedDir: '/synthetic/bundle' };
+      assert.equal(localApplicationBlocksOfficialPostingLookup(saved), false);
+      assert.equal(canRegenerateLocalApplication(saved), false, 'saved output still prevents duplicate generation');
+      assert.equal(localApplicationBlocksOfficialPostingLookup(null), false);
+      for (const status of ['queued', 'running', 'completed', 'importing', 'status-error', 'unknown-status']) {
+        assert.equal(localApplicationBlocksOfficialPostingLookup({ ...saved, status }), true, status);
+      }
+      for (const status of ['failed', 'invalid', 'revision-exhausted', 'blocked']) {
+        assert.equal(localApplicationBlocksOfficialPostingLookup({ id: 'synthetic-terminal', status }), false, status);
+      }
+    },
+  },
   {
     name: 'deleting a saved bundle clears canvas ownership before saved-state adoption and preserves a newer handoff',
     run: async () => {

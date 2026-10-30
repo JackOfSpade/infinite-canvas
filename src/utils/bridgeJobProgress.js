@@ -337,13 +337,19 @@ export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, own
     });
   }
   if (awaitingClaim === true) {
+    const healthyAutomaticPool = bridge.autoLaunchChats === true && state === 'working'
+      && chat.pool?.active === true && !ownerWorker?.launch?.reason
+      && Array.isArray(chat.pool.workers) && chat.pool.workers.some(worker =>
+        ['working', 'waiting'].includes(worker?.state) && !worker.launch?.reason && worker.launch?.stage !== 'failed');
     return build({ kind: 'push-awaiting-poll', steps }, {
       headline: 'Waiting for ChatGPT to ask for this handoff',
       detail: 'A ChatGPT chat is active. It gets this handoff on its next handoff call.',
       // `reached` proves the capability was presented but no work call was
       // admitted. Continuing is safe there; a working chat may own another
       // request, so it stays deliberately passive.
-      tone: 'attention', action: state === 'reached' ? 'continue-chat' : null, lastHeard,
+      // Queued work in a progressing automatic pool needs no intervention.
+      // Its exact claim is still absent, so keep the waiting wording above.
+      tone: healthyAutomaticPool ? 'working' : 'attention', action: state === 'reached' ? 'continue-chat' : null, lastHeard,
     });
   }
   if (answerSilent(ownerWorker)) {

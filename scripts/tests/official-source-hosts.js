@@ -1,10 +1,133 @@
 import assert from 'node:assert/strict';
-import { extractAtsTenant, isPosterAtsTenant, normalizedSourceHost, proveEmployerDomain, rootBrandingNamesPoster, rootFooterText } from '../../electron/ipc/officialSourceHosts.js';
+import { OFFICIAL_SEARCH_PARAM, explicitEmployerAlias, extractAtsTenant, isAtsCorporateBrandAlias, isAtsCorporateHost, isHostedAtsSurface, isKnownAtsHost, isOfficialCareersUrl, isPosterAtsTenant, normalizedSourceHost, proveBidirectionalOwnership, proveEmployerDomain, rootBrandingNamesPoster, rootFooterText, sourceEmployerLabelEqual, sourceTenantTaglineEqual, strictEmployerEqual } from '../../electron/ipc/officialSourceHosts.js';
 
 const employer = 'Northwind Labs';
 const poster = 'Acme Talent Partners';
 
 export default [
+  {
+    name: 'Strict employer normalization treats a Companies business suffix like Company without accepting a business-unit prefix',
+    run() {
+      assert.equal(strictEmployerEqual('Northwind Companies', 'Northwind'), true);
+      assert.equal(strictEmployerEqual('Northwind Company Inc.', 'Northwind Companies'), true);
+      assert.equal(strictEmployerEqual('Northwind Consulting', 'Northwind'), false);
+      assert.equal(strictEmployerEqual('Northwind North America Inc.', 'Northwind Companies'), false);
+    },
+  },
+
+  {
+    name: 'Source display qualifiers preserve exact base labels and reject recruiter nested and unrelated annotations',
+    run() {
+      for (const label of ['Northwind Labs', 'Northwind Labs (A Northstar Company)', 'Northwind Labs (A Northstar Technology Lab)',
+        'Northwind Labs (An Example Division)']) assert.equal(sourceEmployerLabelEqual('Northwind Labs', label), true, label);
+      for (const label of ['Northwind (A Northstar Company)', 'Northwind Labs (Hiring for Example Company)',
+        'Northwind Labs (A Recruiting Company)', 'Northwind Labs (A Client Business)', 'Northwind Labs (A Northstar (US) Company)',
+        'Northwind Labs (A Northstar Company) for another employer', 'Northwind Labs (Northstar Company)']) {
+        assert.equal(sourceEmployerLabelEqual('Northwind Labs', label), false, label);
+      }
+    },
+  },
+
+  {
+    name: 'Explicit employer aliases require a complete declared relationship rather than prefixes or nearby names',
+    run() {
+      const pair = { left: 'Northwind Insights Inc.', right: 'Northwind' };
+      for (const body of ['Northwind Insights, Inc. (“Northwind”) respects privacy.',
+        'Northwind is a trading name of Northwind Insights Inc.',
+        'Northwind and the Dispatch logo are trademarks of Northwind Insights Inc.']) {
+        assert.equal(explicitEmployerAlias({ ...pair, body }), true, body);
+      }
+      for (const body of ['Northwind Insights Inc. provides Northwind services.',
+        'Other Insights Inc. (“Northwind”) respects privacy.',
+        'Northwind Insights Inc. (“Other”) respects privacy.',
+        '<script>Northwind Insights Inc. (“Northwind”)</script>']) {
+        assert.equal(explicitEmployerAlias({ ...pair, body }), false, body);
+      }
+      const root = { domain: 'northwind.test', employer: pair.left, poster: pair.right, rootSiteName: pair.right };
+      assert.equal(proveEmployerDomain(root), false);
+      assert.equal(proveEmployerDomain({ ...root, rootAliases: [[pair.left, pair.right]] }), true);
+      for (const value of ['https://boards-api.greenhouse.io/v1/boards/Northwind/jobs?content=true',
+        'https://api.greenhouse.io/v1/boards/Northwind/jobs/123']) assert.deepEqual(extractAtsTenant(value), { ats: 'greenhouse', tenant: 'northwind' });
+      for (const value of ['https://api.greenhouse.io/v1/boards/Northwind/jobs/123/application',
+        'https://api.greenhouse.io/v1/boards/Northwind/jobs/not-an-id', 'https://api.greenhouse.io/v1/boards/jobs/jobs',
+        'https://api.greenhouse.io.example.test/v1/boards/Northwind/jobs']) assert.equal(extractAtsTenant(value), null, value);
+    },
+  },
+
+  {
+    name: 'Official careers navigation recognizes standalone hiring vocabulary without matching product names or query text',
+    run() {
+      for (const path of ['/careers', '/company/hiring', '/careers-talent/join-the-synthetic-ecosystem', '/careers-and-talent/team', '/join-us', '/work-with-us/', '/opportunities', '/openings/role', '/open-roles', '/company/open-roles/', '/%6fpen-roles', '/%68iring']) {
+        assert.equal(isOfficialCareersUrl(`https://northwind.test${path}`), true, path);
+      }
+      for (const path of ['/rehiring', '/hiring-tools', '/careers-talent-tools', '/join-the-synthetic-ecosystem', '/jobs-analytics', '/open-roles-tools', '/reopen-roles', '/open-role', '/join-us-now', '/product?next=/hiring', '/product?next=/open-roles', '/%2Fhiring', '/%2Fopen-roles']) {
+        assert.equal(isOfficialCareersUrl(`https://northwind.test${path}`), false, path);
+      }
+      for (const host of ['careers.northwind.test', 'career.northwind.test', 'jobs.northwind.test', 'job.northwind.test']) {
+        assert.equal(isOfficialCareersUrl(`https://${host}/`), true, host);
+        assert.equal(proveEmployerDomain({ domain: host, employer: 'Northwind Labs' }), false, 'navigation vocabulary grants no ownership');
+      }
+      for (const host of ['hiring.northwind.test', 'www.careers.northwind.test', 'careers.customer.northwind.test', 'mycareers.northwind.test']) {
+        assert.equal(isOfficialCareersUrl(`https://${host}/`), false, host);
+      }
+      assert.equal(isOfficialCareersUrl('http://northwind.test/hiring'), false);
+    },
+  },
+  {
+    name: 'ATS corporate legal aliases require actual branded-root copyright evidence and retain unrelated poster vetoes',
+    run() {
+      const proof = { domain: 'www.greenhouse.com', employer: 'Greenhouse', poster: 'Greenhouse Software',
+        rootTitle: 'Greenhouse | Synthetic hiring platform', rootFooter: '© 2026 Greenhouse Software, Inc. All rights reserved.' };
+      assert.equal(isAtsCorporateBrandAlias(proof), true);
+      assert.equal(proveEmployerDomain(proof), true);
+      assert.equal(proveBidirectionalOwnership({ ...proof, linksToTenant: true, tenantPointsBack: true,
+        route: { ats: 'greenhouse', tenant: 'synthetic-corporate-team' } }), true);
+      for (const change of [{ domain: 'jobs.greenhouse.com' }, { domain: 'greenhouse.example.test' },
+        { rootFooter: 'Recruiting by Greenhouse Software' }, { rootFooter: '© 2026 Greenhouse Staffing, Inc. All rights reserved.' },
+        { poster: 'Acme Talent Partners' }, { rootTitle: 'Other Software | Synthetic hiring platform' },
+        { employer: 'House' }, { rootFooter: '© 2026 Other Software, Inc. Recruiting by Greenhouse Software.' }]) {
+        assert.equal(isAtsCorporateBrandAlias({ ...proof, ...change }), false, JSON.stringify(change));
+      }
+      assert.equal(proveBidirectionalOwnership({ ...proof, linksToTenant: false, tenantPointsBack: true }), false);
+      assert.equal(proveEmployerDomain({ ...proof, rootFooter: 'Recruiting by Greenhouse Software' }), false);
+    },
+  },
+  {
+    name: 'Official source hosts separate exact ATS corporate marketing sites from customer tenant surfaces',
+    run() {
+      for (const host of ['ashbyhq.com', 'www.ashbyhq.com', 'greenhouse.com', 'www.greenhouse.com', 'rippling.com', 'www.rippling.com']) {
+        assert.equal(isKnownAtsHost(host), true, 'vendor categorization remains intact');
+        assert.equal(isAtsCorporateHost(host), true, host);
+        assert.equal(isHostedAtsSurface(host), false, host);
+      }
+      for (const host of ['jobs.ashbyhq.com', 'api.ashbyhq.com', 'customer.ashbyhq.com', 'www.customer.ashbyhq.com',
+        'job-boards.greenhouse.io', 'boards.greenhouse.io', 'boards-api.greenhouse.io', 'api.greenhouse.io', 'customer.greenhouse.com', 'ats.rippling.com', 'customer.rippling.com', 'myworkdayjobs.com']) {
+        assert.equal(isAtsCorporateHost(host), false, host);
+        assert.equal(isHostedAtsSurface(host), true, host);
+      }
+      for (const host of ['ashbyhq.com.example.test', 'greenhouse.com.example.test', 'www.greenhouse.example.test',
+        'https://user@www.greenhouse.com/']) assert.equal(isAtsCorporateHost(host), false, host);
+    },
+  },
+  {
+    name: 'Official source ownership recognizes branded corporate vendor root titles without granting tenant or unrelated employer ownership',
+    run() {
+      for (const [domain, employer] of [['www.ashbyhq.com', 'Ashby'], ['www.greenhouse.com', 'Greenhouse']]) {
+        assert.equal(proveEmployerDomain({ domain, employer, rootTitle: `${employer} | Synthetic workflow platform` }), true);
+        assert.equal(proveEmployerDomain({ domain, employer, rootTitle: `Synthetic workflow platform | ${employer}` }), employer === 'Greenhouse');
+        assert.equal(proveEmployerDomain({ domain, employer, rootTitle: `${employer} Support | Synthetic platform` }), false);
+        assert.equal(proveEmployerDomain({ domain, employer: 'Northwind Labs', rootTitle: `${employer} | Synthetic platform` }), false);
+        assert.equal(proveEmployerDomain({ domain, employer, poster, rootTitle: `${employer} | Synthetic platform`,
+          rootFooter: `Recruiting by ${poster}` }), false);
+      }
+      for (const domain of ['jobs.ashbyhq.com', 'customer.greenhouse.com', 'job-boards.greenhouse.io']) {
+        assert.equal(proveEmployerDomain({ domain, employer: 'Northwind Labs', rootTitle: 'Northwind Labs' }), false, domain);
+      }
+      assert.equal(proveEmployerDomain({ domain: 'northwind.test', employer, rootTitle: 'Northwind Labs | Synthetic platform' }), true,
+        'an explicit leading brand and matching domain also identify an ordinary employer marketing root');
+      assert.equal(proveEmployerDomain({ domain: 'unrelated.test', employer, rootTitle: 'Northwind Labs | Synthetic platform' }), false);
+    },
+  },
   {
     name: 'Official source hosts extract distinct normalized company tenants instead of vendor-wide path constants',
     run() {
@@ -134,8 +257,46 @@ export default [
       assert.equal(proveEmployerDomain(attestation), false);
       assert.equal(proveEmployerDomain({ ...attestation, independentEmployer: employer }), true);
       assert.equal(proveEmployerDomain({ ...attestation, independentEmployer: employer, rootFooter: `Copyright ${poster}` }), false);
-      assert.equal(proveEmployerDomain({ domain: 'northwind.test', employer, rootTitle: 'Northwind Labs | Build the future' }), false);
+      assert.equal(proveEmployerDomain({ domain: 'northwind.test', employer, rootTitle: 'Northwind Labs | Build the future' }), true);
       assert.equal(proveEmployerDomain({ domain: 'northwind.test', employer, rootTitle: 'Northwind Labs, Inc.' }), true);
+    },
+  },
+  {
+    name: 'Conventional careers roots require a complete employer title and matching registrable brand',
+    run() {
+      for (const [domain, rootTitle] of [['careers.northwind.test', 'Northwind Labs Careers - Open roles'],
+        ['jobs.northwind.test', 'Jobs at Northwind Labs | Join us'], ['job.northwind.test', 'Northwind Labs Jobs'],
+        ['career.northwind.test', 'Careers at Northwind Labs']]) {
+        assert.equal(proveEmployerDomain({ domain, employer, poster: employer, rootTitle }), true);
+      }
+      for (const [domain, rootTitle] of [['careers.tools.northwind.test', 'Northwind Labs Careers'],
+        ['jobs-tools.northwind.test', 'Northwind Labs Careers'], ['careers.other.test', 'Northwind Labs Careers'],
+        ['careers.northwind.test', 'Northwind Careers'], ['careers.northwind.test', 'Agency Northwind Labs Careers'],
+        ['https://careers.northwind.test/company', 'Northwind Labs Careers']]) {
+        assert.equal(proveEmployerDomain({ domain, employer, poster: employer, rootTitle }), false, `${domain}: ${rootTitle}`);
+      }
+    },
+  },
+  {
+    name: 'Static asset paths are never read as ATS tenants and tagline board labels reject intermediaries',
+    run() {
+      for (const url of ['https://jobs.lever.co/js/bug-snag.js', 'https://jobs.lever.co/css/site.css', 'https://jobs.lever.co/favicon.ico',
+        'https://jobs.lever.co/static/app.js', 'https://job-boards.greenhouse.io/assets/x.js', 'https://jobs.ashbyhq.com/images/logo.png',
+        'https://jobs.lever.co/robots.txt', 'https://jobs.lever.co/app.js']) assert.equal(extractAtsTenant(url), null, url);
+      assert.deepEqual(extractAtsTenant('https://jobs.lever.co/cognite/abc'), { ats: 'lever', tenant: 'cognite' });
+      assert.deepEqual(extractAtsTenant('https://job-boards.greenhouse.io/braze'), { ats: 'greenhouse', tenant: 'braze' });
+      assert.equal(sourceTenantTaglineEqual('Cognite', 'Cognite - AI for Industry'), true);
+      assert.equal(sourceTenantTaglineEqual('Cognite', 'Cognite | AI for Industry'), true);
+      assert.equal(sourceTenantTaglineEqual('Cognite', 'Cognite'), true);
+      for (const label of ['Cognite - Staffing Partner', 'Cognite Talent - Jobs', 'Other Co - Cognite', 'Cognite-AI', 'Cognite - Hiring for a client'])
+        assert.equal(sourceTenantTaglineEqual('Cognite', label), false, label);
+    },
+  },
+  {
+    name: 'Only keyword-search parameter names are search parameters',
+    run() {
+      for (const name of ['keyword', 'keywords', 'q', 'Query', 'search', 'term', 'text']) assert.equal(OFFICIAL_SEARCH_PARAM.test(name), true, name);
+      for (const name of ['location', 'page', 'department', 'qq', 'searchType', 'utm_term']) assert.equal(OFFICIAL_SEARCH_PARAM.test(name), false, name);
     },
   },
 ];

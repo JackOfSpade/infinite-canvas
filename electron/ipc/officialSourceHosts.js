@@ -1,6 +1,7 @@
 // Host categories identify discovery routes; an ATS hostname alone never
 // proves which employer owns the tenant or whether a posting is the same job.
 import { parse } from 'parse5';
+import { officialPostingVendorRoute } from './officialPostingVendorAdapters.js';
 export const AGGREGATOR_BASE_DOMAINS = Object.freeze([
   'talent.com', 'dice.com', 'builtin.com', 'wellfound.com', 'angel.co', 'remoteok.com', 'remoteok.io',
   'weworkremotely.com', 'flexjobs.com', 'snagajob.com', 'lensa.com', 'jobgether.com', 'theladders.com',
@@ -20,9 +21,12 @@ export const ATS_BASE_DOMAINS = Object.freeze([
   'dayforcehcm.com', 'eightfold.ai', 'applytojob.com', 'pinpointhq.com', 'comeet.com',
   'brassring.com', 'avature.net', 'csod.com', 'oraclecloud.com', 'workforcenow.adp.com',
   'recruiting.adp.com', 'hrmdirect.com', 'jazz.co', 'freshteam.com', 'zohorecruit.com',
-  'gohire.io', 'greenhouse.com', 'ripplematch.com', 'phenompeople.com',
+  'gohire.io', 'greenhouse.com', 'ripplematch.com', 'phenompeople.com', 'gem.com',
 ]);
-const LEGAL_SUFFIXES = new Set(['inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'gmbh', 'plc', 'ag', 'sa', 'bv', 'nv', 'lp', 'llp']);
+const LEGAL_SUFFIXES = new Set(['inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'companies', 'gmbh', 'plc', 'ag', 'sa', 'bv', 'nv', 'lp', 'llp']);
+// These vendor marketing sites are distinct from their hosted hiring surfaces.
+// Do not generalize to every ATS apex: several platform roots host tenants.
+const ATS_CORPORATE_DOMAINS = new Set(['ashbyhq.com', 'greenhouse.com', 'rippling.com']);
 const hostMatches = (host, domain) => host === domain || host.endsWith(`.${domain}`);
 export function normalizedSourceHost(value) {
   if (typeof value !== 'string') return '';
@@ -50,6 +54,26 @@ export function isKnownAtsHost(host) {
   const value = normalizedSourceHost(host);
   return Boolean(value) && ATS_BASE_DOMAINS.some(domain => hostMatches(value, domain));
 }
+export function isAtsCorporateHost(host) {
+  const value = normalizedSourceHost(host);
+  return Boolean(value) && (ATS_CORPORATE_DOMAINS.has(value)
+    || value.startsWith('www.') && ATS_CORPORATE_DOMAINS.has(value.slice(4)));
+}
+export function isHostedAtsSurface(host) {
+  return isKnownAtsHost(host) && !isAtsCorporateHost(host);
+}
+/** Common standalone careers navigation segments. Product descriptions or
+ * words merely containing these terms cannot create a careers attestation. */
+export function isOfficialCareersUrl(value) {
+  if (!normalizedSourceHost(value)) return false;
+  try {
+    const url = new URL(value); const host = normalizedSourceHost(value); const domain = registrableDomain(host);
+    if (url.pathname === '/' && ['careers', 'career', 'jobs', 'job'].some(label => host === `${label}.${domain}`)) return true;
+    return url.pathname.split('/').some(part => /^(?:careers?|jobs?|positions?|openings?|open-roles|hiring|join-us|work-with-us|opportunities|careers-(?:and-)?talent)$/iu.test(decodeURIComponent(part)));
+  } catch { return false; }
+}
+/** A listing URL's keyword-search parameter name. A navigation hint only: a derived search URL proves nothing about ownership or a match. */
+export const OFFICIAL_SEARCH_PARAM = /^(?:keywords?|q|query|search|term|text)$/iu;
 export function strictEmployerTokens(value) {
   const tokens = String(value ?? '').normalize('NFKC').toLocaleLowerCase().replace(/&/gu, ' and ').match(/[\p{L}\p{N}]+/gu) || [];
   while (tokens.length && LEGAL_SUFFIXES.has(tokens.at(-1))) tokens.pop();
@@ -60,11 +84,75 @@ export function strictEmployerEqual(left, right) {
   return a.length > 0 && a.length === b.length && a.every((token, index) => token === b[index]);
 }
 
+/** A parenthetical display annotation does not change the employer label.
+ * Callers may use this only after a real employer-to-tenant receipt; it is
+ * never root branding, a legal alias or a posting-identity decision. */
+export function sourceEmployerLabelEqual(owner, candidate) {
+  if (strictEmployerEqual(owner, candidate)) return true;
+  const match = /^([^()]{1,160})\s+\((?:a|an)\s+([\p{L}\p{N}][\p{L}\p{N}\s&.,'’-]{0,100}?)\s+(?:company|business|division|technology lab)\)$/iu.exec(String(candidate).trim());
+  if (!match || !strictEmployerEqual(owner, match[1])) return false;
+  return !/\b(?:agency|agencies|recruit\w*|staffing|consult\w*|hiring|client|for|on behalf|jobs?|talent|marketplace)\b/iu.test(match[2]);
+}
+
+/** A board label may add a spaced tagline after the employer ("Cognite - AI for Industry").
+ * The tagline must not read as an intermediary; only after a real employer-to-tenant receipt. */
+export function sourceTenantTaglineEqual(owner, label) {
+  if (sourceEmployerLabelEqual(owner, label)) return true;
+  const match = /^(.{1,160}?)\s+[-\u2013\u2014|]\s+(.{1,200})$/u.exec(String(label ?? '').trim());
+  if (!match || !strictEmployerEqual(match[1], owner)) return false;
+  return !/(?:recruiter|recruiting|agency|staffing|consult|hiring|client|on behalf|jobs|talent|marketplace|for hire|partner|outsourc)/iu.test(match[2]);
+}
+
+/** Alias pairs must come from a fetched own-root Organization property or an
+ * explicit declaration on that root or one of its linked legal pages. */
+export function rootEmployerAliasMatches(left, right, aliases = []) {
+  return strictEmployerEqual(left, right) || aliases.some(pair => Array.isArray(pair) && pair.length === 2
+    && (strictEmployerEqual(left, pair[0]) && strictEmployerEqual(right, pair[1])
+      || strictEmployerEqual(left, pair[1]) && strictEmployerEqual(right, pair[0])));
+}
+
+/** Parse an explicit relationship between two already observed names. A
+ * shared word, name prefix or co-occurrence never establishes an alias. */
+export function explicitEmployerAlias({ body = '', left = '', right = '' } = {}) {
+  const tokens = value => String(value).normalize('NFKC').match(/[\p{L}\p{N}]+/gu) || [];
+  const escaped = value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+  const pattern = value => tokens(value).map(escaped).join('[\\s\\p{P}]+');
+  if (!tokens(left).length || !tokens(right).length || strictEmployerEqual(left, right)) return false;
+  const parts = []; const pending = [parse(String(body))];
+  while (pending.length) {
+    const node = pending.pop();
+    if (['script', 'style', 'template'].includes(node.tagName)) continue;
+    if (node.nodeName === '#text') parts.push(node.value || '');
+    for (let index = (node.childNodes?.length || 0) - 1; index >= 0; index--) pending.push(node.childNodes[index]);
+  }
+  const text = parts.join(' ').normalize('NFKC').replace(/\s+/gu, ' ');
+  const start = '(?<![\\p{L}\\p{N}])'; const end = '(?![\\p{L}\\p{N}])';
+  const a = pattern(left); const b = pattern(right);
+  const quotedAlias = (legal, brand) => new RegExp(`${start}${legal}[.,\\s]*\\(\\s*["“‘']${brand}[.,\\s]*["”’']\\s*\\)`, 'iu').test(text);
+  const tradingName = (brand, legal) => new RegExp(`${start}${brand}[.,\\s]+(?:is\\s+(?:a\\s+|the\\s+)?(?:registered\\s+)?trading\\s+name\\s+of|is\\s+a\\s+brand\\s+of)\\s+${legal}${end}`, 'iu').test(text);
+  const trademark = (brand, legal) => new RegExp(`${start}${brand}(?:\\s+and\\s+[^.;]{1,120})?\\s+(?:is|are)\\s+(?:registered\\s+)?trademarks?\\s+of\\s+${legal}${end}`, 'iu').test(text);
+  return quotedAlias(a, b) || quotedAlias(b, a) || tradingName(a, b) || tradingName(b, a)
+    || trademark(a, b) || trademark(b, a);
+}
+
 const nameTokens = value => String(value ?? '').normalize('NFKC').toLocaleLowerCase().replace(/&/gu, ' and ').match(/[\p{L}\p{N}]+/gu) || [];
 const containsTokens = (haystack, needle) => needle.length > 0 && haystack.some((_, index) => needle.every((token, offset) => haystack[index + offset] === token));
 export function rootBrandingNamesPoster({ rootTitle = '', rootSiteName = '', rootFooter = '' } = {}, poster = '') {
   const tokens = strictEmployerTokens(poster);
   return tokens.length > 0 && [rootTitle, rootSiteName, rootFooter].some(value => containsTokens(nameTokens(value), tokens));
+}
+
+/** A vendor's own fetched copyright may name its legal entity while its
+ * product and hiring board use the shorter brand. A shared word or tenant
+ * slug cannot create this relationship. */
+export function isAtsCorporateBrandAlias({ domain, employer, poster, rootTitle = '', rootSiteName = '', rootFooter = '' } = {}) {
+  if (!isAtsCorporateHost(domain)) return false;
+  const brand = strictEmployerTokens(employer); const legal = strictEmployerTokens(poster);
+  if (!brand.length || legal.length <= brand.length || !brand.every((token, index) => legal[index] === token)) return false;
+  if (!domainBrandMatchesEmployer({ domain, employer, rootTitle, rootSiteName })
+    || ![rootTitle, rootSiteName].some(value => strictEmployerEqual(leadingTitleSegment(value), employer))) return false;
+  const copyrights = String(rootFooter).matchAll(/(?:copyright\s*(?:©\s*)?|©)\s*(?:\d{4}(?:\s*[-–]\s*\d{4})?\s*)?([^.;|\n©]{1,180})/giu);
+  return [...copyrights].some(match => strictEmployerEqual(match[1], poster));
 }
 
 /** Only actual footer text from a host-fetched root contributes ownership vetoes. */
@@ -170,15 +258,23 @@ export function extractAtsTenant(value, { html = '' } = {}) {
   try { url = new URL(String(value)); } catch { return null; }
   const host = normalizedSourceHost(value);
   if (!host || isAggregatorHost(host)) return null;
+  const vendor = officialPostingVendorRoute(value, { html });
+  if (vendor) return vendor;
   const parts = url.pathname.split('/').filter(Boolean).map(part => {
     try { return decodeURIComponent(part); } catch { return ''; }
   });
   const first = parts[0] || '';
+  // A static asset path ("/js/app.js", "/favicon.ico") is not a tenant slug.
   const slug = value => typeof value === 'string' && /^[\p{L}\p{N}][\p{L}\p{N}_.-]{0,119}$/u.test(value)
+    && !/^(?:js|css|img|images|static|assets|fonts|favicon\.ico|robots\.txt|sitemap\.xml)$/iu.test(value)
+    && !/\.(?:js|mjs|css|map|json|xml|txt|html?|php|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|eot|pdf)$/iu.test(value)
     && !['jobs', 'job', 'companies', 'careers', 'career', 'login', 'register', 'signin', 'signup', 'account'].includes(value.toLowerCase())
     ? value.toLocaleLowerCase() : '';
   const tenant = slug(first);
   const hasPathTenant = Boolean(tenant);
+  if (['boards-api.greenhouse.io', 'api.greenhouse.io'].includes(host)
+    && parts[0] === 'v1' && parts[1] === 'boards' && slug(parts[2]) && parts[3] === 'jobs'
+    && (parts.length === 4 || parts.length === 5 && /^\d+$/u.test(parts[4]))) return { ats: 'greenhouse', tenant: slug(parts[2]) };
   if (host === 'jobs.ashbyhq.com') return hasPathTenant ? { ats: 'ashby', tenant } : null;
   if (host === 'boards.greenhouse.io' || /^job-boards(?:\.[a-z]{2})?\.greenhouse\.io$/u.test(host)) {
     if (first === 'embed') {
@@ -223,19 +319,39 @@ export function extractAtsTenant(value, { html = '' } = {}) {
 }
 
 /** Proof is supplied only from pages fetched by the host, never AI verdicts. */
-export function proveEmployerDomain({ domain, employer, poster = '', posterDomain = '', postingUrl = '', sameAs = '', careersPageUrl = '', careersPageEmployer = '', careersLinks = [], rootSiteName = '', rootTitle = '', rootFooter = '', independentEmployer = '', offDomainAttestations = [] } = {}) {
+export function proveEmployerDomain({ domain, employer, poster = '', posterDomain = '', postingUrl = '', sameAs = '', careersPageUrl = '', careersPageEmployer = '', careersLinks = [], rootSiteName = '', rootTitle = '', rootFooter = '', rootAliases = [], independentEmployer = '', offDomainAttestations = [] } = {}) {
   const host = normalizedSourceHost(domain);
   const sameDomain = value => sameOwnershipHost(value, host);
-  if (!host || isAggregatorHost(host) || isKnownAtsHost(host)) return false;
-  if (posterDomain && sameDomain(posterDomain) && !strictEmployerEqual(poster, employer)) return false;
-  if (rootBrandingNamesPoster({ rootSiteName, rootTitle, rootFooter }, poster) && !strictEmployerEqual(poster, employer)) return false;
+  if (!host || isAggregatorHost(host) || isHostedAtsSurface(host)) return false;
+  if (posterDomain && sameDomain(posterDomain) && !rootEmployerAliasMatches(poster, employer, rootAliases)) return false;
+  if (rootBrandingNamesPoster({ rootSiteName, rootTitle, rootFooter }, poster) && !rootEmployerAliasMatches(poster, employer, rootAliases)
+    && !isAtsCorporateBrandAlias({ domain: host, employer, poster, rootTitle, rootSiteName, rootFooter })) return false;
   const independentlyTied = strictEmployerEqual(independentEmployer, employer);
   const offDomainProof = (url, organization, organizationSite) => normalizedSourceHost(url)
     && independentlyTied && !sameDomain(url) && strictEmployerEqual(organization, employer) && sameDomain(organizationSite);
   if (offDomainProof(postingUrl, employer, sameAs)) return true;
   if (offDomainAttestations.some(page => offDomainProof(page?.url, page?.employer, page?.sameAs))) return true;
-  const rootProof = strictEmployerEqual(rootSiteName, employer) || strictEmployerEqual(rootTitle, employer);
+  const rootProof = rootEmployerAliasMatches(rootSiteName, employer, rootAliases) || rootEmployerAliasMatches(rootTitle, employer, rootAliases);
   if (rootProof) return true;
+  // A conventional company careers root may identify itself as "X Careers"
+  // rather than just X. This proves its brand only; authorizing any ATS still
+  // requires its actual fetched careers navigation in the resolver.
+  let careersRoot = false;
+  try {
+    const root = new URL(String(domain).includes('://') ? domain : `https://${domain}/`);
+    careersRoot = root.pathname === '/' && ['careers', 'career', 'jobs', 'job']
+      .some(label => host === `${label}.${registrableDomain(host)}`);
+  } catch { /* An invalid root cannot establish branding. */ }
+  const titleBrand = /^(.*?)\s+(?:careers?|jobs?)$/iu.exec(leadingTitleSegment(rootTitle))?.[1]
+    || /^(?:careers?|jobs?)\s+at\s+(.+)$/iu.exec(leadingTitleSegment(rootTitle))?.[1];
+  if (careersRoot && strictEmployerEqual(titleBrand, employer)
+    && domainBrandMatchesEmployer({ domain: host, employer, rootTitle, rootSiteName })) return true;
+  // A marketing root may add a tagline around a complete brand segment. This
+  // proves root branding; ATS authorization still needs stronger metadata or
+  // an actual careers-to-tenant link in the resolver.
+  if (domainBrandMatchesEmployer({ domain: host, employer, rootTitle, rootSiteName })
+    && [rootTitle, rootSiteName].some(value => String(value).split(/\s+-\s+|[|–—:·]/u)
+      .some(segment => strictEmployerEqual(segment, employer)))) return true;
   const pageProof = independentlyTied && sameDomain(careersPageUrl) && strictEmployerEqual(careersPageEmployer, employer);
   if (pageProof && careersLinks.some(link => {
     try {
@@ -279,11 +395,12 @@ export function domainBrandMatchesEmployer({ domain, employer, rootTitle = '', r
   const leadMatches = lead.some(segment => strictEmployerEqual(segment, employer) || nameTokens(segment).join(' ') === first);
   return leadMatches && first.length >= 3 && (label.startsWith(first) || label.endsWith(first));
 }
-export function proveBidirectionalOwnership({ domain, employer, poster = '', route = null, linksToTenant = false, tenantPointsBack = false, rootTitle = '', rootSiteName = '', rootFooter = '' } = {}) {
+export function proveBidirectionalOwnership({ domain, employer, poster = '', route = null, linksToTenant = false, tenantPointsBack = false, rootTitle = '', rootSiteName = '', rootFooter = '', rootAliases = [] } = {}) {
   const host = normalizedSourceHost(domain);
-  if (!host || !linksToTenant || !tenantPointsBack || isAggregatorHost(host) || isKnownAtsHost(host)) return false;
+  if (!host || !linksToTenant || !tenantPointsBack || isAggregatorHost(host) || isHostedAtsSurface(host)) return false;
   if (!domainBrandMatchesEmployer({ domain: host, employer, rootTitle, rootSiteName })) return false;
-  if (strictEmployerEqual(poster, employer)) return true;
+  if (rootEmployerAliasMatches(poster, employer, rootAliases)) return true;
+  if (isAtsCorporateBrandAlias({ domain: host, employer, poster, rootTitle, rootSiteName, rootFooter })) return true;
   // Neither the label, the root title or site name, nor the tenant slug may carry the poster's name.
   return !rootBrandingNamesPoster({ rootTitle, rootSiteName, rootFooter }, poster)
     && !isPosterAtsTenant({ ats: 'domain', tenant: registrableLabel(host) }, poster)

@@ -9,6 +9,7 @@ import { redactNodeForIssueReport } from '../utils/issueReportRedaction';
 import { collectCompactJobBoardTopology } from '../utils/jobBoardReportTopology';
 import { boundedCombinedSourceRuns } from '../utils/jobBoardProvenance';
 import { collectJobCompensationReport } from '../utils/jobCompensationReport';
+import { collectOfficialPostingReport } from '../utils/officialPostingReport';
 import { collectPointerProbes } from '../utils/pointerOcclusionProbe';
 import { useIsMountedRef } from './useIsMountedRef';
 
@@ -344,6 +345,7 @@ export function useIssueReporter({
         issueReporterDraft,
         jobRecoveryOfferStates,
         jobCompensationSnapshot: collectJobCompensationReport(allNodesDeep, { flat: true }),
+        officialPostingSnapshot: collectOfficialPostingReport(allNodesDeep, { flat: true }),
         frontEndState: {
           activeTool,
           placementMode,

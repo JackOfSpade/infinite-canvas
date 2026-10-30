@@ -47,6 +47,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
+import { parsePostedDate } from './jobDateFilter.js';
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { normalizeCollectionScopeCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../../src/utils/jobSearchDateWindow.js';
@@ -1665,7 +1666,10 @@ async function recordSourcePageRaw(canvasFilePath, { sourceId, query = '', query
       // staging is append-only and cannot be rolled back after an old run has
       // leaked rows into its successor's file.
       if (Array.isArray(jobs) && jobs.length > 0) {
-        const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j })).join('\n') + '\n';
+        // `at` is the scrape time: a relative `posted` label ("22 days ago") is
+        // only meaningful against it, and recovery pins labels to it on read.
+        const at = Number.isFinite(now) ? now : undefined;
+        const lines = jobs.map(j => JSON.stringify({ sourceId, query, page, job: j, at })).join('\n') + '\n';
         // Never advance the manifest page cursor until the staged rows have
         // reached the filesystem. A crash may leave extra rows (dedup handles
         // that), but it must not claim a page whose rows were never durable.
@@ -1985,25 +1989,47 @@ async function finishRunWithSavedListingsRaw(canvasFilePath, {
   });
 }
 
+/**
+ * Replace a relative `posted` label with the absolute instant it meant when the
+ * row was scraped. Recovery reads rows days later; left relative, "31 days ago"
+ * would be re-resolved against the resume clock and slide into the search
+ * window. Absolute labels (identical under any clock) are left untouched.
+ */
+function pinRelativePostedLabel(job, anchorMs) {
+  if (!job || typeof job !== 'object' || !job.posted || !Number.isFinite(anchorMs)) return job;
+  const scraped = parsePostedDate(job.posted, new Date(anchorMs));
+  const later = parsePostedDate(job.posted, new Date(anchorMs + 2 * 86400000));
+  if (!scraped || !later || scraped.getTime() === later.getTime()) return job;
+  return { ...job, posted: scraped.toISOString() };
+}
+
 /** Parse one resolved staging JSONL, skipping torn/garbage lines. */
-async function readStagedJobsFromFiles(files) {
+async function readStagedJobsFromFiles(files, manifest = null) {
   if (!files) return [];
   let raw;
   try { raw = await fs.promises.readFile(files.staging, 'utf8'); }
   catch { return []; }
+  // Rows staged before `at` existed fall back to the manifest's gather time
+  // (never earlier than any scrape, so labels resolve conservatively old),
+  // then its start time.
+  const fallbackAnchor = providerGatheredAtForManifest(manifest) ?? manifestTimestamp(manifest?.startedAt);
   const out = [];
   for (const line of raw.split('\n')) {
     const t = line.trim();
     if (!t) continue;
-    try { out.push(JSON.parse(t)); } catch { /* torn last line after a crash — skip */ }
+    try {
+      const row = JSON.parse(t);
+      const anchor = Number.isFinite(row?.at) ? row.at : fallbackAnchor;
+      out.push(row && row.job ? { ...row, job: pinRelativePostedLabel(row.job, anchor) } : row);
+    } catch { /* torn last line after a crash — skip */ }
   }
   return out;
 }
 
 /** Parse the staging JSONL, skipping any torn/garbage lines. Returns [] on miss. */
 async function readStagedJobsRaw(canvasFilePath, nodeIdOrOptions = null) {
-  const { files } = await locateRun(canvasFilePath, nodeIdOrOptions);
-  return readStagedJobsFromFiles(files);
+  const { files, manifest } = await locateRun(canvasFilePath, nodeIdOrOptions);
+  return readStagedJobsFromFiles(files, manifest);
 }
 
 /**
@@ -2027,7 +2053,7 @@ async function readRunStateRaw(canvasFilePath, now = null, nodeIdOrOptions = nul
   // Reuse the exact ledger locateRun selected. Re-locating by its nullable
   // `files.nodeId` would make an owned legacy manifest accidentally read the
   // sole modern hub's staging file during a migration.
-  const stagedJobs = await readStagedJobsFromFiles(located.files);
+  const stagedJobs = await readStagedJobsFromFiles(located.files, manifest);
   return { manifest, stagedJobs, incomplete, ageMs, resumable: incomplete && recent, legacy: located.legacy === true };
 }
 

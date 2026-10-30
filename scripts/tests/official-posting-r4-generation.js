@@ -8,6 +8,7 @@ import { createOfficialPostingStore } from '../../electron/ipc/officialPostingSt
 import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration as prepareSemanticOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 import { OfficialPostingFetchError } from '../../electron/ipc/officialPostingFetch.js';
 import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 
 const description = 'Requirements include experience building reliable dispatch tools and maintaining reporting workflows. Engineers design clear interfaces for operations teams and validate changes through careful review. The role improves data quality across scheduled pipelines and documents decisions for partner groups. You will collaborate with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving tools that support teams use every day.';
 const location = 'Lakeview, Ontario, Canada';
@@ -303,7 +304,7 @@ export default [
       await withStore(async store => {
         const job = row(); const alternatives = [{ url: 'https://northwind.test/jobs/one', title: 'Software Engineer' },
           { url: 'https://northwind.test/jobs/two', title: 'Software Engineer' }];
-        await store.save(job, { officialPosting: { level: 'L6', outcome: 'ambiguous', employer: '', trail: ['bridge-research', 'ambiguous'], alternatives } });
+        await store.save(job, { officialPosting: { level: 'L6', outcome: 'ambiguous', employer: '', trail: ['bridge-research', 'ambiguous', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], alternatives } });
         let calls = 0;
         const options = { store, now: () => time, bridgeStatus: () => status(true), fetch: () => { throw new Error('A fresh miss cannot fetch.'); },
           resolve: async jobs => { calls++; return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: ['bridge-research'] } })) }; } };

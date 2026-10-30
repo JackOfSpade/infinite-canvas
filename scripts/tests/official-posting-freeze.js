@@ -1,3 +1,4 @@
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -92,7 +93,7 @@ export default [
             bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
             resolve: async jobs => ({ jobs: jobs.map(job => ({ ...job, officialPosting: { level: 'L5', employer: job.company,
               outcome: kind === 'closed' ? 'closed' : 'not-found',
-              trail: kind === 'closed' ? ['closed', 'semantic-match-v1'] : ['bridge-research', 'semantic-match-v1'],
+              trail: kind === 'closed' ? ['closed', 'semantic-match-v1'] : [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'],
               semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job) } } })) }),
           });
           assert.ok(result.resolutionId);

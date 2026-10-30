@@ -5,7 +5,7 @@ import { advertisedSalaryForJob } from './jobAdvertisedSalary.js';
 export const COMPENSATION_OFFER_REASONS = new Set([
   'usable_cash_salary', 'no_cash_salary', 'variable_or_non_cash_only',
   'unparseable_cash_salary', 'salary_maximum_unstated', 'hourly_hours_unclear',
-  'daily_schedule_unclear', 'currency_unclear',
+  'daily_schedule_unclear', 'pay_period_unclear', 'currency_unclear',
   'ambiguous_description_salary', 'description_scope_unclear', 'description_pay_unassessed',
 ]);
 
@@ -28,6 +28,7 @@ const OFFER_EXPLANATIONS = {
   salary_maximum_unstated: 'The advertised pay does not state a maximum.',
   hourly_hours_unclear: 'Weekly hours are unknown, so hourly pay cannot be compared annually.',
   daily_schedule_unclear: 'The work schedule is unknown, so daily pay cannot be compared annually.',
+  pay_period_unclear: 'The advertised pay names only a payroll schedule, so its pay period is unknown.',
   currency_unclear: 'The advertised pay currency could not be established.',
   ambiguous_description_salary: 'The description advertises multiple pay ranges or currencies; the applicable offer is unclear.',
   description_scope_unclear: 'The captured page may contain other jobs, so this posting’s advertised pay could not be established.',

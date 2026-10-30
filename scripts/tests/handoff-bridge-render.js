@@ -42,6 +42,36 @@ function sameDescriptor(first, second) {
 
 export default [
   {
+    name: 'handoff bridge: render: a queued handoff in a healthy automatic pool needs no attention while blocked states remain actionable',
+    run() {
+      const bridge = { enabled: true, serving: 'live', linked: true, tunnelReachable: true, autoLaunchChats: true };
+      const chat = { state: 'working', ordinal: 1, pool: { active: true,
+        workers: [{ ordinal: 1, state: 'working' }, { ordinal: 2, state: 'waiting' }] } };
+      const derive = (extra = {}) => deriveBridgePushProgress({ bridge, chat, awaitingClaim: true, ...extra });
+      for (const state of ['working', 'waiting']) {
+        const queued = derive({ chat: { ...chat, pool: { ...chat.pool, workers: [{ ordinal: 1, state }] } } });
+        assert(queued.kind === 'push-awaiting-poll' && queued.tone === 'working' && queued.action === null
+          && queued.headline === 'Waiting for ChatGPT to ask for this handoff',
+        'normal queueing is passive without pretending this particular handoff was claimed');
+      }
+      const blocked = [
+        { bridge: { ...bridge, paused: true } },
+        { bridge: { ...bridge, tunnelReachable: false } },
+        { bridge: { ...bridge, linked: false } },
+        { bridge: { ...bridge, serving: 'off' } },
+        { bridge: { ...bridge, autoLaunchChats: false } },
+        { chat: { ...chat, state: 'ended' } },
+        { chat: { ...chat, state: 'reached' } },
+        { ownerWorker: { launch: { reason: 'approval_required' } } },
+        { ownerWorker: { launch: { reason: 'reconnect_required' } } },
+        { chat: { ...chat, pool: { ...chat.pool, workers: [{ ordinal: 1, state: 'quiet' }] } } },
+        { chat: { ...chat, pool: { ...chat.pool, workers: [{ ordinal: 1, state: 'waiting', launch: { stage: 'failed', reason: 'safety_block' } }] } } },
+      ];
+      for (const input of blocked) assert(derive(input).tone === 'attention', 'genuine intervention or unproved progress keeps its existing urgency');
+      assert(derive({ chat: { ...chat, state: 'reached' } }).action === 'continue-chat', 'a reached chat retains its existing Continue action');
+    },
+  },
+  {
     name: 'handoff bridge: render: lost tunnel overrides both claimed and queued push progress until recovery',
     run() {
       const chat = { state: 'working', ordinal: 1, lastCallAt: NOW };
@@ -1669,6 +1699,20 @@ export default [
           async check({ window }) {
             assert(live(window).textContent.includes('Waiting for ChatGPT to ask for this handoff') && !window.document.querySelector('button'),
               'a working chat may own another request, so the selected push stays passive');
+          },
+        });
+
+        await scenario('an awaiting selected push in a healthy automatic pool has no needs-attention banner', {
+          status: normalizeBridgeStatus({ ...status(1, { autoLaunchChats: true,
+            chat: working({ pool: { active: true, generation: 31, workerCount: 2, workers: [
+              { ordinal: 1, state: 'working', completed: 2 }, { ordinal: 2, state: 'waiting', completed: 1 },
+            ] } }), queue: { jobs: [] } }), at: clock }),
+          item: { bridgeClaimId: '22222222-2222-4222-8222-222222222222' }, isPush: true, awaitingClaim: true,
+          async check({ window }) {
+            assert(live(window).textContent.includes('Waiting for ChatGPT to ask for this handoff')
+              && !live(window).textContent.includes('Needs attention')
+              && !live(window).textContent.includes('ChatGPT is working on this handoff'),
+            'the actual queued progress region keeps exact per-handoff wording without an intervention warning or a borrowed claim');
           },
         });
 

@@ -7,6 +7,7 @@ import job_backend_hardening from './tests/job-backend-hardening.js';
 import job_board_result_summary from './tests/job-board-result-summary.js';
 import job_board_telemetry from './tests/job-board-telemetry.js';
 import job_board_reporting from './tests/job-board-reporting.js';
+import job_board_official_posting_refresh from './tests/job-board-official-posting-refresh.js';
 import fs from 'node:fs';
 import base64 from './tests/base64.js';
 import marketplace_monitor from './tests/marketplace-monitor.js';
@@ -57,6 +58,8 @@ import official_posting_store from './tests/official-posting-store.js';
 import official_posting_match from './tests/official-posting-match.js';
 import official_posting_extractors from './tests/official-posting-extractors.js';
 import official_posting_resolver from './tests/official-posting-resolver.js';
+import official_posting_ground_truth_fixes from './tests/official-posting-ground-truth-fixes.js';
+import official_posting_chat_engine from './tests/official-posting-chat-engine.js';
 import official_posting_resilience from './tests/official-posting-resilience.js';
 import official_posting_r1_parsing from './tests/official-posting-r1-parsing.js';
 import official_posting_r1_legacy_binding from './tests/official-posting-r1-legacy-binding.js';
@@ -80,9 +83,26 @@ import official_source_hosts from './tests/official-source-hosts.js';
 import official_posting_fields from './tests/official-posting-fields.js';
 import official_posting_scrape from './tests/official-posting-scrape.js';
 import official_posting_semantic from './tests/official-posting-semantic.js';
+import official_posting_discovery_diagnostics from './tests/official-posting-discovery-diagnostics.js';
+import official_posting_negative_policy from './tests/official-posting-negative-policy.js';
+import official_posting_render from './tests/official-posting-render.js';
+import official_posting_embedded_links from './tests/official-posting-embedded-links.js';
+import official_posting_resource_headers from './tests/official-posting-resource-headers.js';
+import official_posting_vendor_adapters from './tests/official-posting-vendor-adapters.js';
+import official_posting_page_data from './tests/official-posting-page-data.js';
+import official_posting_regional_ownership from './tests/official-posting-regional-ownership.js';
+import official_posting_careers_cms from './tests/official-posting-careers-cms.js';
+import official_posting_nuxt_data from './tests/official-posting-nuxt-data.js';
+import official_posting_paylocity_links from './tests/official-posting-paylocity-links.js';
+import official_posting_navigation_finality from './tests/official-posting-navigation-finality.js';
+import official_posting_ssg_navigation from './tests/official-posting-ssg-navigation.js';
+import official_posting_fetch_preloads from './tests/official-posting-fetch-preloads.js';
+import official_posting_read_only_ajax from './tests/official-posting-read-only-ajax.js';
+import official_posting_read_only_search from './tests/official-posting-read-only-search.js';
 import official_posting_semantic_resolution from './tests/official-posting-semantic-resolution.js';
 import official_posting_bridge from './tests/official-posting-bridge.js';
 import official_posting_service from './tests/official-posting-service.js';
+import official_posting_two_pass_rendering from './tests/official-posting-two-pass-rendering.js';
 import official_posting_search from './tests/official-posting-search.js';
 import official_posting_consumers from './tests/official-posting-consumers.js';
 import official_posting_freeze from './tests/official-posting-freeze.js';
@@ -250,6 +270,7 @@ const testGroups = [
   ['job-board-result-summary.js', job_board_result_summary],
   ['job-board-telemetry.js', job_board_telemetry],
   ['job-board-reporting.js', job_board_reporting],
+  ['job-board-official-posting-refresh.js', job_board_official_posting_refresh],
   ['base64.js', base64],
   ['marketplace-monitor.js', marketplace_monitor],
   ['ai-models.js', ai_models],
@@ -299,6 +320,8 @@ const testGroups = [
   ['official-posting-match.js', official_posting_match],
   ['official-posting-extractors.js', official_posting_extractors],
   ['official-posting-resolver.js', official_posting_resolver],
+  ['official-posting-ground-truth-fixes.js', official_posting_ground_truth_fixes],
+  ['official-posting-chat-engine.js', official_posting_chat_engine],
   ['official-posting-resilience.js', official_posting_resilience],
   ['official-posting-r1-parsing.js', official_posting_r1_parsing],
   ['official-posting-r1-legacy-binding.js', official_posting_r1_legacy_binding],
@@ -322,9 +345,26 @@ const testGroups = [
   ['official-posting-fields.js', official_posting_fields],
   ['official-posting-scrape.js', official_posting_scrape],
   ['official-posting-semantic.js', official_posting_semantic],
+  ['official-posting-discovery-diagnostics.js', official_posting_discovery_diagnostics],
+  ['official-posting-negative-policy.js', official_posting_negative_policy],
+  ['official-posting-render.js', official_posting_render],
+  ['official-posting-embedded-links.js', official_posting_embedded_links],
+  ['official-posting-resource-headers.js', official_posting_resource_headers],
+  ['official-posting-vendor-adapters.js', official_posting_vendor_adapters],
+  ['official-posting-page-data.js', official_posting_page_data],
+  ['official-posting-regional-ownership.js', official_posting_regional_ownership],
+  ['official-posting-careers-cms.js', official_posting_careers_cms],
+  ['official-posting-nuxt-data.js', official_posting_nuxt_data],
+  ['official-posting-paylocity-links.js', official_posting_paylocity_links],
+  ['official-posting-navigation-finality.js', official_posting_navigation_finality],
+  ['official-posting-ssg-navigation.js', official_posting_ssg_navigation],
+  ['official-posting-fetch-preloads.js', official_posting_fetch_preloads],
+  ['official-posting-read-only-ajax.js', official_posting_read_only_ajax],
+  ['official-posting-read-only-search.js', official_posting_read_only_search],
   ['official-posting-semantic-resolution.js', official_posting_semantic_resolution],
   ['official-posting-bridge.js', official_posting_bridge],
   ['official-posting-service.js', official_posting_service],
+  ['official-posting-two-pass-rendering.js', official_posting_two_pass_rendering],
   ['official-posting-search.js', official_posting_search],
   ['official-posting-consumers.js', official_posting_consumers],
   ['official-posting-freeze.js', official_posting_freeze],

@@ -174,6 +174,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // filesystem coding-agent jobs remain supported for existing job folders.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
   prepareOfficialPostingForGeneration: (args) => ipcRenderer.invoke('prepare-official-posting-for-generation', args),
+  refreshOfficialPostings: (args) => ipcRenderer.invoke('refresh-official-postings', args),
+  onOfficialPostingRefreshProgress: createListener('official-posting-refresh-progress'),
   // Pre-generation check: refuses a new bundle while hand edits recur across bundles.
   checkApplicationGenerationGate: (args) => ipcRenderer.invoke('check-application-generation-gate', args),
   // Application paste-back handoffs are app-owned and resumable. The local AI

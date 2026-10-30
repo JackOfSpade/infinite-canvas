@@ -18,6 +18,7 @@ import { JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS } from '../test-dependencies.js';
 import { validateResponseSchema } from '../test-dependencies.js';
 import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
 import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, __registerJobsHandlersForTests, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
+import { capPlatformJobsAfterWindow } from '../../electron/ipc/jobs.js';
 import { collectionCompletedAtForManifest, providerGatheredAtForManifest, rebindRunOperationAuthority, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
 import { beginJobContinuation, claimJobContinuation, completeJobContinuation, listJobContinuations, pauseJobContinuations, rebindJobContinuationOwners, releaseJobContinuationExecution } from '../../electron/ipc/jobContinuation.js';
 import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
@@ -6888,6 +6889,70 @@ export default [
         return { exactRunLease: true, lifecycleCancelRetained: true, startupDiscovery: true };
       } finally {
         fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'job run staging: recovered relative posted labels resolve against scrape time, not resume time',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-job-staging-relative-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const nodeId = 'relative-hub';
+      const runId = 'relative-run';
+      try {
+        const DAY = 86400000;
+        // The scrape happened 5 days before this "resume" (the real clock).
+        const scrapedAt = Date.now() - 5 * DAY;
+        const windowStart = scrapedAt - 30 * DAY;
+        await startRun(canvasPath, { runId, startedAt: scrapedAt - 1000, nodeId, sourceIds: ['indeed'] });
+        await recordSourcePage(canvasPath, {
+          sourceId: 'indeed', query: 'q', queryIndex: 0, page: 1,
+          jobs: [
+            { title: 'Edge old', posted: '31 days ago' },
+            { title: 'Edge new', posted: '29 days ago' },
+            { title: 'Absolute', posted: '2020-01-02' },
+            { title: 'Undated' },
+          ],
+          now: scrapedAt, nodeId, expectedRunId: runId,
+        });
+        const recovered = (await readRunState(canvasPath, null, nodeId)).stagedJobs
+          .map(s => ({ ...s.job, source: s.sourceId }));
+        const viaReadStaged = (await readStagedJobs(canvasPath, nodeId)).map(s => s.job.posted);
+        assert(viaReadStaged[0] === recovered[0].posted, 'both read paths pin labels identically');
+        const capped = capPlatformJobsAfterWindow(recovered, windowStart, 10);
+        const titles = capped.jobs.map(j => j.title);
+        assert(!titles.includes('Edge old'),
+          'a "31 days ago" row scraped before the crash stays outside the 30-day window after a later resume');
+        assert(titles.includes('Edge new'), 'the in-window "29 days ago" row survives');
+        assert(titles.includes('Undated'), 'undated rows are still kept');
+        assert(recovered.find(j => j.title === 'Absolute').posted === '2020-01-02',
+          'absolute dates are left untouched');
+        assert(recovered.find(j => j.title === 'Undated').posted === undefined, 'missing labels stay missing');
+
+        // A row scraped fresh after the resume resolves against the new clock:
+        // its own `at` is later, so its label is not shifted back to the old run.
+        const freshAt = Date.now();
+        await recordSourcePage(canvasPath, {
+          sourceId: 'indeed', query: 'q', queryIndex: 0, page: 2,
+          jobs: [{ title: 'Fresh', posted: '31 days ago' }],
+          now: freshAt, nodeId, expectedRunId: runId,
+        });
+        const all = (await readStagedJobs(canvasPath, nodeId));
+        const fresh = all.find(s => s.job.title === 'Fresh').job;
+        const old = all.find(s => s.job.title === 'Edge old').job;
+        assert(Math.abs(new Date(fresh.posted).getTime() - (freshAt - 31 * DAY)) < 2 * DAY
+          && new Date(fresh.posted).getTime() > new Date(old.posted).getTime() + 4 * DAY,
+        'rows staged after the resume keep their own later anchor');
+
+        // Legacy rows with no `at` fall back to the manifest anchor.
+        const scope = jobRunPathScopeForCanvas(canvasPath, nodeId);
+        const stagingPath = path.join(scope.dir, `${scope.base}.jobs-staging.${scope.canvasHash}.${scope.ownerHash}.jsonl`);
+        await fs.promises.appendFile(stagingPath, JSON.stringify({ sourceId: 'indeed', query: 'q', page: 3, job: { title: 'Legacy', posted: '31 days ago' } }) + '\n');
+        const legacy = (await readStagedJobs(canvasPath, nodeId)).find(s => s.job.title === 'Legacy').job;
+        assert(new Date(legacy.posted).getTime() < Date.now() - 30 * DAY - 4 * DAY,
+          'legacy rows without a timestamp anchor to the run start rather than the resume clock');
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
       }
     },
   },

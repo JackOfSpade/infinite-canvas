@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { extractJobPostingBaseSalary, extractJobPostingDescription, walkJsonLdJobPostings } from '../../electron/extractors/apiExtractors.js';
 import { locationsCompatible } from '../../electron/ipc/officialPostingMatch.js';
+import { officialPostingSemanticCandidateEvidence } from '../../electron/ipc/officialPostingSemantic.js';
+import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import {
   extractAshbyPostings, extractGreenhousePostings, extractJsonLdPostings, extractLeverPostings,
   extractOfficialPostingCandidates, extractSmartRecruitersPostings, extractSmartRecruitersHtmlPostings,
@@ -30,6 +32,184 @@ const smartJob = extra => ({ id: '740000000000017', name: 'Dispatch Systems Engi
     additionalInformation: { title: 'Additional Information', text: '<p>Posted pay CAD 117000 to 139000 annually.</p>' } } }, ...extra });
 
 export default [
+  {
+    name: 'Phenom action links expose only safe hosted ATS destinations on actual anchors',
+    run() {
+      const source = 'https://careers.northwind.test/';
+      const board = 'https://job-boards.greenhouse.io/northwind';
+      const action = (tag, url, extra = '') => `<${tag} ph-href="search-results" ph-tevent="static_content_click" data-ph-href="${url}" ${extra}>Jobs</${tag}>`;
+      const scan = html => scanOfficialCareersPage(html, source).links;
+      assert.deepEqual(scan(action('a', board)), [{ url: board, tag: 'a', attribute: 'data-ph-href' }]);
+      assert.deepEqual(scan(action('div', board)), []);
+      assert.deepEqual(scan(`<a data-ph-href="${board}">Jobs</a>`), []);
+      assert.deepEqual(scan(`<a ph-href="search" ph-tevent="unrelated" data-ph-href="${board}">Jobs</a>`), []);
+      for (const unsafe of ['javascript:alert(1)', 'http://job-boards.greenhouse.io/northwind',
+        'https://user:pass@job-boards.greenhouse.io/northwind', 'https://unrelated.test/careers']) {
+        assert.deepEqual(scan(action('a', unsafe)), [], unsafe);
+      }
+      assert.deepEqual(scan(`<a href="${board}" ph-href="search-results" ph-tevent="static_content_click" data-ph-href="${board}">Jobs</a>`),
+        [{ url: board, tag: 'a', attribute: 'href' }]);
+    },
+  },
+  {
+    name: 'URL-bound SSG careers navigation adds ordinary same-origin links without replacing actual anchor provenance',
+    run() {
+      const source = 'https://synthetic.test/';
+      const link = (slug, title) => ({ _type: 'internalLink', targetBlank: false, text: title,
+        reference: { _type: 'page', parent: null, language: null, slug: { _type: 'slug', current: slug }, title } });
+      const settings = { _type: 'settings', orgUrl: source, companySection: { _type: 'menuSection',
+        linkLists: [{ _type: 'linkList', links: [link('careers', 'Careers'), link('open-roles', 'Open Roles')] }] } };
+      const content = { _type: 'page', parent: null, path: '', slug: { _type: 'slug', current: 'home' } };
+      const body = `<link rel="canonical" href="${source}"><script id="ssgContent" type="application/json">${JSON.stringify(content)}</script>
+        <script id="ssgSiteSettings" type="application/json">${JSON.stringify(settings)}</script><a href="/privacy">Privacy</a>`;
+      assert.deepEqual(scanOfficialCareersPage(body, source).links, [
+        { url: `${source}privacy`, tag: 'a', attribute: 'href' },
+        { url: `${source}careers`, tag: 'declaration', attribute: 'url' },
+        { url: `${source}open-roles`, tag: 'declaration', attribute: 'url' },
+      ]);
+      const visible = scanOfficialCareersPage(`<a href="/careers">Actual careers anchor</a>${body}`, source);
+      assert.equal(visible.links.filter(item => item.url === `${source}careers`).length, 1);
+      assert.deepEqual(visible.links[0], { url: `${source}careers`, tag: 'a', attribute: 'href' });
+      assert.equal(visible.links.some(item => 'tenantProven' in item || 'employerDomainProven' in item), false);
+      assert.deepEqual(scanOfficialCareersPage(body.replace(JSON.stringify(settings), JSON.stringify({ ...settings, orgUrl: 'https://unrelated.test/' })), source).links,
+        [{ url: `${source}privacy`, tag: 'a', attribute: 'href' }]);
+      const limited = scanOfficialCareersPage(body.replace(JSON.stringify(settings), JSON.stringify({ ...settings, extra: 'x'.repeat(512 * 1024) })), source);
+      assert.equal(limited.coverageIncomplete, true);
+      assert.deepEqual(limited.links, [{ url: `${source}privacy`, tag: 'a', attribute: 'href' }], 'bounded-out navigation does not remove actual DOM links');
+      assert.equal(visible.coverageIncomplete, undefined);
+    },
+  },
+  {
+    name: 'Bounded-out recognized SSG navigation cannot turn two valid none comparisons into a durable miss',
+    async run() {
+      const { resolveOfficialPosting, shouldPersistOfficialPostingResult } = await import('../../electron/ipc/officialPostingResolver.js');
+      const root = 'https://northwind.test/'; const other = `${root}jobs/other`; const target = `${root}jobs/target`;
+      const roles = `${root}open-roles`;
+      const description = 'Build distributed systems for operational reporting. Maintain dependable release services and document engineering decisions. '.repeat(5);
+      const job = { title: 'Target Engineer', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada', snippet: description,
+        url: 'https://www.linkedin.com/jobs/view/synthetic-ssg-coverage' };
+      const posting = (title, url) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title, url,
+        hiringOrganization: { name: job.company }, description, jobLocation: { address: {
+          addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>`;
+      const navigation = { _type: 'internalLink', targetBlank: false, text: 'Open Roles', reference: { _type: 'page', parent: null,
+        language: null, slug: { _type: 'slug', current: 'open-roles' }, title: 'Open Roles' } };
+      for (const limited of [false, true]) {
+        const settings = { _type: 'settings', orgUrl: root, companySection: { _type: 'menuSection',
+          linkLists: [{ _type: 'linkList', links: [navigation] }] }, extra: limited ? 'x'.repeat(512 * 1024) : '' };
+        const content = { _type: 'page', parent: null, path: '', slug: { _type: 'slug', current: 'home' } };
+        const body = `<title>Northwind Labs</title><link rel="canonical" href="${root}"><a href="${other}">Other role</a>
+          <script id="ssgContent" type="application/json">${JSON.stringify(content)}</script>
+          <script id="ssgSiteSettings" type="application/json">${JSON.stringify(settings)}</script>`;
+        const pages = { [root]: body, [other]: posting('Other Engineer', other),
+          [roles]: `<a href="${target}">Target role</a>`, [target]: posting(job.title, target) };
+        const reads = []; let comparisons = 0;
+        const result = await resolveOfficialPosting(job, { semanticMatching: true, researchRan: true, persistResults: false, store: null,
+          render: null, candidateUrls: [root], fetch: async url => { reads.push(url); if (!pages[url]) throw new Error('Unretained synthetic source');
+            return { url, statusCode: 200, contentType: 'text/html', body: pages[url] }; },
+          match: async (_job, options) => { comparisons++; return { choice: options.some(item => item.title === job.title) ? 'uncertain' : 'none',
+            evidence: [], distinguishing: [], conflicts: ['Synthetic source-coverage regression; no identity accepted.'] }; } });
+        assert.equal(comparisons, 2); assert.equal(reads.includes(target), !limited);
+        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
+        if (limited) {
+          for (const code of ['comparative-a-valid', 'comparative-b-valid', 'comparative-none', 'crawl-partial']) assert.ok(result.officialPosting.trail.includes(code), code);
+          assert.equal(officialPostingLookupStatus(result.officialPosting).retryable, true);
+        }
+      }
+    },
+  },
+  {
+    name: 'Missing source work arrangements remain unspecified across parsers while explicit false and modes survive semantic evidence',
+    run() {
+      const ashby = extra => extractAshbyPostings(json({ jobs: [{ id: 'a-7', title: 'Dispatch Engineer', jobUrl: sourceUrl, ...extra }] }))[0];
+      const lever = extra => extractLeverPostings(json({ id: 'l-7', text: 'Dispatch Engineer', hostedUrl: sourceUrl, ...extra }))[0];
+      const smart = extra => extractSmartRecruitersPostings(json(smartJob({ location: { city: 'Lakeview', country: 'ca', ...extra } })),
+        { sourceUrl: smartApiUrl, tenant: 'northwind' })[0];
+      const microdata = mode => extractSmartRecruitersHtmlPostings(`<main itemscope itemtype="https://schema.org/JobPosting">
+        <h1 itemprop="title">Dispatch Engineer</h1><div itemprop="hiringOrganization"><meta itemprop="name" content="Northwind Labs"></div>
+        <div itemprop="description">Maintain dependable release services.</div>${mode ? `<spl-job-location workplaceType="${mode}"></spl-job-location>` : ''}</main>`,
+      { sourceUrl: smartUrl })[0];
+      const rss = status => extractTeamtailorRss(`<rss><channel><item><title>Dispatch Engineer</title><link>${sourceUrl}</link>
+        <description>Maintain dependable release services.</description>${status ? `<remoteStatus>${status}</remoteStatus>` : ''}</item></channel></rss>`)[0];
+      const unknown = [extractJsonLdPostings(page(node()), { sourceUrl })[0], ashby({}), lever({}), smart({}), microdata(''), rss(''),
+        extractGreenhousePostings(json({ id: 7, title: 'Dispatch Engineer', content: 'Maintain release services.', absolute_url: sourceUrl }))[0],
+        extractOfficialPostingCandidates({ sourceUrl, employer: 'Northwind Labs', body: `<main><h1>Dispatch Engineer</h1>
+          <p>${'Responsibilities include maintaining release services and documenting operational decisions. '.repeat(9)}</p><a href="/apply/7">Apply</a></main>` })[0]];
+      for (const candidate of unknown) {
+        assert.ok(candidate); assert.equal(candidate.location.remote, undefined);
+        assert.ok(officialPostingSemanticCandidateEvidence(candidate).includes('Remote: unspecified'));
+      }
+      const declaredFalse = [extractJsonLdPostings(page(node({ jobLocationType: 'ONSITE' })), { sourceUrl })[0],
+        ashby({ isRemote: false }), ashby({ workplaceType: 'hybrid', isRemote: true }),
+        lever({ workplaceType: 'onsite' }), smart({ remote: false }), microdata('hybrid'), rss('none')];
+      for (const candidate of declaredFalse) {
+        assert.equal(candidate.location.remote, false);
+        assert.ok(officialPostingSemanticCandidateEvidence(candidate).includes('Remote: false'));
+      }
+      assert.equal(extractJsonLdPostings(page(node({ jobLocationType: 'TELECOMMUTE' })), { sourceUrl })[0].location.remote, true);
+      assert.equal(ashby({ isRemote: true }).location.remote, true);
+    },
+  },
+  {
+    name: 'Typed public board inventory detail links precede filters without ranking or ownership claims',
+    run() {
+      const account = '40000000-0000-4000-8000-000000000001';
+      const source = `https://recruiting.paylocity.com/Recruiting/Jobs/All/${account}`;
+      const jobs = [109, 103, 107].map(JobId => ({ JobId, IsInternal: false, JobLocation: { ModuleId: 42 } }));
+      const data = { ModuleId: '42', LeadJoinUrl: `/Recruiting/PublicLeads/New/${account}`, ShowInternal: false, Jobs: jobs };
+      const detail = id => `https://recruiting.paylocity.com/Recruiting/Jobs/Details/${id}`;
+      const body = `<a href="?department=engineering">Engineering</a><a href="${detail(103)}">One visible job</a>
+        <script>window.pageData = ${JSON.stringify(data)};</script><script>window.ATSJobDetailsBaseUrl = '/Recruiting/Jobs/Details/';</script>`;
+      const scan = scanOfficialCareersPage(body, source);
+      assert.deepEqual(scan.links.slice(0, 3), [109, 103, 107].map(id => ({ url: detail(id), tag: 'data', attribute: 'Jobs.JobId' })));
+      assert.equal(scan.links[3].url, `${source}?department=engineering`);
+      assert.equal(scan.links.filter(link => link.url === detail(103)).length, 1);
+      assert.equal(scan.links.some(link => 'tenantProven' in link || 'employerDomainProven' in link), false);
+      assert.equal(scanOfficialCareersPage(body.replace('"ShowInternal":false', '"ShowInternal":true'), source).links[0].url,
+        `${source}?department=engineering`, 'invalid typed inventory cannot displace actual generic navigation');
+      const capped = { ...data, Jobs: Array.from({ length: 513 }, (_, index) => ({ JobId: index + 1,
+        IsInternal: false, JobLocation: { ModuleId: 42 } })) };
+      const partial = scanOfficialCareersPage(body.replace(JSON.stringify(data), JSON.stringify(capped)), source);
+      assert.equal(partial.coverageIncomplete, true, 'a recognized capped inventory cannot look like an exhausted source');
+      assert.ok(partial.links.some(link => link.url === detail(103)), 'ordinary visible links survive a typed inventory ceiling');
+      assert.equal(scan.coverageIncomplete, undefined);
+      assert.equal(scanOfficialCareersPage(body.replace(JSON.stringify(data), JSON.stringify({ ...data, coverageIncomplete: true })), source).coverageIncomplete,
+        undefined, 'untrusted page data cannot manufacture the parser coverage receipt');
+    },
+  },
+  {
+    name: 'Careers CMS source links retain declaration provenance and ignore arbitrary script URL text',
+    run() {
+      const source = 'https://northwind.test/us/eng/careers';
+      const url = 'https://recruiting.paylocity.com/Recruiting/Jobs/All/30000000-0000-4000-8000-000000000001';
+      const records = Object.fromEntries([['CAREERS_SECTION-1_LINK-1_URL', url], ['CAREERS_SECTION-1_LINK-1_TEXT', 'View Job Openings'],
+        ['CAREERS_SECTION-2_SLIDE-1_IMAGE-ALT-TEXT', 'Northwind Labs North America']].map(([key, value]) => [key, { key, value }]));
+      const json = JSON.stringify({ region: 'us', language: 'eng', 12345: { b: { 'eng-US': records } } });
+      const scan = scanOfficialCareersPage(`<script id="ng-state" type="application/json">${json}</script>`, source);
+      assert.deepEqual(scan.links, [{ url, tag: 'declaration', attribute: 'url' }]);
+      assert.deepEqual(scanOfficialCareersPage(`<script>window.other=${json}</script>`, source).links, []);
+      assert.deepEqual(scanOfficialCareersPage(`<script id="ng-state" type="application/json">${json}</script>`, source.replace('/careers', '/product')).links, []);
+    },
+  },
+
+  {
+    name: 'Root branding uses one explicit own-root Organization name and ignores testimonials conflicting entities and other page identities',
+    run() {
+      const scan = nodes => scanOfficialCareersPage(`<title>Synthetic platform for dispatch teams</title><script type="application/ld+json">${JSON.stringify(nodes)}</script>`, 'https://www.northwind.test/');
+      const own = { '@type': 'Organization', name: 'Northwind Labs', url: '/' };
+      assert.equal(scan(own).siteName, 'Northwind Labs');
+      assert.equal(scan({ ...own, url: undefined, '@id': 'https://northwind.test/#organization' }).siteName, 'Northwind Labs');
+      assert.equal(scan({ ...own, url: '/about' }).siteName, '');
+      assert.equal(scan({ ...own, url: 'https://customer.northwind.test/' }).siteName, '');
+      assert.equal(scan({ '@graph': [own, { ...own, name: 'Other Labs' }] }).siteName, '');
+      assert.deepEqual(scan({ ...own, legalName: 'Northwind Research Inc.', alternateName: ['Northwind'] }).organizations,
+        [{ name: 'Northwind Labs', legalName: 'Northwind Research Inc.', alternateNames: ['Northwind'] }]);
+      assert.equal(scan({ '@graph': [own, { ...own, name: 'Other Labs', legalName: 'Northwind Research Inc.' }] }).organizations, undefined);
+      assert.equal(scan({ ...own, url: 'https://customer.test/', legalName: 'Northwind Research Inc.' }).organizations, undefined);
+
+      assert.equal(scan({ '@graph': [own, { ...own, name: 'Customer Labs', url: 'https://customer.test/' }] }).siteName, 'Northwind Labs');
+      assert.equal(scanOfficialCareersPage(`<meta property="og:site_name" content="Explicit brand"><script type="application/ld+json">${JSON.stringify(own)}</script>`, 'https://northwind.test/').siteName, 'Explicit brand');
+    },
+  },
   {
     name: 'SmartRecruiters detail adapters use only observed tenant and posting identifiers and retain API identifier case',
     run() {
@@ -185,6 +365,22 @@ export default [
       assert.equal(locationsCompatible({ location: 'Lakeview, Canada' }, { location: american }), false);
       assert.equal(locationsCompatible({ location: 'Lakeview, United States' }, { location: extractLocation('Ontario', 'US') }), false);
       assert.equal(locationsCompatible({ location: 'Lakeview, Canada' }, { location: extractLocation('California', 'CA') }), false);
+    },
+  },
+  {
+    name: 'JSON-LD accepts only a redundant path-matching Greenhouse job query identifier',
+    run() {
+      const clean = 'https://careers.northwind.example/jobs/123456/dispatch-engineer/';
+      const structured = page(node({ url: clean }));
+      const extract = source => extractJsonLdPostings(structured, { sourceUrl: source });
+      assert.equal(extract(`${clean}?gh_jid=123456`).length, 1);
+      assert.equal(extract(`${clean}?utm_source=board&gh_jid=123456`).length, 1);
+      assert.deepEqual(extract(`${clean}?gh_jid=987654`), []);
+      assert.deepEqual(extract(`${clean}?gh_jid=123456&gh_jid=123456`), []);
+      assert.deepEqual(extract(`${clean}?gh_jid=123456&role=other`), []);
+      assert.deepEqual(extract('https://careers.northwind.example/jobs/987654/dispatch-engineer/?gh_jid=123456'), []);
+      assert.deepEqual(extract('https://other.example/jobs/123456/dispatch-engineer/?gh_jid=123456'), []);
+      assert.deepEqual(extract('https://careers.northwind.example/jobs/?gh_jid=123456'), []);
     },
   },
   {
@@ -382,6 +578,29 @@ export default [
       assert.equal(coercibleRange.salary.provenance, 'unknown', 'arrays and booleans cannot become zero-valued salary facts');
       assert.throws(() => extractAshbyPostings(json({ jobs: [{ title: 'Dispatch Engineer', jobUrl: sourceUrl, descriptionPlain: 'Dispatch\0service' }] })), /bounded raw text/);
       assert.throws(() => extractJsonLdPostings('\0', { sourceUrl }), /bounded raw text/);
+    },
+  },
+  {
+    name: 'Bare email hrefs are not resolved as relative career links',
+    run() {
+      const source = 'https://job-boards.greenhouse.io/braze';
+      const urls = html => scanOfficialCareersPage(html, source).links.map(link => link.url);
+      assert.deepEqual(urls('<a href="talentdata.privacy@braze.com">x</a>'), []);
+      assert.deepEqual(urls('<a href="/braze/jobs/1">a</a><a href="jobs/2">b</a><a href="./x@y">c</a><a href="?q=a@b">d</a>'),
+        ['https://job-boards.greenhouse.io/braze/jobs/1', 'https://job-boards.greenhouse.io/jobs/2', 'https://job-boards.greenhouse.io/x@y', 'https://job-boards.greenhouse.io/braze?q=a@b']);
+    },
+  },
+  {
+    name: 'A careers scan reports plain GET keyword-search forms separately from links',
+    run() {
+      const page = 'https://careers.northwind.example/';
+      const scan = html => scanOfficialCareersPage(html, page).searchForms || [];
+      assert.deepEqual(scan('<form action="/search"><input type="text" name="keywords"></form>'), [{ url: 'https://careers.northwind.example/search', param: 'keywords' }]);
+      assert.deepEqual(scan('<form method="GET"><div><input name="q"></div></form>'), [{ url: page, param: 'q' }]);
+      assert.deepEqual(scan('<form method="post" action="/search"><input name="q"></form>'), []);
+      assert.deepEqual(scan('<form action="/search"><input type="password" name="q"></form>'), []);
+      assert.deepEqual(scan('<form action="/search"><input name="email"></form>'), []);
+      assert.ok(!scanOfficialCareersPage('<form action="/search"><input name="q"></form>', page).links.some(link => link.url.endsWith('/search')), 'a form is never a link');
     },
   },
 ];

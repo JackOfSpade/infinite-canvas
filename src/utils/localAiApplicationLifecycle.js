@@ -22,6 +22,13 @@ export function canRegenerateLocalApplication(localApplication) {
     && REPLACEABLE_LOCAL_APPLICATION_STATUSES.has(localApplication?.status);
 }
 
+// A saved bundle prevents duplicate generation, but does not own a posting
+// lookup. Other unresolved Local AI states keep their existing busy fence.
+export function localApplicationBlocksOfficialPostingLookup(localApplication) {
+  return !!localApplication && localApplication.status !== 'saved'
+    && !canRegenerateLocalApplication(localApplication);
+}
+
 // Only the main process's missing-output verdict releases a saved link. Keep
 // it protected during a status error or while the mount-time probe is pending.
 export function hasLinkedLocalApplicationOutput(localApplication) {

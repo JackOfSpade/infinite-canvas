@@ -657,26 +657,43 @@ export function attachProtectedCards(unionJobs, protectedCards) {
   for (const card of cards) {
     const row = jobFromProtectedCard(card);
     if (row.cardId) byId.set(row.cardId, row);
-    byKey.set(locationKey(row), row);
+    const key = locationKey(row);
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(row);
     const url = urlKey(row);
     if (url) byUrl.set(url, row);
   }
 
+  // One protected card attaches to at most one union row. Pass 1 claims cards by
+  // id/url (strong identity) so the weaker title|company|location fallback in
+  // pass 2 cannot steal a card from a later row, and only takes unclaimed cards.
   const usedIds = new Set();
-  const out = jobs.map((job) => {
+  const matches = new Array(jobs.length).fill(null);
+  jobs.forEach((job, i) => {
     let match = null;
     const id = jobCardId(job);
-    if (id && byId.has(id)) match = byId.get(id);
+    if (id && byId.has(id) && !usedIds.has(byId.get(id).cardId)) match = byId.get(id);
     if (!match) {
       const url = urlKey(job);
-      if (url && byUrl.has(url)) match = byUrl.get(url);
+      if (url && byUrl.has(url) && !usedIds.has(byUrl.get(url).cardId)) match = byUrl.get(url);
     }
-    if (!match) {
-      const key = locationKey(job);
-      if (byKey.has(key)) match = byKey.get(key);
+    if (match) {
+      usedIds.add(match.cardId);
+      matches[i] = match;
     }
+  });
+  jobs.forEach((job, i) => {
+    if (matches[i]) return;
+    const candidates = byKey.get(locationKey(job)) || [];
+    const match = candidates.find(row => !usedIds.has(row.cardId));
+    if (match) {
+      usedIds.add(match.cardId);
+      matches[i] = match;
+    }
+  });
+  const out = jobs.map((job, i) => {
+    const match = matches[i];
     if (!match) return job;
-    usedIds.add(match.cardId);
     return {
       ...job,
       cardId: match.cardId,

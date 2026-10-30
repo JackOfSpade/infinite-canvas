@@ -317,7 +317,7 @@ function identifier(row) {
   const value = row?.identifier ?? row?.requisitionId ?? row?.reqId;
   return key(typeof value === 'object' ? value?.value : value);
 }
-function sameRequisition(a, b) {
+export function sameRequisition(a, b) {
   const mentions = (item, id) => id.length >= 6 && new RegExp(`(?<![\\p{L}\\p{N}])${escape(id)}(?![\\p{L}\\p{N}])`, 'iu').test(item.sourceUrl || item.url || '');
   const left = identifier(a); const right = identifier(b);
   return strictEmployerEqual(a.employer || a.hiringOrganization?.name, b.employer || b.hiringOrganization?.name)

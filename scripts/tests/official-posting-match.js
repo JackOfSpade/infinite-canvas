@@ -105,7 +105,8 @@ export default [
       assert.equal(classifyOfficialSourceHost('careers.northwind.example', EMPLOYER), 'unrelated');
       assert.equal(proveEmployerDomain({ domain: 'northwind.example', employer: EMPLOYER, rootSiteName: 'Northwind' }), false);
       assert.equal(proveEmployerDomain({ domain: 'northwind.example', employer: EMPLOYER, rootTitle: EMPLOYER }), true);
-      assert.equal(proveEmployerDomain({ domain: 'northwind.example', employer: EMPLOYER, rootTitle: `${EMPLOYER} | Marketing copy` }), false, 'root title proof compares the whole title');
+      assert.equal(proveEmployerDomain({ domain: 'northwind.example', employer: EMPLOYER, rootTitle: `${EMPLOYER} | Marketing copy` }), true, 'an exact fetched brand segment and matching corporate domain support employer discovery');
+      assert.equal(proveEmployerDomain({ domain: 'unrelated.example', employer: EMPLOYER, rootTitle: `${EMPLOYER} | Marketing copy` }), false, 'a brand segment cannot authorize an unrelated domain');
       assert.equal(careersPageEmployerFromTitle(`Careers at ${EMPLOYER} | Build the future`), EMPLOYER);
       assert.equal(careersPageEmployerFromTitle(`Careers at ${EMPLOYER}`), EMPLOYER);
       assert.equal(careersPageEmployerFromTitle(`${EMPLOYER} | Careers and marketing`), '');

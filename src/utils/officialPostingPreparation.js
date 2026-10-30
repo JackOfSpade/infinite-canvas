@@ -7,7 +7,12 @@ const PREPARATION_REFRESH_AGE_MS = OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_M
 /** One live source projection for both research and the final queue boundary. */
 export function projectOfficialPostingGenerationJob(data = {}) {
   return {
-    title: data.title, company: data.company, snippet: data.snippet,
+    title: data.title, company: data.company, snippet: data.snippet, description: data.description,
+    employer: data.employer, hiringOrganization: data.hiringOrganization, locations: data.locations,
+    workMode: data.workMode, remote: data.remote, remoteCountry: data.remoteCountry, remoteRegion: data.remoteRegion,
+    employmentType: data.employmentType, seniority: data.seniority, jobLevel: data.jobLevel,
+    identifier: data.identifier, requisitionId: data.requisitionId, reqId: data.reqId,
+    sourceUrl: data.sourceUrl, provenance: data.provenance,
     postedBy: data.postedBy, applyOptions: data.applyOptions,
     salaryProvenance: data.salaryProvenance, officialPosting: data.officialPosting,
     boardClosed: data.boardClosed, listingLiveness: data.listingLiveness, alternateListings: data.alternateListings,
@@ -59,16 +64,26 @@ export function subscribeOfficialPostingPreparation(listener) {
 }
 
 /** A synchronous claim also fences callbacks captured before a rerender. */
-export function beginOfficialPostingPreparation({ canvasFilePath, nodeId, cancel }) {
+export function beginOfficialPostingPreparation({ canvasFilePath, nodeId, cancel, purpose = 'generation', owner = 'card' }) {
   const key = keyFor(canvasFilePath, nodeId);
   if (preparations.has(key)) return null;
   let cancelled = false;
   const entry = Object.freeze({
-    state: 'resolving', position: null,
+    state: 'resolving', position: null, purpose: purpose === 'lookup' ? 'lookup' : 'generation',
+    owner: owner === 'board-refresh' ? 'board-refresh' : 'card',
     cancel() {
       if (preparations.get(key) !== entry || cancelled) return;
       cancelled = true;
-      cancel?.();
+      try {
+        const acknowledgement = cancel?.();
+        if (acknowledgement && typeof acknowledgement.then === 'function') {
+          // The owner keeps its claim until host acknowledgment. A failed
+          // attempt can return false so the still-visible Cancel can retry.
+          void Promise.resolve(acknowledgement).then(result => {
+            if (result === false) cancelled = false;
+          }, () => { cancelled = false; });
+        }
+      } catch { cancelled = false; }
     },
     finish() {
       if (preparations.get(key) !== entry) return;

@@ -30,6 +30,172 @@ import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js
 import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
 export default [{
+  name: 'Amounts tied to stipends, allowances and other extras are not salary',
+  run() {
+    const parse = salary => parseGuaranteedCashOffer({ salary, location: 'Austin, TX' });
+    const cases = [
+      ['$85,000 per year, $1,500 annual training budget', 85000, 85000],
+      ['$4,000 per month, $500 annual stipend', 48000, 48000],
+      ['$5,000 per month, $2,000 annual equipment allowance', 60000, 60000],
+      ['$120,000 - $140,000 annually; relocation up to $10,000', 120000, 140000],
+      ['$95,000/yr + $5,000 signing bonus', 95000, 95000],
+      ['$90,000 a year, stipend of $500/month', 90000, 90000],
+      ['$110,000 - $130,000 per year, $1,200/year learning budget', 110000, 130000],
+      ['$2,000 weekly, $1,000 annual housing stipend', 104000, 104000],
+      ['$65,000 - $70,000 housing included', 65000, 70000],
+      ['$65,000 - $70,000 housing included; 40 hours/week', 65000, 70000],
+      ['$65,000 - $70,000 housing included; $5,000 tuition', 65000, 70000],
+      ['$65,000 - $70,000 housing included; $5,000 housing', 65000, 70000],
+      ['$4,500/month stipend', 54000, 54000],
+      ['Monthly stipend of $4,500', 54000, 54000],
+      // With the helper disabled, this remains a $3,000 annual offer.
+      ['$3,000 relocation', 3000, 3000],
+      ['$75,000 - $85,000 annually (tuition reimbursement up to $5,250)', 75000, 85000],
+      ['$75,000 per year; $3,000 education reimbursement', 75000, 75000],
+      ['$95k base, $15k relocation, $10k signing', 95000, 95000],
+      ['$85,000 - $95,000 per year plus relocation', 85000, 95000],
+      ['$85,000 - $95,000 per year, relocation assistance available', 85000, 95000],
+      ['$92K - $126K/yr', 92000, 126000],
+      ['$150,000 - $200,000 annual base salary', 150000, 200000],
+      ['$60,000 per year', 60000, 60000],
+      ['$3,000 monthly', 36000, 36000],
+      ['$5,000 per month ($60,000 a year)', 60000, 60000],
+      // Exercise both directions, plural nouns, bounded connectors, ranges and units.
+      ['$80,000/year; $1k - $2k annual training budgets', 80000, 80000],
+      ['$80,000/year; $500 per month housing allowance', 80000, 80000],
+      ['$80,000/year; $500 annual professional development training budget', 80000, 80000],
+      ['$80,000/year; relocation package worth $8,000', 80000, 80000],
+      ['$80,000/year; tuition: $1,000 to $2,000 annually', 80000, 80000],
+      ['$80,000/year; $500 yearly wellness stipends', 80000, 80000],
+      ['$80,000/year; $500 equipment allowances', 80000, 80000],
+      ['$80,000/year; $500 reimbursements', 80000, 80000],
+      ['$80,000/year; $500 reimbursement', 80000, 80000],
+      ['$80,000/year; $5,000 relocation', 80000, 80000],
+      ['$80,000/year; $5,000 signing', 80000, 80000],
+      ['$80,000/year; $5,000 sign-on', 80000, 80000],
+      ['$80,000/year; $5,000 tuition', 80000, 80000],
+      ['$80,000/year; $5,000 housing', 80000, 80000],
+      ['$80,000/year; SIGN-ON BONUS: $5,000', 80000, 80000],
+      // Unattached words and lookalikes must not reach across the salary.
+      ['relocation assistance available, $95,000 per year', 95000, 95000],
+      ['$85,000 - $95,000 per year with relocation', 85000, 95000],
+      ['$80,000/year, $1,500 budgetary adjustment', 1500, 80000],
+    ];
+    for (const [salary, min, max] of cases) {
+      const result = parse(salary);
+      assert(result.usable && result.min === min && result.max === max,
+        `"${salary}" must parse to ${min}-${max}, got ${result.usable ? `${result.min}-${result.max}` : result.reasonCode}`);
+    }
+    for (const salary of ['Housing allowance only']) {
+      const result = parse(salary);
+      assert(!result.usable && result.reasonCode === 'unparseable_cash_salary',
+        `"${salary}" must have no parseable cash salary, got ${JSON.stringify(result)}`);
+    }
+    for (const salary of ['$95,000/yr, signing bonus', 'CA$125,280 - CA$210,600/year; OTE CA$139,200 - CA$234,000/year']) {
+      const result = parse(salary);
+      assert(!result.usable && result.reasonCode === 'variable_or_non_cash_only',
+        `"${salary}" must retain the existing exclusion reason, got ${JSON.stringify(result)}`);
+    }
+  },
+}, {
+  name: 'Salary cadence ignores schedule hours and annualizes biweekly and semimonthly pay',
+  run() {
+    const parse = (salary) => parseGuaranteedCashOffer({ salary, location: 'Austin, TX' });
+    const sched = parse('Salary: $60,000 per year; 40 hours/week');
+    assert(sched.usable && sched.min === 60000 && sched.max === 60000 && sched.annualized === false, 'a "40 hours/week" schedule must not turn an annual salary into weekly pay');
+    assert(parse('$2,000 biweekly').min === 52000, 'biweekly pay must annualize x26');
+    assert(parse('$2,000 bi-weekly').min === 52000, 'bi-weekly pay must annualize x26');
+    assert(parse('$2,000 every two weeks').min === 52000, '"every two weeks" must annualize x26');
+    assert(parse('$4,000 semimonthly').min === 96000, 'semimonthly pay must annualize x24');
+    assert(parse('$4,000 semi-monthly').min === 96000, 'semi-monthly must be x24, not monthly x12');
+    assert(parse('$2,000 weekly').min === 104000 && parse('$8,000 per month').min === 96000, 'weekly and monthly cadences must keep working');
+    const hourly = parseGuaranteedCashOffer({ salary: '$30/hr', description: '40 hours/week', location: 'Austin, TX' });
+    assert(hourly.usable && hourly.min === 62400, 'hourly pay must still use the schedule hours');
+  },
+}, {
+  name: 'Payroll-frequency and work-schedule phrases never decide the pay cadence',
+  run() {
+    const parse = (salary) => parseGuaranteedCashOffer({ salary, location: 'Austin, TX' });
+    const cases = [
+      ['$60,000 annually, paid twice a month', 60000, 60000],
+      ['$60,000 per year, paid bi-weekly', 60000, 60000],
+      ['$60,000 per year, paid semi-monthly', 60000, 60000],
+      ['$60,000/year, 40 hours weekly', 60000, 60000],
+      ['$60,000/yr; 8 hours/day, 5 days/week', 60000, 60000],
+      ['Salary: $60,000 per year; 40 hours/week', 60000, 60000],
+      ['starting at $80,000 - $100,000 annually', 80000, 100000],
+      ['$2,000 biweekly', 52000, 52000],
+      ['$2,000 every two weeks', 52000, 52000],
+      ['$4,000 semimonthly', 96000, 96000],
+      ['$4,000 semi-monthly', 96000, 96000],
+      ['$1,000/week', 52000, 52000],
+      ['$5,000 per month', 60000, 60000],
+      ['$60,000 per year paid biweekly', 60000, 60000],
+      ['$4,000, twice a month', 96000, 96000],
+      ['$25/hr, 40 hours/week', 52000, 52000],
+      // A word after the amount is not a k/m magnitude: "$3,000 monthly" is not $3,000 million.
+      ['$3,000 monthly', 36000, 36000],
+      ['$3,000 monthly, 40 hours/week', 36000, 36000],
+      ['$5,000 - $6,000 monthly', 60000, 72000],
+      ['$3k monthly', 36000, 36000],
+      ['$120k - 150k', 120000, 150000],
+      ['$1.2M per year', 1200000, 1200000],
+      // A currency code may follow the k/m magnitude.
+      ['$90kCAD', 90000, 90000],
+      ['$100KUSD', 100000, 100000],
+      ['$90k-$110kCAD', 90000, 110000],
+      ['$3,000 mo', 36000, 36000],
+      // A period word counts only when attached to an amount.
+      ['$1,500 per week, 52 weeks a year', 78000, 78000],
+      // A stipend that is the only stated pay is the pay, even for a fixed term.
+      ['$2,000 weekly stipend for a year', 104000, 104000],
+      ['$4,500/month stipend for a year', 54000, 54000],
+      ['$5,000/month, 12 months per year', 60000, 60000],
+      ['$5,000 per month, reviewed yearly', 60000, 60000],
+      ['$3,000 per month, annual leave 20 days', 36000, 36000],
+      ['$2,000 weekly salary for a year', 104000, 104000],
+      ['$70,000 annually, paid every two weeks', 70000, 70000],
+      // An annual figure stated beside a shorter-period figure is the one compared.
+      ['$5,000 per month ($60,000 a year)', 60000, 60000],
+      ['$2,500 bi-weekly, $65,000 annually', 65000, 65000],
+      ['$150k per year or $12.5k monthly', 150000, 150000],
+      // A smaller annual figure beside the pay is an extra, not the pay.
+      ['$4,000 per month, $500 annual stipend', 48000, 48000],
+      ['$6,000 per month, $10,000 annual tuition benefit', 72000, 72000],
+      ['$5,000 per month. Raise of $3,000 annually', 60000, 60000],
+      ['$20/hr full-time, $41,600 annually', 41600, 41600],
+      // A salary-sized figure beside a payroll schedule can only be annual.
+      ['$70,000 salaried, paid every two weeks', 70000, 70000],
+      ['$65,000 - $75,000 paid biweekly', 65000, 75000],
+      ['$90,000 paid weekly', 90000, 90000],
+      ['$1.5 million', 1500000, 1500000],
+      ['$2 million - $3 million', 2000000, 3000000],
+    ];
+    for (const [salary, min, max] of cases) {
+      const r = parse(salary);
+      assert(r.usable && r.min === min && r.max === max, `"${salary}" must parse to ${min}-${max}, got ${r.usable ? `${r.min}-${r.max}` : r.reasonCode}`);
+    }
+    const hourly = parse('$25/hr');
+    assert(hourly.reasonCode === 'hourly_hours_unclear', '$25/hr without hours stays unclear');
+    // A payroll schedule beside a smaller figure with no stated period leaves the period unknown rather than guessed.
+    for (const salary of ['$2,000, paid weekly', '$5,000 paid monthly', '$12,000 paid monthly']) {
+      assert(parse(salary).reasonCode === 'pay_period_unclear', `"${salary}" must be pay_period_unclear, got ${JSON.stringify(parse(salary))}`);
+    }
+    assert(parse('$100 per day, 260 days a year').reasonCode === 'daily_schedule_unclear', 'a daily rate stays unclear even beside "a year"');
+  },
+}, {
+  name: 'A spaced-dash range after "starting at" is a usable range; a lone floor is not',
+  run() {
+    const parse = (salary) => parseGuaranteedCashOffer({ salary, location: 'Austin, TX' });
+    for (const salary of ['starting at $80,000 - $100,000 annually', 'starting at $80,000 to $100,000 annually']) {
+      const r = parse(salary);
+      assert(r.usable && r.min === 80000 && r.max === 100000, `"${salary}" must be a usable 80k-100k range`);
+    }
+    const floor = parse('starting at $80,000');
+    assert(!floor.usable && floor.reasonCode === 'salary_maximum_unstated', 'a lone starting floor must stay unusable');
+  },
+}, {
+
   name: 'Experience requirement ranges preserve grounded minima instead of promoting jobs to an upper-end salary band',
   run() {
     const ladder = [

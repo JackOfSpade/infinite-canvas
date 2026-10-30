@@ -41,8 +41,14 @@ export function JobBoardDoneState({
   onRecombine,
   onClear,
   combining = false,
+  scanning = false,
+  onRefreshOfficialPostings,
+  onCancelOfficialPostingRefresh,
+  officialPostingRefreshing = false,
+  officialPostingProgress = null,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const actionsBusy = combining || scanning || officialPostingRefreshing;
 
   // The merge counts preference exclusions separately, before totalIncoming.
   const mergeInputPostings = summaryCount(totalIncoming);
@@ -107,6 +113,32 @@ export function JobBoardDoneState({
         </>
       )}
 
+      {!locked && (onRefreshOfficialPostings || officialPostingRefreshing) && (
+        <div className="mt-2 flex w-full items-center gap-1">
+          <button
+            onClick={onRefreshOfficialPostings}
+            onPointerDown={event => event.stopPropagation()}
+            disabled={actionsBusy}
+            className="nodrag flex-1 rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-[10px] text-sky-200/90 hover:bg-sky-500/20 disabled:opacity-50"
+            title="Check the official postings for existing cards, including collapsed cards. Keeps applications, notes and scores."
+          >
+            {officialPostingRefreshing
+              ? officialPostingProgress?.recovering ? 'Lookup needs cancellation'
+                : officialPostingProgress?.stopping ? 'Stopping lookup…'
+                : officialPostingProgress?.queued ? 'Lookup queued…'
+                  : `Checking postings ${officialPostingProgress?.completed || 0}/${officialPostingProgress?.total || 0}`
+              : 'Refresh official postings'}
+          </button>
+          {officialPostingRefreshing && (
+            <button onClick={onCancelOfficialPostingRefresh} onPointerDown={event => event.stopPropagation()}
+              disabled={officialPostingProgress?.stopping}
+              className="nodrag rounded-full bg-white/10 px-2 py-1 text-[10px] text-white/60 disabled:opacity-50">
+              Cancel
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Active filter summary pills (irrelevant while stale — cards are hidden) */}
       <div className="flex flex-wrap justify-center gap-1 mt-1 min-h-[18px]">
         {!stale && sourceFilter && (
@@ -147,7 +179,7 @@ export function JobBoardDoneState({
             <button
               onClick={onRecombine}
               onPointerDown={(e) => e.stopPropagation()}
-              disabled={combining}
+              disabled={actionsBusy}
               className={`nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full disabled:opacity-50 text-[10px] transition-colors border ${
                 stale
                   ? 'bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border-amber-500/30'
@@ -155,16 +187,16 @@ export function JobBoardDoneState({
               }`}
               title={canReplaceWithEmpty
                 ? 'Replace the hidden previous results with the completed searches’ empty result'
-                : 'Reuse saved scored searches, refresh salary research, and rebuild the board without scraping or scoring again'}
+                : 'Reuse saved scored searches, recheck outdated official postings, refresh salary research, and rebuild the board without another job-board search or scoring pass'}
             >
-              <RefreshCw size={9} className={combining ? 'animate-spin' : ''} />
-              {combining ? 'Combining…' : (canReplaceWithEmpty ? 'Clear stale results' : 'Re-combine')}
+              <RefreshCw size={9} className={combining || scanning ? 'animate-spin' : ''} />
+              {combining ? 'Combining…' : scanning ? 'Scanning…' : (canReplaceWithEmpty ? 'Clear stale results' : 'Re-combine')}
             </button>
           )}
           <button
             onClick={onClear}
             onPointerDown={(e) => e.stopPropagation()}
-            disabled={combining}
+            disabled={actionsBusy}
             className="nodrag flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/70 disabled:opacity-50 text-[10px] transition-colors"
             title="Clear the combined board (keeps the connected search modules)"
           >

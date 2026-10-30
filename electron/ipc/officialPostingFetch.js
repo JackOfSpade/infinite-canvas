@@ -2,10 +2,13 @@ import https from 'node:https';
 import dns from 'node:dns/promises';
 import net from 'node:net';
 import { OFFICIAL_FETCH_FAILURE_REASONS, officialHttpsUrl } from './officialPostingFields.js';
+import { officialPostingResourceHeaders } from './officialPostingResourceHeaders.js';
+import { normalizeOfficialPostingPublicSearchHeaders } from './officialPostingReadOnlySearch.js';
 
 export { OFFICIAL_FETCH_FAILURE_REASONS } from './officialPostingFields.js';
 
 export const OFFICIAL_FETCH_MAX_BYTES = 3 * 1024 * 1024;
+export const OFFICIAL_FETCH_SCRIPT_MAX_BYTES = 8 * 1024 * 1024;
 export const OFFICIAL_FETCH_TIMEOUT_MS = 15_000;
 export const OFFICIAL_FETCH_MAX_REDIRECTS = 5;
 export const OFFICIAL_FETCH_HOP_CAPABILITY = Symbol.for('infinite-canvas.official-posting-fetch-hop-hooks');
@@ -99,7 +102,7 @@ async function pinnedAddress(url, lookup) {
 // the request lookup hook returns only the already validated address. A second
 // DNS lookup cannot swap a public answer for an internal address.
 export async function fetchOfficialPosting(value, {
-  lookup = dns.lookup, request = https.request, now = Date.now, signal, hopHooks,
+  lookup = dns.lookup, request = https.request, now = Date.now, signal, hopHooks, resource = false, resourceHeaders, publicSearchHeaders, upgradeSameHostRedirects = false,
 } = {}) {
   let deadline = now() + OFFICIAL_FETCH_TIMEOUT_MS;
   const controller = new AbortController();
@@ -166,7 +169,9 @@ export async function fetchOfficialPosting(value, {
           req = request(url, {
             method: 'GET', agent: false,
             headers: { Accept: 'text/html, application/json, application/ld+json, application/xml, text/xml, application/rss+xml',
-              'Accept-Encoding': 'identity', 'User-Agent': 'InfiniteCanvas-OfficialPosting/1.0' },
+              'Accept-Encoding': 'identity', 'User-Agent': 'InfiniteCanvas-OfficialPosting/1.0',
+              ...(resource === true ? officialPostingResourceHeaders(resourceHeaders) : {}),
+              ...(resource === true ? normalizeOfficialPostingPublicSearchHeaders(url.href, publicSearchHeaders) || {} : {}) },
             lookup(_hostname, options, callback) {
               if (typeof options === 'function') { callback = options; options = {}; }
               if (options?.all) callback(null, [pinned]); else callback(null, pinned.address, pinned.family);
@@ -181,24 +186,37 @@ export async function fetchOfficialPosting(value, {
               const location = res.headers.location;
               if (!location || redirects >= OFFICIAL_FETCH_MAX_REDIRECTS) { fail(new OfficialPostingFetchError('unsafe-url')); return; }
               let next;
-              try { next = fetchUrl(new URL(location, url).href); } catch (error) { fail(error); return; }
+              try {
+                const target = new URL(location, url);
+                // Some corporate sites emit legacy HTTP regional redirects.
+                // A trusted discovery session may request the SAME host/path
+                // over TLS instead. An HTTP transfer is never made.
+                if (upgradeSameHostRedirects === true && target.protocol === 'http:' && target.hostname === url.hostname
+                  && !target.username && !target.password && (!target.port || target.port === '80')) {
+                  target.protocol = 'https:'; target.port = '';
+                }
+                next = fetchUrl(target.href);
+              } catch (error) { fail(error); return; }
               finished = true; cleanup(); res.destroy(); req?.destroy(); resolve({ redirect: next, statusCode: status }); return;
             }
             if (status !== 200) { fail(new OfficialPostingFetchError(status === 404 || status === 410 ? 'closed' : 'fetch-failed', {
               statusCode: status, retryAfter: String(res.headers['retry-after'] || ''),
             })); return; }
             const contentType = String(res.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-            if (!/^(?:text\/(?:html|xml)|application\/(?:json|ld\+json|xml|rss\+xml|atom\+xml|xhtml\+xml))$/u.test(contentType)
+            const scriptResource = resource === true && /^(?:text\/(?:javascript|ecmascript)|application\/(?:javascript|x-javascript|ecmascript))$/u.test(contentType);
+            const maxBytes = scriptResource ? OFFICIAL_FETCH_SCRIPT_MAX_BYTES : OFFICIAL_FETCH_MAX_BYTES;
+            if ((!/^(?:text\/(?:html|xml)|application\/(?:json|ld\+json|xml|rss\+xml|atom\+xml|xhtml\+xml))$/u.test(contentType)
+              && !(resource === true && /^(?:text\/(?:css|javascript|ecmascript|plain|x-component)|application\/(?:javascript|x-javascript|ecmascript)|image\/svg\+xml)$/u.test(contentType)))
               || (res.headers['content-encoding'] && res.headers['content-encoding'] !== 'identity')) {
               fail(new OfficialPostingFetchError('unsupported-content-type')); return;
             }
-            if (Number(res.headers['content-length']) > OFFICIAL_FETCH_MAX_BYTES) { fail(new OfficialPostingFetchError('oversize')); return; }
+            if (Number(res.headers['content-length']) > maxBytes) { fail(new OfficialPostingFetchError('oversize')); return; }
             const chunks = []; let bytes = 0;
             res.on('data', chunk => {
               if (finished) return;
               const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
               bytes += buffer.length;
-              if (bytes > OFFICIAL_FETCH_MAX_BYTES) { fail(new OfficialPostingFetchError('oversize')); return; }
+              if (bytes > maxBytes) { fail(new OfficialPostingFetchError('oversize')); return; }
               chunks.push(buffer);
             });
             res.on('end', () => {
@@ -206,7 +224,10 @@ export async function fetchOfficialPosting(value, {
               let body;
               try { body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks)); }
               catch { fail(new OfficialPostingFetchError('invalid-text')); return; }
-              if (hasUnsafeTextControl(body)) { fail(new OfficialPostingFetchError('invalid-text')); return; }
+              // Valid JavaScript bundles may contain literal control characters
+              // inside string/regex literals. They are executable resources,
+              // never posting text; document/JSON admission remains strict.
+              if (hasUnsafeTextControl(body) && !scriptResource) { fail(new OfficialPostingFetchError('invalid-text')); return; }
               finished = true; cleanup(); resolve({ body, url: url.href, sourceUrl: url.href, contentType, statusCode: status, bytes });
             });
           });

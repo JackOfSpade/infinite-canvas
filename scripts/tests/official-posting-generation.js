@@ -1,3 +1,4 @@
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -9,6 +10,9 @@ import { createOfficialPostingPrepareSemaphore, getPreparedOfficialPosting, prep
 import { officialPostingSemanticInputHash, officialPostingSemanticSourceHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { extractOfficialPostingCandidates } from '../../electron/ipc/officialPostingExtractors.js';
 import { abortNodeTasksAndWait, beginSenderQuitPause, releaseSenderQuitPause, snapshotActiveNodeTasks } from '../../electron/ipc/ipcUtils.js';
+import { refreshOfficialPostingEntries, validateOfficialPostingRefreshArgs, registerOfficialPostingRefreshHandler } from '../../electron/ipc/officialPostingRefresh.js';
+import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { __projectLocalApplicationJobForAcceptanceHarness as projectProductionJob, __freezeOfficialPostingJobForTests } from '../../electron/ipc/localAiApplication.js';
 
 const text = 'Requirements include experience building reliable dispatch tools and maintaining reporting workflows. Engineers design clear interfaces for operations teams and validate changes through careful review. The role improves data quality across scheduled pipelines and documents decisions for partner groups. You will collaborate with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving tools that support teams use every day.';
 const place = 'Lakeview, Ontario, Canada';
@@ -50,6 +54,222 @@ function semanticPosting(original, body = page(), extra = {}) {
 }
 
 export default [
+  {
+    name: 'production refresh preparation and queue projections retain identical bounded remote requisition and description source facts',
+    async run() {
+      const original = job({ description: text, remote: true, workMode: 'remote', remoteCountry: 'Canada',
+        remoteRegion: 'Ontario', identifier: { '@type': 'PropertyValue', value: 'synthetic-req-123' },
+        requisitionId: 'synthetic-req-123', hiringOrganization: { name: 'Northwind Labs' },
+        locations: [{ display: 'Remote, Canada', remote: true, remoteCountry: 'Canada' }],
+        employmentType: ['FULL_TIME'], seniority: 'Intermediate', sourceUrl: 'https://mirror.example/jobs/one' });
+      const expected = projectProductionJob(original);
+      const captures = [];
+      const resolve = async rows => {
+        captures.push(structuredClone(rows[0]));
+        return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company,
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'] } })) };
+      };
+      const store = { find: async () => null };
+      await refreshOfficialPostingEntries({ nodeId: 'source-board', manualAiRunId: 'refresh-source-fields',
+        entries: [{ cardId: 'source-card', job: original }] }, { store, resolve, bridgeStatus: status, projectJob: projectProductionJob });
+      const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, resolve, bridgeStatus: status,
+        projectJob: projectProductionJob, listingProbe: { probe: async () => ({ unknown: 'synthetic-unavailable' }) } });
+      const receipt = getPreparedOfficialPosting(prepared.resolutionId, expected);
+      assert.ok(receipt);
+      const frozen = __freezeOfficialPostingJobForTests(original, receipt);
+      for (const candidate of [...captures, receipt.scrapedJob, frozen]) {
+        for (const field of ['description', 'remote', 'workMode', 'remoteCountry', 'remoteRegion', 'identifier', 'requisitionId',
+          'hiringOrganization', 'locations', 'employmentType', 'seniority', 'sourceUrl']) assert.deepEqual(candidate[field], expected[field], field);
+        assert.equal(officialPostingSemanticInputHash(candidate), officialPostingSemanticInputHash(expected));
+      }
+      assert.equal(captures.length, 2);
+      assert.throws(() => projectProductionJob({ ...original, description: 'x'.repeat(80_001) }), /size limit/u);
+      assert.throws(() => projectProductionJob({ ...original, remote: 'true' }), /invalid type/u);
+      assert.throws(() => projectProductionJob({ ...original, identifier: { value: () => 'unsafe' } }), /serializable/u);
+      const cycle = {}; cycle.value = cycle;
+      assert.throws(() => projectProductionJob({ ...original, hiringOrganization: cycle }), /serializable/u);
+    },
+  },
+  {
+    name: 'nonforced refresh cheaply reuses only host-bound current semantic verification and researches edited legacy or failed-recheck rows',
+    async run() {
+      for (const mode of ['current', 'edited', 'legacy', 'failed-recheck']) await withStore(async store => {
+        const original = job();
+        const saved = mode === 'legacy' ? posting() : semanticPosting(original);
+        await store.save(original, { officialPosting: saved, description: text });
+        const current = { ...original, ...(mode === 'edited' ? { snippet: `${original.snippet} Additional current responsibility.` } : {}),
+          officialPosting: { ...saved, ...(mode === 'failed-recheck' ? { trail: [...saved.trail, 'reverify-failed', 'fetch-failed'] } : {}) } };
+        let fetches = 0; let research = 0;
+        const result = await refreshOfficialPostingEntries({ nodeId: 'board-cache', manualAiRunId: `refresh-cache:${mode}`, force: false,
+          entries: [{ cardId: 'cache-card', job: current }] }, { store, bridgeStatus: status,
+          fetch: async () => { fetches++; throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
+          callRaw: async prompt => { research++; return prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
+            .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'); },
+        });
+        assert.equal(result.entries[0].officialPosting.sourceUrl, officialUrl);
+        if (mode === 'current') { assert.equal(fetches, 0); assert.equal(research, 0); }
+        else {
+          assert.ok(fetches > 0, mode); assert.ok(research > 0, mode);
+          assert.ok(result.entries[0].officialPosting.trail.includes('reverify-failed'), mode);
+        }
+      });
+    },
+  },
+  {
+    name: 'nonforced refresh reuses a current semantic miss only until its host cache TTL expires',
+    async run() {
+      let clock = Date.UTC(2030, 0, 1);
+      await withStore(async store => {
+        const original = job();
+        const miss = { level: 'L5', outcome: 'not-found', employer: original.company,
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'] };
+        await store.save(original, { officialPosting: miss });
+        let research = 0;
+        const refresh = () => refreshOfficialPostingEntries({ nodeId: 'board-miss-cache', manualAiRunId: 'refresh-miss-cache', force: false,
+          entries: [{ cardId: 'miss-card', job: { ...original, officialPosting: miss } }] }, { store, now: () => clock, bridgeStatus: status,
+          fetch: async () => { throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
+          callRaw: async prompt => { research++; return prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
+            .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'); } });
+        assert.ok((await refresh()).entries[0].officialPosting.trail.includes('recent-miss'));
+        assert.equal(research, 0);
+        clock += 24 * 60 * 60_000;
+        assert.equal((await refresh()).entries[0].officialPosting.trail.includes('recent-miss'), false);
+        assert.equal(research, 1);
+      }, { now: () => clock });
+    },
+  },
+  {
+    name: 'bulk official refresh preserves duplicate cards, source facts and order while using isolated leads and the shared semantic pipeline',
+    async run() {
+      const first = job({ description: text, remote: true, workMode: 'remote', remoteCountry: 'Canada',
+        officialPosting: posting({ sourceUrl: 'https://card-lead.test/jobs/one' }), score: 85 });
+      const second = job({ title: 'Product Engineer', url: 'https://mirror.example/jobs/two', sourceJobKey: 'two',
+        officialPosting: posting({ sourceUrl: 'https://card-lead.test/jobs/two' }) });
+      const request = { nodeId: 'board-refresh', manualAiRunId: 'official-refresh:one', entries: [
+        { cardId: 'card-a', job: first }, { cardId: 'card-b', job: second }, { cardId: 'card-c', job: first },
+      ] };
+      const before = structuredClone(request); const progress = [];
+      const refreshed = await refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => null },
+        projectJob: row => ({ title: row.title, company: row.company, location: row.location, snippet: row.snippet, url: row.url, sourceJobKey: row.sourceJobKey }),
+        resolve: async (rows, options) => {
+          assert.equal(options.semanticMatching, true); assert.equal(options.bypassCache, true);
+          // Production refresh lets ChatGPT read the pages: no host fetch session is opened.
+          assert.equal(options.fetchSession, undefined);
+          assert.deepEqual(options.candidateUrlsByRow, [['https://card-lead.test/jobs/one', officialUrl], ['https://card-lead.test/jobs/two', officialUrl], ['https://card-lead.test/jobs/one', officialUrl]]);
+          assert.equal(rows[0].description, text); assert.equal(rows[0].remote, true);
+          assert.equal(rows[0].remoteCountry, 'Canada'); assert.equal(rows[0].workMode, 'remote');
+          for (const row of rows) { assert.equal(row.officialPosting, undefined); assert.equal(row.score, undefined); }
+          options.onProgress({ completed: 2 });
+          return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company,
+            semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'] } })), telemetry: { total: rows.length } };
+        }, onProgress: value => progress.push(value) });
+      assert.deepEqual(refreshed.entries.map(entry => entry.cardId), ['card-a', 'card-b', 'card-c']);
+      assert.deepEqual(Object.keys(refreshed).sort(), ['entries', 'telemetry']);
+      assert.deepEqual(refreshed.telemetry, { total: 3 });
+      assert.deepEqual(progress.map(value => value.completed), [0, 2, 3]);
+      assert.ok(progress.every(value => value.nodeId === request.nodeId && value.manualAiRunId === request.manualAiRunId && value.total === 3));
+      assert.deepEqual(request, before, 'refresh cannot mutate source jobs or allocate Generate receipts');
+    },
+  },
+  {
+    name: 'official refresh retains host-bound historical verification on transient failure but never trusts a foreign cache or replaces a proved close',
+    async run() {
+      const original = job();
+      const request = { nodeId: 'board-refresh', manualAiRunId: 'official-refresh:failure', entries: [{ cardId: 'card-a', job: original }] };
+      for (const legacy of [false, true]) {
+        const prior = { aliases: officialPostingAliases(original), officialPosting: legacy ? posting() : semanticPosting(original) };
+        const refreshed = await refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => prior },
+          resolve: async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'failed', employer: row.company,
+            trail: ['bridge-research', 'fetch-failed'], fetchFailures: [{ url: officialUrl, code: 'fetch-failed', reason: 'access-denied', statusCode: 403 }] } })) }) });
+        assert.equal(refreshed.entries[0].officialPosting.sourceUrl, officialUrl);
+        assert.ok(refreshed.entries[0].officialPosting.trail.includes('reverify-failed'));
+        assert.equal(refreshed.entries[0].officialPosting.fetchFailures[0].statusCode, 403);
+        assert.equal(refreshed.entries[0].postedBy, original.company);
+      }
+      const closed = await refreshOfficialPostingEntries(request, { bridgeStatus: status,
+        store: { find: async () => ({ aliases: officialPostingAliases(original), officialPosting: semanticPosting(original) }) },
+        resolve: async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'closed', employer: row.company,
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: ['bridge-research', 'closed', 'semantic-match-v1'] } })) }) });
+      assert.equal(closed.entries[0].officialPosting.outcome, 'closed');
+      assert.equal(closed.entries[0].officialPosting.sourceUrl, undefined);
+      const foreign = await refreshOfficialPostingEntries(request, { bridgeStatus: status,
+        store: { find: async () => ({ aliases: officialPostingAliases(job({ title: 'Unrelated Supervisor' })), officialPosting: posting() }) },
+        resolve: async (rows, options) => { assert.deepEqual(options.priorOfficialRecords, [null]); assert.deepEqual(options.candidateUrlsByRow, [[]]);
+          return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'failed', employer: row.company, trail: ['fetch-failed'] } })) }; } });
+      assert.equal(foreign.entries[0].officialPosting.level, 'L5');
+    },
+  },
+  {
+    name: 'official refresh fails visibly before publishing unavailable, incomplete, reordered or unproved results',
+    async run() {
+      const request = { nodeId: 'board-refresh', manualAiRunId: 'official-refresh:invalid', entries: [{ cardId: 'card-a', job: job() }] };
+      let calls = 0;
+      await assert.rejects(refreshOfficialPostingEntries(request, { bridgeStatus: () => ({ enabled: false }),
+        resolve: async () => { calls++; }, store: { find: async () => null } }), error => error.code === 'OFFICIAL_POSTING_RESEARCH_UNAVAILABLE');
+      assert.equal(calls, 0);
+      for (const result of [() => ({ jobs: [] }), rows => ({ jobs: [{ ...rows[0], title: 'Foreign role', officialPosting: { level: 'L5', outcome: 'failed', employer: rows[0].company, trail: ['failed'] } }] }),
+        rows => ({ jobs: [{ ...rows[0], officialPosting: posting() }] }), rows => ({ jobs: [{ ...rows[0], officialPosting: { level: 'L5', outcome: 'not-found', employer: rows[0].company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'] } }] })]) {
+        await assert.rejects(refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => null }, resolve: async rows => result(rows) }),
+          error => /^OFFICIAL_POSTING_REFRESH_(?:INCOMPLETE|INVALID)$/u.test(error.code));
+      }
+    },
+  },
+  {
+    name: 'official refresh validates bounded serializable inputs and distinct card ownership',
+    run() {
+      const request = { nodeId: 'board-refresh', manualAiRunId: 'official-refresh:validation', entries: [{ cardId: 'card-a', job: job() }] };
+      validateOfficialPostingRefreshArgs(request);
+      for (const invalid of [{ ...request, entries: [] }, { ...request, entries: [...request.entries, ...request.entries] },
+        { ...request, nodeId: {} }, { ...request, manualAiRunId: 'bad run' }, { ...request, force: 'yes' },
+        { ...request, entries: [{ cardId: 'card-a', job: { title: 'x'.repeat(512 * 1024) } }] },
+        { ...request, entries: [{ cardId: 'card-a', job: { invalid: () => {} } }] },
+        { ...request, entries: Array.from({ length: 129 }, (_, index) => ({ cardId: `card-${index}`, job: job() })) }]) {
+        assert.throws(() => validateOfficialPostingRefreshArgs(invalid), TypeError);
+      }
+      const cycle = {}; cycle.self = cycle;
+      assert.throws(() => validateOfficialPostingRefreshArgs({ ...request, entries: [{ cardId: 'card-a', job: cycle }] }), TypeError);
+    },
+  },
+  {
+    name: 'bulk refresh IPC registers every card owner, emits scoped progress and cancels on card deletion and quit pause',
+    async run() {
+      const sender = new EventEmitter(); sender.id = 9081; sender.isDestroyed = () => false;
+      const events = []; sender.send = (...values) => events.push(values);
+      const previous = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
+      const entered = deferred();
+      try {
+        registerOfficialPostingRefreshHandler({ projectJob: row => ({ ...row }), bridgeStatus: status, store: { find: async () => null },
+          resolve: async (_rows, { signal, onProgress }) => { onProgress({ completed: 2 }); entered.resolve();
+            return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); } });
+        const invoke = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
+        const request = { nodeId: 'board-refresh-many', manualAiRunId: 'official-refresh:owners',
+          entries: Array.from({ length: 12 }, (_, index) => ({ cardId: `refresh-card-${index}`, job: job() })) };
+        const pending = invoke({ sender }, request); await entered.promise;
+        assert.equal(snapshotActiveNodeTasks(sender.id).length, 13);
+        assert.ok(events.some(([name, value]) => name === 'official-posting-refresh-progress' && value.completed === 2 && value.total === 12
+          && value.manualAiRunId === request.manualAiRunId && value.nodeId === request.nodeId));
+        await abortNodeTasksAndWait('refresh-card-11', sender);
+        assert.equal((await pending).cancelled, true);
+        assert.deepEqual(snapshotActiveNodeTasks(sender.id), []);
+        beginSenderQuitPause(sender);
+        assert.equal((await invoke({ sender }, request)).errorCode, 'APP_QUIT_PAUSED');
+      } finally { releaseSenderQuitPause(sender); if (previous) electronPkg.ipcMain.handle('refresh-official-postings', previous); }
+    },
+  },
+  {
+    name: 'shared official resolver keeps per-row refresh leads isolated across discovery and research passes',
+    async run() {
+      const rows = [job({ title: 'Engineer One', sourceJobKey: 'one' }), job({ title: 'Engineer Two', sourceJobKey: 'two', url: 'https://mirror.example/jobs/two' })];
+      const calls = [];
+      const result = await resolveOfficialPostings(rows, { store: { find: async () => null },
+        semanticMatching: false, candidateUrls: ['https://shared.test/careers'], candidateUrlsByRow: [['https://one.test/job'], ['https://two.test/job']],
+        resolve: async (row, options) => { calls.push({ title: row.title, leads: options.candidateUrls }); return { officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: ['fetch-failed'] } }; },
+        callRaw: async prompt => [...prompt.matchAll(/Requested ids: ([a-f0-9, ]+)\./gu)][0][1].split(', ').map(id =>
+          `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n') });
+      assert.equal(result.jobs.length, 2); assert.equal(calls.length, 4);
+      for (const call of calls) assert.deepEqual(call.leads, ['https://shared.test/careers', call.title === 'Engineer One' ? 'https://one.test/job' : 'https://two.test/job']);
+    },
+  },
   {
     name: 'fresh official closure refuses stale board-open and alternate links even with a generation override',
     async run() {
@@ -110,7 +330,7 @@ export default [
           assert.equal(options.priorOfficialRecords, undefined);
           assert.equal(rows[0].officialPosting, undefined, 'renderer official facts cannot reach fresh identity authority');
           return { jobs: rows.map(row => ({ ...row,
-            officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: ['bridge-research'] } })) };
+            officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'] } })) };
         },
       });
       assert.equal(calls, 1);
@@ -172,7 +392,7 @@ export default [
         const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-cached-miss',
           listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
         await store.save(original, { officialPosting: { level: 'L5', outcome: 'not-found', employer: original.company,
-          trail: ['bridge-research', 'semantic-match-v1'],
+          trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'],
           semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original) } } });
         let calls = 0;
         const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
@@ -217,7 +437,7 @@ export default [
       const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
         store: { find: async () => null }, bridgeStatus: () => ({ ...status(), chat: { pool: { active: false } } }),
         resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
-          officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: ['bridge-research', 'comparative-none'] } })) }),
+          officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'comparative-none'] } })) }),
       });
       assert.equal(prepared.listingCheck.action, 'proceed');
       assert.equal(prepared.officialPosting.level, 'L5');
@@ -400,7 +620,7 @@ export default [
     async run() {
       let time = Date.parse('2026-01-01T00:00:00Z');
       await withStore(async store => {
-        const original = job(); await store.save(original, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: ['bridge-research'] } });
+        const original = job(); await store.save(original, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'] } });
         let calls = 0; const order = [];
         const options = { store: { ...store, find: async row => { order.push('store'); return store.find(row); } }, now: () => time,
           bridgeStatus: () => { order.push('status'); return status(); }, slots: { acquire: async () => { order.push('slot'); return () => {}; } },

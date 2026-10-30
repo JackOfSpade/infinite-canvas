@@ -7,6 +7,7 @@ import { JSDOM } from 'jsdom';
 import { formatOriginalJobListingMarkdown, ORIGINAL_JOB_LISTING_BODY_HEADING } from '../../electron/ipc/applicationBundle.js';
 import { buildResumeDocument, normaliseResumeDownloadBundle } from '../../electron/ipc/resumeHtml.js';
 import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
 import { captureInterviewPreparationBundle } from '../../electron/ipc/interviewPreparation.js';
 import { applicationDockRequest, brokenApplicationDockRequest, workingApplicationDockRequest } from '../../src/utils/applicationHandoffDock.js';
@@ -210,14 +211,14 @@ export default [
     name: 'Official posting bundle: completed no-match, ambiguity and closure stay distinct from interrupted research',
     run() {
       for (const [outcome, trail, state, label] of [
-        ['not-found', ['bridge-research'], 'not-found', 'No exact official posting found'],
-        ['ambiguous', ['comparative-disagree'], 'ambiguous', 'Several official postings match'],
+        ['not-found', ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], 'not-found', 'No exact official posting found'],
+        ['ambiguous', ['comparative-disagree', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], 'ambiguous', 'Several official postings match'],
         ['closed', ['closed'], 'closed', 'Official posting closed'],
       ]) {
         const officialPosting = { level: 'L5', outcome, employer: 'Northwind', trail };
         const status = officialPostingLookupStatus(officialPosting);
         assert.equal(status.state, state); assert.equal(status.label, label); assert.equal(status.retryable, false);
-        assert.equal(officialPostingDisplay({ ...job, officialPosting }).statusLabel, label);
+        assert.equal(officialPostingDisplay({ ...job, officialPosting }).statusLabel, 'Outdated lookup · check again');
         assert.ok(formatOriginalJobListingMarkdown({ ...job, officialPosting }, { audience: 'bundle' }).includes(label));
         assert.deepEqual(normaliseResumeDownloadBundle({ officialPosting }).officialPosting, officialPosting);
       }

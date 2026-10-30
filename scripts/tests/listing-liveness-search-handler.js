@@ -9,6 +9,7 @@ import { finalizeListingEvidence, LISTING_LIVENESS_RULES } from '../../electron/
 import { memoListingVerdict, recordListingEvidence, recordOfficialExpiryCandidates } from '../../electron/ipc/listingLivenessStore.js';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 
 const AT = '2026-10-25T12:00:00.000Z';
 const DESCRIPTION = 'Build reliable platform services, review incidents, and document service recovery with the engineering team. '.repeat(8);
@@ -137,7 +138,7 @@ export default [
         const { result, telemetry } = await runSearch({ canvasFilePath, careerSnapshotId,
           nodeId: 'synthetic-expiry-confirmation-hub', rows,
           officialPosting: target => ({ level: 'L5', outcome: 'not-found', employer: target.company,
-            trail: ['bridge-research', 'closed'] }), expiryCandidatesForRow: candidateFor,
+            trail: ['bridge-research', 'closed', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] }), expiryCandidatesForRow: candidateFor,
           callListingLiveness: async (_prompt, options) => {
             calls++;
             return options.responseValidator({ rows: states.map((state, index) => ({ id: `r${index + 1}`,

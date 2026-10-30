@@ -10,6 +10,7 @@ import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPos
 import { CONSTANTS } from '../../electron/ipc/handoffBridge/constants.js';
 import { buildOfficialPostingMatchRequest } from '../../electron/ipc/officialPostingBridge.js';
 import { bridgeComparisonAvailable } from '../../electron/ipc/handoffBridge/bridgeAvailability.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 
 const description = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
 const location = 'Lakeview, Ontario, Canada';
@@ -275,7 +276,7 @@ export default [
     },
   },
   {
-    name: 'semantic cache partition rechecks legacy found and misses and changed source evidence without rewriting saved records',
+    name: 'semantic cache partition rechecks pre-upgrade misses despite matching input hashes without rewriting saved records',
     async run() {
       const jobs = Array.from({ length: 5 }, (_, index) => row(index + 1));
       const values = [metadata(sourceUrl(1)),
@@ -289,8 +290,8 @@ export default [
       const before = JSON.stringify({ jobs, records });
       const store = { find: async job => records[jobs.indexOf(job)], save: () => { throw new Error('Partition must not rewrite records'); } };
       const partition = await partitionOfficialPostingRows(jobs, { store });
-      assert.deepEqual(partition.unresolvedIndices, [0, 1, 4]);
-      assert.equal(partition.settledTelemetry.total, 2);
+      assert.deepEqual(partition.unresolvedIndices, [0, 1, 3, 4], 'the prior semantic input hash does not waive ownership-discovery migration');
+      assert.equal(partition.settledTelemetry.total, 1);
       assert.equal(JSON.stringify({ jobs, records }), before);
     },
   },
@@ -422,7 +423,7 @@ export default [
     async run() {
       let time = Date.parse('2026-01-01T00:00:00Z');
       await withStore(async store => {
-        const job = row(); const old = await store.save(job, { officialPosting: { level: 'L5', outcome: 'not-found', employer: job.company, trail: ['bridge-research'] } });
+        const job = row(); const old = await store.save(job, { officialPosting: { level: 'L5', outcome: 'not-found', employer: job.company, trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] } });
         const leads = new Map([[officialPostingRequestId(job), sourceUrl(1)]]); let fetches = 0; let handoffs = 0;
         time += 1000;
         const recent = await resolveOfficialPostings([job], { store, now: () => time, fetch: async () => { fetches++; throw new Error('cached miss'); },

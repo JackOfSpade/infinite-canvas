@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { runInNewContext } from 'node:vm';
-import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
-import { beginOfficialPostingPreparation, projectOfficialPostingGenerationJob,
+import { EventEmitter } from 'node:events';
+import electronPkg from 'electron';
+import { officialPostingDisplay, officialPostingNeedsRefresh } from '../../src/utils/officialPostingDisplay.js';
+import { beginOfficialPostingPreparation, getOfficialPostingPreparation, projectOfficialPostingGenerationJob,
   officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh } from '../../src/utils/officialPostingPreparation.js';
-import { OFFICIAL_POSTING_LABELS, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { OFFICIAL_POSTING_LABELS, normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import {
-  hasLinkedLocalApplicationOutput, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision,
+  hasLinkedLocalApplicationOutput, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision,
   replacedLocalApplicationForCleanup,
 } from '../../src/utils/localAiApplicationLifecycle.js';
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
@@ -17,6 +20,10 @@ import { APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs } from '../..
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.js';
 import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId } from '../../src/utils/jobHubManualAiOwnership.js';
+import { registerOfficialPostingRefreshHandler } from '../../electron/ipc/officialPostingRefresh.js';
+import { abortNodeTasksAndWait, snapshotActiveNodeTasks } from '../../electron/ipc/ipcUtils.js';
+import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
+import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const flushMicrotasks = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
@@ -76,7 +83,7 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     getDismissedApplicationBundles: () => new Set(), hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision,
     queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup,
     requestApplicationHandoffFocus() {}, requestApplicationHandoffRefresh() {},
-    normalizeJobListingExternalUrl, beginOfficialPostingPreparation, projectOfficialPostingGenerationJob,
+    normalizeJobListingExternalUrl, beginOfficialPostingPreparation, getOfficialPostingPreparation, projectOfficialPostingGenerationJob,
     officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh, setTimeout: fn => { fn(); return 0; },
     acquireModuleRun: options => { leases++; laneLabel = options.label; return queue.acquireModuleRun(options); },
   };
@@ -85,7 +92,248 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     deleteCard: () => { card = null; } };
 }
 
+function lookupHarness({ refresh, data = row({ careerSnapshotId: undefined }) } = {}) {
+  const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+  const start = source.indexOf('  const refreshOfficialPosting = useCallback(');
+  const end = source.indexOf('\n  const generateApplication = useCallback(', start);
+  assert.ok(start > 0 && end > start);
+  let card = { id: 'lookup-card', type: 'jobcard', data };
+  let canvas = '/synthetic/lookup-canvas.json';
+  const board = { id: 'board', type: 'jobboard', data: {} };
+  const calls = []; const completed = []; const cancelled = []; const updates = []; const toasts = [];
+  const context = { useCallback: fn => fn, applicationSubmissionRef: { current: false },
+    hasApplicationRun: false, localLookupPending: false, effectiveLock: false,
+    idRef: { current: 'lookup-card' }, generateId: () => 'synthetic-lookup-run',
+    getLiveNode: id => id === 'lookup-card' ? card : id === 'board' ? board : null,
+    nav: { getCurrentFile: () => canvas }, isMountedRef: { current: true }, addToast: value => toasts.push(value),
+    projectOfficialPostingGenerationJob, officialPostingPreparationSourceKey, beginOfficialPostingPreparation,
+    getOfficialPostingPreparation, normalizeOfficialPosting, officialPostingLookupStatus, localApplicationBlocksOfficialPostingLookup, EventLogger: { log() {} },
+    updateGlobal: (_id, patch) => { updates.push(copy(patch)); card.data = { ...card.data, ...patch }; },
+    window: { electronAPI: {
+      refreshOfficialPostings: async args => { calls.push(copy(args)); return typeof refresh === 'function' ? refresh(args) : refresh; },
+      completeNonApiAiRun: async id => { completed.push(id); },
+      cancelNodeTaskAndWait: async (...args) => { cancelled.push(args); return { settled: true }; },
+      queueLocalApplication: () => { throw new Error('A posting check must not generate an application'); },
+    } },
+  };
+  return { callback: runInNewContext(`${source.slice(start, end)}\nrefreshOfficialPosting;`, context), context,
+    calls, completed, cancelled, updates, toasts, board, get card() { return card; },
+    claim: () => getOfficialPostingPreparation(canvas, 'lookup-card'),
+    deleteCard: () => { card = null; }, changeCanvas: () => { canvas = '/synthetic/other-canvas.json'; },
+  };
+}
+
 export default [
+  {
+    name: 'Judge citations appear in rank order on uncertain and retained postings, never as generic leads',
+    run() {
+      const alternatives = Array.from({ length: 4 }, (_, index) => ({ url: `https://careers.example.test/candidate-${index}`,
+        title: `Unconfirmed · cited by ${4 - index} of 4 judges` }));
+      const expected = alternatives.slice(0, 3).map((item, index) => ({ ...item, rank: index + 1 }));
+      const ambiguous = posting({ outcome: 'ambiguous', alternatives });
+      assert.deepEqual(officialPostingDisplay(row({ officialPosting: ambiguous })).candidateLinks, expected);
+      const retained = posting({ alternatives, trail: ['semantic-match-v1', 'source-unproven', 'reverify-failed'],
+        semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) } });
+      const retainedDisplay = officialPostingDisplay(row({ officialPosting: retained }));
+      assert.equal(retainedDisplay.lookupState, 'verified');
+      assert.deepEqual(retainedDisplay.candidateLinks, expected);
+      const generic = [{ url: 'https://careers.example.test/generic', title: 'Northwind posting lead' }];
+      assert.deepEqual(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: generic }) })).candidateLinks, []);
+      assert.deepEqual(officialPostingDisplay(row({ officialPosting: posting() })).candidateLinks, []);
+    },
+  },
+  {
+    name: 'official-posting freshness marks legacy decisions for recheck without discarding historical verified links',
+    run() {
+      const proof = { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) };
+      const legacyMiss = row({ officialPosting: posting({ level: 'L5', outcome: 'not-found', trail: ['bridge-research'] }) });
+      assert.equal(officialPostingNeedsRefresh(legacyMiss), true);
+      assert.equal(officialPostingDisplay(legacyMiss).statusLabel, 'Outdated lookup · check again');
+      const currentMiss = { ...legacyMiss, officialPosting: { ...legacyMiss.officialPosting,
+        trail: ['bridge-research', 'semantic-match-v1', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], semanticMatch: { version: 1, inputHash: proof.inputHash } } };
+      assert.equal(officialPostingNeedsRefresh(currentMiss), false);
+      assert.equal(officialPostingDisplay(currentMiss).statusLabel, 'No exact official posting found');
+      const previous = row(); const display = officialPostingDisplay(previous);
+      assert.equal(display.statusLabel, 'Previous official posting · check again');
+      assert.equal(display.applyUrl, previous.officialPosting.officialApplyUrl);
+      const verified = row({ officialPosting: posting({ trail: ['semantic-match-v1'], semanticMatch: proof }) });
+      assert.equal(officialPostingNeedsRefresh(verified), false);
+      assert.equal(officialPostingDisplay(verified).statusLabel, 'Exact official posting verified');
+      for (const patch of [{ officialPosting: undefined }, { officialPosting: {} },
+        { officialPosting: posting({ semanticMatch: proof }) },
+        { officialPosting: posting({ trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: proof.inputHash } }) },
+        { officialPosting: posting({ trail: ['semantic-match-v1', 'reverify-failed', 'fetch-timeout'], semanticMatch: proof }) }]) {
+        assert.equal(officialPostingNeedsRefresh(row(patch)), true);
+      }
+      const failed = officialPostingDisplay(row({ officialPosting: posting({ trail: ['semantic-match-v1', 'reverify-failed', 'fetch-timeout'], semanticMatch: proof }) }));
+      assert.equal(failed.applyUrl, previous.officialPosting.officialApplyUrl);
+      assert.equal(failed.lookupRetryable, true); assert.match(failed.statusDetail, /timed out/u);
+    },
+  },
+  {
+    name: 'standalone official-posting card check needs no career data, never generates and retires its own research claim',
+    async run() {
+      let release;
+      const test = lookupHarness({ refresh: () => new Promise(resolve => { release = resolve; }) });
+      const first = test.callback(); const duplicate = test.callback();
+      assert.equal(test.calls.length, 1); assert.equal(test.claim().purpose, 'lookup');
+      assert.equal(test.calls[0].nodeId, 'board');
+      assert.equal(test.calls[0].entries[0].cardId, 'lookup-card');
+      const resolved = posting({ trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) } });
+      release({ success: true, entries: [{ cardId: 'lookup-card', officialPosting: resolved, postedBy: 'Synthetic Poster' }] });
+      await Promise.all([first, duplicate]);
+      assert.equal(test.updates.length, 1); assert.deepEqual(test.card.data.officialPosting, normalizeOfficialPosting(resolved));
+      assert.equal(test.completed.length, 1); assert.equal(test.claim(), null);
+      assert.equal(test.card.data.localApplication, undefined);
+    },
+  },
+  {
+    name: 'standalone official-posting card checks refuse cancelled, edited, deleted and superseded late results',
+    async run() {
+      for (const mode of ['cancelled', 'source-edited', 'newer-result', 'deleted', 'other-canvas']) {
+        let release;
+        const test = lookupHarness({ refresh: () => new Promise(resolve => { release = resolve; }) });
+        const pending = test.callback();
+        const claim = test.claim();
+        if (mode === 'cancelled') { claim.cancel(); claim.cancel(); }
+        if (mode === 'source-edited') test.card.data.description = 'A new live source description.';
+        if (mode === 'newer-result') test.card.data.officialPosting = posting({ outcome: 'closed' });
+        if (mode === 'deleted') test.deleteCard();
+        if (mode === 'other-canvas') test.changeCanvas();
+        release({ success: true, entries: [{ cardId: 'lookup-card', officialPosting: posting(), postedBy: '' }] });
+        await pending;
+        assert.equal(test.updates.length, 0, mode);
+        assert.equal(test.completed.length, 1, mode);
+        assert.equal(getOfficialPostingPreparation('/synthetic/lookup-canvas.json', 'lookup-card'), null, mode);
+        if (mode === 'cancelled') assert.equal(test.cancelled.length, 1);
+      }
+      const foreign = beginOfficialPostingPreparation({ canvasFilePath: '/synthetic/lookup-canvas.json', nodeId: 'lookup-card' });
+      try {
+        const test = lookupHarness(); await test.callback();
+        assert.equal(test.calls.length, 0, 'Generate and Check must share the same synchronous owner');
+        assert.equal(test.claim(), foreign, 'a refused check must never retire another operation');
+      } finally { foreign.finish(); }
+    },
+  },
+  {
+    name: 'standalone card lookup routes through the selected parent bridge hub while retaining its card cancellation owner',
+    async run() {
+      const sender = new EventEmitter(); sender.id = 9082; sender.isDestroyed = () => false; sender.send = () => {};
+      const previous = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
+      let signal; let nodeId; let markEntered;
+      const entered = new Promise(resolve => { markEntered = resolve; });
+      let pending; let source;
+      try {
+        registerOfficialPostingRefreshHandler({ projectJob: job => ({ ...job }), store: { find: async () => null },
+          bridgeStatus: () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active: true } } }),
+          resolve: async (_jobs, options) => {
+            signal = options.signal; nodeId = options.nodeId; markEntered();
+            return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+          } });
+        const invoke = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
+        const test = lookupHarness({ refresh: args => invoke({ sender }, args) });
+        test.context.window.electronAPI.cancelNodeTaskAndWait = async cardId => abortNodeTasksAndWait(cardId, sender);
+        pending = test.callback(); await entered;
+        assert.equal(nodeId, 'board');
+        assert.deepEqual(snapshotActiveNodeTasks(sender.id).map(item => item.nodeId).sort(), ['board', 'lookup-card']);
+        const handoff = { requestId: 'synthetic-card-lookup', handoffCode: 'HANDOFF-ABCDEF',
+          bridgeClaimId: '22222222-2222-4222-8222-222222222222', windowId: sender.id, nodeId,
+          runId: test.calls[0].manualAiRunId, task: 'job-official-posting-shortlist', promptChars: 24, codeEnforced: true };
+        source = createPushSource({ codeGuard: createHandoffCodeGuard(),
+          windows: new Map([[sender.id, { __canvasFilePath: '/synthetic/lookup-canvas.json' }]]),
+          hubKey: () => 'b'.repeat(64),
+          seam: { list: async () => ({ handoffs: [handoff], excluded: {}, pending: 1 }),
+            read: async () => ({ ok: true, requestId: handoff.requestId, handoffCode: handoff.handoffCode,
+              task: handoff.task, responseFormat: 'json', prompt: 'Synthetic lookup prompt.', attempt: 1 }) } });
+        assert.equal(source.selectHub({ windowId: sender.id, canvasFilePath: '/synthetic/lookup-canvas.json', nodeId: 'board' }), true);
+        assert.equal((await source.get()).status, 'served', 'a selected Board worker must receive the card lookup');
+        test.claim().cancel(); await pending;
+        assert.equal(signal.aborted, true); assert.equal(test.updates.length, 0);
+        assert.deepEqual(snapshotActiveNodeTasks(sender.id), []);
+      } finally {
+        await abortNodeTasksAndWait('lookup-card', sender); await pending; source?.closeEpoch('default');
+        if (previous) electronPkg.ipcMain.handle('refresh-official-postings', previous);
+        else electronPkg.ipcMain.removeHandler('refresh-official-postings');
+      }
+      const orphan = lookupHarness({ data: row({ hubId: undefined }), refresh: { success: false } });
+      await orphan.callback(); assert.equal(orphan.calls[0].nodeId, 'lookup-card', 'orphan cards retain manual-dock routing');
+      const invalidParent = lookupHarness(); invalidParent.board.type = 'text';
+      await invalidParent.callback(); assert.equal(invalidParent.calls.length, 0, 'an unrelated parent node cannot route card research');
+    },
+  },
+  {
+    name: 'official-posting shared projection preserves every semantic source input and fences live edits',
+    run() {
+      const data = row({ employer: 'Synthetic Employer', hiringOrganization: { name: 'Synthetic Employer' },
+        description: 'Synthetic full description.', locations: ['Remote, Canada'], workMode: 'remote', remote: true,
+        remoteCountry: 'Canada', remoteRegion: 'Ontario', employmentType: 'full-time', seniority: 'senior', jobLevel: 'senior',
+        identifier: 'synthetic-id', requisitionId: 'synthetic-requisition', reqId: 'synthetic-req',
+        sourceUrl: 'https://source.example.test/platform', provenance: { provider: 'synthetic' } });
+      const projected = projectOfficialPostingGenerationJob(data);
+      for (const key of ['employer', 'hiringOrganization', 'description', 'locations', 'workMode', 'remote', 'remoteCountry',
+        'remoteRegion', 'employmentType', 'seniority', 'jobLevel', 'identifier', 'requisitionId', 'reqId', 'sourceUrl', 'provenance']) {
+        assert.deepEqual(projected[key], data[key], key);
+        assert.notEqual(officialPostingPreparationSourceKey(projected),
+          officialPostingPreparationSourceKey({ ...projected, [key]: 'synthetic edit' }), key);
+      }
+    },
+  },
+  {
+    name: 'standalone official-posting cancellation retains ownership until host acknowledgment and permits retry after failure',
+    async run() {
+      let release; let acknowledgments = 0; let finished = false;
+      const test = lookupHarness({ refresh: () => new Promise(resolve => { release = resolve; }) });
+      test.context.window.electronAPI.cancelNodeTaskAndWait = async () => {
+        acknowledgments++;
+        if (acknowledgments === 1) throw new Error('Synthetic cancellation acknowledgment failure');
+        return { settled: true };
+      };
+      const pending = test.callback().then(() => { finished = true; });
+      const claim = test.claim();
+      assert.equal(claim.cancel(), undefined, 'button callbacks must not expose a rejecting promise');
+      await flushMicrotasks();
+      release({ success: true, entries: [{ cardId: 'lookup-card', officialPosting: posting(), postedBy: '' }] });
+      await flushMicrotasks();
+      assert.equal(finished, false); assert.equal(test.claim(), claim); assert.equal(test.completed.length, 0);
+      assert.equal(test.updates.length, 0); assert.equal(test.toasts.at(-1).title, 'Lookup cancellation not finished');
+      claim.cancel(); await pending;
+      assert.equal(acknowledgments, 2); assert.equal(test.claim(), null); assert.equal(test.completed.length, 1);
+    },
+  },
+  {
+    name: 'standalone official-posting responses require exactly one matching normalized card result',
+    async run() {
+      const valid = { cardId: 'lookup-card', officialPosting: posting(), postedBy: '' };
+      for (const entries of [[], [valid, valid], [{ ...valid, cardId: 'different-card' }],
+        [{ ...valid, officialPosting: { ...posting(), unexpected: 'Synthetic invalid schema' } }]]) {
+        const test = lookupHarness({ refresh: { success: true, entries } }); await test.callback();
+        assert.equal(test.updates.length, 0); assert.equal(test.completed.length, 1); assert.equal(test.claim(), null);
+        assert.equal(test.toasts.length, 1);
+      }
+    },
+  },
+  {
+    name: 'Board official-posting ownership fences standalone checks and queued Generate admission',
+    async run() {
+      const claim = beginOfficialPostingPreparation({ canvasFilePath: '/synthetic/lookup-canvas.json', nodeId: 'board', purpose: 'lookup' });
+      try {
+        const lookup = lookupHarness(); await lookup.callback(); assert.equal(lookup.calls.length, 0);
+      } finally { claim.finish(); }
+      const generationClaim = beginOfficialPostingPreparation({ canvasFilePath: '/project/canvas.json', nodeId: 'board', purpose: 'lookup' });
+      try {
+        const generate = harness(); await generate.callback(); assert.equal(generate.calls.length, 0);
+      } finally { generationClaim.finish(); }
+      const queued = harness({ prepare: { success: true, resolutionId: 'synthetic-before-board-refresh', officialPosting: posting() } });
+      const blocker = await queued.queue.acquireModuleRun({ nodeId: 'synthetic-blocker', kind: 'application', lane: 'application' });
+      const pending = queued.callback(); await flushMicrotasks();
+      const laterClaim = beginOfficialPostingPreparation({ canvasFilePath: '/project/canvas.json', nodeId: 'board', purpose: 'lookup' });
+      try {
+        blocker.release(); await pending;
+        assert.equal(queued.calls.some(call => call.kind === 'queue'), false);
+        assert.equal(queued.queue.getSnapshot().active, null);
+      } finally { laterClaim.finish(); blocker.release(); }
+    },
+  },
   {
     name: 'official-posting card tokens never retire through saved Search child-cancellation ledgers',
     async run() {
@@ -281,7 +529,7 @@ export default [
       const unknown = officialPostingDisplay(row({ officialPosting: posting({ level: 'L6', employer: '' }) }));
       assert.equal(unknown.employer, ''); assert.equal(unknown.postedBy, 'Acme Talent Partners');
       assert.equal(unknown.employerLabel, 'Acme Talent Partners'); assert.match(unknown.statusLabel, /poster, employer unknown/u);
-      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'closed' }) })).statusLabel, 'Official posting closed');
+      assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'closed' }) })).statusLabel, 'Outdated lookup · check again');
       const alternatives = [{ title: 'Platform Engineer A', url: 'https://careers.example.test/platform-a' },
         { title: 'Platform Engineer B', url: 'https://careers.example.test/platform-b' }];
       assert.equal(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives }) })).statusLabel, 'Official posting match uncertain');
@@ -302,9 +550,10 @@ export default [
     name: 'official-posting closed history opens its known official page for inspection without authorizing an apply URL',
     async run() {
       const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
-      const start = source.indexOf('  const openJobUrl = useCallback(');
-      const end = source.indexOf(');', source.indexOf('\n  }, [', start)) + 2;
-      assert.ok(start > 0 && end > start);
+      const start = source.indexOf('  const openCardExternalUrl = useCallback(');
+      const jobStart = source.indexOf('  const openJobUrl = useCallback(', start);
+      const end = source.indexOf(');', source.indexOf('\n  }, [', jobStart)) + 2;
+      assert.ok(start > 0 && jobStart > start && end > jobStart);
       for (const level of ['L1', 'L2', 'L3', 'L4']) {
         const job = row({ officialPosting: posting({ level, outcome: 'closed', trail: ['closed'] }) });
         const display = officialPostingDisplay(job);
@@ -313,7 +562,7 @@ export default [
         assert.match(display.viewLabel, /official posting previously marked closed/u);
         assert.equal(display.applyUrl, job.url);
         assert.equal(officialPostingLookupStatus(job.officialPosting).applyUrl, '');
-        assert.equal(display.statusLabel, 'Official posting closed');
+        assert.equal(display.statusLabel, 'Outdated lookup · check again');
         const opened = [];
         const open = runInNewContext(`${source.slice(start, end)}\nopenJobUrl;`, {
           useCallback: fn => fn, data: job, postingDisplay: display, id: 'synthetic-closed-card', normalizeJobListingExternalUrl,

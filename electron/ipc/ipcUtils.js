@@ -41,7 +41,7 @@ const QUIT_PAUSE_WORK_CHANNELS = new Set([
   'parse-career-data', 'resolve-job-search-location', 'interpret-job-preferences', 'resolve-search-roles',
   'evaluate-job-preferences', 'generate-job-queries', 'search-jobs', 'search-jobs-single-source', 'score-jobs',
   'research-job-compensation', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
-  'queue-local-application', 'prepare-official-posting-for-generation', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief',
+  'queue-local-application', 'prepare-official-posting-for-generation', 'refresh-official-postings', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief',
   'analyze-photos', 'scrape-price-comps', 'synthesize-price', 'synthesize-prices-batch', 'synthesize-bundle-price',
   'rescrape-source', 'resolve-captcha', 'assess-platform-fit',
 ]);
@@ -531,7 +531,9 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
 
       if (typeof options.additionalNodeIds === 'function') {
         const ids = options.additionalNodeIds(args, event);
-        if (!Array.isArray(ids) || ids.length > 8 || ids.some(id => typeof id !== 'string' || !id || id.length > 300)) {
+        const maxAdditionalNodeIds = Number.isSafeInteger(options.maxAdditionalNodeIds)
+          ? Math.max(1, Math.min(128, options.maxAdditionalNodeIds)) : 8;
+        if (!Array.isArray(ids) || ids.length > maxAdditionalNodeIds || ids.some(id => typeof id !== 'string' || !id || id.length > 300)) {
           throw new TypeError('Additional IPC task owners must be bounded node identifiers.');
         }
         additionalNodeIds = [...new Set(ids)];

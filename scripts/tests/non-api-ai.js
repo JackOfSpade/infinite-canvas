@@ -106,7 +106,7 @@ export default [
     },
   },
   {
-    name: 'comparative transport: an unread run cannot be submitted even through the bridge and output caps scale by options',
+    name: 'comparative transport: an unread run cannot be submitted even through the bridge and every judgment reserves the full usable answer',
     run: async () => {
       const f = await comparativeTransportFixture('unread');
       const owner = f.invoke('A'); const request = await f.waitRequest();
@@ -114,7 +114,7 @@ export default [
       assert((await owner).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE');
       const one = await checkPromptFits('Synthetic comparison', { task: COMPARATIVE_TASK, hints: { optionCount: 1 } });
       const eight = await checkPromptFits('Synthetic comparison', { task: COMPARATIVE_TASK, hints: { optionCount: 8 } });
-      assert(eight.reservedOutput > one.reservedOutput && eight.reservedOutput <= 15360, 'token allowance follows bounded option count');
+      assert(one.reservedOutput === 15360 && eight.reservedOutput === 15360, 'each judgment copies a whole description, so it reserves the full usable answer');
       await f.cleanup();
     },
   },

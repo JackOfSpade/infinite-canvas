@@ -1,3 +1,4 @@
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
@@ -17,8 +18,8 @@ const job = (extra = {}) => ({ title: 'Synthetic Platform Builder', company: 'No
   snippet: 'A synthetic position that exercises the Generate listing check.', ...extra });
 const state = (verdict, basis, at = AT - 60_000) => ({ verdict, basis, board: 'linkedin', at: new Date(at).toISOString() });
 const marker = () => ({ board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: new Date(AT - 60_000).toISOString() });
-const miss = (extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research'], ...extra });
-const ambiguous = () => ({ level: 'L6', outcome: 'ambiguous', employer: '', trail: ['bridge-research', 'ambiguous'] });
+const miss = (extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'], ...extra });
+const ambiguous = () => ({ level: 'L6', outcome: 'ambiguous', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'ambiguous'] });
 const official = () => ({ level: 'L4', outcome: 'link-only', employer: 'Northwind Labs',
   sourceUrl: 'https://northwind.test/jobs/synthetic-one',
   officialApplyUrl: 'https://northwind.test/jobs/synthetic-one', trail: ['description-anchor'] });

@@ -1384,7 +1384,10 @@ export default [
       assert(dismissButton.includes('disabled={effectiveLock}')
         && notes.includes('disabled={effectiveLock || hasApplicationRun || localJobPending}')
         && generateButton.includes('onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}')
-        && generateButton.includes('disabled={hasApplicationRun || localJobPending || effectiveLock}')
+        && generateButton.includes('disabled={hasApplicationRun || !!officialPostingLookup || !!boardPostingPreparation || localJobPending || effectiveLock}')
+        && card.includes('() => data.hubId ? getOfficialPostingPreparation(preparationCanvasFilePath, data.hubId) : null')
+        && generate.includes('getOfficialPostingPreparation(canvas, card.data.hubId)')
+        && generate.includes('if (boardPostingCheckActive(getLiveNode(idRef.current))) return;')
         && !generateButton.includes('job-search') && !generateButton.includes('activeRuns'),
       'dismiss, notes, and Generate must share the effective owning-board lock while Generate stays enabled during an unrelated active Job Search module');
       return { jobSearchLane: true, applicationLane: true, effectiveBoardLock: true, generateScopedToApplication: true };

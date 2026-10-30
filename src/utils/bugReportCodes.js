@@ -168,6 +168,20 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  OFFICIAL: {
+    label: 'Official Posting Lookups',
+    description: 'Current job cards: official-posting level, outcome, retryability, bounded failure/trail codes and semantic-proof presence, including collapsed cards and nested canvases restored after a restart. Included automatically in FULL. Omits listing identities, URLs, prose and proof hashes; does not prove a disk save.',
+    logFilter: line => /official[- ]?posting|job-official-posting|employer.*(?:verification|site)|bridge/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
+  OFFDISC: {
+    label: 'Official Posting Discovery',
+    description: 'Process-local latest lookup per source input: discovered candidates, eligible sources, fixed source-rejection reasons and comparison counts. Distinguishes no research leads from candidates rejected before comparison. Included automatically in FULL; no listing text, URLs or source/proof hashes.',
+    logFilter: line => /official[- ]?posting|job-official-posting|OfficialPosting/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   SCORE: {
     label: 'Job Scoring Consistency',
     description: 'Job-scoring audit — batch outcomes plus bounded per-job score/direction/reason evidence and cross-batch drift flags for effectively identical postings. Use when similar jobs received inconsistent scores. Included automatically in FULL; keeps the compact Job Search Pipeline section while dropping heavy canvas/media dumps.',

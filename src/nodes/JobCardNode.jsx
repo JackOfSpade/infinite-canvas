@@ -17,7 +17,7 @@ import { openExternalFailureMessage, openExternalUrl } from '../utils/openExtern
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
-import { canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
+import { canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
 import {
   APPLICATION_HANDOFF_LIMIT,
   applicationAwaitsPaste,
@@ -33,6 +33,7 @@ import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/j
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
 import { officialPostingDisplay } from '../utils/officialPostingDisplay';
+import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields';
 import { jobCompensationDisplay } from '../utils/jobCompensationDisplay';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation,
   projectOfficialPostingGenerationJob, officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh } from '../utils/officialPostingPreparation';
@@ -444,6 +445,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     () => getOfficialPostingPreparation(preparationCanvasFilePath, id),
     () => null,
   );
+  const boardPostingPreparation = useSyncExternalStore(
+    subscribeOfficialPostingPreparation,
+    () => data.hubId ? getOfficialPostingPreparation(preparationCanvasFilePath, data.hubId) : null,
+    () => null,
+  );
   // Local state is only the fast feedback for this mounted view. The global
   // snapshot is authoritative across a hidden-card unmount/remount, preventing
   // a remounted card from accidentally enqueueing a second application.
@@ -454,11 +460,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // 'global' lane whenever it is occupied, so it is not reliably this card's
   // active entry; activeRuns carries one active entry per lane instead.
   const activeApplicationRun = moduleRunSnapshot.activeRuns?.some((entry) => entry.nodeId === id && entry.kind === 'application');
+  const officialPostingLookup = sharedPreparation?.purpose === 'lookup' ? sharedPreparation : null;
   const displayedApplicationRun = queuedApplicationRun
     ? { state: 'queued', position: queuedApplicationRun.position, blocked: queuedApplicationRun.blocked === true }
-    : activeApplicationRun ? (applicationRun.state === 'resolving' ? applicationRun : { state: 'generating', position: null }) : sharedPreparation || applicationRun;
+    : activeApplicationRun ? (applicationRun.state === 'resolving' ? applicationRun : { state: 'generating', position: null }) : (officialPostingLookup ? null : sharedPreparation) || applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
   const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
+  const localLookupPending = localApplicationBlocksOfficialPostingLookup(localApplication);
   const hasLinkedApplicationOutput = hasLinkedLocalApplicationOutput(localApplication)
     || hasLinkedLocalApplicationOutput(data.localApplication);
   const bundleIndicator = applicationBundleIndicator(localApplication);
@@ -546,6 +554,31 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     return `${base} · ${variants.length} posting${variants.length === 1 ? '' : 's'}`;
   }, [postingDisplay.location, data.postingVariants]);
 
+  const openCardExternalUrl = useCallback(async (url, { onRejected, onDispatched, onFailed } = {}) => {
+    if (!url || !window.electronAPI?.openExternal) {
+      onRejected?.();
+      addToast({
+        title: 'Cannot Open Listing',
+        description: 'No safe job-listing link is available for this card.',
+        type: 'error',
+      });
+      return;
+    }
+    try {
+      // handleSafe resolves even on failure, so check the payload as well as rejections.
+      const result = await window.electronAPI.openExternal(url);
+      if (!result?.success) throw new Error(result?.error || 'Could not open the job listing.');
+      onDispatched?.();
+    } catch (error) {
+      onFailed?.(error);
+      addToast({
+        title: 'Cannot Open Listing',
+        description: 'Could not open the job listing. Please try again.',
+        type: 'error',
+      });
+    }
+  }, [addToast]);
+
   const openJobUrl = useCallback(async () => {
     const url = normalizeJobListingExternalUrl({ ...data, url: postingDisplay.viewUrl || data.url });
     const diagnostic = summarizeJobListingUrl(data, url);
@@ -555,33 +588,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     // `ca.linkedin.com/jobs/view/:segment` look like a placeholder the card had
     // actually dispatched. The names now say what the value is.
     EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} rawRoute=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} targetRoute=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
-    if (!url || !window.electronAPI?.openExternal) {
-      EventLogger.log(`[JobCard] external-link rejected id=${id} reason=${url ? 'dispatcher-unavailable' : 'invalid-or-missing-url'}`);
-      addToast({
-        title: 'Cannot Open Listing',
-        description: 'No safe job-listing link is available for this card.',
-        type: 'error',
-      });
-      return;
-    }
-    try {
-      // handleSafe (electron/ipc/ipcUtils.js) always RESOLVES this invoke,
-      // even on failure, with { success: false, error }. Check the payload
-      // instead of relying on a rejection, or a failed open silently reads
-      // as dispatched.
-      const result = await window.electronAPI.openExternal(url);
-      if (!result?.success) throw new Error(result?.error || 'Could not open the job listing.');
-      EventLogger.log(`[JobCard] external-link dispatched id=${id} targetRoute=${diagnostic.targetRoute}`);
-    } catch (error) {
-      const reason = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
-      EventLogger.log(`[JobCard] external-link failed id=${id} targetRoute=${diagnostic.targetRoute} reason=${reason}`);
-      addToast({
-        title: 'Cannot Open Listing',
-        description: 'Could not open the job listing. Please try again.',
-        type: 'error',
-      });
-    }
-  }, [id, data, postingDisplay.viewUrl, addToast]);
+    await openCardExternalUrl(url, {
+      onRejected: () => EventLogger.log(`[JobCard] external-link rejected id=${id} reason=${url ? 'dispatcher-unavailable' : 'invalid-or-missing-url'}`),
+      onDispatched: () => EventLogger.log(`[JobCard] external-link dispatched id=${id} targetRoute=${diagnostic.targetRoute}`),
+      onFailed: error => {
+        const reason = String(error?.message || error || 'unknown error').replace(/\s+/g, ' ').slice(0, 160);
+        EventLogger.log(`[JobCard] external-link failed id=${id} targetRoute=${diagnostic.targetRoute} reason=${reason}`);
+      },
+    });
+  }, [id, data, postingDisplay.viewUrl, openCardExternalUrl]);
 
   const openResearchSource = useCallback(async (rawUrl) => {
     const opened = await openExternalUrl(rawUrl, {
@@ -1097,8 +1112,95 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // Application Generate always writes a self-contained Local AI handoff next
   // to the saved canvas. New jobs use paste-back; legacy coding-agent jobs produce files, then
   // the existing polling/import path validates and saves the final bundle.
+  const refreshOfficialPosting = useCallback(async () => {
+    if (applicationSubmissionRef.current || hasApplicationRun || localLookupPending || effectiveLock) return;
+    const sourceCard = getLiveNode(idRef.current);
+    if (sourceCard?.type !== 'jobcard' || sourceCard.data?.locked || getLiveNode(sourceCard.data?.hubId)?.data?.locked
+      || localApplicationBlocksOfficialPostingLookup(sourceCard.data?.localApplication)) return;
+    if (typeof window.electronAPI?.refreshOfficialPostings !== 'function') {
+      addToast({ title: 'Official posting lookup', description: 'Restart the updated app to check official postings.', type: 'error' });
+      return;
+    }
+    const canvasFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
+    if (getOfficialPostingPreparation(canvasFilePath, sourceCard.data?.hubId)) return;
+    const cardId = sourceCard.id;
+    const parent = sourceCard.data?.hubId ? getLiveNode(sourceCard.data.hubId) : null;
+    if (parent && !['jobhub', 'jobboard'].includes(parent.type)) return;
+    const lookupNodeId = parent?.id || cardId;
+    const sourceJob = projectOfficialPostingGenerationJob(sourceCard.data);
+    const sourceKey = officialPostingPreparationSourceKey(sourceJob);
+    const savedResultKey = JSON.stringify([sourceCard.data.officialPosting, sourceCard.data.postedBy]);
+    let cancelled = false;
+    let cancelAttempt = null; let cancellationAcknowledged = null; let acknowledgeCancellation = null;
+    const preparation = beginOfficialPostingPreparation({ canvasFilePath, nodeId: cardId, purpose: 'lookup',
+      cancel: () => {
+        cancelled = true;
+        cancellationAcknowledged ||= new Promise(resolve => { acknowledgeCancellation = resolve; });
+        if (!cancelAttempt) {
+          cancelAttempt = Promise.resolve().then(async () => {
+            const acknowledgement = await window.electronAPI.cancelNodeTaskAndWait?.(cardId, 'official-posting-cancelled');
+            if (acknowledgement?.settled !== true) throw new Error('Cancellation has not finished. Retry Cancel.');
+            acknowledgeCancellation();
+            return true;
+          }).catch(() => {
+            cancelAttempt = null;
+            if (isMountedRef.current) addToast({ title: 'Lookup cancellation not finished',
+              description: 'The lookup is still stopping. Retry Cancel.', type: 'error' });
+            return false;
+          });
+        }
+        return cancelAttempt;
+      },
+    });
+    if (!preparation) return;
+    const manualAiRunId = 'official-posting:' + cardId + ':' + generateId();
+    try {
+      const result = await window.electronAPI.refreshOfficialPostings({ nodeId: lookupNodeId, manualAiRunId,
+        entries: [{ cardId, job: sourceJob }] });
+      if (cancelled || result?.cancelled || result?.pausedForQuit || result?.errorCode === 'APP_QUIT_PAUSED'
+        || getOfficialPostingPreparation(canvasFilePath, cardId) !== preparation) return;
+      const currentFilePath = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
+      const current = getLiveNode(cardId);
+      if (currentFilePath !== canvasFilePath || current?.type !== 'jobcard' || current.data?.locked
+        || getLiveNode(current.data?.hubId)?.data?.locked
+        || getOfficialPostingPreparation(canvasFilePath, current.data?.hubId)
+        || sourceKey !== officialPostingPreparationSourceKey(projectOfficialPostingGenerationJob(current.data))
+        || savedResultKey !== JSON.stringify([current.data.officialPosting, current.data.postedBy])) return;
+      const entry = Array.isArray(result?.entries) && result.entries.length === 1 && result.entries[0]?.cardId === cardId
+        ? result.entries[0] : null;
+      const posting = normalizeOfficialPosting(entry?.officialPosting);
+      if (result?.success !== true || !posting) {
+        if (isMountedRef.current) addToast({ title: 'Official posting lookup', description: 'The lookup did not finish. Retry the official posting lookup.', type: 'error' });
+        return;
+      }
+      const lookup = officialPostingLookupStatus(posting);
+      const noticeBasis = current.data.listingGenerationNotice?.basis;
+      const clearNotice = !lookup.retryable && (noticeBasis === 'official-lookup'
+        || (noticeBasis === 'official-closed' && lookup.state === 'verified'));
+      updateGlobal(cardId, { officialPosting: posting,
+        postedBy: typeof entry.postedBy === 'string' ? entry.postedBy : current.data.postedBy,
+        ...(clearNotice ? { listingGenerationNotice: null, listingHold: false } : {}),
+      });
+      EventLogger.log('[JobCard] official-posting lookup finished');
+    } catch (error) {
+      if (!cancelled && error?.code !== 'APP_QUIT_PAUSED' && error?.message !== 'App paused for quit' && isMountedRef.current) {
+        addToast({ title: 'Official posting lookup', description: 'The lookup did not finish. Retry the official posting lookup.', type: 'error' });
+      }
+    } finally {
+      if (cancelled && cancellationAcknowledged) await cancellationAcknowledged;
+      await window.electronAPI.completeNonApiAiRun?.(manualAiRunId)?.catch?.(() => {});
+      if (cancelled && cancellationAcknowledged) await cancellationAcknowledged;
+      preparation.finish();
+    }
+  }, [getLiveNode, nav, hasApplicationRun, localLookupPending, effectiveLock, addToast, isMountedRef, updateGlobal]);
+
   const generateApplication = useCallback(async (options = {}) => {
     if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
+    const boardPostingCheckActive = card => {
+      const canvas = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
+      return !!card?.data?.hubId && !!getOfficialPostingPreparation(canvas, card.data.hubId);
+    };
+    if (boardPostingCheckActive(getLiveNode(idRef.current))) return;
     if (hasLinkedLocalApplicationOutput(getLiveNode(idRef.current)?.data?.localApplication)) return;
     // The reactive effective lock gives mounted cards immediate feedback; the
     // live read remains the race-safe fence if a Board locks after that render.
@@ -1167,7 +1269,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       if (!preparation) return;
       const prepareLivePosting = async () => {
         const sourceCard = getLiveNode(idRef.current);
-        if (cancelledBeforeStart || !queuedLocalApplicationStartDecision(sourceCard, getLiveNode(sourceCard?.data?.hubId)).allowed) return false;
+        if (cancelledBeforeStart || boardPostingCheckActive(sourceCard)
+          || !queuedLocalApplicationStartDecision(sourceCard, getLiveNode(sourceCard?.data?.hubId)).allowed) return false;
         const sourceJob = projectOfficialPostingGenerationJob(sourceCard.data);
         const sourceKey = officialPostingPreparationSourceKey(sourceJob);
         const prepareRunId = 'official-posting:' + idRef.current + ':' + generateId();
@@ -1190,7 +1293,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         }
         if (cancelledBeforeStart || prepared?.cancelled || prepared?.pausedForQuit || prepared?.errorCode === 'APP_QUIT_PAUSED') return false;
         const preparedCard = getLiveNode(idRef.current);
-        if (!queuedLocalApplicationStartDecision(preparedCard, getLiveNode(preparedCard?.data?.hubId)).allowed) {
+        if (boardPostingCheckActive(preparedCard)
+          || !queuedLocalApplicationStartDecision(preparedCard, getLiveNode(preparedCard?.data?.hubId)).allowed) {
           cancelledBeforeStart = true;
           return false;
         }
@@ -1288,6 +1392,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // instead of leaving a ghost at the head of the queue.
         canStart: () => {
           const card = getLiveNode(idRef.current);
+          if (boardPostingCheckActive(card)) return true;
           if (!queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId)).allowed) return true;
           const handoffCapNodes = (nav?.enumerateAllNodes?.() || []).filter((node) => node.id !== idRef.current);
           return countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles()) < APPLICATION_HANDOFF_LIMIT;
@@ -1304,10 +1409,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           // a card may change between canStart and this queue microtask.
           const card = getLiveNode(idRef.current);
           const decision = queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId));
-          if (!decision.allowed) {
+          if (boardPostingCheckActive(card) || !decision.allowed) {
             cancelledBeforeStart = true;
-            EventLogger.log(`[LocalAI] skipped queued generation node=${idRef.current}: ${decision.reason}`);
-            throw new Error(`Application generation skipped: ${decision.reason}`);
+            const reason = boardPostingCheckActive(card) ? 'Official posting refresh in progress' : decision.reason;
+            EventLogger.log(`[LocalAI] skipped queued generation node=${idRef.current}: ${reason}`);
+            throw new Error(`Application generation skipped: ${reason}`);
           }
           if (isMountedRef.current) setApplicationRun({ state: 'generating', position: null });
         },
@@ -1362,9 +1468,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const startDecision = queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId));
       // onStart and this async continuation run in separate microtasks. Keep
       // the same live ownership/lock fence immediately before the IPC too.
-      if (!startDecision.allowed) {
+      if (boardPostingCheckActive(cardBeforeQueue) || !startDecision.allowed) {
         cancelledBeforeStart = true;
-        EventLogger.log(`[LocalAI] skipped queued generation node=${idRef.current}: ${startDecision.reason}`);
+        const reason = boardPostingCheckActive(cardBeforeQueue) ? 'Official posting refresh in progress' : startDecision.reason;
+        EventLogger.log(`[LocalAI] skipped queued generation node=${idRef.current}: ${reason}`);
         return;
       }
       // Slots and the edit-history gate may wait for minutes or hours. Refresh
@@ -1561,6 +1668,39 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           <div className="text-white/50 text-xs mt-0.5 truncate">{postingDisplay.employerLabel}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
           {postingDisplay.via && <div className="text-white/35 text-[10px] mt-0.5 truncate">{postingDisplay.via}</div>}
           {postingDisplay.statusLabel && <div className="text-amber-300/70 text-[10px] mt-0.5" title={postingDisplay.statusDetail || undefined}>{postingDisplay.statusLabel}</div>}
+          {postingDisplay.candidateLinks.length > 0 && (
+            <div className="mt-1 min-w-0" onPointerDown={(e) => e.stopPropagation()}>
+              <div className="text-white/50 text-[10px]">Judges split · unconfirmed links (best first)</div>
+              {postingDisplay.candidateLinks.map((link) => {
+                const url = new URL(link.url);
+                return <button
+                  key={link.url}
+                  type="button"
+                  title={link.title}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); openCardExternalUrl(link.url); }}
+                  className="block max-w-full truncate rounded text-left text-[10px] text-amber-200 hover:text-white"
+                >{link.rank}. {url.host}{url.pathname}</button>;
+              })}
+            </div>
+          )}
+          {(postingDisplay.lookupNeedsRefresh || officialPostingLookup) && (
+            <div className="mt-1 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
+              <button
+                onClick={(e) => { e.stopPropagation(); refreshOfficialPosting(); }}
+                disabled={!!officialPostingLookup || !!boardPostingPreparation || hasApplicationRun || localLookupPending || effectiveLock}
+                className="rounded px-1.5 py-1 text-[10px] font-medium text-amber-200 bg-amber-400/10 hover:bg-amber-400/20 disabled:opacity-50"
+                title="Check the employer's official posting without generating an application."
+              >
+                {officialPostingLookup ? 'Checking official posting…' : postingDisplay.lookupActionLabel}
+              </button>
+              {officialPostingLookup && <button
+                onClick={(e) => { e.stopPropagation(); officialPostingLookup.cancel(); }}
+                className="rounded px-1.5 py-1 text-[10px] text-white/70 bg-white/5 hover:bg-white/10"
+                title="Cancel this official posting lookup."
+              >Cancel</button>}
+            </div>
+          )}
           {unscoredPlaceholder && (
             <div className="mt-1 flex flex-wrap gap-1">
               <span
@@ -2065,8 +2205,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             {listingOverrideAvailable ? 'Generate anyways to continue, or check the posting again.' : data.listingGenerationNotice?.basis === 'official-closed' ? 'The official posting is closed. Check again to look for a current exact posting.' : 'Complete the official posting lookup before generating. Check again to retry.'}
           </div>
           <button
-            onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication(); }}
-            disabled={effectiveLock}
+            onClick={effectiveLock ? undefined : (e) => { e.stopPropagation();
+              if (['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis)) refreshOfficialPosting();
+              else generateApplication();
+            }}
+            disabled={effectiveLock || !!officialPostingLookup || !!boardPostingPreparation}
             className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
             title={['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis) ? 'Retry the official posting lookup.' : 'Check whether the listing is still open again.'}
           >
@@ -2080,7 +2223,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       {!hasLinkedApplicationOutput && <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
         <button
           onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}
-          disabled={hasApplicationRun || localJobPending || effectiveLock}
+          disabled={hasApplicationRun || !!officialPostingLookup || !!boardPostingPreparation || localJobPending || effectiveLock}
           className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
             effectiveLock
               ? 'bg-white/5 text-white/20 cursor-default'
@@ -2090,6 +2233,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           }`}
           title={localJobPending
             ? bridgeHeldLine ? bridgeHeldLine.pendingTitle : 'A Local AI job is waiting for the local-agent routine or is being imported.'
+            : officialPostingLookup || boardPostingPreparation ? 'An official posting lookup is running for this card or its Job Board.'
             : displayedApplicationRun.state === 'resolving'
             ? 'Finding the official posting. Cancel to stop this preparation.'
             : displayedApplicationRun.state === 'queued'

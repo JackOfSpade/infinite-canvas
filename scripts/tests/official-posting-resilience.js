@@ -1,3 +1,4 @@
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -231,7 +232,7 @@ export default [
         rows[0].officialPosting = verified.officialPosting;
         const miss = await store.save(rows[1], { officialPosting: { ...unresolvedOfficialPosting(rows[1]).officialPosting,
           semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(rows[1]) },
-          trail: ['bridge-research', 'comparative-none', 'semantic-match-v1'] } });
+          trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'comparative-none', 'semantic-match-v1'] } });
         rows[1].officialPosting = miss.officialPosting;
         rows[3].officialPosting = structuredClone(verified.officialPosting);
       } });

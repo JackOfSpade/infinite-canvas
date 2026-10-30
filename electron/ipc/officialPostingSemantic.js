@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { officialHttpsUrl } from './officialPostingFields.js';
-import { extractAtsTenant, isAggregatorHost, isKnownAtsHost } from './officialSourceHosts.js';
+import { extractAtsTenant, isAggregatorHost, isHostedAtsSurface } from './officialSourceHosts.js';
 import { plainPostingText } from './officialPostingMatch.js';
 
 export const OFFICIAL_POSTING_SEMANTIC_INVENTORY_CAP = 1024;
@@ -44,7 +44,7 @@ export function evaluateOfficialPostingSourceEligibility(value, { now = Date.now
   const host = new URL(sourceUrl).hostname;
   if (isAggregatorHost(host)) return { eligible: false, reason: 'aggregator-source', status: 'unavailable' };
   const status = sourceStatus(candidate, now);
-  const ats = extractAtsTenant(sourceUrl) || isKnownAtsHost(host);
+  const ats = extractAtsTenant(sourceUrl) || isHostedAtsSurface(host);
   const proven = ats ? candidate.tenantProven === true
     : candidate.employerDomainProven === true || candidate.officialPortalProven === true;
   return { eligible: proven, reason: proven ? '' : 'source-unproven', status };

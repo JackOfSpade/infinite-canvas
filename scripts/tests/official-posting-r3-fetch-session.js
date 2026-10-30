@@ -55,6 +55,27 @@ function forwarded(pages, timer, starts = [], lookup = async () => [{ address: '
 
 export default [
   {
+    name: 'Official session shares host limits while separating rendered-resource admission from posting bytes',
+    async run() {
+      const calls = [];
+      const fetch = async (url, options) => {
+        calls.push(options.resource);
+        if (!options.resource) throw new OfficialPostingFetchError('unsupported-content-type');
+        return { ...page(url), body: 'window.jobs = true;', contentType: 'application/javascript' };
+      };
+      const session = createOfficialPostingFetchSession({ fetch });
+      try {
+        const url = 'https://careers.northwind.test/careers.js';
+        await assert.rejects(session.fetch(url), { code: 'unsupported-content-type' });
+        assert.equal((await session.fetch(url, { resource: true })).body, 'window.jobs = true;');
+        await assert.rejects(session.fetch(url), { code: 'unsupported-content-type' });
+        assert.equal((await session.fetch(url, { resource: true })).contentType, 'application/javascript');
+        assert.deepEqual(calls, [false, true]);
+        assert.equal(session.telemetry().fetches, 2); assert.equal(session.telemetry().uniqueUrls, 1);
+      } finally { session.dispose(); }
+    },
+  },
+  {
     name: 'research can retry one settled transient URL failure without evicting good bytes or resetting host safety limits',
     async run() {
       const timer = clock(); const attempts = new Map();

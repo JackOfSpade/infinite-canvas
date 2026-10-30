@@ -14,6 +14,8 @@ import {
 import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { buildPostingVariant, postingVariantKey } from '../../src/utils/jobLocationConsolidation.js';
 import { migrateLegacyJobHubResults } from '../../src/utils/serializationUtils.js';
+import { shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 
 function posting(extra = {}) {
   return {
@@ -67,7 +69,45 @@ function generateScope() {
 
 export default [
   {
-    name: 'official fetch diagnostics remain bounded across source whitelists without changing lookup decisions',
+    name: 'unproved fetched sources stay incomplete and never become cached negative research',
+    run() {
+      const miss = { level: 'L5', outcome: 'ambiguous', employer: 'Northwind Labs',
+        trail: ['bridge-research', 'source-unproven'] };
+      assert.deepEqual(normalizeOfficialPosting(miss), miss);
+      assert.equal(officialResearchSettled(miss), false);
+      const status = officialPostingLookupStatus(miss);
+      assert.equal(status.state, 'incomplete'); assert.equal(status.retryable, true);
+      assert.equal(status.label, 'Employer source verification incomplete');
+      assert.ok(status.detail.includes('ownership could not be verified'));
+      assert.equal(shouldPersistOfficialPostingResult(miss, { researchRan: true }), false);
+      assert.ok(boundedOfficialPostingTrail([...OFFICIAL_POSTING_TRAIL, 'source-unproven']).includes('source-unproven'));
+    },
+  },
+  {
+    name: 'every rejected or unreadable fetch keeps negative research retryable and uncached while verified matches stay usable',
+    run() {
+      for (const code of ['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']) {
+        const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research', code] };
+        assert.equal(officialResearchSettled(miss), false, code);
+        assert.equal(officialPostingLookupStatus(miss).state, 'incomplete', code);
+        assert.equal(officialPostingLookupStatus(miss).retryable, true, code);
+        assert.equal(shouldPersistOfficialPostingResult(miss, { researchRan: true }), false, code);
+        const failure = { url: 'https://careers.example.test/unreadable', code };
+        const metadataOnly = { ...miss, trail: ['bridge-research'], fetchFailures: [failure] };
+        assert.equal(officialResearchSettled(metadataOnly), false, `${code} metadata`);
+        assert.equal(officialPostingLookupStatus(metadataOnly).state, 'incomplete', `${code} metadata`);
+        assert.equal(shouldPersistOfficialPostingResult(metadataOnly, { researchRan: true }), false, `${code} metadata`);
+        const found = posting({ trail: ['identifier-anchor', code], fetchFailures: [failure] });
+        assert.equal(officialPostingLookupStatus(found).state, 'verified', code);
+        assert.equal(shouldPersistOfficialPostingResult(found), true, code);
+        const trail = boundedOfficialPostingTrail([...OFFICIAL_POSTING_TRAIL.filter(item => item.startsWith('comparative-')), code, 'reverify-failed']);
+        assert.ok(trail.includes(code), `${code} survives trail compaction`);
+        assert.ok(trail.includes('reverify-failed'));
+      }
+    },
+  },
+  {
+    name: 'official fetch diagnostics remain bounded across source whitelists and prevent false completed misses',
     run() {
       const failure = officialPostingFetchFailure({ code: 'fetch-failed', statusCode: 403, message: 'PRIVATE RESPONSE BODY',
         reason: 'server-error' }, 'https://careers.example.test/blocked?utm_source=board#detail');
@@ -77,8 +117,8 @@ export default [
       assert.deepEqual(safeJob(row({ officialPosting: value })).officialPosting.fetchFailures, [failure]);
       assert.deepEqual(cardFor(row({ officialPosting: value })).data.officialPosting.fetchFailures, [failure]);
       const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research'], fetchFailures: [failure] };
-      assert.equal(officialResearchSettled(miss), true, 'diagnostic receipts alone cannot change a completed decision');
-      assert.equal(officialPostingLookupStatus(miss).state, 'not-found');
+      assert.equal(officialResearchSettled(miss), false, 'unread verification evidence cannot establish a completed miss');
+      assert.equal(officialPostingLookupStatus(miss).state, 'incomplete');
       const incomplete = { ...miss, trail: [...miss.trail, 'fetch-failed'] };
       assert.equal(officialResearchSettled(incomplete), false);
       assert.equal(officialPostingLookupStatus(incomplete).state, 'incomplete');
@@ -105,6 +145,10 @@ export default [
         assert.equal(officialResearchSettled({ level: 'L5', outcome: 'closed', employer: 'Northwind Labs', trail }), false);
       }
       assert.ok(officialPostingComparativeTrail({ validA: true, validB: true, choiceA: 'uncertain', choiceB: 'uncertain' }).includes('comparative-choice-uncertain'));
+      assert.ok(OFFICIAL_POSTING_TRAIL.includes('comparative-equivalent'));
+      assert.ok(boundedOfficialPostingTrail(['semantic-match-v1', 'comparative-equivalent', 'comparative-choice-p1', 'comparative-match']).includes('comparative-equivalent'));
+      // A split of two real options never yields a choice code from the comparative helper itself.
+      assert.equal(officialPostingComparativeTrail({ validA: true, validB: true, choiceA: 'P1', choiceB: 'P2' }).some(code => code.startsWith('comparative-choice-')), false);
     },
   },
   {
@@ -130,13 +174,13 @@ export default [
       assert.ok(trail.includes('comparative-choice-p2'));
       assert.ok(trail.includes('comparative-a-valid')); assert.ok(trail.includes('comparative-b-valid'));
       assert.ok(officialPostingComparativeTrail({ choiceA: 'P1 PRIVATE TEXT', validA: 1 }).every(code => OFFICIAL_POSTING_TRAIL.includes(code)));
-      const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['comparative-none'] };
+      const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['comparative-none', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] };
       assert.equal(officialResearchSettled(miss), true);
       for (const code of ['comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text']) {
         assert.equal(officialResearchSettled({ ...miss, trail: [...miss.trail, code] }), false);
         assert.deepEqual(safeJob(row({ officialPosting: posting({ trail: [code] }) })).officialPosting.trail, [code]);
       }
-      assert.equal(officialResearchSettled({ ...miss, outcome: 'ambiguous', trail: ['comparative-disagree'] }), true);
+      assert.equal(officialResearchSettled({ ...miss, outcome: 'ambiguous', trail: ['comparative-disagree', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] }), true);
       assert.equal(safeJob(row({ officialPosting: posting({ comparison: { evidence: 'PRIVATE TEXT' } }) })).officialPosting, undefined);
     },
   },

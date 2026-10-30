@@ -15,6 +15,9 @@ import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
 import { useToast } from '../components/ToastProvider';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation } from '../hooks/useEpochCancellation';
+import { useBoardOfficialPostingRefresh } from '../hooks/useBoardOfficialPostingRefresh';
+import { carryBoardOfficialPostingResults, refreshBoardOfficialPostingJobs } from '../utils/jobBoardOfficialPostingRefresh';
+import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
 import { hubCardFilter } from '../utils/jobCardFilters';
@@ -835,6 +838,22 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // let the later settlement replace the other cascade. Keep the active run
   // token in a ref so the admission check takes effect within this call stack.
   const combineRunRef = useRef(null);
+  const { runRef: officialPostingRefreshRunRef, refreshing: officialPostingRefreshing,
+    progress: officialPostingProgress, start: refreshOfficialPostings, cancel: cancelOfficialPostingRefresh } = useBoardOfficialPostingRefresh({
+    nodeId: id, canvasFilePath, getNode, getNodes, updateGlobal, moduleRunQueue, addToast,
+    canStart: () => {
+      const live = getNode(id)?.data;
+      return !!live && live.hubState === 'done' && !live.locked && !live.boardCancellation
+        && !hasPendingManualAiRetirement(live) && !combineRunRef.current && !scanRunRef.current
+        && !scanPreflightRef.current && !cancellationInFlightRef.current && !combineRecoveryTokenClaimRef.current
+        && !live.boardScanResume && !isBoardCombineManualAiRunId(live.manualAiResume?.runId);
+    },
+    getScopeKey: () => {
+      const inputs = liveCombineInputs(id, getNodes(), getEdges());
+      return JSON.stringify([getNode(id)?.data?.combineSignature, boardInputSignature(inputs.completed, inputs.all),
+        inputs.completed.map(combineSourceRunEntry)]);
+    },
+  });
   // A phase=combine retry with a retired token must first publish its replacement
   // token to the canvas. Reserve that short commit window too: the plan update
   // re-renders this component before the original await resumes, and its recovery
@@ -2421,6 +2440,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   useUnmountEffect(cleanupBoard);
 
   const handleClear = useCallback(async () => {
+    if (officialPostingRefreshRunRef.current || getOfficialPostingPreparation(canvasFilePath, id)?.owner === 'board-refresh') return;
     if (cancellationInFlightRef.current) return;
     if (getNode(id)?.data?.locked) {
       EventLogger.log(`[JobBoard] clear ignored because Board is locked id=${id}`);
@@ -2500,7 +2520,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       autoRetriedBoardCancellationRef.current = null;
     }
     EventLogger.log(`[JobBoard] cleared id=${id}`);
-  }, [addToast, id, data, getNode, cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, updateGlobal, epoch, moduleRunQueue, persistBoardCancellationIntent]);
+  }, [addToast, id, data, getNode, cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, updateGlobal, epoch, moduleRunQueue, persistBoardCancellationIntent, officialPostingRefreshRunRef, canvasFilePath]);
 
   const completeManualAiRun = useCallback(async (runId, {
     retryCombineAfterRetirement = false,
@@ -2751,6 +2771,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [data.boardCancellation, handleCancelRun, id]);
 
   const handleCombine = useCallback(async (options = {}) => {
+    if (officialPostingRefreshRunRef.current || getOfficialPostingPreparation(canvasFilePath, id)?.owner === 'board-refresh') return { status: 'busy' };
     if (isJobWorkflowDeletionPending(id)) return { status: 'cancelled' };
     const liveBoardDataAtAdmission = getNode(id)?.data || {};
     if (
@@ -2917,6 +2938,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setCombineTrace(initialTrace);
     const cancelled = epoch.start();
     let lease = null;
+    let postingClaim = null;
     try {
       if (!queueManagedByScan) {
         // A standalone Combine owns one job-domain turn. A selected-search run
@@ -2947,6 +2969,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // lane. Locked means a frozen snapshot, so do not even start provider
       // work from the click-time unlocked render.
       if (getNode(id)?.data?.locked) return { status: 'not-ready', error: 'Unlock this Job Board first.' };
+      const pendingCardLookup = getNodes().some(node => node?.type === 'jobcard' && node.data?.hubId === id
+        && getOfficialPostingPreparation(canvasFilePath, node.id));
+      if (pendingCardLookup) {
+        addToast({ title: 'Official posting lookup running', description: 'Finish or cancel the card lookup before combining this board.', type: 'info' });
+        return { status: 'busy' };
+      }
+      postingClaim = beginOfficialPostingPreparation({ canvasFilePath, nodeId: id, purpose: 'lookup' });
+      if (!postingClaim) return { status: 'busy' };
       // Take the input snapshot only after the shared lane starts. A search
       // ahead of this board can complete while it is queued; using the click-
       // time closure would waste a manual run and could misstate provenance.
@@ -3130,6 +3160,20 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           );
         }
       }
+      // Bind lookups to the final card shape: location consolidation can change
+      // the semantic source. Keep exact current card receipts, then retry legacy
+      // and incomplete rows without changing the source-run artifacts.
+      union = carryBoardOfficialPostingResults(union, existingBoardCards);
+      recordCombineStage('official-postings');
+      const officialRefresh = await refreshBoardOfficialPostingJobs(union, {
+        nodeId: id, manualAiRunId, force: true,
+        cancelled: () => cancelled() || !getNode(id) || !!getNode(id)?.data?.locked,
+        // Every row crosses the host proof check. Only the host can reuse an
+        // exact current cache receipt; renderer freshness is display-only.
+        refresh: args => window.electronAPI.refreshOfficialPostings({ ...args, force: false }),
+      });
+      union = officialRefresh.jobs;
+      if (cancelled() || !getNode(id)) return { status: 'cancelled' };
       const perModule = completedAtCombine.map((m) => ({ label: m.label, count: m.count }));
       EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);
       EventLogger.log(
@@ -3562,6 +3606,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       addToast({ title: 'Combine failed', description: err?.message || String(err), type: 'error' });
       return { status: 'failed', error: err?.message || String(err) };
     } finally {
+      postingClaim?.finish();
       lease?.release();
       if (committedCombineRef.current?.token === combineToken) {
         committedCombineRef.current = null;
@@ -3585,9 +3630,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
-  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, setNodes, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage]);
+  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, setNodes, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage, officialPostingRefreshRunRef]);
 
   const handleSearchSelected = useCallback(async (request = null) => {
+    if (officialPostingRefreshRunRef.current || getOfficialPostingPreparation(canvasFilePath, id)?.owner === 'board-refresh') return { status: 'busy' };
     if (isJobWorkflowDeletionPending(id)) return { status: 'cancelled' };
     const liveBoardDataAtAdmission = getNode(id)?.data || data;
     if (
@@ -5496,7 +5542,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }
       }
     }
-  }, [addToast, boardRecoverySig, canvasFilePath, data, epoch, getEdges, getNode, getNodes, handleCombine, id, interruptedRecoveryProbes, jobSearchCoordinator, moduleRunQueue, updateGlobal]);
+  }, [addToast, boardRecoverySig, canvasFilePath, data, epoch, getEdges, getNode, getNodes, handleCombine, id, interruptedRecoveryProbes, jobSearchCoordinator, moduleRunQueue, updateGlobal, officialPostingRefreshRunRef]);
 
   const settleRecoveredCombine = useCallback((outcome, expectedBoardRunId) => {
     if (
@@ -6937,7 +6983,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           setShowReviewCards={setShowReviewCards}
           onRecombine={boardRunVisible ? null : () => handleCombine()}
           onClear={handleClear}
-          combining={scanning || combining}
+          combining={combining}
+          scanning={scanning}
+          officialPostingRefreshing={officialPostingRefreshing}
+          officialPostingProgress={officialPostingProgress}
+          onRefreshOfficialPostings={boardRunVisible ? null : refreshOfficialPostings}
+          onCancelOfficialPostingRefresh={cancelOfficialPostingRefresh}
         />
       )}
       </HubContainer>

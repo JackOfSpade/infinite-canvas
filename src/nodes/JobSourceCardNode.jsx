@@ -1077,6 +1077,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           enabledSourceIds: hubData.enabledSourceIds,
           jobRunId,
           operationAuthority: continuationIntent.operationAuthority,
+          preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
           secondTabUrl: pendingWarning?.openSecondTab ? pendingUrl : null,
           // Legacy snapshot/display data only — see the resumeJobSource
           // branch above; the gate this used to feed is gone.

@@ -7,11 +7,12 @@ import { createOfficialPostingStore, officialPostingView, officialPostingRecordM
 import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { createOfficialPostingFetchSession } from './officialPostingFetchSession.js';
 import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
-import { officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, createOfficialPostingRowBudget, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { descriptionOverlap } from './officialPostingMatch.js';
+import { officialPostingAdapterUrl, officialPostingChunks, resolveOfficialPosting, unresolvedOfficialPosting, createOfficialPostingRowBudget, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
+import { renderOfficialCareersPage } from './officialPostingRender.js';
+import { canonicalLeadUrl, descriptionOverlap } from './officialPostingMatch.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
-import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
+import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse,
@@ -22,6 +23,9 @@ import { getHandoffBridgeStatus } from './handoffBridge/index.js';
 import { bridgeComparisonAvailable } from './handoffBridge/bridgeAvailability.js';
 import { CONSTANTS } from './handoffBridge/constants.js';
 import { buildListingLivenessRequest, validateListingLivenessResponse } from './listingLivenessAi.js';
+import { snapshotOfficialPostingLeads } from './officialPostingSnapshot.js';
+import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS } from './officialPostingJudge.js';
+import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from './officialPostingNegativePolicy.js';
 
 export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
 export const OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS = 15_000;
@@ -121,7 +125,7 @@ function materiallyDifferent(left, right) {
   const words = value => value.split(/\s+/u).length;
   return descriptionOverlap(a, b).score < 0.9 || Math.abs(words(a) - words(b)) / Math.max(words(a), words(b)) > 0.15;
 }
-const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget', 'crawl-partial', 'semantic-uncertain', 'semantic-overflow', ...OFFICIAL_POSTING_COMPARATIVE_CODES]);
+const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'source-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget', 'crawl-partial', 'semantic-uncertain', 'semantic-overflow', ...OFFICIAL_POSTING_COMPARATIVE_CODES]);
 const FETCH_COUNTERS = Object.freeze(['fetches', 'uniqueUrls', 'cacheHits', 'breakerTrips']);
 const MISS_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROW_CONCURRENCY = 6;
@@ -140,7 +144,7 @@ function countPosting(stats, posting, comparison = null) {
   for (const code of new Set(posting.trail || [])) {
     if (code === 'bridge-timeout') stats.bridgeTimeout += 1;
     if (code === 'bridge-unavailable') stats.bridgeUnavailable += 1;
-    if (code !== 'comparative-match' && REJECTION_CODES.includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
+    if (!['comparative-match', 'comparative-equivalent'].includes(code) && REJECTION_CODES.includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
   }
   if (['found', 'link-only'].includes(posting.outcome) && posting.trail?.includes('comparative-match')) stats.comparativeMatches += 1;
   if (Number.isSafeInteger(comparison?.optionCount) && comparison.optionCount >= 1 && comparison.optionCount <= 8) {
@@ -169,7 +173,7 @@ export function mergeOfficialPostingTelemetry(...blocks) {
       const value = block.comparisonOptions?.[option];
       if (Number.isSafeInteger(value) && value >= 0) result.comparisonOptions[option] += value;
     }
-    for (const code of REJECTION_CODES) if (code !== 'comparative-match' && count(block.rejections?.[code])) result.rejections[code] = (result.rejections[code] || 0) + count(block.rejections[code]);
+    for (const code of REJECTION_CODES) if (!['comparative-match', 'comparative-equivalent'].includes(code) && count(block.rejections?.[code])) result.rejections[code] = (result.rejections[code] || 0) + count(block.rejections[code]);
   }
   // Per-board counts of rows an aggregator board reported closed. Present only
   // when a pass saw any, so a pass without them keeps its historical shape.
@@ -303,12 +307,21 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
   };
 }
 
+/** ChatGPT finds and judges official postings; the host crawl engine remains only for callers that inject their own
+ * resolver or fetcher (its tests), or that ask for it by name. */
+export async function resolveOfficialPostings(jobs, options = {}) {
+  const injectedCrawl = options.resolve || options.fetchSession || options.render || (options.fetch && options.fetch !== fetchOfficialPosting);
+  const engine = options.engine ?? (injectedCrawl ? 'crawl' : 'chat');
+  return engine === 'chat' ? resolveOfficialPostingsByChat(jobs, options) : resolveOfficialPostingsByCrawl(jobs, options);
+}
+
 /** Chunks are frozen from this input before cache reads. Six host workers do
  * not change research membership; handoff chunks remain strictly sequential. */
-export async function resolveOfficialPostings(jobs, {
+export async function resolveOfficialPostingsByCrawl(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
   store, fetch = fetchOfficialPosting, fetchSession, resolve = resolveOfficialPosting, now = Date.now,
-  semanticMatching = resolve === resolveOfficialPosting, bypassCache = false, candidateUrls = [],
+  render = fetch === fetchOfficialPosting ? renderOfficialCareersPage : null,
+  semanticMatching = resolve === resolveOfficialPosting, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
   priorOfficialRecords = [],
   timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
   bridgeStatus = getHandoffBridgeStatus,
@@ -324,7 +337,12 @@ export async function resolveOfficialPostings(jobs, {
   const session = fetchSession || createOfficialPostingFetchSession({ fetch, signal });
   const initialFetchStats = session.telemetry();
   const members = chunks.flat();
-  for (const member of members) member.priorOfficialRecord = priorOfficialRecords[rows.indexOf(member.job)] || null;
+  for (const member of members) {
+    const index = rows.indexOf(member.job);
+    member.priorOfficialRecord = priorOfficialRecords[index] || null;
+    member.bypassCache = bypassCache || bypassCacheByRow[index] === true;
+    member.candidateUrls = [...candidateUrls, ...(Array.isArray(candidateUrlsByRow[index]) ? candidateUrlsByRow[index] : [])];
+  }
   const budgets = new Set();
   const freshBudget = (member, retryUrls = []) => {
     const previous = member.rowBudget;
@@ -391,8 +409,8 @@ export async function resolveOfficialPostings(jobs, {
     const rowSignal = semanticMatching ? signal : member.rowBudget.signal;
     if (rowSignal?.aborted) return unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [abortTrail(rowSignal)] });
     try {
-      const result = await resolve(member.job, { store, fetch: session.fetch, signal: rowSignal, rowBudget: member.rowBudget,
-        now: clock, persistResults: false, persistMisses: false, semanticMatching, bypassCache, candidateUrls,
+      const result = await resolve(member.job, { store, fetch: session.fetch, render, signal: rowSignal, rowBudget: member.rowBudget,
+        now: clock, persistResults: false, persistMisses: false, semanticMatching, bypassCache: member.bypassCache, candidateUrls: member.candidateUrls,
         priorOfficialRecord: member.priorOfficialRecord,
         ...(semanticMatching ? member.callbacks : {}), ...options });
       if (!normalizeOfficialPosting(result?.officialPosting)) throw new TypeError('Invalid official posting resolution.');
@@ -467,7 +485,7 @@ export async function resolveOfficialPostings(jobs, {
           : [lead.postingUrl, lead.url, lead.careersPageUrl, lead.employerDomain].filter(Boolean));
         session.retryFailedUrls?.(researchedUrls);
         freshBudget(member, researchedUrls);
-        let result = await safeResolve(member, { candidateUrls: [...researchedLeads, ...candidateUrls],
+        let result = await safeResolve(member, { candidateUrls: [...researchedLeads, ...member.candidateUrls],
           bypassCache: true, ...member.callbacks, researchRan: true });
         result = addTrail(result, 'bridge-research');
         results.set(member, await persist(member, result, { researchRan: true })); settle(member);
@@ -503,6 +521,247 @@ export async function resolveOfficialPostings(jobs, {
     for (const budget of budgets) budget.dispose();
     if (!fetchSession) session.dispose?.();
   }
+}
+
+/** A saved decision for this exact scraped input settles the row without new chats: a verified posting, or a
+ * recent settled miss (the store's 24-hour window). A closed record is researched again for a replacement. */
+async function cachedChatResolution(job, store) {
+  let record;
+  try { record = await store.find(job); } catch { return null; }
+  const posting = normalizeOfficialPosting(record?.officialPosting);
+  if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record) || !officialPostingSemanticProofMatches(job, posting)
+    || !shouldPersistOfficialPostingResult({ officialPosting: posting }, { researchRan: true })) return null;
+  if (VERIFIED_LEVELS.has(posting.level) && ['found', 'link-only'].includes(posting.outcome)) {
+    return { record, postedBy: strictEmployerEqual(posting.employer, job?.company) ? '' : String(job?.company || ''),
+      officialPosting: { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), 'cache-hit']) } };
+  }
+  if (!VERIFIED_LEVELS.has(posting.level) && !posting.trail?.includes('closed')) {
+    return { record, postedBy: unresolvedOfficialPosting(job).postedBy,
+      officialPosting: { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), 'recent-miss']) } };
+  }
+  return null;
+}
+
+/** Leads for the judges: a prior verified page first (a recheck), then supplied leads, then the finders' postings and
+ * their careers pages. Pointers only; each judge opens them itself. */
+function judgeLeadsFor(member, found) {
+  const leads = []; const seen = new Set();
+  const add = (value, kind, employer = '') => {
+    const url = officialHttpsUrl(value); const key = canonicalLeadUrl(url);
+    if (!url || !key || seen.has(key)) return;
+    seen.add(key);
+    // A job board's own public data for this posting: the page itself usually needs JavaScript, which the judges' browser
+    // cannot run. A pointer only; the judges read it themselves.
+    const route = kind === 'posting' ? extractAtsTenant(url) : null;
+    let dataUrl = '';
+    try { dataUrl = route ? officialHttpsUrl(officialPostingAdapterUrl(route, url)) : ''; } catch { dataUrl = ''; }
+    leads.push({ url, kind, employer: String(employer || ''), ...(dataUrl && dataUrl !== url ? { dataUrl } : {}) });
+  };
+  const prior = normalizeOfficialPosting(member.priorOfficialRecord?.officialPosting);
+  for (const url of [prior?.sourceUrl, prior?.officialApplyUrl]) add(url, 'posting', prior?.employer);
+  for (const lead of member.candidateUrls) {
+    if (typeof lead === 'string') add(lead, 'posting');
+    else { add(lead?.postingUrl || lead?.url, 'posting', lead?.employer); add(lead?.careersPageUrl, 'careers', lead?.employer); }
+  }
+  for (const lead of found) add(lead.postingUrl, 'posting', lead.employer);
+  for (const lead of found) add(lead.careersPageUrl, 'careers', lead.employer);
+  return { total: leads.length, leads: leads.slice(0, MAX_JUDGE_LEADS).map((lead, index) => ({ id: `P${index + 1}`, ...lead })) };
+}
+
+const JUDGMENT_LOG_BYTES = 2 * 1024 * 1024;
+/** The judges' own answers (choice, status, link, URL, explanation), so an unsettled lookup can be diagnosed afterwards.
+ * Bounded: the file rolls over to one previous copy. Never part of any decision. */
+async function recordJudgment(store, entry) {
+  if (!store?.rootDir) return;
+  try {
+    const fs = await import('node:fs/promises');
+    const file = path.join(store.rootDir, 'judgments.jsonl');
+    const size = await fs.stat(file).then(stat => stat.size, () => 0);
+    if (size > JUDGMENT_LOG_BYTES) await fs.rename(file, `${file}.1`);
+    await fs.appendFile(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
+  } catch { /* Diagnostics must not affect the lookup. */ }
+}
+
+/** ChatGPT does all finding, reading and judging. The host sends handoffs, checks each answer's format and quotes,
+ * compares the two isolated judgments for equality, and stores the agreed result. */
+export async function resolveOfficialPostingsByChat(jobs, {
+  manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
+  store, now = Date.now, snapshotFetch = fetchOfficialPosting, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
+  priorOfficialRecords = [], timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
+  bridgeStatus = getHandoffBridgeStatus,
+  comparativeWorkerAvailable = callMatch === callLLMRaw ? () => bridgeComparisonAvailable(bridgeStatus(), hasLiveObservedWorker) : null,
+  comparativeWorkerLaunching = callMatch === callLLMRaw ? hasPendingObservedWorkerLaunch : null,
+  comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
+} = {}) {
+  const rows = Array.isArray(jobs) ? jobs : [];
+  const members = officialPostingChunks(rows).flat();
+  const clock = () => typeof now === 'function' ? Number(now()) : Number(now);
+  const stats = telemetryBlock();
+  const results = new Map(); const finished = new Set(); const found = new Map();
+  for (const member of members) {
+    const index = rows.indexOf(member.job);
+    member.priorOfficialRecord = priorOfficialRecords[index] || null;
+    member.bypassCache = bypassCache || bypassCacheByRow[index] === true;
+    member.candidateUrls = [...candidateUrls, ...(Array.isArray(candidateUrlsByRow[index]) ? candidateUrlsByRow[index] : [])];
+  }
+  try { store ||= getOfficialPostingStore(); } catch { store = null; }
+  const progress = () => { try { onProgress?.({ completed: finished.size, total: rows.length }); } catch { /* Progress cannot fail the search. */ } };
+  const settle = (member, result) => { results.set(member, result); finished.add(member); progress(); };
+  const unresolved = (member, trail) => unresolvedOfficialPosting(member.job, { outcome: 'ambiguous', trail });
+  const persist = async (member, result) => {
+    if (!store || result.record || result.officialPosting?.trail?.includes('recent-miss')
+      || !shouldPersistOfficialPostingResult(result, { signal, researchRan: true })) return result;
+    try {
+      const record = await store.save(member.job, { officialPosting: result.officialPosting, description: result.description });
+      return { ...result, record, officialPosting: record.officialPosting };
+    } catch (error) {
+      stats.failed += 1;
+      console.warn('[OfficialPosting] Resolution storage failed:', error?.code || error?.name || 'Error');
+      return { ...unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: [...(result.officialPosting?.trail || []), 'storage-failed'] }),
+        comparison: result.comparison };
+    }
+  };
+  const handoff = (request, hints, comparative) => cappedHandoff(request, { call: comparative ? callMatch : callRaw, signal, timeoutMs,
+    manualAiRunId, nodeId, hints, now: clock, stats,
+    ...(comparative ? { comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs } : {}) });
+  // Finders: grounded research batches. A row the first finder could not place gets one more independent search.
+  const findLeads = async (group, round) => {
+    // Cards with the same scraped identity share one research slot and its answer.
+    const byId = new Map();
+    for (const member of group) byId.set(member.id, [...(byId.get(member.id) || []), member]);
+    const chunks = officialPostingChunks([...byId.values()].map(([first]) => first.job));
+    for (const [batch, chunk] of chunks.entries()) {
+      const chunkMembers = chunk.flatMap(({ id }) => byId.get(id) || []);
+      if (signal?.aborted || !bridgeAvailable) {
+        for (const member of chunkMembers) settle(member, unresolved(member, [signal?.aborted ? abortTrail(signal) : 'bridge-unavailable']));
+        continue;
+      }
+      try {
+        const raw = await handoff(buildOfficialPostingResearchRequest(chunk.map(({ job }) => job)),
+          { itemCount: chunk.length, batch: batch + 1, batchTotal: chunks.length, ...(round > 1 ? { attemptKind: 'second-search' } : {}) }, false);
+        for (const row of parseOfficialPostingResearchResponse(raw, chunk.map(({ id }) => id))) {
+          for (const member of byId.get(row.id) || []) found.set(member, [...(found.get(member) || []), ...row.candidates]);
+        }
+      } catch (error) {
+        // A failed second search keeps whatever the first one found.
+        const code = failureCode(error, signal);
+        for (const member of chunkMembers) if (round === 1 || code !== 'research-miss') settle(member, unresolved(member, [code]));
+      }
+    }
+  };
+  // One isolated A/B pair. Returns the two validated answers, or the unresolved row when a judgment fails.
+  const judgePair = async (member, leads, round, snapshots) => {
+    const answers = {}; const valid = { A: false, B: false };
+    for (const run of ['A', 'B']) {
+      const request = buildOfficialPostingJudgeRequest({ job: member.job, leads, run, round, snapshots });
+      const attempts = callMatch === callLLMRaw ? 1 : 2;
+      let correction = {}; let failure = null;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (!bridgeAvailable) { failure = 'bridge-unavailable'; break; }
+        try {
+          answers[run] = validateOfficialPostingJudgeResponse(await handoff({ ...request, ...correction },
+            { itemCount: 1, optionCount: leads.length, comparisonRun: run }, true), { job: member.job, leads });
+          valid[run] = true; failure = null;
+          const answer = answers[run];
+          await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
+            company: String(member.job?.company || '').slice(0, 120), round, run, leads: leads.map(lead => lead.url),
+            choice: answer.choice, status: answer.status, statusQuote: answer.statusQuote, employerLinked: answer.employerLinked,
+            employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, descriptionChars: answer.description.length,
+            conflicts: answer.conflicts });
+          break;
+        } catch (error) {
+          // The real transport owns its correction rounds; injected callers emulate one with the same identity.
+          if (attempt + 1 < attempts && Array.isArray(error?.correctionDetails) && error.correctionDetails.length) {
+            correction = { correctionDetails: [...error.correctionDetails], correctionRuleIds: [...(error.correctionRuleIds || [])], correctionAttempt: 1 };
+            continue;
+          }
+          failure = ['comparative-unavailable', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE'].includes(error?.code) ? 'comparative-unavailable'
+            : error?.code === 'OFFICIAL_POSTING_COMPARATIVE_INVALID' || Array.isArray(error?.correctionDetails) ? 'comparative-invalid'
+              : failureCode(error, signal);
+          if (failure === 'research-miss') failure = 'comparative-invalid';
+        }
+      }
+      if (failure) {
+        await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
+          company: String(member.job?.company || '').slice(0, 120), round, run, leads: leads.map(lead => lead.url), failure });
+        return { answers, failed: { ...unresolved(member, ['bridge-research', ...officialPostingComparativeTrail({ validA: valid.A, validB: valid.B,
+          choiceA: answers.A?.choice, choiceB: answers.B?.choice }), signal?.aborted ? abortTrail(signal) : failure]),
+        comparison: { optionCount: leads.length, validA: valid.A, validB: valid.B, invalidRuns: Number(!valid.A) + Number(!valid.B),
+          unavailable: failure === 'comparative-unavailable' } } };
+      }
+    }
+    return { answers };
+  };
+  const judge = async member => {
+    const { leads, total } = judgeLeadsFor(member, found.get(member) || []);
+    if (!leads.length) return unresolved(member, ['bridge-research', 'research-miss']);
+    // One download of every lead, shared by both rounds: the judges' browser cannot run JavaScript.
+    const snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotFetch, signal });
+    const textComplete = !snapshots.some(snapshot => snapshot.descriptionTruncated || snapshot.pageTextTruncated);
+    const decide = answers => decideOfficialPostingJudgments(member.job, { leads, totalLeads: total, textComplete, answerA: answers.A, answerB: answers.B, now: clock,
+      fallback: unresolvedOfficialPosting, comparativeTrail: officialPostingComparativeTrail,
+      inputHash: officialPostingSemanticInputHash(member.job), extractRoute: url => extractAtsTenant(url),
+      employerEqual: strictEmployerEqual, negativeProofTrail: OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL });
+    const first = await judgePair(member, leads, 1, snapshots);
+    if (first.failed) return first.failed;
+    const answers = Object.values(first.answers);
+    const withCitations = result => {
+      if (result.officialPosting?.outcome !== 'ambiguous') return result;
+      const alternatives = rankJudgeCitations({ leads, answers });
+      return alternatives.length ? { ...result, officialPosting: { ...result.officialPosting, alternatives } } : result;
+    };
+    const decided = decide(first.answers);
+    // A pair that did not settle (they differed, or could not confirm status or the employer's link) gets one more
+    // independent pair, and so does a pair that found nothing or found it closed: a miss or a closure is final only
+    // when a second pair says so too. Only that second pair's own agreement can settle the row; the first pair's answers never count.
+    const retryable = ['semantic-uncertain', 'official-liveness-unconfirmed', 'source-unproven', 'comparative-none']
+      .some(code => decided.officialPosting?.trail?.includes(code)) || decided.officialPosting?.outcome === 'closed';
+    if (!retryable || signal?.aborted) return withCitations(decided);
+    const second = await judgePair(member, leads, 2, snapshots);
+    answers.push(...Object.values(second.answers));
+    // A miss or a closure never settles on one pair: without the confirming pair it stays retryable.
+    if (second.failed) return decided.officialPosting?.trail?.includes('comparative-none') || decided.officialPosting?.outcome === 'closed'
+      ? second.failed : withCitations(decided);
+    return withCitations(decide(second.answers));
+  };
+  progress();
+  if (store) await parallelRows(members.filter(member => !member.bypassCache), async member => {
+    const cached = await cachedChatResolution(member.job, store);
+    if (cached) settle(member, cached);
+  });
+  await findLeads(members.filter(member => !finished.has(member)), 1);
+  await findLeads(members.filter(member => !finished.has(member) && !judgeLeadsFor(member, found.get(member) || []).total), 2);
+  await parallelRows(members.filter(member => !finished.has(member)), async member => {
+    let result;
+    try { result = signal?.aborted ? unresolved(member, [abortTrail(signal)]) : await judge(member); }
+    catch (error) {
+      stats.failed += 1;
+      console.warn('[OfficialPosting] Row judgment failed:', error?.code || error?.name || 'Error');
+      result = unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] });
+    }
+    settle(member, await persist(member, result));
+  });
+  for (const member of members) {
+    let result = results.get(member);
+    if (TEXT_LEVELS.has(result?.officialPosting?.level) && ['found', 'link-only'].includes(result.officialPosting.outcome)) {
+      let description = result.description;
+      if (!description && store && result.officialPosting.contentHash) try { description = await store.readText(result.officialPosting.contentHash); } catch { /* The view handles missing/corrupt text. */ }
+      if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
+        result = addTrail(result, 'material-jd-change'); stats.materialJdChange += 1;
+        if (store && result.record && shouldPersistOfficialPostingResult(result, { signal })) try {
+          const record = await store.save(member.job, { officialPosting: result.officialPosting, expectedRecord: result.record });
+          if (record) result = { ...result, record, officialPosting: record.officialPosting };
+        } catch { /* Telemetry and row retain the detected change. */ }
+        results.set(member, result);
+      }
+    }
+    countPosting(stats, result?.officialPosting || unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] }).officialPosting, result?.comparison);
+  }
+  const byJob = new Map([...results].map(([member, result]) => [member.job, result]));
+  const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
+    officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
+  if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
+  return { jobs: resolved, telemetry: stats, expiryCandidates: rows.map(() => []) };
 }
 
 function atsPostingKey(posting) {

@@ -53,6 +53,8 @@ function harness(options = {}) {
   let urlReadError = options.urlReadError === true;
   let mode = options.mode || 'work';
   let modeReads = 0;
+  let draft = options.draft ?? '';
+  let unknownAccount = options.unknownAccount === true;
   const launcher = createChatLauncher({
     now: () => day * 86_400_000 + (tick += 500), delay: async () => {},
     onState: (...values) => { states.push(values); options.onState?.(...values); },
@@ -85,15 +87,19 @@ function harness(options = {}) {
         return 'selected';
       }
       if (code === "'ready'") return 'ready';
-      if (code.includes('return JSON.stringify({ready:')) return JSON.stringify({ ready: !options.noEditor, empty: true, attachments: options.staleAttachment ? 1 : 0, url: activeUrl });
+      if (code.includes('return JSON.stringify({ready:')) return JSON.stringify({ ready: !options.noEditor, empty: draft === '', draft, attachments: options.staleAttachment ? 1 : 0, url: activeUrl });
       if (code.includes('window.__icBridgeUploads ||= ')) return 'ready';
       if (code.includes('b.push(')) return 'appended';
       if (code.includes('transfer.items.add(new File')) return options.uploadFailed ? 'failed' : 'attached';
       if (code.includes('const expected =')) return JSON.stringify({ complete: true, progress: 0 });
       if (code.includes("return 'cleared'")) return 'cleared';
-      if (code.includes("document.execCommand('insertText'")) return options.insertMismatch ? 'mismatch' : 'match';
+      if (code.includes("document.execCommand('insertText'")) {
+        if (options.insertMismatch) return 'mismatch';
+        // ChatGPT keeps an unsent composer draft across new tabs.
+        draft = JSON.parse(code.match(/insertText', false, ("(?:[^"\\]|\\.)*")/u)[1]); return 'match';
+      }
       if (code.includes('const models =')) { modelReads += 1; return JSON.stringify({ model: selectedModel, topModel: 'GPT-6', topSelected: selectedModel === 'GPT-6', min: 0, max: options.maxPosition ?? 4, now: effortPosition, label: effortPosition === 4 ? 'Pro' : effortPosition === 3 ? 'Extra High' : 'High', sliderReady: modelReads > (options.partialModelReads || 0) && !(options.sliderOnlyForTop && selectedModel !== 'GPT-6'), locked: options.lockedPro === true && effortPosition === 4 }); }
-      if (code.includes('const visible =')) return JSON.stringify({ blocked: options.upsellPro === true && effortPosition === 4 && !upsellDismissed });
+      if (code.includes('const visible =') && !code.includes('const agent =')) return JSON.stringify({ blocked: options.upsellPro === true && effortPosition === 4 && !upsellDismissed });
       if (code.includes('const dialog =')) { upsellDismissed = true; return 'closed'; }
       if (code.includes('const item = [...')) { if (!options.selectionStuck) selectedModel = 'GPT-6'; return 'selected'; }
       if (code.includes('const slider = document.querySelector')) {
@@ -104,16 +110,17 @@ function harness(options = {}) {
       if (code.includes("return 'closed'")) return 'closed';
       if (code.includes("!!document.querySelector('[role=\"menu\"]')")) return 'false';
       if (code.includes("!document.querySelector('[role=\"menu\"]')")) return 'true';
-      if (code.includes('const signedIn =')) return JSON.stringify({ signedIn: !options.unknownAccount });
-      if (code.includes('const agent =')) return JSON.stringify({ reason: options.diagnosis || 'none', assistantPresent: true });
+      if (code.includes('const signedIn =')) return JSON.stringify({ signedIn: !unknownAccount });
+      if (code.includes('const agent =')) return JSON.stringify(options.diagnosisResult
+        || { reason: options.diagnosis || 'none', assistantPresent: true });
       if (code.includes("button[aria-label=\"Select ChatGPT model\"]")) return 'opened';
       if (code.includes("button[aria-label=\"Open profile menu\"]")) return 'opened';
-      if (code.includes("button[aria-label=\"Send\"]")) return 'clicked';
+      if (code.includes("button[aria-label=\"Send\"]")) { draft = ''; return 'clicked'; }
       if (code.includes('empty:')) return JSON.stringify({ empty: true });
       throw new Error('unexpected fake command');
     },
   });
-  return { launcher, calls, states, setMode: value => { mode = value; }, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; }, recoverChrome: () => { urlReadError = false; } };
+  return { launcher, calls, states, setDraft: value => { draft = value; }, setUnknownAccount: value => { unknownAccount = value; }, setMode: value => { mode = value; }, navigate: url => { activeUrl = url; }, nextDay: () => { day += 1; }, enableAppleEvents: () => { appleEventsEnabled = true; }, restartChrome: () => { chromeRestarted = true; }, recoverChrome: () => { urlReadError = false; } };
 }
 
 const flush = async (turns = 40) => { for (let turn = 0; turn < turns; turn++) await new Promise(resolve => setImmediate(resolve)); };
@@ -121,7 +128,7 @@ const flush = async (turns = 40) => { for (let turn = 0; turn < turns; turn++) a
 // A dock with one connected pool worker whose owned tab is diagnosed by a
 // controllable fake. `tick(ms)` advances the clock and fires the 15s
 // observation timer (or republishes status when none is armed).
-function observedWorkerUi({ worker, clock, diagnosis, controller = {} }) {
+function observedWorkerUi({ worker, clock, diagnosis, controller = {}, launchResult }) {
   const calls = [];
   const diagnoses = [];
   const handlers = new Map();
@@ -143,6 +150,7 @@ function observedWorkerUi({ worker, clock, diagnosis, controller = {} }) {
       close: async owner => { calls.push(['close', owner]); return true; },
       launch: async () => {
         calls.push(['launch']);
+        if (launchResult) return launchResult;
         worker.firstCallAt = clock.now; worker.lastCallAt = clock.now; worker.state = 'waiting';
         return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` };
       } },
@@ -160,7 +168,7 @@ function observedWorkerUi({ worker, clock, diagnosis, controller = {} }) {
       await flush();
     } };
 }
-const stopped = { reason: 'none', assistantPresent: true, responding: false };
+const noStop = { reason: 'none', assistantPresent: true, responding: false };
 const responding = { reason: 'none', assistantPresent: true, responding: true };
 
 const starter = 'private-session-code-do-not-log';
@@ -175,6 +183,15 @@ const cases = [
 ];
 
 export default [
+  { name: 'chat launcher: a stopped launch\'s own starter left in the composer is replaced; a person\'s draft still blocks', async run() {
+    const h = harness({ unknownAccount: true });
+    assert.equal((await h.launcher.launch({ owner: 'draft', starter })).reason, 'account_unknown');
+    h.setUnknownAccount(false);
+    const retried = await h.launcher.launch({ owner: 'draft', starter });
+    assert.equal(retried.ok, true, 'the retry is not blocked by the starter the first attempt typed');
+    const person = harness({ draft: 'my own unsent note' });
+    assert.equal((await person.launcher.launch({ owner: 'person', starter })).reason, 'editor_not_empty');
+  } },
   { name: 'chat launcher: restart_cap keeps the tab and never launches or retries a replacement', async run() {
     const clock = { now: Date.now() };
     const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 61_000, restarts: 3 };
@@ -668,7 +685,7 @@ export default [
     assert.equal(page({ error: 'Message delivery timed out. Please try again.', stop: true }).reason, 'none');
     assert.deepEqual(page({ error: 'Message delivery timed out. Please try again.', stop: true }).responding, true);
     assert.deepEqual(page({ stop: true }), { reason: 'none', assistantPresent: true, responding: true });
-    assert.deepEqual(page({}), { reason: 'none', assistantPresent: true, responding: false }, 'a turn without a Stop control is not responding');
+    assert.deepEqual(page({}), { reason: 'none', assistantPresent: true, responding: false }, 'an absent Stop control is reported without asserting a failure');
     assert.equal(page({ error: 'Message delivery timed out. Please try again.\nRetry' }).responding, false);
     assert.equal(page({ conversation: true }).responding, false);
     assert.equal(page({ error: 'Message delivery timed out. Please try again.', hidden: true }).reason, 'none');
@@ -856,27 +873,147 @@ export default [
       assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true, automatic: true }], ['close', 'worker:31:1'], ['launch']]);
     } finally { h.ui.dispose(); }
   } },
-  { name: 'chat launcher: two consecutive looks without a Stop control classify the chat as stopped', async run() {
+  { name: 'chat launcher: repeated quiet no-Stop observations remain provisional through a later accepted handoff', async run() {
     const clock = { now: Date.now() };
-    const worker = { ordinal: 1, state: 'working', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
-    let next = stopped;
-    const h = observedWorkerUi({ worker, clock, diagnosis: () => next });
+    const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => noStop });
     try {
       await h.publish();
-      assert.equal((await h.launch())?.reason ?? null, null, 'one look can fall between two polls');
-      next = responding; await h.tick(15_000);
+      for (let look = 0; look < 6; look++) await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null, 'absence of a Stop control does not prove the overdue answer stopped');
+      assert.equal(worker.state, 'quiet');
+      assert.equal(worker.quietReason, 'answer_silent', 'the engine retains its honest overdue-answer diagnosis');
+      assert.deepEqual(h.calls, [], 'the owned chat and capability remain intact');
+      worker.lastCallAt = ++clock.now; worker.lastOutcome = 'accepted'; worker.completed = 1; worker.state = 'waiting';
+      await h.publish();
       assert.equal((await h.launch())?.reason ?? null, null);
-      next = stopped; await h.tick(15_000);
-      assert.equal((await h.launch())?.reason ?? null, null, 'a responding look resets the streak');
+      assert.deepEqual(h.calls, [], 'later authenticated acceptance needs no replacement or warning recovery');
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: temporary tool gaps stay provisional through acceptance and an overdue-answer transition', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'working', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => noStop });
+    try {
+      await h.publish();
+      for (let look = 0; look < 4; look++) await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null, 'a no-Stop tool gap is not a failed chat while the engine still owns progressing work');
+      assert.deepEqual(h.calls, []);
+      worker.lastCallAt = ++clock.now; worker.lastOutcome = 'accepted'; worker.completed = 1; worker.state = 'waiting';
+      await h.publish();
+      assert.equal((await h.launch())?.reason ?? null, null, 'the completed handoff needed no warning or replacement');
+      worker.lastCallAt = ++clock.now; worker.lastOutcome = 'served'; worker.state = 'working';
       await h.tick(15_000);
-      assert.deepEqual(await h.launch(), { ...(await h.launch()), stage: 'failed', reason: 'chat_stopped' });
+      assert.equal((await h.launch())?.reason ?? null, null);
+      worker.state = 'quiet'; worker.quietReason = 'answer_silent';
+      await h.tick(400_000);
+      assert.deepEqual(h.calls, [], 'an overdue answer remains provisional without an explicit failure');
       await h.tick(15_000);
-      assert.equal((await h.launch()).reason, 'chat_stopped');
-      next = responding; await h.tick(15_000);
-      assert.equal((await h.launch()).reason, null);
-      assert.equal((await h.launch()).stage, 'presented');
-      assert.equal(h.diagnoses.length, 6);
-      assert.deepEqual(h.calls, [], 'a working worker that owns an answer is never replaced by these rules');
+      assert.deepEqual(h.calls, [], 'repeated quiet no-Stop observations never authorize replacing owned work');
+      assert.equal((await h.launch())?.reason ?? null, null);
+    } finally { h.ui.dispose(); }
+  } },
+  { name: 'chat launcher: delayed explicit failure observations are fenced by bridge liveness, replacement incarnation and quiet transition', async run() {
+    for (const change of ['newer-bridge-call', 'replacement-incarnation', 'quiet-transition']) {
+      const clock = { now: Date.now() };
+      const worker = { ordinal: 1, state: change === 'quiet-transition' ? 'working' : 'quiet', quietReason: 'answer_silent',
+        firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+      let resolveDiagnosis; let pending = true;
+      const diagnosis = new Promise(resolve => { resolveDiagnosis = resolve; });
+      const h = observedWorkerUi({ worker, clock, diagnosis: () => pending ? diagnosis : { ...noStop, reason: 'delivery_timeout' } });
+      h.snapshot.autoLaunchChats = false;
+      try {
+        await h.publish();
+        if (change === 'newer-bridge-call') worker.lastCallAt = ++clock.now;
+        if (change === 'replacement-incarnation') { worker.restarts++; worker.firstCallAt = ++clock.now; }
+        worker.state = 'quiet'; worker.quietReason = 'answer_silent';
+        pending = false; resolveDiagnosis({ ...noStop, reason: 'delivery_timeout' }); await flush();
+        assert.equal((await h.launch())?.reason ?? null, null, `${change} invalidates the pending observation`);
+        await h.tick(400_000);
+        assert.equal((await h.launch()).reason, 'delivery_timeout', 'a fresh explicit failure belongs to the current owner and lifecycle');
+        assert.deepEqual(h.calls, []);
+      } finally { resolveDiagnosis(noStop); h.ui.dispose(); }
+    }
+  } },
+  { name: 'chat launcher: unknown and explicit absent response controls never become stopped evidence', async run() {
+    const observation = { reason: 'none', assistantPresent: true, responding: false };
+    const backend = harness({ diagnosisResult: observation });
+    assert.equal((await backend.launcher.launch({ owner: 'worker:31:1', starter })).ok, true);
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => backend.launcher.diagnose('worker:31:1') });
+    h.snapshot.autoLaunchChats = false;
+    try {
+      await h.publish();
+      assert.equal((await h.launch())?.reason ?? null, null, 'an absent response control does not establish a stopped chat');
+      for (const unknown of [undefined, null, 0, 'false', {}, []]) {
+        observation.responding = unknown;
+        assert.equal((await backend.launcher.diagnose('worker:31:1')).responding, null);
+        await h.tick(15_000);
+        assert.equal((await h.launch())?.reason ?? null, null, 'partial or malformed data does not create a stopped warning');
+      }
+      observation.responding = false;
+      await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null, 'a fresh absent response control remains provisional');
+      await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null, 'repeated complete no-Stop observations remain provisional');
+      observation.responding = true;
+      await h.tick(15_000);
+      assert.equal((await h.launch())?.reason ?? null, null, 'a visible response control also leaves the healthy chat intact');
+      assert.deepEqual(h.calls, [], 'inconclusive observations cannot replace an answer-owning worker');
+    } finally { h.ui.dispose(); await backend.launcher.close('worker:31:1'); }
+  } },
+  { name: 'chat launcher: a newer bridge call clears an observed transport warning without restarting the recovered worker', async run() {
+    for (const reason of ['delivery_timeout', 'conversation_unavailable']) {
+      const clock = { now: Date.now() };
+      const worker = { ordinal: 1, state: 'working', quietReason: 'answer_silent',
+        firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+      const h = observedWorkerUi({ worker, clock,
+        diagnosis: () => ({ ...noStop, reason }) });
+      try {
+        await h.publish();
+        assert.equal((await h.launch()).reason, reason);
+        const diagnoses = h.diagnoses.length;
+        worker.lastCallAt = ++clock.now;
+        worker.lastOutcome = 'accepted'; worker.completed = 1; worker.state = 'waiting';
+        await h.publish();
+        assert.equal((await h.launch()).stage, 'presented');
+        assert.equal((await h.launch()).reason, null, 'authenticated liveness supersedes the earlier tab observation');
+        for (let poll = 0; poll < 4; poll++) {
+          worker.lastCallAt = clock.now + 15_000; worker.lastOutcome = 'waiting';
+          await h.tick(15_000);
+        }
+        assert.equal((await h.launch()).reason, null);
+        assert.equal(h.diagnoses.length, diagnoses, 'healthy polling needs no additional DOM diagnosis to clear its warning');
+        assert.deepEqual(h.calls, [], 'recovered work keeps its chat and capability');
+      } finally { h.ui.dispose(); }
+    }
+  } },
+  { name: 'chat launcher: bridge liveness preserves launch, consent and refusal failures and cannot clear another incarnation observation', async run() {
+    for (const reason of ['delivery_timeout', 'approval_required', 'reconnect_required', 'safety_block', 'send_not_confirmed']) {
+      const clock = { now: Date.now() };
+      const worker = { ordinal: 1, state: 'ready', firstCallAt: null, lastCallAt: null, restarts: 0 };
+      const h = observedWorkerUi({ worker, clock, diagnosis: () => noStop,
+        controller: { copyWorkerStarter: async () => ({ copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }) },
+        launchResult: { ok: false, reason } });
+      try {
+        await h.publish();
+        assert.equal((await h.launch()).reason, reason);
+        worker.firstCallAt = clock.now; worker.lastCallAt = ++clock.now; worker.state = 'waiting';
+        await h.publish();
+        assert.equal((await h.launch()).reason, reason, 'only a connected-tab observation is cleared by later liveness');
+      } finally { h.ui.dispose(); }
+    }
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ ...noStop, reason: 'delivery_timeout' }) });
+    h.snapshot.autoLaunchChats = false;
+    try {
+      await h.publish(); await h.tick(15_000);
+      assert.equal((await h.launch()).reason, 'delivery_timeout');
+      worker.restarts++; worker.firstCallAt = clock.now; worker.lastCallAt = ++clock.now; worker.state = 'waiting';
+      await h.publish();
+      assert.equal((await h.launch()).reason, 'delivery_timeout', 'another incarnation cannot acknowledge this observation');
     } finally { h.ui.dispose(); }
   } },
   { name: 'chat launcher: a not-responding look never clears a delivery failure', async run() {
@@ -887,35 +1024,27 @@ export default [
     try {
       await h.publish();
       assert.equal((await h.launch()).reason, 'delivery_timeout');
-      next = stopped; await h.tick(15_000);
+      next = noStop; await h.tick(15_000);
       assert.equal((await h.launch()).reason, 'delivery_timeout');
       next = responding; await h.tick(15_000);
       assert.equal((await h.launch()).reason, null);
       assert.deepEqual(h.calls, []);
     } finally { h.ui.dispose(); }
   } },
-  { name: 'chat launcher: a silent answer-owning chat that stopped is replaced, a responding one never', async run() {
-    {
-      const clock = { now: Date.now() };
-      const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: clock.now - 900_000, lastCallAt: clock.now - 400_000, restarts: 0 };
-      const h = observedWorkerUi({ worker, clock, diagnosis: () => stopped });
-      try {
-        await h.publish();
-        assert.deepEqual(h.calls, []);
-        await h.tick(15_000);
-        assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, automatic: true }], ['close', 'worker:31:1'], ['launch']]);
-      } finally { h.ui.dispose(); }
-    }
-    for (const [state, quietReason] of [['working', null], ['quiet', 'answer_silent'], ['waiting', null]]) {
-      const clock = { now: Date.now() };
-      const worker = { ordinal: 1, state, quietReason, firstCallAt: clock.now - 900_000, lastCallAt: clock.now - 400_000, restarts: 0 };
-      const h = observedWorkerUi({ worker, clock, diagnosis: () => responding });
-      try {
-        await h.publish();
-        for (let look = 0; look < 4; look++) await h.tick(15_000);
-        assert.equal(h.diagnoses.length, 5, `${state} worker is observed`);
-        assert.deepEqual(h.calls, [], `${state} worker with a visible Stop control is never replaced`);
-      } finally { h.ui.dispose(); }
+  { name: 'chat launcher: response-control visibility alone never replaces working, waiting or quiet chats', async run() {
+    for (const observation of [noStop, responding]) {
+      for (const [state, quietReason] of [['working', null], ['quiet', 'answer_silent'], ['waiting', null]]) {
+        const clock = { now: Date.now() };
+        const worker = { ordinal: 1, state, quietReason, firstCallAt: clock.now - 900_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+        const h = observedWorkerUi({ worker, clock, diagnosis: () => observation });
+        try {
+          await h.publish();
+          for (let look = 0; look < 4; look++) await h.tick(15_000);
+          assert.equal(h.diagnoses.length, 5, `${state} worker is observed`);
+          assert.equal((await h.launch())?.reason ?? null, null);
+          assert.deepEqual(h.calls, [], `${state} worker requires affirmative failure evidence before replacement`);
+        } finally { h.ui.dispose(); }
+      }
     }
   } },
   { name: 'chat launcher: idle workers are never diagnosed', async run() {

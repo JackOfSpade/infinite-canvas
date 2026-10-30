@@ -43,7 +43,7 @@ export default [
       assert(taskMaxTokensFor('job-official-posting-shortlist', { optionCount: 1, itemCount: 64 }) === 1040,
         'the shortlist output stays compact and depends only on its bounded candidate count');
       const matchCaps = Array.from({ length: 8 }, (_, index) => taskMaxTokensFor('job-official-posting-match', { optionCount: index + 1 }));
-      assert(matchCaps.every((cap, index) => index === 0 || cap > matchCaps[index - 1]), 'each additional option has output room for its distinguishing evidence');
+      assert(matchCaps.every(cap => cap === 15360), 'every judgment has the full usable answer for a verbatim official description');
       assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 0 }) === matchCaps[0]);
       assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 1000 }) === matchCaps[7], 'an invalid option count cannot grow the output budget past eight options');
       assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 1, itemCount: 12 }) === matchCaps[0], 'the single-row comparison budget depends on options, not research batch size');
