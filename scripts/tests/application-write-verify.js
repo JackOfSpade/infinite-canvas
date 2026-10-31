@@ -237,7 +237,7 @@ export default [
       assert.equal(WRITE_VERIFY_BRIEF.split("which of this job's needs it meets").length, 2, 'the need-it-meets phrase appears exactly once');
       assert.ok(WRITE_VERIFY_BRIEF.includes('Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the brief forbids consecutive paragraphs opening with the same word');
       assert.equal(WRITE_VERIFY_BRIEF.includes('where this job needs it'), false, 'the old where-this-job-needs-it wording is gone (user decision, 2026-10-20)');
-      assert.equal(WRITE_VERIFY_BRIEF.length, 956, 'the brief is exactly 956 characters after the conclusion swap and the time-and-place removal');
+      assert.equal(WRITE_VERIFY_BRIEF.length, 970, 'the brief is exactly 970 characters after the first-person closing swap (2026-10-31 second session)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('the need it serves'), false, 'the need-it-serves wording was replaced so the point says the work meets the need (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('in plain words'), false, 'the plain-words wording was replaced by the explicit-link wording (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
@@ -246,7 +246,8 @@ export default [
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly EDITORIAL SUMMARY, give a short explanation of the finished application/u);
       assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('EDITORIAL SUMMARY') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST'), 'the explanation follows the evidence appendix');
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /After the complete letter, add two editorial appendices/u);
-      assert.ok(WRITE_VERIFY_BRIEF.includes(' Conclude briefly on what your proof adds up to, with no new proof. '), 'the close concludes on what the proof adds up to without bringing new proof');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' Close on what this proof taught you, in first person, not a verdict on yourself. '), 'the close says what the body proof taught the writer, in first person, not a verdict on the candidate');
+      assert.equal(WRITE_VERIFY_BRIEF.includes('adds up to'), false, 'the adds-up-to closing produced third-person self-verdicts and is replaced');
       assert.equal(WRITE_VERIFY_BRIEF.includes('End on your argument, not stock courtesy.'), false, 'the old closing sentence is replaced');
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
@@ -260,7 +261,7 @@ export default [
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('states its full point in its first one or two sentences'), 'the panel rewards point-first paragraphs');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('opens on evidence or only on what the role needs'), 'the panel marks evidence-first paragraphs down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a closing of stock courtesy rather than the letter's own argument"), 'the panel marks a courtesy close down');
-      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that brings new proof, retells details or examples the body already gave, however it frames them, or rests on a maxim any applicant could write, instead of briefly concluding on what the letter's proof adds up to"), 'the panel marks a new-proof or example-recap close down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that brings new proof, recaps examples the body already gave without drawing a lesson from them, rests on a maxim any applicant could write, or passes a verdict on the candidate, in the third person or as self-praise, instead of closing in the writer's own voice on what the body's proof taught them"), 'the panel marks a new-proof, example-recap or self-verdict close down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('framed once as that reading rather than as a probability'), 'the panel rewards a thesis framed as a reading, not a probability');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('same connective or sentence pattern linking the candidate\'s work to the job in two or more paragraphs'), 'the panel marks a repeated connective down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('past or present perfect'), 'the panel checks the tense of past work');

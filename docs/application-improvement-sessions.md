@@ -60,6 +60,22 @@ Patterns below the recurrence bar are watched, not forgotten. The private `appli
 
 ## Session log
 
+### 2026-10-31 (second) — improvement session; first-person closing replaces the self-verdict; counter reset
+
+Run at the user's request with the counter at 4, since this morning's session. Coverage: all 4 pairs retained, one model label, none superseded. Three letters kept and one marked not needed. All three kept letters carry notes. No truth errors.
+
+Findings, notes first:
+- **Recurring, caused by this morning's change: the self-verdict close.** All three notes object to the last paragraph as third-person talk or patting oneself on the back; one replaced it with a courtesy line and asked for something insightful instead. "Conclude briefly on what your proof adds up to" made every one of the 20 archived writer candidates for these jobs close on "(Taken) together, this shows an engineer who / that I can", the risk this morning's entry named.
+- **Career-source fixes confirmed.** The education label and a source detail the user flagged are absent from the re-imported snapshot, and both bundles built on it show neither. Both watch items resolved; no generator change.
+- **Watched, not acted on:** restated dates (one more correction), and kept-unedited evidence on the stock sign-off, body-point count and a praising link sentence.
+
+Change shipped (brief 970 of 970 characters; the sentence grew from 66 to 80 characters within the existing budget):
+1. Brief: "Conclude briefly on what your proof adds up to, with no new proof." became "Close on what this proof taught you, in first person, not a verdict on yourself." The judge rubric now counts a close that passes a verdict on the candidate, in the third person or as self-praise, against writing. It also narrows "retells details the body already gave, however it frames them" to recapping examples without drawing a lesson from them, since a lesson has to name the proof it comes from.
+
+Test: a writer-stage replay of two archived writer prompts for each of the three kept-letter jobs, on the production writer profile (latest Opus, xhigh), changed only in this sentence, with three wordings. Two blind panels of twelve Sonnet judges each ranked the original answer against two replays, with labels shuffled. In the first panel, "Close on what your work taught you…" beat the original 12 of 12 (mean 79.4 against 69.8), but 5 of 12 of its closings brought new proof. A courtesy-line wording ("End with one courteous line…") beat the original 10 of 12 but left all 12 letters without a conclusion. In the second panel the shipped wording ranked first in 10 of 12 and above the original in 12 of 12, with a mean of 83.8 against 70.8 for the original and 77.2 for the first wording. Its closings had no self-verdicts (original 12 of 12) and no new proof, and judges called the insight obvious in 1 of 12 (original 10 of 12). Mean letter length was 559 words against 540. New risk to watch: four of six replayed lessons converge on the same lesson from one body proof, which will repeat across letters built on the same career data. Not run: conversion, validators, fit, fact-check and the page-image judge on the replays, truth recall, and the frozen-set replay. The judges were given the user's closing criteria, so this is evidence on the closing defect, not a full blind quality comparison.
+
+Validation: 6,296 unit tests passed with zero failures, all résumé-PDF suites passed, touched-file lint passed, and the oracle gate reported zero ngram findings. Frozen regression set: the three oldest pairs dropped, the three kept-letter pairs of this window added (20). Watch list reviewed for all four pairs. Counter reset after this entry.
+
 ### 2026-10-31 — improvement session; conclusion close, time-and-place removed, salutation main name; counter reset
 
 Run at the user's request with the counter at 2. Coverage: both pairs since the 2026-10-28 session were retained, under one model label, none superseded. Both were accepted and edited, and both have notes. No truth errors. Career source check: the 10-28 education-label fix was in the live source but not yet re-imported (both résumés still carried the label, corrected by hand). At the user's request a phrase they flagged was also removed from the source. Both are career-data watch items until a re-imported bundle confirms them.
