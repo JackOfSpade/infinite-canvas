@@ -958,7 +958,9 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
     const boardClosedDetail = boardClosedRescued > 0 || boardClosedRemoved > 0
       ? ` · board-closed: ${boardClosedRescued} rescued from the evidence gate for the official-posting check, ${boardClosedRemoved} dropped after it`
       : '';
-    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${boardClosedDetail}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    const languageDropped = nonnegativeCount(funnel.languageDropped) || 0;
+    const languageDropDetail = languageDropped > 0 ? `, non-English ${languageDropped}` : '';
+    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${languageDropDetail}${boardClosedDetail}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
   }
   const sources = Object.entries(receipt.sources || {});
   if (sources.length) {
@@ -6081,9 +6083,11 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const boardClosedDropped = Math.max(0, Number(s.boardClosedDropped) || 0);
     const boardClosedRescueStage = boardClosedSetAside > 0 ? ` (board-closed-rescued: ${boardClosedSetAside})` : '';
     const boardClosedDropStage = boardClosedDropped > 0 ? ` → board-closed-dropped: ${boardClosedDropped}` : '';
+    const languageDropped = Math.max(0, Number(s.languageDropped) || 0);
+    const languageDropStage = languageDropped > 0 ? ` → non-English-dropped: ${languageDropped}` : '';
     const evidenceStage = descriptionDeferred > 0
-      ? ` → evidence-deferred: ${descriptionDeferred}${boardClosedRescueStage}${finalDedupStage}${officialStage}${boardClosedDropStage} → **scoring-eligible: ${s.kept}**`
-      : `${finalDedupStage}${officialStage}${boardClosedDropStage} → **new: ${s.kept}**`;
+      ? ` → evidence-deferred: ${descriptionDeferred}${boardClosedRescueStage}${finalDedupStage}${officialStage}${boardClosedDropStage}${languageDropStage} → **scoring-eligible: ${s.kept}**`
+      : `${finalDedupStage}${officialStage}${boardClosedDropStage}${languageDropStage} → **new: ${s.kept}**`;
     // The AI role screen sits between the age and history stages, where the
     // deterministic title gate it replaced used to sit. It is usually the
     // LARGEST drop in a run with resolved roles, so omitting it left the funnel
@@ -6383,15 +6387,14 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         }
       }
     }
-    // Listing language: how many kept jobs came through in a non-English language
-    // (e.g. fr.glassdoor.ca / Québec / EU postings). They're kept & scored as-is —
-    // this is observability, not a filter — so a foreign listing that scored low
-    // is explained by its language, not a scoring bug.
+    // Listing language tallies the final candidates before the language filter.
+    // Descriptions that are not primarily English are dropped before scoring;
+    // retain the language breakdown and samples to explain those removals.
     const langs = s.languages;
     if (langs && langs.total > 0) {
       if (langs.nonEnglish > 0) {
         const parts = Object.entries(langs.byLang).map(([l, n]) => `${l}=${n}`).join(', ');
-        lines.push(`- Listing language: ${langs.nonEnglish}/${langs.total} non-English (${parts}) — kept & scored as-is (the AI reads them; applying is the user's call)`);
+        lines.push(`- Listing language: ${langs.nonEnglish}/${langs.total} non-English (${parts}) — dropped as not primarily English before scoring`);
         for (const l of Object.keys(langs.samples || {})) {
           const sample = langs.samples[l];
           if (sample && typeof sample === 'object') {
@@ -7955,6 +7958,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const entries = Object.entries(t.resolves).sort((a, b) => (b[1]?.ts || 0) - (a[1]?.ts || 0));
     lines.push('\n### Captcha-resolve / Solve');
     for (const [sourceId, r] of entries) {
+      const languageDropped = nonnegativeCount(r.languageDropped) || 0;
+      const languageDropStage = languageDropped > 0 ? ` → non-English-dropped: ${languageDropped}` : '';
       // LinkedIn's Solve isn't a captcha-extract — it's an anonymous description
       // re-fetch (no login: descriptions come from cookieless guest pages, so the
       // session is irrelevant). Its own outcome fields render on a dedicated line.
@@ -7981,7 +7986,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (r.kind === 'description-retry') {
         const unavailable = Array.isArray(r.unavailableDescriptions) ? r.unavailableDescriptions : [];
         const boardClosedKept = Math.max(0, Math.floor(Number(r.boardClosedKept) || 0));
-        lines.push(`- \`${sourceId}\`${ago(r.ts)}: description retry → recovered ${r.recoveredDescriptions || 0}/${r.attemptedDescriptions || 0} · ${r.remainingDescriptions || 0} still below scoring threshold${unavailable.length ? ` · **${unavailable.length} unavailable listing(s) removed**` : ''}${boardClosedKept ? ` · ${boardClosedKept} board-closed listing(s) kept for the official-posting check` : ''}${r.challengeReason ? ` · stopped by ${r.challengeReason}` : ''}`);
+        lines.push(`- \`${sourceId}\`${ago(r.ts)}: description retry → recovered ${r.recoveredDescriptions || 0}/${r.attemptedDescriptions || 0} · ${r.remainingDescriptions || 0} still below scoring threshold${unavailable.length ? ` · **${unavailable.length} unavailable listing(s) removed**` : ''}${boardClosedKept ? ` · ${boardClosedKept} board-closed listing(s) kept for the official-posting check` : ''}${languageDropStage}${r.challengeReason ? ` · stopped by ${r.challengeReason}` : ''}`);
         for (const item of unavailable.slice(0, 5)) {
           lines.push(`  - Removed unavailable listing${item?.reason ? ' · reason recorded' : ''} (details withheld)`);
         }
@@ -8003,7 +8008,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const extractionLabel = r.enrichment ? 'score-safe returned' : 'inline-extracted';
       lines.push(
         `- \`${sourceId}\`${ago(r.ts)}: ${extractionLabel} ${r.extracted}${r.relevanceDropped > 0 ? ` → title-relevance-dropped ${r.relevanceDropped}` : ''} → age-dropped ${r.ageDropped} → ` +
-        `already-seen/history ${r.historyDropped}${mergeNote}`,
+        `already-seen/history ${r.historyDropped}${languageDropStage}${mergeNote}`,
       );
       if (r.relevanceDropped > 0) {
         const samples = (Array.isArray(r.relevanceRejected) ? r.relevanceRejected : []).slice(0, 8);
@@ -8033,7 +8038,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           lines.push('    - missing listing recorded (details withheld)');
         }
       }
-      if (r.extracted > 0 && r.kept === 0) {
+      if (r.extracted > 0 && r.kept === 0 && r.historyDropped === r.extracted && languageDropped === 0) {
         lines.push('  - _(every extracted job was already shown on a prior run — correctly suppressed, not re-analyzed)_');
       }
       // Net change = 0 means the resolve refreshed existing same-source jobs but

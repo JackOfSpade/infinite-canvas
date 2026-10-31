@@ -753,6 +753,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     // pass, and those that pass then removed. Present only when a run had any.
     ...(receiptNumber(receipt.funnel.boardClosedSetAside) > 0 ? { boardClosedSetAside: receiptNumber(receipt.funnel.boardClosedSetAside) } : {}),
     ...(receiptNumber(receipt.funnel.boardClosedDropped) > 0 ? { boardClosedDropped: receiptNumber(receipt.funnel.boardClosedDropped) } : {}),
+    ...(receipt.funnel.languageDropped != null ? { languageDropped: receiptNumber(receipt.funnel.languageDropped) } : {}),
     kept: receiptNumber(receipt.funnel.kept),
   } : null;
   const scoring = sanitizeReceiptScoring(receipt.scoring);

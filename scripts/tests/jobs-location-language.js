@@ -1,5 +1,9 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, explicitSalaryCurrency, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, englishShare, explicitSalaryCurrency, filterNonEnglishJobs, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeJobLanguages, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
+
+// Synthetic sections long enough to stand alone as a language-detection chunk.
+const FRENCH_JOB_SECTION = "Nous recherchons une personne expérimentée pour rejoindre notre équipe et développer des applications fiables en collaboration avec les responsables du produit et les autres collègues tout en améliorant la qualité des logiciels et en accompagnant les nouveaux membres de notre entreprise.";
+const ENGLISH_JOB_SECTION = 'We are looking for an experienced engineer to join our team and develop reliable applications with our product managers and other colleagues while improving the quality of our software and supporting new members of the company through thoughtful reviews and clear technical documentation.';
 
 export default [
   {
@@ -749,6 +753,99 @@ export default [
       return { ok: true };
   },
 },
+{
+    name: 'filterNonEnglishJobs: French descriptions drop before scoring while English descriptions stay',
+    run: () => {
+      const french = { title: 'Software Engineer', description: FRENCH_JOB_SECTION, source: 'example' };
+      const english = { title: 'Développeur expérimenté', description: ENGLISH_JOB_SECTION, language: 'fr' };
+      const input = [french, english];
+      const result = filterNonEnglishJobs(input);
+      assert(result.dropped.length === 1 && result.dropped[0] === french && french.language === 'fr',
+        'the description decides a French drop even with an English title');
+      assert(result.jobs.length === 1 && result.jobs[0] === english && !Object.hasOwn(english, 'language'),
+        'an English description survives a French title and clears a stale card chip');
+      assert(input.length === 2, 'the input array retains dropped rows for telemetry');
+      const summary = summarizeJobLanguages(input);
+      assert(summary.total === 2 && summary.nonEnglish === 1 && summary.byLang.fr === 1
+        && summary.samples.fr.evidence.startsWith('Nous recherchons'),
+      'summarizing the original rows records dropped language counts and evidence');
+      return { kept: result.jobs.length, dropped: result.dropped.length };
+    },
+  },
+{
+    name: 'filterNonEnglishJobs: a longer English section survives French-first bilingual descriptions',
+    run: () => {
+      const description = [...Array(8).fill(FRENCH_JOB_SECTION), ...Array(12).fill(ENGLISH_JOB_SECTION)].join('\n');
+      assert(detectLanguage(description) === 'fr', 'the fixture reproduces the old first-2000-character French verdict');
+      const language = englishShare(description);
+      assert(language.share > 0.5 && language.dominant === 'fr', 'the larger English section wins across chunks');
+      const job = { description, language: 'fr' };
+      const result = filterNonEnglishJobs([job]);
+      assert(result.jobs[0] === job && result.dropped.length === 0 && !Object.hasOwn(job, 'language'),
+        'French-first bilingual jobs remain eligible when English occupies more text');
+      return { share: language.share };
+    },
+  },
+{
+    name: 'filterNonEnglishJobs: a short English introduction does not save a primarily French description',
+    run: () => {
+      const description = ['Join our team.', ...Array(5).fill(FRENCH_JOB_SECTION)].join('\n');
+      const job = { description };
+      const result = filterNonEnglishJobs([job]);
+      assert(result.jobs.length === 0 && result.dropped[0] === job && job.language === 'fr',
+        'the larger French body determines the drop despite an English introduction');
+      return { share: englishShare(description).share };
+    },
+  },
+{
+    name: 'filterNonEnglishJobs: English with heavy mojibake and accented loanwords remains eligible',
+    run: () => {
+      const job = { description: Array(4).fill('Weâ€™re hiring for our café operations team â€” youâ€™ll review résumés, support naïve new starters, and create clear reports for colleagues. Youâ€™ll work with experienced managers â€” our team values reliable service, careful planning, and friendly communication.').join('\n') };
+      const result = filterNonEnglishJobs([job]);
+      assert(result.jobs[0] === job && result.dropped.length === 0 && !job.language,
+        'encoding damage and genuine loanwords are not evidence of a non-English majority');
+      return { share: englishShare(job.description).share };
+    },
+  },
+{
+    name: 'filterNonEnglishJobs: CJK and Cyrillic descriptions are dropped',
+    run: () => {
+      const chinese = { description: '我们正在寻找经验丰富的软件工程师加入我们的团队，负责开发和维护高质量的软件应用程序，与产品经理和设计团队紧密合作，分析业务需求并解决技术问题。候选人需要具备良好的编程能力和沟通能力，能够独立完成工作并积极参与团队协作。我们提供良好的工作环境和职业发展机会，欢迎对软件开发充满热情的人才加入。' };
+      const russian = { description: 'Мы ищем опытного инженера для разработки программного обеспечения и поддержки надежных приложений. Вы будете работать с командой разработчиков, анализировать требования заказчиков и улучшать качество наших продуктов. Кандидат должен обладать опытом программирования и хорошими навыками общения.' };
+      const result = filterNonEnglishJobs([chinese, russian]);
+      assert(result.jobs.length === 0 && result.dropped.length === 2, 'both non-Latin descriptions are dropped');
+      assert(chinese.language === 'zh' && russian.language === 'ru', 'drop diagnostics retain detected languages');
+      return { languages: result.dropped.map(job => job.language) };
+    },
+  },
+{
+    name: 'englishShare: exact ties, empty text, and sparse English evidence are kept conservatively',
+    run: () => {
+      const description = `${FRENCH_JOB_SECTION.slice(0, 250)}\n${ENGLISH_JOB_SECTION.slice(0, 250)}`;
+      const tied = englishShare(description);
+      assert(tied.share === 0.5 && tied.dominant === 'fr', 'equal character weights produce a 50 percent English share');
+      const jobs = [{ description }, { title: 'Développeur expérimenté', language: 'fr' }, { description: 'VP', language: 'fr' }];
+      const result = filterNonEnglishJobs(jobs);
+      assert(result.jobs.length === jobs.length && result.dropped.length === 0 && jobs.every(job => !job.language),
+        'ties and inconclusive descriptions survive and clear stale tags');
+      assert(englishShare(null).share === 1 && englishShare('').dominant === null, 'empty evidence defaults to English');
+      assert(filterNonEnglishJobs(null).jobs.length === 0, 'missing lists are harmless');
+      return { share: tied.share };
+    },
+  },
+{
+    name: 'filterNonEnglishJobs: descriptions override snippets and blank descriptions fall back to snippets',
+    run: () => {
+      const fallback = { description: ' \n ', snippet: FRENCH_JOB_SECTION };
+      const english = { description: ENGLISH_JOB_SECTION, snippet: FRENCH_JOB_SECTION };
+      const result = filterNonEnglishJobs([fallback, english]);
+      assert(result.dropped[0] === fallback && fallback.language === 'fr', 'a blank description uses the available snippet');
+      assert(result.jobs[0] === english && !english.language, 'a full English description supersedes the localized snippet');
+      const bounded = englishShare(`${ENGLISH_JOB_SECTION} `.repeat(40) + FRENCH_JOB_SECTION.repeat(80));
+      assert(bounded.share === 1 && bounded.dominant === null, 'description analysis is capped before the distant tail');
+      return { bounded: true };
+    },
+  },
 {
     name: 'tagJobLanguage: refreshed English content clears a stale non-English card chip',
     run: () => {

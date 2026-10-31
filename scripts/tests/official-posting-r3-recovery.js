@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import { createOfficialPostingRecoveryPassResolver, officialPostingDedup, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 import { unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 import { scoreSafeRowsWithBoardClosed } from '../../electron/ipc/officialPostingBoardClosed.js';
+import { filterNonEnglishJobs } from '../../src/utils/jobLanguage.js';
 
 const description = 'Requirements include building reliable dispatch services and documenting route reports with the operations team.';
 const job = (id, extra = {}) => ({ source: 'google', title: 'Dispatch Engineer', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada',
@@ -22,25 +23,40 @@ function actualGenericGlue(resolveRows, row, checkpoints) {
   const init = source.indexOf('const resolveGenericPostings =', generic);
   const persist = source.indexOf('const persistSourceRecoveryJobs = async', generic);
   const publish = source.indexOf('const officialResolution = await resolveGenericPostings(', generic);
+  const languageFilter = source.indexOf('const languageFilter = filterNonEnglishJobs(items);', publish);
   assert.ok(init > generic && persist > init && publish > persist, 'generic handler owns one pass receipt across checkpoint and publication');
+  assert.ok(languageFilter > publish, 'generic publication resolves official postings before filtering listing languages');
   const context = {
     createOfficialPostingRecoveryPassResolver, resolveScoreSafePostings: resolveRows,
     sourceRecoverySnapshot: { jobs: [], descriptionRecoveryJobs: [row], profile: {}, careerData: '', careerSnapshotId: 'synthetic-career', nodeId: 'board' },
     sourceRecoveryJobs: [row], sourceRecoveryCheckpointOwned: true, recoveryCheckpointOutcome: 'unchanged', sourceId: 'google',
     snapshotDescriptionRecoveryJobs: snapshot => snapshot.descriptionRecoveryJobs,
     mergeDescriptionRecoverySourceJobs: (_previous, _source, rows) => rows,
-    filterJobsByDescriptionEvidence: rows => ({ jobs: rows }), overlayResolvedRecoveryRows: rows => rows, scoreSafeRowsWithBoardClosed,
+    filterJobsByDescriptionEvidence: rows => ({ jobs: rows }), filterNonEnglishJobs, overlayResolvedRecoveryRows: rows => rows, scoreSafeRowsWithBoardClosed,
     buildJobAnalysisSnapshot: args => ({ snapshot: args }),
     saveDescriptionRecoverySnapshotIfCurrent: async snapshot => { await Promise.resolve(); checkpoints.push(snapshot); return { saved: true }; },
     requireDescriptionRecoveryCheckpointPersisted: receipt => { assert.equal(receipt.saved, true); return receipt; },
     event: { sender: {} }, nodeId: 'board', signal: new AbortController().signal, jobRunId: 'run', canvasFilePath: '/synthetic/canvas.json',
-    continuationAdmission: { continuation: false }, operationAuthority: {}, logger: { warn() {} },
+    continuationAdmission: { continuation: false }, operationAuthority: {}, logger: { warn() {}, info() {} },
   };
-  vm.runInNewContext(`${source.slice(init, source.indexOf('// Load the recovery snapshot', init))}\n${source.slice(persist, source.indexOf('// The normal manual-scrape path', persist))}\nglobalThis.api = { persist: persistSourceRecoveryJobs, publish: async items => { const descriptionEvidence = { jobs: items }; ${source.slice(publish, source.indexOf('tagJobLanguages(items);', publish))} return officialResolution; } };`, context);
+  vm.runInNewContext(`${source.slice(init, source.indexOf('// Load the recovery snapshot', init))}\n${source.slice(persist, source.indexOf('// The normal manual-scrape path', persist))}\nglobalThis.api = { persist: persistSourceRecoveryJobs, publish: async items => { const descriptionEvidence = { jobs: items }; ${source.slice(publish, languageFilter)} return officialResolution; } };`, context);
   return context.api;
 }
 
 export default [
+  {
+    name: 'R3 generic recovery checkpoints exclude non-English descriptions from score-ready jobs',
+    async run() {
+      const english = job('english', { description: 'Responsibilities include building reliable software and documenting system requirements with the operations team. '.repeat(8) });
+      const french = job('french', { description: 'Nous recherchons une personne pour rejoindre notre équipe. Vous serez responsable de développer des applications et de travailler avec les équipes techniques. '.repeat(8) });
+      const checkpoints = [];
+      const glue = actualGenericGlue(async rows => result(rows), french, checkpoints);
+      await glue.persist([english, french]);
+      assert.equal(checkpoints.length, 1);
+      assert.deepEqual(checkpoints[0].jobs.map(row => row.url), [english.url]);
+      assert.equal(checkpoints[0].descriptionRecoveryJobs.length, 2, 'the recovery pool retains source evidence separately');
+    },
+  },
   {
     name: 'R3 generic Solve rejudges changed checkpoint input and resolves genuinely new rows once',
     async run() {

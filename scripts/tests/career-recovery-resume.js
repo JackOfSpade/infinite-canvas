@@ -413,8 +413,10 @@ export default [
         'malformed markers are not career work');
       const searchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const pauseEligibilitySource = readFileSync(new URL('../../src/utils/jobHubManualAiOwnership.js', import.meta.url), 'utf8');
       assert(/function isCareerCompilationTask\(task\) \{\s*return isCareerCompilerTask\(task\);\s*\}/.test(searchSource)
-        && dialogSource.includes('isCareerCompilerTask(request.task)'),
+        && dialogSource.includes('isJobSearchPauseEligible(activeRequest)')
+        && pauseEligibilitySource.includes('isCareerCompilerTask(request.task)'),
       'both renderer gates delegate to the one shared classifier instead of keeping a private list');
     },
   },

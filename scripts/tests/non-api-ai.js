@@ -474,6 +474,7 @@ export default [
     name: 'non-API AI: every career-profile compiler stage can be paused with its Job Search',
     run: () => {
       const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      const pauseEligibilitySource = readFileSync(new URL('../../src/utils/jobHubManualAiOwnership.js', import.meta.url), 'utf8');
       const searchSource = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const careerRecoveryGate = searchSource.indexOf('isCareerCompilationTask(resume?.task)');
       const jobRunInspection = searchSource.indexOf('window.electronAPI.peekJobRun', careerRecoveryGate);
@@ -481,7 +482,8 @@ export default [
       // classified by ONE shared renderer helper; neither gate keeps its own
       // list, so a newly added stage cannot be missed by one of them.
       const taskHelperSource = readFileSync(new URL('../../src/utils/careerCompilerTasks.js', import.meta.url), 'utf8');
-      assert(dialogSource.includes('isCareerCompilerTask(request.task)')
+      assert(dialogSource.includes('isJobSearchPauseEligible(activeRequest)')
+        && pauseEligibilitySource.includes('isCareerCompilerTask(request.task)')
         && searchSource.includes('return isCareerCompilerTask(task);')
         && taskHelperSource.includes("task.startsWith('career-profile-')")
         && taskHelperSource.includes("task.startsWith('career-file-')")

@@ -119,7 +119,7 @@ import {
   collectionScopeCaveatsFromSourceResults,
   hydrateCollectionScopeCaveatsIntoSourceResults,
 } from '../../src/utils/jobCollectionScopeCaveats.js';
-import { tagJobLanguages, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
+import { filterNonEnglishJobs, summarizeJobLanguages } from '../../src/utils/jobLanguage.js';
 import { reconcileGlassdoorSalaryFromDescription } from '../../src/utils/jobSalaryReconciliation.js';
 import { repairJobsMojibake, normalizeJobsMarkup } from '../../src/utils/textEncoding.js';
 import { normalizeJobCollectionLimits, isUnlimitedPages, resolveBrowserPageBudgets, resolveJobsPerPlatform, resolvePageCeiling, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
@@ -4723,6 +4723,7 @@ export function reconcileSearchFunnel(search) {
   // no official source kept. Both default to 0, so a run without any is unchanged.
   const boardClosedSetAside = Math.max(0, Number(search.boardClosedSetAside) || 0);
   const boardClosedDropped = Math.max(0, Number(search.boardClosedDropped) || 0);
+  const languageDropped = Math.max(0, Number(search.languageDropped) || 0);
   const kept = Math.max(0, Number(search.kept) || 0);
   const relevanceKept = Math.max(0, raw - relevanceDropped);
   const countryScopeKept = Math.max(0, relevanceKept - countryScopeDropped);
@@ -4740,7 +4741,8 @@ export function reconcileSearchFunnel(search) {
       + boardClosedSetAside
       - finalDedupDropped
       - officialDedupDropped
-      - boardClosedDropped,
+      - boardClosedDropped
+      - languageDropped,
   );
   const windowUnexplainedDelta = hasWindowFirstFunnel
     ? windowEligible - expectedWindowEligible
@@ -4783,6 +4785,7 @@ export function reconcileSearchFunnel(search) {
     finalDedupDropped,
     officialDedupDropped,
     ...(boardClosedSetAside > 0 || boardClosedDropped > 0 ? { boardClosedSetAside, boardClosedDropped } : {}),
+    languageDropped,
     kept,
     expectedKept,
     unexplainedDelta: kept - expectedKept,
@@ -5996,6 +5999,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         ...(search.officialDedupDropped != null ? { officialDedupDropped: search.officialDedupDropped } : {}),
         ...(search.boardClosedSetAside > 0 ? { boardClosedSetAside: search.boardClosedSetAside } : {}),
         ...(search.boardClosedDropped > 0 ? { boardClosedDropped: search.boardClosedDropped } : {}),
+        ...(search.languageDropped != null ? { languageDropped: search.languageDropped } : {}),
         kept: search.kept,
       },
     } : {}),
@@ -14380,7 +14384,7 @@ Return a JSON object with four arrays of search query strings:
     // HTML) shipped "<p> <strong>Headquarters:</strong> …" bodies and
     // "Customer Support &amp; Product Demo Specialist" titles straight into the
     // scoring prompt, the cards and the résumé generator. Runs right after the
-    // mojibake repair and before language tagging/scoring for the same reason
+    // mojibake repair and before language filtering/scoring for the same reason
     // that one does: one chokepoint on the final kept set, so every consumer
     // sees the cleaned text and a new source inherits the fix.
     normalizeJobsMarkup(kept);
@@ -14462,25 +14466,29 @@ Return a JSON object with four arrays of search query strings:
       ...officialResolution.officialDedupDrops.map(entry => ({ ...entry, stage: 'official-posting' })),
     ]);
 
+    // Filter by the English share of the final description after official-posting
+    // resolution. Keep English-majority bilingual jobs; dropped rows never reach
+    // scoring or seen-history. Tally the pre-filter list after the helper tags
+    // only the dropped rows, so diagnostics retain their languages and samples.
+    const languageFilter = filterNonEnglishJobs(kept);
+    const languageTelemetry = summarizeJobLanguages(kept);
+    kept = languageFilter.jobs;
+    if (languageFilter.dropped.length > 0) {
+      logger.info(`[Jobs] Dropped ${languageFilter.dropped.length} listing(s) whose descriptions are not primarily English — not scored or marked seen`);
+    }
+
     // Do NOT write even the eligible rows to seen-history yet. The Job Board is
     // the single authoritative writer after it displays cards; leaving the
-    // low-evidence rows out of this telemetry confirms they cannot be hidden by
-    // a future run merely because this scrape encountered them first.
+    // low-evidence and non-English rows out of this telemetry confirms a future
+    // run cannot hide them merely because this scrape encountered them first.
     recordHistoryWrite('preScoring', kept, {
       written: 0,
       pruned: 0,
       skipped: canvasFilePath ? 'deferred until results are visible' : 'no-canvas-path',
     });
 
-    // Tag non-English listings (e.g. fr.glassdoor.ca / Québec / EU postings). Runs
-    // here — after enrichment, on the final kept set — so the language sniff sees
-    // full descriptions and the tag rides through scoring → staging → card. We do
-    // NOT drop or down-score these: the AI reads any language and the user may
-    // speak it, so applying is their call. English jobs are left untagged.
-    tagJobLanguages(kept);
-
     logger.info(
-      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, windowEligible=${windowEligible.length}, ageDropped=${ageDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, windowEligible.length - deduped.length)}, roleDropped=${roleDropped}, historyDropped=${historyDropped}, finalDedupDropped=${finalDedupDropped})`
+      `[Jobs] ${kept.length} new jobs (raw=${relevanceFunnel.raw}, relevanceDropped=${relevanceFunnel.relevanceDropped}, windowEligible=${windowEligible.length}, ageDropped=${ageDropped}, afterDedup=${deduped.length}, dedupDropped=${Math.max(0, windowEligible.length - deduped.length)}, roleDropped=${roleDropped}, historyDropped=${historyDropped}, finalDedupDropped=${finalDedupDropped}, languageDropped=${languageFilter.dropped.length})`
     );
     // Per-source raw gathered counts (+ strongest warning), for active sources so a
     // 0 is visible — answers "was this source silently not gathered?" the way the
@@ -14688,9 +14696,6 @@ Return a JSON object with four arrays of search query strings:
       })),
       adherence: summarizeLocationAdherence(kept, location),
     };
-    // Listing-language tally over the kept jobs — answers "did any non-English
-    // postings come through, and from where?" (kept & scored as-is; see tagJobLanguages).
-    const languageTelemetry = summarizeJobLanguages(kept);
     // Compact all-source relevance audit over the final kept set. Exact source
     // admission evidence is retained for keyword-less feeds. For provider-ranked
     // searches, the post-hoc title audit is diagnostic only: no local title
@@ -14804,6 +14809,7 @@ Return a JSON object with four arrays of search query strings:
       bySource,
       location: locationTelemetry,
       languages: languageTelemetry,
+      languageDropped: languageFilter.dropped.length,
       relevanceAudit,
       // Data-driven browser-scrape order this run + the per-source manual-solve
       // history that produced it — so "why did Google scrape first?" is answerable.
@@ -15614,9 +15620,9 @@ Return a JSON object with four arrays of search query strings:
     // Same final-set chokepoints, in the same order, as the main gather path
     // (see the commentary at the repairJobsMojibake call there): a job reaching
     // the renderer from this path must be cleaned, evidence-filtered and
-    // language-tagged identically, or a background single-source refresh would
-    // ship rows the main search would have dropped. Runs BEFORE the progress
-    // send below so its `count` matches the rows actually returned.
+    // filtered for majority English identically, or a background single-source
+    // refresh would ship rows the main search would have dropped. Runs BEFORE
+    // the progress send below so its `count` matches the rows actually returned.
     repairJobsMojibake(kept);
     normalizeJobsMarkup(kept);
     kept = kept.map(reconcileGlassdoorSalaryFromDescription);
@@ -15629,7 +15635,11 @@ Return a JSON object with four arrays of search query strings:
     }
     const officialResolution = await resolveScoreSafePostings(kept, { event, nodeId, signal, jobRunId });
     kept = officialResolution.jobs;
-    tagJobLanguages(kept);
+    const languageFilter = filterNonEnglishJobs(kept);
+    kept = languageFilter.jobs;
+    if (languageFilter.dropped.length > 0) {
+      logger.info(`[Jobs][${sourceId}] Dropped ${languageFilter.dropped.length} listing(s) whose descriptions are not primarily English — not returned or marked seen`);
+    }
 
     let status = 'done';
     if (warning && warning.severity === 'block') status = 'error';
@@ -15652,6 +15662,7 @@ Return a JSON object with four arrays of search query strings:
       jobs: kept,
       officialPosting: officialResolution.officialPosting,
       officialDedupDropped: officialResolution.officialDedupDropped,
+      languageDropped: languageFilter.dropped.length,
       warning,
     };
   }, { beforeReply: checkpointContinuationBeforeReply('search-jobs-single-source'), captureListingLiveness: true });
@@ -17052,9 +17063,17 @@ Return a JSON object with four arrays of search query strings:
           ? allLinkedInRaw
           : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         const needEnrich = filterJobsByDescriptionEvidence(allLinkedIn).dropped;
-        const admitForScoring = async rows => (await resolveScoreSafePostings(
-          scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { event, nodeId, signal, jobRunId, progressSourceId: 'linkedin' },
-        )).jobs;
+        const admitForScoring = async rows => {
+          const officialResolution = await resolveScoreSafePostings(
+            scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { event, nodeId, signal, jobRunId, progressSourceId: 'linkedin' },
+          );
+          // This branch publishes directly, before the generic Solve filter.
+          const languageFilter = filterNonEnglishJobs(officialResolution.jobs);
+          if (languageFilter.dropped.length > 0) {
+            logger.info(`[Jobs][${nodeId}] LinkedIn recovery languageDropped=${languageFilter.dropped.length} — descriptions not primarily English, not scored or marked seen`);
+          }
+          return languageFilter.jobs;
+        };
         const persistRecoveryPool = async (updatedLinkedIn) => {
           const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
             snapshotRecoveryJobs,
@@ -17455,7 +17474,10 @@ Return a JSON object with four arrays of search query strings:
       const descriptionRecoveryJobs = mergeDescriptionRecoverySourceJobs(
         snapshotDescriptionRecoveryJobs(sourceRecoverySnapshot), sourceId, recoveryJobs,
       );
-      const scoringJobs = (await resolveGenericPostings(scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(descriptionRecoveryJobs)))).jobs;
+      const resolvedJobs = (await resolveGenericPostings(scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(descriptionRecoveryJobs)))).jobs;
+      // Keep the durable scoring snapshot on the same admission policy as the
+      // reply below; retain all rows only in the separate recovery pool.
+      const scoringJobs = filterNonEnglishJobs(resolvedJobs).jobs;
       const { snapshot: nextSnapshot } = buildJobAnalysisSnapshot({
         jobs: scoringJobs,
         descriptionRecoveryJobs,
@@ -17807,9 +17829,10 @@ Return a JSON object with four arrays of search query strings:
     items = normalizedCollectionLimits.jobsPerPlatform == null
       ? items
       : items.slice(0, normalizedCollectionLimits.jobsPerPlatform);
-    // Mirror the main search's final text/language cleanup. Resolve rows otherwise
-    // bypassed the single normalization chokepoint and could carry raw markup or
-    // mojibake into scoring, cards, history, and generated application documents.
+    // Mirror the main search's final text cleanup and majority-English filter.
+    // Resolve rows otherwise bypassed the single normalization chokepoint and
+    // could carry raw markup or mojibake into scoring, cards, history, and
+    // generated application documents.
     repairJobsMojibake(items);
     normalizeJobsMarkup(items);
     items = items.map(reconcileGlassdoorSalaryFromDescription);
@@ -17817,7 +17840,11 @@ Return a JSON object with four arrays of search query strings:
     const officialResolution = await resolveGenericPostings(
       overlayResolvedRecoveryRows(scoreSafeRowsWithBoardClosed(descriptionEvidence), sourceRecoverySnapshot?.jobs));
     items = officialResolution.jobs;
-    tagJobLanguages(items);
+    const languageFilter = filterNonEnglishJobs(items);
+    items = languageFilter.jobs;
+    if (languageFilter.dropped.length > 0) {
+      logger.info(`[Jobs][${nodeId}] Resolve dropped ${languageFilter.dropped.length} listing(s) whose descriptions are not primarily English — not scored or marked seen`);
+    }
     // A successful challenge clear does not make a list-card stub score-safe.
     // Retain the actionable source warning when a detail pass still left rows
     // without evidence, rather than returning `resolved: true` and letting the
@@ -17833,7 +17860,7 @@ Return a JSON object with four arrays of search query strings:
 
     logger.info(
       `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
-      `${enrichmentMeta ? 'score-safe-returned' : 'inline-extracted'}=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, new=${items.length}` +
+      `${enrichmentMeta ? 'score-safe-returned' : 'inline-extracted'}=${extractedRaw.length}, relevanceDropped=${relevanceDropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, languageDropped=${languageFilter.dropped.length}, new=${items.length}` +
       `${enrichmentMeta ? `, detail attempted=${enrichmentMeta.attempted || 0}, enriched=${enrichmentMeta.enriched || 0}, empty=${enrichmentMeta.empty || 0}` : ''}`
     );
     // Keyed by sourceId so a multi-source recovery keeps every resolve;
@@ -17881,6 +17908,7 @@ Return a JSON object with four arrays of search query strings:
       kept: items.length,
       officialPosting: officialResolution.officialPosting,
       officialDedupDropped: officialResolution.officialDedupDropped,
+      languageDropped: languageFilter.dropped.length,
       descriptionEvidenceDropped: {
         total: descriptionEvidence.dropped.length,
         deferred: descriptionEvidence.quality.deferred,
@@ -17918,6 +17946,7 @@ Return a JSON object with four arrays of search query strings:
           ageDropped,
           historyDropped,
           descriptionEvidenceDropped: descriptionEvidence.dropped.length,
+          languageDropped: languageFilter.dropped.length,
           kept: items.length,
         },
       };
@@ -18087,11 +18116,16 @@ Return a JSON object with four arrays of search query strings:
       normalizeJobsMarkup(retriedItems);
       const descriptionEvidence = filterJobsByDescriptionEvidence(retriedItems);
       const officialResolution = await resolveScoreSafePostings(scoreSafeRowsWithBoardClosed(descriptionEvidence), { event, nodeId, signal, jobRunId });
-      const items = officialResolution.jobs;
+      let items = officialResolution.jobs;
       const boardClosedOutcome = boardClosedRetirement(officialResolution);
       const retriedUnavailable = Array.isArray(retried.unavailable) ? retried.unavailable : [];
       const retriedBoardClosedKept = retriedUnavailable.filter(item => boardClosedOutcome.keptKeys.has(item?.key)).length;
-      tagJobLanguages(items);
+      // Use the recovered final description before exposing score-ready rows.
+      const languageFilter = filterNonEnglishJobs(items);
+      items = languageFilter.jobs;
+      if (languageFilter.dropped.length > 0) {
+        logger.info(`[Jobs][${nodeId}] Description retry dropped ${languageFilter.dropped.length} listing(s) whose descriptions are not primarily English — not scored or marked seen`);
+      }
       if (canWriteTelemetry()) {
         const priorResolveMergeNet = Number(jobsTelemetry.resolves.indeed?.cumulativeMergeNet) || 0;
         jobsTelemetry.resolves.indeed = {
@@ -18100,8 +18134,9 @@ Return a JSON object with four arrays of search query strings:
         kind: 'description-retry',
         cumulativeMergeNet: priorResolveMergeNet,
         hasMergeTelemetry: jobsTelemetry.resolves.indeed?.hasMergeTelemetry === true,
-        extracted: items.length,
+        extracted: officialResolution.jobs.length,
         kept: items.length,
+        languageDropped: languageFilter.dropped.length,
         descriptionEvidenceDropped: descriptionEvidence.dropped.length,
         attemptedDescriptions: retried.attempted || 0,
         recoveredDescriptions: retried.recovered || 0,
@@ -18114,7 +18149,7 @@ Return a JSON object with four arrays of search query strings:
         challengeReason: retried.challengeReason || null,
         };
       }
-      const retryDetail = `${items.length} description(s) recovered of ${retried.attempted || 0} attempted; descriptionEvidenceDropped=${descriptionEvidence.dropped.length}`;
+      const retryDetail = `${items.length} description(s) recovered of ${retried.attempted || 0} attempted; descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, languageDropped=${languageFilter.dropped.length}`;
       recordResumeAttempt(sourceId, attemptMode, 'resolved', retryDetail);
       const retryProgress = {
         nodeId,
@@ -18426,14 +18461,19 @@ Return a JSON object with four arrays of search query strings:
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
     const officialResolution = await resolveScoreSafePostings(scoreSafeRowsWithBoardClosed(descriptionEvidence), { event, nodeId, signal, jobRunId });
     items = officialResolution.jobs;
-    tagJobLanguages(items);
+    // Keep the resumed scoring queue on the same majority-English policy.
+    const languageFilter = filterNonEnglishJobs(items);
+    items = languageFilter.jobs;
+    if (languageFilter.dropped.length > 0) {
+      logger.info(`[Jobs][${nodeId}] Indeed resume dropped ${languageFilter.dropped.length} listing(s) whose descriptions are not primarily English — not scored or marked seen`);
+    }
     const enrichment = {
       ...(result?.enrichment || result?.enrichmentMeta || {}),
       residualAttempts: summarizeIndeedResumeEnrichment(extracted),
     };
     const resolved = items.length > 0 || !result?.warning;
     const warning = result?.warning || null;
-    const funnelDetail = `extracted=${extracted.length}, countryScopeDropped=${countryScope.dropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, new=${items.length}`;
+    const funnelDetail = `extracted=${extracted.length}, countryScopeDropped=${countryScope.dropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, languageDropped=${languageFilter.dropped.length}, new=${items.length}`;
     logger.info(`[Jobs][${nodeId}] Indeed resume complete: ${funnelDetail}`);
 
     // Resume occurs after the original search already wrote its final source
@@ -18466,6 +18506,7 @@ Return a JSON object with four arrays of search query strings:
           ageDropped,
           historyDropped,
           descriptionEvidenceDropped: descriptionEvidence.dropped.length,
+          languageDropped: languageFilter.dropped.length,
           kept: items.length,
         },
       };
@@ -18508,6 +18549,7 @@ Return a JSON object with four arrays of search query strings:
       historyDropped,
       historyDropSamples,
       kept: items.length,
+      languageDropped: languageFilter.dropped.length,
       descriptionEvidenceDropped: {
         total: descriptionEvidence.dropped.length,
         deferred: descriptionEvidence.quality.deferred,

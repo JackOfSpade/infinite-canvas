@@ -4282,7 +4282,7 @@ export default [
           stagingStarted: true, cleanup: { attempted: true, cleared: true },
           funnel: {
             raw: 13, relevanceDropped: 2, deduped: 11, ageDropped: 4,
-            roleDropped: 2, historyDropped: 1, descriptionEvidenceDropped: 0, kept: 4,
+            roleDropped: 2, historyDropped: 1, descriptionEvidenceDropped: 0, languageDropped: 1, kept: 3,
           },
           sources: {
             google: {
@@ -4310,7 +4310,8 @@ export default [
           // fail closed on runs that had just finished in THIS process.
           && recovery.includes('receipt not correlated to a live run — no live pipeline telemetry was attributable in this process')
           && !recovery.includes('previous-process receipt')
-          && recovery.includes('Initial-search funnel: 13 raw → 11 deduped → 4 kept')
+          && recovery.includes('Initial-search funnel: 13 raw → 11 deduped → 3 kept')
+          && recovery.includes('description evidence 0, non-English 1')
           && recovery.includes('`google`: 13 candidate identities traversed → 11 usable row(s) retained')
           && recovery.includes('warning rate-limit (block)')
           && recovery.includes('`google` scroll reveal: q1/1 191 card(s) after 29 reveal pass(es) — board end marker reached')
@@ -4335,6 +4336,8 @@ export default [
         }).markdown;
         assert(full.includes('Last terminal run receipt: ✅ completed')
           && focused.includes('Last terminal run receipt: ✅ completed')
+          && full.includes('description evidence 0, non-English 1')
+          && focused.includes('description evidence 0, non-English 1')
           && focused.includes('hub `receipt-hub` is present in this canvas'),
         'FULL and RECOVERY retain the durable terminal receipt after a simulated restart');
         assert(full.includes('Detailed live per-job evidence appears in Job Search Pipeline only when retained in this process.'),
@@ -10551,6 +10554,19 @@ export default [
       });
       assert(finalDedup.reconciled && finalDedup.expectedKept === 5 && finalDedup.finalDedupDropped === 1,
         `a final enrichment-ready dedup must be an explicit reconciled funnel stage, got ${JSON.stringify(finalDedup)}`);
+      const languageFiltered = reconcileSearchFunnel({
+        raw: 10, relevanceDropped: 0, deduped: 10, ageDropped: 1,
+        historyDropped: 2, descriptionEvidenceDropped: { total: 1 },
+        finalDedupDropped: 1, languageDropped: 2, kept: 3,
+      });
+      assert(languageFiltered.reconciled && languageFiltered.expectedKept === 3
+        && languageFiltered.languageDropped === 2 && languageFiltered.unexplainedDelta === 0,
+      `non-English drops must reconcile before scoring, got ${JSON.stringify(languageFiltered)}`);
+      const missingLanguageDrops = reconcileSearchFunnel({
+        raw: 5, deduped: 5, languageDropped: 0, kept: 3,
+      });
+      assert(!missingLanguageDrops.reconciled && missingLanguageDrops.unexplainedDelta === -2,
+        'unattributed language losses must still trigger the funnel integrity warning');
       const windowFirst = reconcileSearchFunnel({
         raw: 10, relevanceDropped: 0, windowEligible: 8, ageDropped: 2,
         deduped: 7, roleDropped: 1, historyDropped: 1,
@@ -10582,6 +10598,96 @@ export default [
         && countryScope.expectedWindowEligible === 5 && countryScope.expectedKept === 2,
       `a confirmed cross-border drop must reconcile before the date window, got ${JSON.stringify(countryScope)}`);
       return { kept: reconciled.kept, explainedDrops: reconciled.descriptionEvidenceDropped, windowBeforeDedup: true };
+    },
+  },
+{
+    name: 'job pipeline report: non-English drops precede the scoring total and retain the language breakdown',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { ...telemetry };
+      const nodeId = 'language-filter-diagnostics';
+      Object.assign(telemetry, {
+        nodeId, windowId: null, pipeline: null, resolves: {}, scoring: null,
+        bucketing: null, linkedinEnrich: [], linkedinCooldown: null,
+      });
+      try {
+        for (const deferred of [0, 1]) {
+          telemetry.search = {
+            ts: Date.now(), queries: 1, raw: 6 + deferred, deduped: 6 + deferred,
+            ageDropped: 0, historyDropped: 0, kept: 2,
+            descriptionEvidenceDropped: { total: deferred },
+            finalDedupDropped: 1, officialPosting: { total: 5 },
+            officialDedupDropped: 0, boardClosedDropped: 1, languageDropped: 2,
+            languages: {
+              total: 4, nonEnglish: 2, byLang: { fr: 1, ja: 1 },
+              samples: { fr: { label: 'French fixture', evidence: 'French description fixture' } },
+            },
+          };
+          const report = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+          const totalLabel = deferred > 0 ? 'scoring-eligible' : 'new';
+          assert(report.includes(`board-closed-dropped: 1 → non-English-dropped: 2 → **${totalLabel}: 2**`),
+            'language drops appear after official/board closure filters and immediately before either scoring total');
+          assert(report.includes('Listing language: 2/4 non-English (fr=1, ja=1) — dropped as not primarily English before scoring'),
+            'listing language explains why the pre-filter candidates were dropped');
+          assert(report.includes('fr: listing sample recorded · evidence recorded (content withheld)'),
+            'language samples remain represented without exposing their content');
+        }
+        telemetry.search = {
+          ts: Date.now(), queries: 1, raw: 2, deduped: 2,
+          ageDropped: 0, historyDropped: 0, kept: 2, languageDropped: 0,
+          languages: { total: 2, nonEnglish: 0, byLang: {}, samples: {} },
+        };
+        const allEnglish = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+        assert(!allEnglish.includes('non-English-dropped:'), 'zero language drops do not add a funnel stage');
+        assert(allEnglish.includes('Listing language: all 2 kept job(s) English'),
+          'the all-English report line remains intact');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { bothFunnelTotals: true, languageBreakdown: true, allEnglish: true };
+    },
+  },
+{
+    name: 'job pipeline report: Solve and description retry explain language drops without claiming seen-history suppression',
+    run: () => {
+      const telemetry = getJobsTelemetry();
+      const saved = { ...telemetry };
+      const nodeId = 'language-recovery-diagnostics';
+      Object.assign(telemetry, {
+        nodeId, windowId: null, pipeline: null, search: null, scoring: null,
+        bucketing: null, linkedinEnrich: [], linkedinCooldown: null,
+        resolves: {
+          google: { ts: Date.now(), extracted: 2, ageDropped: 0, historyDropped: 0, languageDropped: 2, kept: 0 },
+          glassdoor: { ts: Date.now(), kind: 'source-resume', extracted: 3, ageDropped: 0, historyDropped: 1, languageDropped: 1, kept: 1 },
+          indeed: { ts: Date.now(), kind: 'description-retry', recoveredDescriptions: 0, attemptedDescriptions: 2, remainingDescriptions: 0, languageDropped: 2, kept: 0 },
+        },
+        resumeAttempts: {
+          glassdoor: [{ t: Date.now(), mode: 'resume', outcome: 'resolved', detail: 'extracted=3, historyDropped=1, languageDropped=1, new=1' }],
+        },
+      });
+      try {
+        const report = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+        assert(report.includes('already-seen/history 0 → non-English-dropped: 2 → **new (to history): 0**'),
+          'Solve accounts for rows dropped by language before its final count');
+        assert(report.includes('already-seen/history 1 → non-English-dropped: 1 → **new (to history): 1**'),
+          'source resume accounts for language drops separately from history');
+        assert(report.includes('description retry → recovered 0/2 · 0 still below scoring threshold → non-English-dropped: 2'),
+          'description retry reports language drops despite recovered descriptions being complete');
+        assert(report.includes('languageDropped=1'), 'the Resume attempts trail retains the language drop counter');
+        assert(!report.includes('every extracted job was already shown on a prior run'),
+          'language-filtered zero-result passes are not mislabeled as seen-history suppression');
+        telemetry.resolves = {
+          google: { ts: Date.now(), extracted: 2, ageDropped: 0, historyDropped: 2, languageDropped: 0, kept: 0 },
+        };
+        telemetry.resumeAttempts = {};
+        const historyOnly = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
+        assert(!historyOnly.includes('non-English-dropped:'), 'zero language drops add no recovery stage');
+        assert(historyOnly.includes('every extracted job was already shown on a prior run'),
+          'actual history-only suppression keeps its explanation');
+      } finally {
+        Object.assign(telemetry, saved);
+      }
+      return { solve: true, resume: true, retry: true, historyOnly: true };
     },
   },
 {

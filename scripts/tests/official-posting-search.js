@@ -10,6 +10,10 @@ import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalys
 import { readRunState, sanitizeLastRunReceipt } from '../../electron/ipc/jobRunStaging.js';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 import { reconcileGlassdoorSalaryFromDescription } from '../../src/utils/jobSalaryReconciliation.js';
+import { filterNonEnglishJobs } from '../../src/utils/jobLanguage.js';
+
+const englishDescription = 'Responsibilities include building reliable software and documenting system requirements with the operations team. '.repeat(8);
+const frenchDescription = 'Nous recherchons une personne pour rejoindre notre équipe. Vous serez responsable de développer des applications et de travailler avec les équipes techniques. '.repeat(8);
 
 export default [
   {
@@ -40,11 +44,15 @@ export default [
       const admitStart = linked.indexOf('const admitForScoring =');
       const admitEnd = linked.indexOf('const persistRecoveryPool =', admitStart);
       let options;
-      const binding = { resolveScoreSafePostings: async (_rows, value) => { options = value; return { jobs: [] }; },
+      const binding = { resolveScoreSafePostings: async (rows, value) => { options = value; return { jobs: rows }; },
         scoreSafeRowsWithBoardClosed: value => value, filterJobsByDescriptionEvidence: value => value,
+        filterNonEnglishJobs, logger: { info() {} },
         overlayResolvedRecoveryRows: value => value, snapshotRecoveryJobs: [], event: context.event, nodeId: 'hub', signal: context.signal, jobRunId: 'run' };
       vm.runInNewContext(`${linked.slice(admitStart, admitEnd)}\nglobalThis.admit = admitForScoring;`, binding);
-      return binding.admit([]).then(() => assert.equal(options.progressSourceId, 'linkedin'));
+      return binding.admit([{ id: 'english', description: englishDescription }, { id: 'french', description: frenchDescription }]).then(rows => {
+        assert.equal(options.progressSourceId, 'linkedin');
+        assert.deepEqual(rows.map(row => row.id), ['english'], 'LinkedIn recovery returns only primarily English descriptions');
+      });
     },
   },
   {
@@ -57,7 +65,7 @@ export default [
     },
   },
   {
-    name: 'official-posting search: fresh score-safe rows resolve before the final durable checkpoint without rewriting identity',
+    name: 'official-posting search: final descriptions filter by English majority before reply and durable score-safe checkpoint',
     async run() {
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'official-posting-search-'));
       const canvasFilePath = path.join(directory, 'canvas.json');
@@ -66,6 +74,9 @@ export default [
       const row = { source: 'remoteok', title: 'Platform Engineer', company: 'Northwind Labs', location: 'Remote',
         salary: '', posted: 'today', url: 'https://listing.example.test/platform',
         snippet: 'Responsibilities and requirements: maintain resilient platform services and review operational failures. '.repeat(8) };
+      const french = { ...row, title: 'Systems Engineer', url: 'https://listing.example.test/systems', description: frenchDescription };
+      const bilingual = { ...row, title: 'Data Engineer', url: 'https://listing.example.test/data', description: `${frenchDescription}\n${englishDescription.repeat(2)}` };
+      const rows = [row, french, bilingual];
       try {
         await fs.promises.writeFile(canvasFilePath, '{}');
         const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
@@ -77,9 +88,9 @@ export default [
           resolveRequiredPinnedCareerInput: async () => ({ profile: {}, careerData: '', pinned: true }),
           fetchHttpSources: async (...args) => {
             await args[10]('remoteok');
-            const result = { sourceId: 'remoteok', jobs: [row], gathered: 1 };
+            const result = { sourceId: 'remoteok', jobs: rows, gathered: rows.length };
             await args[11]('remoteok', result);
-            await args[8]({ sourceId: 'remoteok', query: 'platform engineer', page: 1, jobs: [row] });
+            await args[8]({ sourceId: 'remoteok', query: 'platform engineer', page: 1, jobs: rows });
             return [result];
           },
           resolveOfficialPostings: async (jobs, options) => {
@@ -102,15 +113,41 @@ export default [
         assert.equal(result.success, true, result.error);
         assert.equal(calls.length, 1); assert.equal(calls[0].nodeId, nodeId);
         assert.ok(calls[0].signal instanceof AbortSignal);
-        assert.equal(result.jobs.length, 1);
+        assert.equal(result.jobs.length, 2);
+        assert.deepEqual(result.jobs.map(job => job.url).sort(), [row.url, bilingual.url].sort());
+        assert.ok(result.jobs.every(job => !Object.hasOwn(job, 'language')), 'majority-English results need no language chip');
         for (const key of ['title', 'company', 'location', 'salary', 'snippet', 'url']) assert.equal(result.jobs[0][key], row[key]);
         assert.equal(result.jobs[0].officialPosting.level, 'L5');
         const state = await readRunState(canvasFilePath, Date.now(), { nodeId });
         assert.ok(state.stagedJobs.some(entry => entry.job?.officialPosting?.level === 'L5'));
+        assert.equal(state.stagedJobs.filter(entry => entry.job?.officialPosting?.level === 'L5').length, 2, 'only English-majority rows reach the final score-safe checkpoint');
         assert.ok(progress.some(item => item.sourceId === 'official-posting' && item.count === 0
-          && item.detail === 'Finding official postings 0 / 1'));
-        assert.equal(getJobsTelemetry().search.officialPosting.total, 1);
+          && item.detail === 'Finding official postings 0 / 3'));
+        assert.equal(getJobsTelemetry().search.officialPosting.total, 3);
+        assert.equal(getJobsTelemetry().search.languageDropped, 1);
+        assert.equal(getJobsTelemetry().search.languages.total, 3, 'language telemetry counts the list before filtering');
+        assert.equal(getJobsTelemetry().search.languages.nonEnglish, 1);
+        assert.equal(getJobsTelemetry().search.languages.byLang.fr, 1);
         assert.equal(getJobsTelemetry().search.reconciliation.reconciled, true);
+
+        const retryRows = [
+          { ...row, source: 'indeed', jobkey: 'english-retry', url: 'https://www.indeed.com/viewjob?jk=english-retry', description: englishDescription },
+          { ...french, source: 'indeed', jobkey: 'french-retry', url: 'https://www.indeed.com/viewjob?jk=french-retry' },
+        ];
+        __registerJobsHandlersForTests({
+          retryIndeedJobDescriptions: async jobs => ({ jobs, attempted: jobs.length, recovered: jobs.length, remaining: 0 }),
+          resolveOfficialPostings: async jobs => ({ jobs, telemetry: { total: jobs.length } }),
+        });
+        const retried = await ipcMain.__getInvokeHandler('resume-job-source')({ sender }, {
+          sourceId: 'indeed', nodeId, jobRunId: result.runId, canvasFilePath, enabledSourceIds: ['indeed'],
+          careerSnapshotId, operationAuthority: authority.receipt,
+          resumeState: { mode: 'retry-descriptions', jobs: retryRows },
+        });
+        assert.equal(retried.resolved, true, JSON.stringify(retried));
+        assert.deepEqual(retried.items.map(job => job.jobkey), ['english-retry'], 'native description retry filters recovered French text before returning score-ready rows');
+        assert.equal(getJobsTelemetry().resolves.indeed.languageDropped, 1);
+        assert.equal(getJobsTelemetry().resolves.indeed.kept, 1);
+        assert.ok(progress.some(item => item.sourceId === 'indeed' && item.count === 1 && item.detail?.includes('languageDropped=1')));
       } finally {
         registerJobsHandlers();
         await fs.promises.rm(directory, { recursive: true, force: true });
@@ -120,13 +157,14 @@ export default [
   {
     name: 'official-posting search: official dedup is a separate conserved stage and survives terminal receipt normalization',
     run() {
-      const funnel = { raw: 8, deduped: 8, ageDropped: 0, roleDropped: 1, historyDropped: 1,
-        descriptionEvidenceDropped: { total: 1 }, finalDedupDropped: 1, officialDedupDropped: 2, kept: 2 };
+      const funnel = { raw: 9, deduped: 9, ageDropped: 0, roleDropped: 1, historyDropped: 1,
+        descriptionEvidenceDropped: { total: 1 }, finalDedupDropped: 1, officialDedupDropped: 2, languageDropped: 1, kept: 2 };
       const result = reconcileSearchFunnel(funnel);
       assert.equal(result.reconciled, true); assert.equal(result.officialDedupDropped, 2);
       const receipt = sanitizeLastRunReceipt({ runId: 'synthetic-official-run', completedAt: Date.now(),
         terminal: { status: 'completed', outcome: 'populated' }, funnel: { ...funnel, descriptionEvidenceDropped: 1 } });
       assert.equal(receipt.funnel.officialDedupDropped, 2);
+      assert.equal(receipt.funnel.languageDropped, 1);
     },
   },
   {
@@ -140,12 +178,14 @@ export default [
       const single = block("handleSafe('search-jobs-single-source',", "handleSafe('prepare-board-jobs-history',");
       assert.match(single, /await resolveScoreSafePostings\(kept,/u);
       const linked = block('const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
-      assert.match(linked, /const admitForScoring = async rows => \(await resolveScoreSafePostings/u);
+      assert.match(linked, /const admitForScoring = async rows => \{\s*const officialResolution = await resolveScoreSafePostings/u);
+      assert.match(linked, /const languageFilter = filterNonEnglishJobs\(officialResolution.jobs\)/u);
       assert.match(linked, /const scoringJobs = await admitForScoring\(descriptionRecoveryJobs\)/u);
       assert.doesNotMatch(linked, /items: admitForScoring\(/u);
       const generic = block('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
       assert.match(generic, /const resolveGenericPostings = createOfficialPostingRecoveryPassResolver\(rows =>\s*resolveScoreSafePostings\(rows, \{ event, nodeId, signal, jobRunId \}\), \{ signal \}\)/u);
-      assert.match(generic, /const scoringJobs = \(await resolveGenericPostings\(scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(descriptionRecoveryJobs\)\)\)\).jobs/u);
+      assert.match(generic, /const resolvedJobs = \(await resolveGenericPostings\(scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(descriptionRecoveryJobs\)\)\)\).jobs/u);
+      assert.match(generic, /const scoringJobs = filterNonEnglishJobs\(resolvedJobs\).jobs/u);
       assert.match(generic, /const officialResolution = await resolveGenericPostings\(\s*overlayResolvedRecoveryRows\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\), sourceRecoverySnapshot\?\.jobs\)\)/u);
       assert.match(linked, /scoringItems = await persistRecoveryPool\(items\)/u);
       assert.doesNotMatch(linked, /const scoringItems = await admitForScoring\(items\)/u);

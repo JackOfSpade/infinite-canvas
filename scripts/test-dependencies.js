@@ -294,7 +294,7 @@ export { canAuthCookieBypassLoginUrl, classifyNativeIndeedChallengeTab, classify
 export { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, JOB_SCORING_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, PRICE_SYNTHESIS_SCHEMA, RESUME_PARSE_SCHEMA } from '../electron/ipc/aiSchemas.js';
 export { JOB_TAXONOMY_CHUNK_SIZE, buildJobTaxonomyPlanSummary, inspectJobTaxonomyRoleIndexes, normalizeJobTaxonomyPlan, validateJobTaxonomyPlan, runBoundedJobTaxonomy } from '../electron/ipc/jobTaxonomy.js';
 export { deriveLocationParam, summarizeLocationAdherence, filterProvablyOutsideCountryScope, pickGlassdoorLocation, describeLocationTreatment, LOCATION_TREATMENT } from '../src/utils/jobLocation.js';
-export { detectLanguage, tagJobLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
+export { detectLanguage, englishShare, filterNonEnglishJobs, tagJobLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 export { reconcileGlassdoorSalaryFromDescription } from '../src/utils/jobSalaryReconciliation.js';
 export { repairMojibake, hasMojibake, repairJobsMojibake, normalizeJobMarkup, normalizeJobsMarkup, decodeHtmlEntities, stripHtmlToText } from '../src/utils/textEncoding.js';
 export { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';

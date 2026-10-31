@@ -5,16 +5,16 @@
 //
 // We REQUEST English everywhere (Accept-Language: en-US, --lang=en-US), but some
 // boards serve localized job descriptions anyway — fr.glassdoor.ca for Ontario,
-// Québec / EU employers posting in their own language. We deliberately KEEP these
-// listings: the AI scorer reads any language fine, and the user may well speak
-// it, so whether to apply is left to the user. This module ONLY tags a listing's
-// language so the card can show a chip and the run report can note how many came
-// through. It never drops or down-scores anything.
+// Québec / EU employers posting in their own language. Before scoring, drop
+// listings whose description (or snippet when empty) is mostly non-English.
+// Measure sections separately so bilingual postings with a larger English
+// section survive even when the non-English section comes first. Dropped rows
+// retain a language tag for run diagnostics; kept rows need no language chip.
 //
 // Detection is offline (no network, no LLM) and intentionally CONSERVATIVE:
 // English is the default, and tinyld must be confident (or the text long enough)
-// before we tag non-English — mislabeling a normal English JD is worse, and more
-// visible to the user, than leaving a foreign one untagged.
+// before counting a section as non-English. Dropping a normal English JD is
+// worse than retaining an inconclusive one.
 //
 // Framework-agnostic so both `src/` (renderer) and `electron/` (main) can import
 // it — though in practice only the main process runs detection (the renderer
@@ -114,6 +114,69 @@ export function detectLanguage(text) {
   return 'en';
 }
 
+// Estimate the English share by character weight, across at most 8k characters.
+// Greedy sentence/line groups give tinyld enough context without letting the
+// first language in a bilingual description decide the whole listing. Short or
+// inconclusive chunks keep detectLanguage's conservative English default.
+export function englishShare(text) {
+  const pieces = String(text || '').slice(0, 8000).split(/[\r\n]+|(?<=[.!?。])\s+/u);
+  const nonEnglishWeights = new Map();
+  let englishWeight = 0;
+  let totalWeight = 0;
+  let chunk = '';
+  const scoreChunk = () => {
+    if (!chunk) return;
+    const language = detectLanguage(chunk);
+    const weight = chunk.length;
+    totalWeight += weight;
+    if (language === 'en') englishWeight += weight;
+    else nonEnglishWeights.set(language, (nonEnglishWeights.get(language) || 0) + weight);
+    chunk = '';
+  };
+  for (const piece of pieces) {
+    const trimmed = piece.trim();
+    if (!trimmed) continue;
+    chunk = chunk ? `${chunk} ${trimmed}` : trimmed;
+    if (chunk.length >= 200) scoreChunk();
+  }
+  scoreChunk();
+
+  let dominant = null;
+  let dominantWeight = 0;
+  for (const [language, weight] of nonEnglishWeights) {
+    if (weight > dominantWeight) {
+      dominant = language;
+      dominantWeight = weight;
+    }
+  }
+  return { share: totalWeight ? englishWeight / totalWeight : 1, dominant };
+}
+
+// Mutate language tags on the original rows, but return a new kept list. This
+// lets callers summarize the pre-filter list to count and sample dropped jobs.
+// Titles never decide eligibility; empty descriptions fall back to snippets.
+export function filterNonEnglishJobs(jobs) {
+  const kept = [];
+  const dropped = [];
+  for (const job of Array.isArray(jobs) ? jobs : []) {
+    if (!job || typeof job !== 'object') {
+      kept.push(job);
+      continue;
+    }
+    const description = String(job.description || '').trim();
+    const { share, dominant } = englishShare(description || job.snippet);
+    if (share < 0.5) {
+      job.language = dominant;
+      dropped.push(job);
+    } else {
+      delete job.language;
+      kept.push(job);
+    }
+  }
+  return { jobs: kept, dropped };
+}
+
+// Legacy tagging helper retained for older callers and saved-card behavior.
 // Mutates a job IN PLACE: sets `job.language` only when confidently non-English
 // (English is the implicit default, so the field is left unset to keep the
 // payload small and the card chip absent). Re-tagging is common after a scraper
@@ -133,8 +196,8 @@ export function tagJobLanguages(jobs) {
   return jobs;
 }
 
-// Tally for the run report: how many kept listings were non-English, broken down
-// by language, with one sample each.
+// Tally for the run report: summarize the pre-filter rows after filtering to
+// count non-English drops by language, with one sample each.
 export function summarizeJobLanguages(jobs) {
   const list = Array.isArray(jobs) ? jobs : [];
   const byLang = {};
