@@ -233,11 +233,11 @@ export default [
       assert.match(WRITE_VERIFY_BRIEF, /as the cover letter a persuasive essay to the hiring manager/u, 'the letter is written as an essay to a named reader');
       assert.ok(WRITE_VERIFY_BRIEF.includes(" Open on a thesis: the role's main need as you read the posting, framed once as your reading, not a probability, then that you meet it, stated as fact. "), 'the thesis is the writer\u2019s reading, framed once and not as a probability, then the claim of meeting it as fact');
       assert.ok(WRITE_VERIFY_BRIEF.includes(' Start each body paragraph with its full point in one or two sentences'), 'each body paragraph leads with its full point');
-      assert.ok(WRITE_VERIFY_BRIEF.includes('Start each body paragraph with its full point in one or two sentences, the kind of work you did and, stated outright for a reader who has not memorized the posting, which of this job\'s needs it meets, then prove it with specific examples, the first set in its time and place. Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the point states the kind of work and, outright, which of this job\u2019s needs it meets, proved with specific examples, then the paragraph-opener rule');
+      assert.ok(WRITE_VERIFY_BRIEF.includes('Start each body paragraph with its full point in one or two sentences, the kind of work you did and, stated outright for a reader who has not memorized the posting, which of this job\'s needs it meets, then prove it with specific examples. Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the point states the kind of work and, outright, which of this job\u2019s needs it meets, proved with specific examples, then the paragraph-opener rule');
       assert.equal(WRITE_VERIFY_BRIEF.split("which of this job's needs it meets").length, 2, 'the need-it-meets phrase appears exactly once');
       assert.ok(WRITE_VERIFY_BRIEF.includes('Do not open consecutive paragraphs with the same word or link two paragraphs to the job with the same sentence pattern.'), 'the brief forbids consecutive paragraphs opening with the same word');
       assert.equal(WRITE_VERIFY_BRIEF.includes('where this job needs it'), false, 'the old where-this-job-needs-it wording is gone (user decision, 2026-10-20)');
-      assert.equal(WRITE_VERIFY_BRIEF.length, 968, 'the brief is exactly 968 characters after the equal-length unused-proof closing swap');
+      assert.equal(WRITE_VERIFY_BRIEF.length, 956, 'the brief is exactly 956 characters after the conclusion swap and the time-and-place removal');
       assert.equal(WRITE_VERIFY_BRIEF.includes('the need it serves'), false, 'the need-it-serves wording was replaced so the point says the work meets the need (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('in plain words'), false, 'the plain-words wording was replaced by the explicit-link wording (user decision, 2026-10-21)');
       assert.equal(WRITE_VERIFY_BRIEF.includes('a claim about your work this job needs'), false, 'the implicit-link wording is gone');
@@ -246,7 +246,7 @@ export default [
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /a line reading exactly EDITORIAL SUMMARY, give a short explanation of the finished application/u);
       assert.ok(WRITE_VERIFY_SHORTLIST_STEP.indexOf('EDITORIAL SUMMARY') > WRITE_VERIFY_SHORTLIST_STEP.indexOf('EVIDENCE SHORTLIST'), 'the explanation follows the evidence appendix');
       assert.match(WRITE_VERIFY_SHORTLIST_STEP, /After the complete letter, add two editorial appendices/u);
-      assert.ok(WRITE_VERIFY_BRIEF.includes(' Close on a wider point from unused proof. '), 'the close draws a wider point from proof the body has not used');
+      assert.ok(WRITE_VERIFY_BRIEF.includes(' Conclude briefly on what your proof adds up to, with no new proof. '), 'the close concludes on what the proof adds up to without bringing new proof');
       assert.equal(WRITE_VERIFY_BRIEF.includes('End on your argument, not stock courtesy.'), false, 'the old closing sentence is replaced');
       // Sabotage: the replaced letter sentences must be gone, so the brief carries one letter instruction set, not two.
       assert.equal(WRITE_VERIFY_BRIEF.includes('your hedged read'), false, 'the old hedged-read wording is gone');
@@ -260,7 +260,7 @@ export default [
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('states its full point in its first one or two sentences'), 'the panel rewards point-first paragraphs');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('opens on evidence or only on what the role needs'), 'the panel marks evidence-first paragraphs down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a closing of stock courtesy rather than the letter's own argument"), 'the panel marks a courtesy close down');
-      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that retells details or examples the body already gave, however it frames them, or rests on a maxim any applicant could write, instead of drawing a wider point from proof the body has not used"), 'the panel marks an example-recap close down');
+      assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes("a close that brings new proof, retells details or examples the body already gave, however it frames them, or rests on a maxim any applicant could write, instead of briefly concluding on what the letter's proof adds up to"), 'the panel marks a new-proof or example-recap close down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('framed once as that reading rather than as a probability'), 'the panel rewards a thesis framed as a reading, not a probability');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('same connective or sentence pattern linking the candidate\'s work to the job in two or more paragraphs'), 'the panel marks a repeated connective down');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes('past or present perfect'), 'the panel checks the tense of past work');

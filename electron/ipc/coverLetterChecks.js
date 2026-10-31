@@ -236,8 +236,17 @@ export function targetCompanyNameForms(value = '') {
     .map(name => ({ name }));
 }
 
+// A salutation greets the employer by its main name. Any trailing
+// parenthetical a board appends ("(A Parent Lab)", "(Canada)") and branding
+// pictographs are display decoration there; the job company value and the
+// body identity forms above keep them.
+const SALUTATION_TRAILING_PARENTHETICAL_RE = /\s*\([^()]*\)\s*$/u;
+const SALUTATION_PICTOGRAPH_RE = /[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu;
+
 function salutationCompanyName(value = '') {
-  const displayName = normalizedCompanyDisplayName(value);
+  const plain = text(text(value).replace(SALUTATION_PICTOGRAPH_RE, ' '));
+  const mainName = text(plain.replace(SALUTATION_TRAILING_PARENTHETICAL_RE, '')) || plain;
+  const displayName = normalizedCompanyDisplayName(mainName);
   // The host owns this field, so a writer cannot repair punctuation copied
   // from a board's employer display name. Use the neutral salutation instead
   // of altering the employer's name or spending every correction on it.

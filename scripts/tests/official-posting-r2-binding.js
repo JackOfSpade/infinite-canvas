@@ -43,11 +43,11 @@ export default [
     },
   },
   {
-    name: 'R2 body-name normalization leaves salutation punctuation refusal and descriptive qualifiers unchanged',
+    name: 'R2 body-name normalization leaves salutation punctuation refusal unchanged; the salutation greets the main name',
     run() {
       for (const [company, display] of [[`${COMPANY}, Inc.`, COMPANY], [`${COMPANY} LLC (NWL)`, COMPANY],
-        ['The Elm Company', 'The Elm Company'], [`${COMPANY} (Canada)`, `${COMPANY} (Canada)`],
-        [`${COMPANY} (2024)`, `${COMPANY} (2024)`]]) {
+        ['The Elm Company', 'The Elm Company'], [`${COMPANY} (Canada)`, COMPANY],
+        [`${COMPANY} (2024)`, COMPANY]]) {
         const job = { company };
         assert.equal(authorCoverLetterEnvelope({ job }).salutation, `Dear ${display} Hiring Team,`);
         assert.equal(job.company, company);

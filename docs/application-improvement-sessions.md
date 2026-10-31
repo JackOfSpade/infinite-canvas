@@ -60,6 +60,25 @@ Patterns below the recurrence bar are watched, not forgotten. The private `appli
 
 ## Session log
 
+### 2026-10-31 — improvement session; conclusion close, time-and-place removed, salutation main name; counter reset
+
+Run at the user's request with the counter at 2. Coverage: both pairs since the 2026-10-28 session were retained, under one model label, none superseded. Both were accepted and edited, and both have notes. No truth errors. Career source check: the 10-28 education-label fix was in the live source but not yet re-imported (both résumés still carried the label, corrected by hand). At the user's request a phrase they flagged was also removed from the source. Both are career-data watch items until a re-imported bundle confirms them.
+
+Findings, notes first:
+- **Recurring, caused by the last session: the closing.** Both notes say the last paragraph "is still doing point proof" instead of concluding. The 10-28 line "Close on a wider point from unused proof" turned the close into another body paragraph. The user also cut a body paragraph from both letters for length, and the extra proof paragraph was part of that length.
+- **Second explicit objection: dates and city in the letter.** The brief's "the first set in its time and place" produced an exact date range and city; the user asked why.
+- **User-stated preference: the salutation greets the main name.** The host kept a descriptive parenthetical from the board's employer name.
+- **Watched, not acted on:** too many body points (2 bundles, remedy undecided), a vague project name (2 across sessions), a pointer phrase with no referent, a self-praising link sentence, an overlong sentence with an ambiguous modifier, a stock sign-off, a weak résumé verb, a narrow Skills subset (one bundle expanded it, one kept it). Each stays on the watch list until it recurs.
+
+Changes shipped:
+1. Brief: "Close on a wider point from unused proof." became "Conclude briefly on what your proof adds up to, with no new proof." The judge rubric now also counts a close that brings new proof against writing.
+2. Brief: removed ", the first set in its time and place" (removing guidance). The brief is 956 of 970 characters.
+3. Host salutation (`salutationCompanyName`): drops a trailing parenthetical and branding pictographs from the employer display name. The job company value and the body identity forms used by the truth checks keep them. This reverses the earlier rule that kept "(Canada)"-style qualifiers.
+
+Test: a writer-stage replay of three archived writer prompts for each of the two edited jobs, changed only in the brief, on the production writer profile (latest Opus, xhigh), with two closing wordings. Twelve blind Sonnet judges ranked each prompt's original answer against the replays, letter order reversed for half. The shipped wording ranked above the original in 12 of 12 comparisons, first in 7. Closings that conclude without new proof rose from 0 of 12 to 12 of 12. Restated dates or city fell from 10 of 12 to 0. Mean overall score was 77 against 52, and mean length fell from 538 to 511 words. The alternative wording ("End on a short conclusion…") won 9 of 10 against the original but ranked below the shipped one. New risk to watch: most replayed closings open on "Taken together". Not run: conversion, validators, fit, fact-check and the page-image judge on the replayed drafts, truth recall, and the frozen-set replay. The judges were given the user's closing, length and date criteria, so this is evidence on those defects, not a full blind quality comparison.
+
+Validation: 6,284 unit tests and all 24 résumé-PDF checks passed, and touched-file lint passed. The oracle gate reports 7 ngram findings, all in interview-helper files from earlier commits that this session did not touch; none are in this change. Frozen regression set: the two oldest pairs dropped, both pairs of this window added (20). Watch list reviewed for both pairs. Counter reset after this entry.
+
 ### 2026-10-24 — requested evidence-selection policy; counter not reset
 
 At the user's direction, planning, the saved-outline writer handoff and the judge now share one cover-letter selection rule: one well-developed proof is sufficient when further examples add little; another proof belongs only when it materially strengthens the case. Evidence determines the number of points and paragraphs. The judge's structure criterion now asks for fit within one page rather than one-page completeness. No word target, proof-count quota or factual acceptance rule was added.

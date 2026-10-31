@@ -3015,11 +3015,20 @@ export default [
         // envelope previously consumed all five candidates' correction rounds.
         buildCoverLetterDocument({ letter });
       }
-      assert(qualifiedEnvelope.salutation === 'Dear Acme (Canada) Hiring Team,',
-        'a descriptive parenthetical qualifier is not mistaken for an acronym in the salutation');
+      assert(qualifiedEnvelope.salutation === 'Dear Acme Hiring Team,',
+        'a descriptive parenthetical qualifier is dropped from the salutation, which greets the main name');
+      const parentJob = { company: 'Harbor (A Lantern Technology Lab)' };
+      assert(authorCoverLetterEnvelope({ job: parentJob, evidence }).salutation === 'Dear Harbor Hiring Team,'
+        && parentJob.company === 'Harbor (A Lantern Technology Lab)',
+      'a parent-company parenthetical is dropped only from the salutation');
       const numericQualifierEnvelope = authorCoverLetterEnvelope({ job: { company: 'Acme (2024)' }, evidence });
-      assert(numericQualifierEnvelope.salutation === 'Dear Acme (2024) Hiring Team,',
-        'a numeric parenthetical qualifier is not mistaken for an acronym in the salutation');
+      assert(numericQualifierEnvelope.salutation === 'Dear Acme Hiring Team,',
+        'a numeric parenthetical qualifier is dropped from the salutation');
+      assert(authorCoverLetterEnvelope({ job: { company: 'Orchard 🌱 Labs' }, evidence }).salutation === 'Dear Orchard Labs Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: '✨Harbor✨' }, evidence }).salutation === 'Dear Harbor Hiring Team,',
+      'branding pictographs in the employer display name stay out of the salutation');
+      assert(authorCoverLetterEnvelope({ job: { company: '(Stealth)' }, evidence }).salutation === 'Dear (Stealth) Hiring Team,',
+        'a name that is only a parenthetical is kept rather than emptied');
       assert(envelope.signatureTitle === '' && envelope.closing === 'Best regards,', 'code-authored closing omits an implied target title');
       assert(envelope.date === 'August 2026', 'app-authored cover-letter dates use month and year only');
       assert(envelope.subtitleRole === 'Operations leader' && envelope.credential === 'B.S. Operations, Example University',
