@@ -1,3 +1,4 @@
+import jobSearchDateDiagnosticsTests from './jobSearchDateDiagnosticsFixture.mjs';
 import {
   assert,
   JOB_SEARCH_DEFAULT_INITIAL_LOOKBACK_DAYS,
@@ -19,6 +20,7 @@ import {
 const localDate = (year, month, day, hour = 0, minute = 0) => new Date(year, month - 1, day, hour, minute);
 
 export default [
+  ...jobSearchDateDiagnosticsTests,
   {
     name: 'Job Search history always wins over first-search lookback',
     run: () => {

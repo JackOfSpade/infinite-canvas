@@ -1,6 +1,7 @@
 // Preference inputs are user-authored free text, while the candidate pool
 // contains full listings and evidence quotes. Neither belongs in a report.
 import { summarizeJobScoringIntegrity } from './jobScoringContract.js';
+import { sanitizeJobSearchDateDiagnostics } from './jobSearchDateDiagnostics.js';
 
 // A hub can live inside a folder (a sidebar module dropped onto a group, or
 // spawned while a sub-canvas is open), so redaction has to follow
@@ -149,6 +150,9 @@ function redactNode(node, depth) {
     ...node,
     data: {
       ...restData,
+      ...(restData.jobSearchDateDiagnostics !== undefined ? {
+        jobSearchDateDiagnostics: sanitizeJobSearchDateDiagnostics(restData.jobSearchDateDiagnostics),
+      } : {}),
       ...(Array.isArray(scoredJobs) ? { scoredJobsCount: scoredJobs.length } : {}),
       scoringIntegrity: summarizeJobScoringIntegrity(node.data),
       ...(Array.isArray(preferenceCandidatePool) ? { preferenceCandidatePoolCount: preferenceCandidatePool.length } : {}),

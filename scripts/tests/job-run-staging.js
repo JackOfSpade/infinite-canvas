@@ -27,6 +27,7 @@ import { getJobAnalysisPaths, getJobDescriptionRecoveryCheckpointPath, rebindJob
 import { claimJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 import crypto from 'node:crypto';
 import quitWorkflowPauseTests from './quitWorkflowPauseFixture.mjs';
+import jobCollectionDiagnosticsTests from './jobCollectionDiagnosticsFixture.mjs';
 import { jobWorkflowNeedsQuitPause } from '../../src/utils/quitWorkflowPause.js';
 import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
@@ -99,6 +100,7 @@ async function sealContinuationFixture(canvasFilePath, identity, { careerSnapsho
 }
 
 export default [
+  ...jobCollectionDiagnosticsTests,
   ...quitWorkflowPauseTests,
   {
     name: 'job run staging: resuming a torn final row preserves every newly checkpointed job',
@@ -1231,6 +1233,11 @@ export default [
             && after?.manifest?.collectionCompletedAt === firstGatheredAt
             && after?.manifest?.lastUpdated > firstGatheredAt,
           `${testCase.label} gathered-only recovery must retain its original start/collection boundaries while refreshing lastUpdated, got ${JSON.stringify({ result, manifest: after?.manifest })}`);
+          assert(after.manifest.collectionDiagnostics?.disposition === 'full'
+            && after.manifest.collectionDiagnostics?.startedAt === startedAt
+            && after.manifest.collectionDiagnostics?.completedAt === firstGatheredAt
+            && after.manifest.collectionDiagnostics?.unfinishedSourceCount === 0,
+          'the current settled search response must persist its observed collection evidence, including after a legacy gathered resume');
           assert(result.jobs.length === 1 && result.jobs[0].officialPosting?.level === 'L5'
             && after.stagedJobs.some(entry => entry.job?.officialPosting?.level === 'L5'),
           'old gathered rows must cross the official resolver and checkpoint their metadata before being returned');

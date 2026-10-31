@@ -14922,6 +14922,14 @@ Return a JSON object with four arrays of search query strings:
       nodeId,
       expectedOperationAuthority: authorityReceipt,
       collectionCompletedAt,
+      collectionDiagnostics: {
+        disposition: collectionDisposition === 'user-finished-partial'
+          ? 'user-finished-partial'
+          : finalGatingSourceIds.size > 0 ? 'unfinished-sources' : 'full',
+        startedAt: collectionStartedAt,
+        completedAt: collectionCompletedAt,
+        unfinishedSourceCount: finalGatingSourceIds.size,
+      },
     });
     await assertSearchCurrent();
     if (gatheredStageAdvanced !== true) return searchSupersededResult();

@@ -30,6 +30,7 @@ import { buildPasteRejectionTraceMarkdown } from './bugReport/pasteRejectionTrac
 import { buildRendererCrashMarkdown } from '../rendererRecovery.js';
 import { workspaceIoDiagnosticsMarkdown } from './workspaceIoDiagnostics.js';
 import { buildJobCompensationSnapshot } from './bugReport/jobCompensationSnapshot.js';
+import { buildJobSearchDateHistory } from './bugReport/jobSearchDates.js';
 import { buildOfficialPostingSnapshot } from './bugReport/officialPostingSnapshot.js';
 import { buildOfficialPostingDiscoveryMarkdown } from './officialPostingDiscoveryDiagnostics.js';
 import { applicationCitationDiagnosticsMarkdown } from './applicationCitationDiagnostics.js';
@@ -2924,7 +2925,12 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // This remains useful even when the live pipeline section self-gates to ''.
   let jobRecoveryOfferMarkdown = '';
   let jobRecoveryMarkdown = '';
-  if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE') || reportCodes.has('JOBRECOVERY')) {
+  let jobSearchDateHistoryMarkdown = '';
+  if (isFullReport || reportCodes.has('JOBDATES')) {
+    try { jobSearchDateHistoryMarkdown = buildJobSearchDateHistory(nodes); }
+    catch { jobSearchDateHistoryMarkdown = diagnosticRenderFailureMarkdown('Job Search Date History (JOBDATES)', new Error('could not inspect saved date decisions')); }
+  }
+  if (isFullReport || reportCodes.has('RECOVERY') || reportCodes.has('JOBRESOLVE') || reportCodes.has('JOBRECOVERY') || reportCodes.has('JOBDATES')) {
     try { jobRecoveryOfferMarkdown = buildJobRecoveryOfferSnapshot(payload.jobRecoveryOfferStates); }
     catch { jobRecoveryOfferMarkdown = diagnosticRenderFailureMarkdown('Job Recovery Offer Diagnostics', new Error('could not inspect renderer recovery admission state')); }
     try { jobRecoveryMarkdown = buildJobRecoverySnapshot(canvasFilePath, currentNodeIds, currentJobHubIds, reportWindowId); }
@@ -3158,7 +3164,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

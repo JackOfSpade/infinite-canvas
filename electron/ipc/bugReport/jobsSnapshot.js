@@ -14,7 +14,7 @@ import { getListingLivenessProbeCounts } from '../listingLivenessProbe.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
 import { getJobAnalysisPaths } from '../jobAnalysisPaths.js';
 import { formatJobAnalysisRecoveryLifecycleMarkdown, readJobAnalysisRecoveryLifecycle } from '../jobAnalysisRecoveryLifecycle.js';
-import { hasProviderGatheredBoundary, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt } from '../jobRunStaging.js';
+import { hasProviderGatheredBoundary, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, sanitizeLastRunReceipt, sanitizeJobRunCollectionDiagnostics } from '../jobRunStaging.js';
 import { JOB_SEARCH_TEST_MODE } from '../../../src/utils/jobSourceScope.js';
 import { isGoogleJobsInternalUrl } from '../../../src/utils/jobListingUrl.js';
 import { ago, closeReportDiagnostic, modelTag, pipelineScope, formatAge, projectReportDiagnostic, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText } from './helpers.js';
@@ -930,6 +930,8 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
   const lines = [
     `- ${label}: ${status} · ${outcome}${terminalScoreReadyDetail} · run \`${reportOpaqueIdentifier(receipt.runId)}\` · started ${receiptTime(receipt.startedAt)} · ended ${receiptTime(receipt.completedAt)}${receiptElapsed(receipt.startedAt, receipt.completedAt)} · ${receipt.stagingStarted ? 'staging started' : 'staging not recorded'} · ${cleanup} · ${receiptHubCorrelation(receipt.nodeId, currentNodeIds)} · ${provenance}`,
   ];
+  const collection = sanitizeJobRunCollectionDiagnostics(receipt.collectionDiagnostics);
+  lines.push(`  - Collection evidence: \`${collection.disposition}\` · started ${receiptTime(collection.startedAt)} · completed ${receiptTime(collection.completedAt)} · unfinished sources ${collection.unfinishedSourceCount ?? 'not recorded'}${collection.disposition === 'unknown' ? ' · older or missing evidence cannot establish full collection' : ''}.`);
 
   const funnel = receipt.funnel;
   if (funnel) {

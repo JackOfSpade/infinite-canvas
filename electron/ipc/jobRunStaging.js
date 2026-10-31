@@ -18,6 +18,7 @@
  *       stage: 'searching' | 'gathered',
  *       providerGatheredAt?: number, collectionCompletedAt?: number,
  *       collectionDisposition?: 'user-finished-partial',
+ *       collectionDiagnostics?: { disposition, startedAt, completedAt, unfinishedSourceCount },
  *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
  *                 jobPreferencePlan, canonicalLocation, searchWindow,
  *                 maxAgeDays, nodeId },
@@ -514,6 +515,25 @@ function receiptTimestamp(value, fallback = null) {
     : fallback;
 }
 
+const COLLECTION_DIAGNOSTIC_DISPOSITIONS = new Set([
+  'full', 'user-finished-partial', 'unfinished-sources', 'unknown',
+]);
+const MAX_COLLECTION_DIAGNOSTIC_SOURCES = 1000;
+
+/** Fixed metadata only: terminal completion alone never proves full collection. */
+export function sanitizeJobRunCollectionDiagnostics(value) {
+  const data = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const count = data.unfinishedSourceCount;
+  return {
+    disposition: COLLECTION_DIAGNOSTIC_DISPOSITIONS.has(data.disposition) ? data.disposition : 'unknown',
+    startedAt: receiptTimestamp(data.startedAt),
+    completedAt: receiptTimestamp(data.completedAt),
+    unfinishedSourceCount: typeof count === 'number'
+      && Number.isSafeInteger(count) && count >= 0 && count <= MAX_COLLECTION_DIAGNOSTIC_SOURCES
+      ? count : null,
+  };
+}
+
 function receiptToken(value, max = 80) {
   const text = String(value ?? '').trim();
   // Source IDs, stop reasons, and warning codes are controlled identifiers.
@@ -765,6 +785,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     nodeId,
     ...(careerSnapshotId ? { careerSnapshotId } : {}),
     ...(operationAuthority ? { operationAuthority } : {}),
+    collectionDiagnostics: sanitizeJobRunCollectionDiagnostics(receipt.collectionDiagnostics),
     startedAt: receiptTimestamp(receipt.startedAt),
     completedAt,
     updatedAt: receiptTimestamp(receipt.updatedAt, completedAt),
@@ -938,6 +959,7 @@ async function readManifestFromFiles(files) {
     const {
       collectionCompletedAt: rawCollectionCompletedAt,
       collectionDisposition: rawCollectionDisposition,
+      collectionDiagnostics: rawCollectionDiagnostics,
       recoveryDisposition: rawRecoveryDisposition,
       ...otherManifest
     } = manifest;
@@ -950,6 +972,7 @@ async function readManifestFromFiles(files) {
       ...otherManifest,
       ...(collectionCompletedAt != null ? { collectionCompletedAt } : {}),
       ...(collectionDisposition ? { collectionDisposition } : {}),
+      collectionDiagnostics: sanitizeJobRunCollectionDiagnostics(rawCollectionDiagnostics),
       ...(recoveryDisposition ? { recoveryDisposition } : {}),
       inputs: {
         ...otherInputs,
@@ -1740,6 +1763,7 @@ async function setStageRaw(canvasFilePath, stage, now, {
   expectedOperationAuthority = null,
   __testOnlyAllowUnpinned = false,
   collectionCompletedAt = null,
+  collectionDiagnostics = null,
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
@@ -1763,6 +1787,18 @@ async function setStageRaw(canvasFilePath, stage, now, {
         ?? collectionCompletedAtForManifest(manifest)
         ?? manifestTimestamp(now);
       if (firstGatheredAt != null) manifest.collectionCompletedAt = firstGatheredAt;
+    }
+    if (stage === 'gathered' && collectionDiagnostics != null) {
+      // Only the host's settled search boundary supplies this evidence. Keep
+      // an explicit partial finish irreversible, including a retry after a
+      // later caller presents a generic full-collection response.
+      const existing = sanitizeJobRunCollectionDiagnostics(manifest.collectionDiagnostics);
+      if (existing.disposition !== 'user-finished-partial') {
+        manifest.collectionDiagnostics = sanitizeJobRunCollectionDiagnostics({
+          ...sanitizeJobRunCollectionDiagnostics(collectionDiagnostics),
+          completedAt: manifest.collectionCompletedAt,
+        });
+      }
     }
     manifest.stage = stage;
     manifest.lastUpdated = now ?? manifest.lastUpdated;
@@ -1968,6 +2004,15 @@ async function finishRunWithSavedListingsRaw(canvasFilePath, {
     if (manifestTimestamp(manifest.collectionCompletedAt) == null) {
       manifest.collectionCompletedAt = existingBoundary ?? stoppedAt;
     }
+    // Persist the decision before returning to scoring: a crash or a later
+    // terminal-only continuation must retain why the scan date did not move.
+    manifest.collectionDiagnostics = sanitizeJobRunCollectionDiagnostics({
+      disposition: 'user-finished-partial',
+      startedAt: manifest.startedAt,
+      completedAt: manifest.collectionCompletedAt,
+      unfinishedSourceCount: Math.min(MAX_COLLECTION_DIAGNOSTIC_SOURCES,
+        sourceEntries.filter(([, source]) => !sourceIsTerminal(source)).length),
+    });
     manifest.lastUpdated = stoppedAt;
     try {
       await atomicWriteJson(files.manifest, manifest);
@@ -2286,6 +2331,9 @@ async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = 
           // when the receipt builder could not match in-memory telemetry.
           nodeId: receipt?.nodeId || manifest?.inputs?.nodeId || null,
           startedAt: receipt?.startedAt ?? manifest?.startedAt,
+          // Collection evidence comes only from the owned host manifest, not
+          // a renderer terminal receipt or a completed-status inference.
+          collectionDiagnostics: manifest?.collectionDiagnostics,
           stagingStarted: true,
           cleanup: { attempted: false, cleared: null },
           ...(suppliedCareerSnapshotId ? { careerSnapshotId: suppliedCareerSnapshotId } : {}),

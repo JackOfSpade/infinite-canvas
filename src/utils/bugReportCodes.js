@@ -400,6 +400,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'jobAuditDetail'],
   },
 
+  JOBDATES: {
+    label: 'Job Search Date History',
+    description: 'Saved Job Search date decisions and durable terminal collection evidence — full versus partial collection, why the last-scraped and coverage dates were committed or retained, and dates kept by Clear Scrape. Includes nested modules and survives workspace save/reopen. Older missing evidence is labelled unknown. Metadata only, with hashed hub/run IDs. Included automatically in FULL.',
+    logFilter: line => /\[JobSearch\]|\[Jobs\]|job.?run|scrape|collection|clear|completion/i.test(line),
+    excludeSections: ['edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState', 'sessionTraces', 'jobAuditDetail'],
+  },
+
   JOBRESOLVE: {
     label: 'Job Source Solve & Continue',
     description: 'Job Search source-card Solve/Continue/retry audit — the visible resolver launch, current-run description-recovery snapshot ownership/readiness, bounded per-source/run Solve outcomes (including retry/Skip recommendation and checkpoint result), per-source progress, returned-item merge, and relevant task lifecycle. Use when a Job Search source card says Solve/Continue did nothing, reopened repeatedly, or reports that its recovery snapshot belongs to another hub/run. Keeps the compact job pipeline/recovery evidence while dropping heavy canvas, media, session-trace, and per-job audit detail. This is separate from the SellHub-only RESOLVE code.',

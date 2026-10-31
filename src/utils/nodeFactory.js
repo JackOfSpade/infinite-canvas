@@ -207,6 +207,8 @@ function sanitizeJobHubClone(data) {
   delete data.manualAiResume;
   delete data.manualAiCleanupReceipts;
   delete data.terminalFinalizationRecovery;
+  // Date decisions belong to the original module/run, not its new clone.
+  delete data.jobSearchDateDiagnostics;
   delete data.queuedModuleRun;
   delete data.providerPhaseAwaitingResume;
   // Fresh-import capability is node-scoped user intent, not reusable career

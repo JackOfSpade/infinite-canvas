@@ -28,6 +28,7 @@ import { useToast } from '../components/ToastProvider';
 import { buildJobHubCareerClearPatch, getHubDropLockReason, getHubDropRejectLabel, hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../utils/jobAnalysisRecovery';
 import { formatCompletionTimestamp, normalizeCompletionTimestamp } from '../utils/completionTimestamp';
+import { jobSearchDateDiagnosticPatch, jobSearchDateRetentionReason } from '../utils/jobSearchDateDiagnostics';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { canAutomaticallyResolveJobSourceWarning, descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, reconcileTerminalJobSourceWarningProjection, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
 import { collectionScopeCaveatsForSavedJobReanalysis, normalizeCollectionScopeCaveats } from '../utils/jobCollectionScopeCaveats';
@@ -1607,7 +1608,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const existing = node?.data?.terminalFinalizationRecovery;
         if (failed) {
           return finalizationRecovery
-            ? { terminalFinalizationRecovery: finalizationRecovery }
+            ? {
+              terminalFinalizationRecovery: finalizationRecovery,
+              ...jobSearchDateDiagnosticPatch(node?.data, {
+                event: 'finalization', reason: 'finalization-failed', runId,
+              }),
+            }
             : null;
         }
         const pendingCompletion = node?.data?.pendingCollectionCompletion;
@@ -1628,7 +1634,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             patch.searchWindow = pendingCompletion.searchWindow;
           }
         }
-        return Object.keys(patch).length > 0 ? patch : null;
+        return {
+          ...patch,
+          ...jobSearchDateDiagnosticPatch(node?.data, {
+            event: 'finalization', runId,
+            reason: commitsSuccessfulCollection ? 'completion-committed'
+              : jobSearchDateRetentionReason(node?.data, {
+                runId, terminalStatus, careerSnapshotId: admittedCareerSnapshotId,
+              }),
+            nextData: { ...node?.data, ...patch },
+          }),
+        };
       });
     };
     if (!window.electronAPI?.completeJobRun) {
@@ -1727,6 +1743,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             // cleanup cannot later make the timestamp embedded in `jobRunId`
             // look like a legacy full-scan anchor.
             partialCollectionRunId: runId,
+            ...jobSearchDateDiagnosticPatch(node?.data, {
+              event: 'collection', runId, searchResult,
+              reason: searchResult?.collectionDisposition === 'user-finished-partial'
+                ? 'user-finished-partial' : 'unfinished-sources',
+            }),
             ...(node?.data?.pendingCollectionCompletion?.runId === runId
               ? { pendingCollectionCompletion: null }
               : {}),
@@ -1744,6 +1765,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // A normal gathered result is full provider coverage. Clear any old
       // partial-run marker before its terminal completion makes a new anchor.
       partialCollectionRunId: null,
+      ...jobSearchDateDiagnosticPatch(node?.data, {
+        event: 'collection', reason: 'full-collection-staged', runId,
+        searchResult: { ...searchResult, collectionStartedAt, collectionCompletedAt },
+      }),
       pendingCollectionCompletion: {
         runId,
         careerSnapshotId: admittedCareerSnapshotId,
@@ -12605,18 +12630,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // from the old career data, so the brief reopens with it. The kept
         // jobs, their run token, and scan history are untouched.
         ...buildJobHubCareerOnlyClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
+        ...jobSearchDateDiagnosticPatch(liveData, { event: 'clear', reason: 'clear-career', runId }),
         manualAiResume: null,
         _boardRollbackSourceProgressFence: null,
       };
       updateGlobal(id, careerOnlyPatch);
     } else if (mode === 'scrape') {
-      updateGlobal(id, (node) => buildJobHubScrapeClearPatch(node?.data || liveData, {
-        nodeId: id,
-        jobAnalysisClearedAt,
-        jobAnalysisClearedRunId,
-        materializedSearchHistory,
+      updateGlobal(id, (node) => ({
+        ...buildJobHubScrapeClearPatch(node?.data || liveData, {
+          nodeId: id,
+          jobAnalysisClearedAt,
+          jobAnalysisClearedRunId,
+          materializedSearchHistory,
+        }),
+        ...jobSearchDateDiagnosticPatch(node?.data || liveData, {
+          event: 'clear', reason: 'clear-scrape', runId,
+          nextData: { ...(node?.data || liveData), ...materializedSearchHistory },
+        }),
       }));
     } else updateGlobal(id, {
+      ...jobSearchDateDiagnosticPatch(liveData, {
+        event: 'clear', reason: 'clear-all', runId,
+        nextData: { ...liveData, ...materializedSearchHistory },
+      }),
       hubState: 'empty', queuedModuleRun: null, analysisOperation: null, errorMessage: null, rerunOutcome: null, rerunNotice: null, reanalysisNotice: null, testModeNote: null,      scoredJobs: null, finalSourceCounts: {}, resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: 0, scoreThreshold: 0, jobRunId: null,
       // A reset starts a NEW run, so any retry route left by the previous
       // failure must not outlive it — Try again would otherwise re-enter a
