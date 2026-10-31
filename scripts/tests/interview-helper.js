@@ -26,6 +26,7 @@ import {
 } from '../../electron/ipc/interviewHelper.js';
 import { cloneNode, NODE_FACTORIES } from '../../src/utils/nodeFactory.js';
 import { getNodeDims } from '../../src/utils/constants.js';
+import { interviewHelperCardWidth, interviewHelperColumns } from '../../src/utils/interviewHelperLayout.js';
 
 function profileFixture() {
   return {
@@ -935,8 +936,22 @@ export default [
     name: 'interview helper: unmeasured layout matches the full setup card footprint',
     run: () => {
       const dims = getNodeDims({ type: 'interviewhelper' });
-      assert(dims.w === 350 && dims.h === 560,
-        `Interview Helper needs its real 350x560 setup fallback before DOM measurement, got ${dims.w}x${dims.h}`);
+      assert(dims.w === 740 && dims.h === 560,
+        `Interview Helper needs its real 740x560 setup fallback before DOM measurement, got ${dims.w}x${dims.h}`);
+    },
+  },
+  {
+    name: 'interview helper layout: widens by whole columns as content grows, without flip-flopping',
+    run: () => {
+      const desktop = { width: 1600, height: 1000 };
+      assert(interviewHelperCardWidth(2) === 740 && getNodeDims({ type: 'interviewhelper' }).w === interviewHelperCardWidth(2),
+        'the unmeasured footprint must match the default two-column card');
+      assert(interviewHelperColumns(900, desktop, 2) === 2, 'a short setup card stays two columns');
+      assert(interviewHelperColumns(3200, desktop, 2) === 4, 'long practice feedback widens so the whole card fits at a readable zoom');
+      assert(interviewHelperColumns(3200, { width: 1000, height: 1000 }, 2) === 3, 'a narrower window stops at the widest card it can show');
+      const settled = interviewHelperColumns(1800, desktop, 2);
+      assert(interviewHelperColumns(1800, desktop, settled) === settled, 'the chosen count must be stable on re-measurement');
+      assert(interviewHelperColumns(0, desktop, 3) === 3 && interviewHelperColumns(1800, null, 3) === 3, 'unknown measurements keep the current count');
     },
   },
   {

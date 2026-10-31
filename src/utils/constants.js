@@ -121,12 +121,14 @@ const NODE_DIMS = {
   // capped at max-h-44 = 176px, JobBoardSearchSelection.jsx) + JobBoardDoneState's
   // result summary (~110px), matching the jobhub/sellhub height convention above.
   jobboard: { w: 260, h: 320 },
-  // InterviewHelperNode has a fixed 350px card width. Its first actionable
-  // setup state includes four configuration sections plus the optional
-  // evidence-question panel; 560px leaves room for that complete setup before
-  // React Flow has a measured DOM size. Prepared brief/rail states remain
-  // content-sized after measurement.
-  interviewhelper: { w: 350, h: 560 },
+  // InterviewHelperNode starts as a 740px two-column card and widens by whole
+  // columns as content grows (interviewHelperLayout.js). Its first actionable setup state (four configuration sections plus
+  // the optional evidence-question panel) splits across them. 560px was the
+  // measured single-column setup height and stays as a safe upper bound (an
+  // overestimate only leaves a gap; an underestimate overlaps neighbours) until
+  // React Flow has a measured DOM size. Prepared brief/rail/feedback states
+  // remain content-sized after measurement.
+  interviewhelper: { w: 740, h: 560 },
   // MarketplaceStatusNode computes nodeWidth dynamically per platform-card grid
   // (marketplaceStatusLayout.js) — no single fixed size exists. This is the
   // node's own single-platform-row size: marketplaceStatusNodeWidth(1) = 1*CARD_W

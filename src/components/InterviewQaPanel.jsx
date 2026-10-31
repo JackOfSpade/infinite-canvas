@@ -170,7 +170,7 @@ export function InterviewQaPanel({ nodeId, snapshotId, refreshKey, disabled = fa
   const cards = [...qa.foundation.cards, ...qa.company.cards];
   const disclosed = qa.company.cards.filter(card => card.origin === 'disclosed').length;
   const needsPrep = cards.filter(card => card.status === 'needs-prep' || card.status === 'empty').length;
-  return <section aria-label="Interview Q&A" className="space-y-2 border-t border-white/10 pt-3">
+  return <section aria-label="Interview Q&A" className="break-inside-avoid space-y-2 border-t border-white/10 pt-3">
     <p className="text-[11px] text-white/70" role="status">Foundation {qa.foundation.cards.length} · {qa.company.company || 'Company'} {qa.company.cards.length} · {disclosed} disclosed · {needsPrep} need prep</p>
     <button type="button" className="nodrag w-full rounded-md border border-white/15 px-2 py-1.5 text-xs disabled:opacity-40" onClick={() => { setOpen(true); void reload(); }}>Edit Q&A</button>
     {error && !open && <p role="alert" className="text-xs text-amber-200">{error} <button type="button" className="underline" onClick={() => { void reload(); }}>Retry loading Q&A</button></p>}

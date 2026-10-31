@@ -23,7 +23,7 @@ export function FeedbackView({ feedback }) {
     <p className="text-xs text-white/80"><span className="font-semibold">Overall</span> <Score value={feedback.overall?.score} />{feedback.receivedAt ? <span className="text-[10px] text-white/45"> · {when(feedback.receivedAt)}</span> : null}</p>
     <p className="text-[11px] text-white/75 whitespace-pre-wrap">{feedback.overall?.summary}</p>
     {feedback.priorities?.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Work on first</p><ol className="list-decimal pl-4 text-[11px] text-amber-100 space-y-0.5">{feedback.priorities.map((item, index) => <li key={index}>{item}</li>)}</ol></div>}
-    {planned.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Planned questions · weakest first</p><ul className="space-y-1.5">{planned.map((item, index) => <li key={index} className="rounded-md border border-white/10 bg-black/20 p-1.5">
+    {planned.length > 0 && <div><p className="text-[10px] font-semibold uppercase text-white/45">Planned questions · weakest first</p><ul className="space-y-1.5">{planned.map((item, index) => <li key={index} className="break-inside-avoid rounded-md border border-white/10 bg-black/20 p-1.5">
       <p className="text-[11px] text-white/85"><Score value={item.score} /> {item.score != null ? '· ' : ''}{item.question}{!item.asked && <span className="text-white/45"> · not asked</span>}</p>
       {item.askedAs && <p className="text-[10px] text-white/55">Asked as: {item.askedAs}</p>}
       <section className="practice-memorized" aria-label="Memorized answer"><p className="text-[10px] font-semibold uppercase text-white/40">Memorized answer</p>
