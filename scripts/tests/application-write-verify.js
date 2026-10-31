@@ -12,6 +12,7 @@ import {
   writeVerifyChangedFindingErrors, writeVerifyFactFindingErrors, writeVerifyUnitText, writeVerifyUnitListing,
   writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, WRITE_VERIFY_REJECTION_HEADING,
   writeVerifyNextAfterCandidate, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyPrompt,
+  writeVerifyWriterSkillNames, writeVerifyDroppedSkillErrors,
 } from '../../electron/ipc/applicationWriteVerify.js';
 import {
   APPLICATION_V2_LIMITS, ApplicationV2LimitError,
@@ -44,6 +45,34 @@ const domains = [
 const JOB_ID = '11111111-1111-4111-8111-111111111111';
 
 export default [
+  {
+    name: 'v2 conversion keeps every eligible writer skill and states no skill-group citation cap',
+    run() {
+      const names = ['Kotlin', 'Swift', 'GraphQL', 'Redis', 'Terraform', 'Kafka', 'ETL', 'ETL pipelines', 'React', 'React Flow'];
+      const plain = ['RÉSUMÉ', '', 'EXPERIENCE', '', 'Engineer · Example Co', '- Built things.', '',
+        'SKILLS', '', 'Languages: Kotlin, Swift', 'Platforms: GraphQL · Redis · Terraform · Kafka · ETL pipelines · React Flow', '',
+        'EDUCATION', '', 'B.S. Example', '', 'COVER LETTER', '', 'I used React and ETL daily.'].join('\n');
+      // Longer names consume their span; the letter and other sections never count.
+      assert.deepEqual(writeVerifyWriterSkillNames(plain, names).sort(),
+        ['ETL pipelines', 'GraphQL', 'Kafka', 'Kotlin', 'React Flow', 'Redis', 'Swift', 'Terraform'].sort());
+      const docs = items => ({ resume: { skills: [{ id: 's1', group: 'Skills', items }] } });
+      const kept = writeVerifyWriterSkillNames(plain, names);
+      assert.deepEqual(writeVerifyDroppedSkillErrors(plain, docs(kept.map(name => name.toLowerCase())), names), []);
+      const errors = writeVerifyDroppedSkillErrors(plain, docs(['Kotlin', 'Swift', 'GraphQL', 'Redis']), names);
+      assert.equal(errors.length, 1);
+      assert.deepEqual(pasteRejectionCheckIds(errors).checkIds, ['structured-resume']);
+      for (const name of ['Terraform', 'Kafka', 'ETL pipelines', 'React Flow']) assert.ok(errors[0].includes(JSON.stringify(name)));
+      // A lone all-caps skill line is not mistaken for the next heading; no skills block drops nothing.
+      assert.deepEqual(writeVerifyWriterSkillNames('SKILLS\nREDIS\nKafka\n\nEDUCATION\nTerraform', names).sort(), ['Kafka', 'Redis']);
+      assert.deepEqual(writeVerifyDroppedSkillErrors('RÉSUMÉ\nEXPERIENCE\n- Kotlin work', docs([]), names), []);
+      const convert = writeVerifyPrompt({ stage: 'convert', state: { ...initialWriteVerifyState(1), ordinal: 0,
+        candidates: [{ id: 'candidate-1', status: 'written', plainText: plain, corrections: 0, fitCorrections: 0, rejections: [] }] },
+      sourcePrompt: 'SOURCE', posting: '', hand: '', envelope: {} });
+      assert.ok(convert.includes('a skill group has no such cap'));
+      assert.ok(!convert.includes('no more than four distinct career quotes per unit'));
+    },
+  },
+
   {
     name: 'v2 newest fit observations supersede older measurements and legacy newest rows stay excluded',
     run() {

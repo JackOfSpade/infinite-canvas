@@ -56,7 +56,7 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
+import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifySkillIndex, writeVerifyDroppedSkillErrors, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { targetEmploymentFrames } from './applicationEmploymentGuard.js';
@@ -5062,7 +5062,9 @@ async function writeVerifyFrozenContext(input, state) {
     careerSkillEvidence: hydrated.skillEvidence,
     groundingContract: writeVerifyGroundingContract(),
   });
-  return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt,
+  const skillNames = writeVerifySkillIndex({ profile: hydrated.snapshot.profile, catalog, listingEvidence,
+    careerSkillEvidence: hydrated.skillEvidence }).map(skill => skill.name);
+  return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt, skillNames,
     evidencePlan: { evidence: [...hydrated.catalog, ...listingEvidence], requirements } };
 }
 
@@ -8005,6 +8007,9 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       if (documents) { const delta = diffUnits(base, documents); patchEvidence = { mode: unitState.mode, changed: delta.changed, removed: delta.removed, mergedSha256: structuredDocumentDigest(documents) }; }
     }
     if (!errors.length && !documents) errors.push('Conversion must return both production structured documents.');
+    if (!errors.length && outgoingStage === 'convert') {
+      errors.push(...writeVerifyDroppedSkillErrors(candidate.plainText, documents, (await writeVerifyFrozenContext(input, state)).skillNames));
+    }
     if (!errors.length) {
       if (outgoingStage !== 'fact-correction') candidate.structured = documents;
       if (outgoingStage === 'fact-correction') errors.push(...writeVerifyChangedFindingErrors(work.factFindings || [], documents));
