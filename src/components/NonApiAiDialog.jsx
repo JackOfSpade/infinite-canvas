@@ -15,7 +15,7 @@ import { ClaudeProgress } from './ClaudeProgress';
 import { BridgeApplicationsPage } from './BridgeApplicationsPage';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
 import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
-import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
+import { isJobSearchPauseEligible } from '../utils/jobHubManualAiOwnership';
 // Which bridge-held bundles share ONE page instead of one chip/page each.
 import { buildDockNav, isGroupOnlyNav } from '../utils/applicationBridgePage';
 import { isBridgeHeldPush } from '../utils/bridgeHeldPush';
@@ -340,21 +340,6 @@ const ownerBadgeForNode = (nodeId) => {
   return `Hub ${((hash >>> 0).toString(36).toUpperCase()).padStart(7, '0')}`;
 };
 
-// Only Job Search's own manual-AI runs understand the saved-stop event below.
-// A Job Search may pause during file extraction or any compiler/audit/repair
-// stage, so retain the whole `career-profile-*` family alongside the job-*
-// stages. The mounted node re-checks the
-// exact run id before it acts; this is merely the dock's narrow UI eligibility
-// gate, not an authorization boundary.
-const isJobSearchPauseEligible = (request) => (
-  request?.kind !== 'application'
-  && typeof request?.nodeId === 'string' && request.nodeId.length > 0
-  && typeof request?.runId === 'string' && request.runId.length > 0
-  && (
-    isCareerCompilerTask(request.task)
-    || (typeof request.task === 'string' && request.task.startsWith('job-'))
-  )
-);
 
 /**
  * Global manual-AI handoff dock. A pending request is deliberately never

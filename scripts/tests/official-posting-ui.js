@@ -19,7 +19,7 @@ import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelectio
 import { APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs } from '../../src/utils/applicationHandoffDock.js';
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.js';
-import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId } from '../../src/utils/jobHubManualAiOwnership.js';
+import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId, isJobSearchPauseEligible } from '../../src/utils/jobHubManualAiOwnership.js';
 import { registerOfficialPostingRefreshHandler } from '../../electron/ipc/officialPostingRefresh.js';
 import { abortNodeTasksAndWait, snapshotActiveNodeTasks } from '../../electron/ipc/ipcUtils.js';
 import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
@@ -977,6 +977,17 @@ export default [
         const ghost = make('usajobs', 'copy', { snippet: closed.snippet });
         assert.deepEqual(runMerge(site, [first, closed], [ghost]), [first, closed], `${site}: a discarded incoming representative cannot remove the closed row`);
       }
+    },
+  },
+  {
+    name: 'dock offers Job Search pause only for Search-owned runs, never a card or Board official-posting lookup',
+    run() {
+      const base = { kind: 'push', nodeId: 'hub-1', task: 'job-official-posting-research' };
+      assert.equal(isJobSearchPauseEligible({ ...base, runId: 'search-run-1' }), true, 'a Search-owned lookup can pause its Job Search');
+      assert.equal(isJobSearchPauseEligible({ ...base, runId: 'official-posting:card-1:abc' }), false, 'a Generate-time card lookup has no Job Search to pause');
+      assert.equal(isJobSearchPauseEligible({ ...base, runId: 'official-posting:board:abc' }), false, 'a Board refresh lookup has no Job Search to pause');
+      assert.equal(isJobSearchPauseEligible({ ...base, task: 'career-profile-compile', runId: 'search-run-1' }), true, 'career compiler stages stay eligible');
+      assert.equal(isJobSearchPauseEligible({ ...base, kind: 'application', runId: 'search-run-1' }), false, 'application handoffs are never eligible');
     },
   },
 ];
