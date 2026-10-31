@@ -226,6 +226,232 @@ async function mount(bundle, window, { initialData = {}, nodes = [], nodeId = 'i
   return root;
 }
 
+function typeInto(window, input, value) {
+  const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+  descriptor.set.call(input, value);
+  input.dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+}
+function keyDown(window, target, key) {
+  target.dispatchEvent(new window.KeyboardEvent('keydown', { key, bubbles: true, cancelable: true }));
+}
+async function settle(bundle, times = 4) {
+  for (let index = 0; index < times; index += 1) await bundle.module.act(async () => { await flush(); });
+}
+const FOLDERS = [
+  { token: 'tok-discord', company: 'Discord', location: 'Remote', role: 'Product Manager', label: 'Discord · Product Manager', modifiedAt: '2026-10-08T00:00:00.000Z' },
+  { token: 'tok-acme', company: 'Acme', location: 'Toronto', role: 'Engineer', label: 'Acme · Engineer', modifiedAt: '2026-10-01T00:00:00.000Z' },
+];
+const qaCard = (id, scope, question, extra = {}) => ({ id, scope, question, variants: [], headline: `${question} headline`, bullets: [{ stage: 'action', text: `${id} bullet` }], example: `${id} example`, extensions: [], origin: 'catalog', source: null, author: 'generated', status: 'ready', thinEvidence: false, ...extra });
+function qaFixture() {
+  return {
+    foundation: { status: 'partial', cards: [
+      qaCard('f1', 'foundation', 'Tell me about yourself.', { variants: ['Walk me through your résumé.'], extensions: [{ id: 'x1', text: 'Mention mentoring' }] }),
+      qaCard('f2', 'foundation', 'What is your biggest weakness?', { headline: '', bullets: [], example: '', status: 'needs-prep' }),
+    ] },
+    company: { status: 'ready', company: 'Discord', foundationLinks: [{ foundationQuestion: 'Tell me about yourself.', question: 'Walk me through your background', sourceUrl: 'https://glassdoor.example/q1' }], cards: [
+      qaCard('c1', 'company', 'How would you grow Nitro?', { origin: 'disclosed', source: { url: 'https://glassdoor.example/q2', date: '2026-09-01', quote: 'They asked how to grow Nitro.' } }),
+      qaCard('c2', 'company', 'Why Discord?', { origin: 'research', author: 'user' }),
+    ] },
+  };
+}
+function article(window, question) {
+  return [...window.document.querySelectorAll('article')].find(item => item.getAttribute('aria-label') === question);
+}
+function within(root, label) {
+  return [...root.querySelectorAll('button')].find(item => item.textContent.trim() === label);
+}
+
+const QA_SETUP_TESTS = [
+  {
+    name: 'interview helper render: application combobox lists, filters and selects a folder by keyboard, fills an empty URL and enables Prepare',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = []; const listCalls = []; const selectCalls = [];
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+          listInterviewApplicationFolders: async args => { listCalls.push(args); return { root: '/Applied Jobs', folders: FOLDERS }; },
+          selectInterviewApplicationFolder: async args => { selectCalls.push(args); return { ...publicBundle(), jobUrl: JOB_URL }; },
+        };
+        const root = await mount(bundle, window, { nodes: sourceNodes(), onPersist: patch => updates.push(patch) });
+        try {
+          await settle(bundle);
+          assert(button(window, 'Prepare interview brief').disabled, 'Prepare must stay disabled until an application is selected');
+          assert(window.document.body.textContent.includes('Fills empty answers; existing answers are kept.'), 'the fill-only note must appear near Prepare');
+          const combobox = window.document.querySelector('[role="combobox"]');
+          assert(combobox && combobox.getAttribute('aria-expanded') === 'false', 'the application combobox must start collapsed');
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          assert(listCalls.length === 1 && listCalls[0].nodeId === 'interview-helper', 'opening must list folders for this node');
+          assert(combobox.getAttribute('aria-expanded') === 'true', 'opening must expand the combobox');
+          const listbox = window.document.getElementById(combobox.getAttribute('aria-controls'));
+          assert(listbox?.getAttribute('role') === 'listbox', 'the combobox must control a listbox');
+          assert(listbox.querySelectorAll('[role="option"]').length === 2, 'both folders must be listed');
+          await bundle.module.act(async () => { typeInto(window, combobox, 'remote'); await flush(); });
+          const filtered = [...listbox.querySelectorAll('[role="option"]')];
+          assert(filtered.length === 1 && filtered[0].textContent.startsWith('Discord · Product Manager'), 'typing must filter by location');
+          await bundle.module.act(async () => { keyDown(window, combobox, 'ArrowDown'); await flush(); });
+          assert(combobox.getAttribute('aria-activedescendant') === filtered[0].id && filtered[0].getAttribute('aria-selected') === 'true', 'ArrowDown must activate the first option');
+          await bundle.module.act(async () => { keyDown(window, combobox, 'Enter'); await flush(); });
+          await settle(bundle, 6);
+          assert(selectCalls.length === 1 && selectCalls[0].nodeId === 'interview-helper' && selectCalls[0].token === 'tok-discord', 'Enter must select the folder token');
+          const bundlePatch = updates.find(patch => patch.interviewHelperApplicationBundle);
+          assert(bundlePatch?.interviewHelperApplicationBundle.artifactId === BUNDLE_ID && bundlePatch.interviewHelperApplicationBundle.digest === BUNDLE_DIGEST, 'the folder bundle must persist like the picker bundle');
+          assert(bundlePatch.interviewHelperJobUrl === JOB_URL, 'an empty job URL must be filled from main');
+          assert(window.document.querySelector('[aria-label="Original job listing URL"]').value === JOB_URL, 'the URL field must show the filled URL');
+          assert(combobox.getAttribute('aria-expanded') === 'false', 'selection must close the listbox');
+          assert(!button(window, 'Prepare interview brief').disabled, 'Prepare must enable once career data and application are ready');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: application combobox keeps an existing URL, closes on Escape and shows empty states',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = []; let reply = { root: null, folders: [], reason: 'canvas-unsaved' };
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+          listInterviewApplicationFolders: async () => reply,
+          selectInterviewApplicationFolder: async () => ({ ...publicBundle(), jobUrl: 'https://jobs.example.test/other' }),
+        };
+        const existing = 'https://jobs.example.test/existing';
+        const root = await mount(bundle, window, { nodes: sourceNodes(), initialData: { interviewHelperJobUrl: existing }, onPersist: patch => updates.push(patch) });
+        try {
+          await settle(bundle);
+          const combobox = window.document.querySelector('[role="combobox"]');
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          const status = () => [...window.document.querySelectorAll('[role="status"]')].map(item => item.textContent);
+          assert(status().includes('Save your canvas to list applications'), 'an unsaved canvas must explain how to list applications');
+          await bundle.module.act(async () => { keyDown(window, combobox, 'Escape'); await flush(); });
+          assert(combobox.getAttribute('aria-expanded') === 'false', 'Escape must close the listbox');
+          reply = { root: '/Applied Jobs', folders: [] };
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          assert(status().includes('No application folders found under Applied Jobs.'), 'an empty root must show the no-folders state');
+          reply = { root: '/Applied Jobs', folders: FOLDERS };
+          await bundle.module.act(async () => { keyDown(window, combobox, 'Escape'); await flush(); });
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          const option = [...window.document.querySelectorAll('[role="option"]')].find(item => item.textContent.startsWith('Acme · Engineer'));
+          await bundle.module.act(async () => { option.click(); await flush(); });
+          await settle(bundle, 6);
+          const bundlePatch = updates.find(patch => patch.interviewHelperApplicationBundle);
+          assert(bundlePatch && !('interviewHelperJobUrl' in bundlePatch), 'a saved URL must never be replaced by the folder URL');
+          assert(window.document.querySelector('[aria-label="Original job listing URL"]').value === existing, 'the URL field must keep the saved URL');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: Q&A reloads after Prepare completes',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const pending = deferred(); const loads = [];
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+          prepareInterviewBrief: async () => pending.promise,
+          completeNonApiAiRun: async () => ({ absent: true }),
+          loadInterviewQa: async args => { loads.push(args); return qaFixture(); },
+        };
+        const root = await mount(bundle, window, { nodes: sourceNodes(), initialData: { interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } } });
+        try {
+          await settle(bundle);
+          assert(loads.length >= 1 && loads.every(call => call.nodeId === 'interview-helper'), 'Q&A must load for this node on mount');
+          assert(loads.at(-1).snapshotId === SNAPSHOT_A, 'Q&A must load with the active career snapshot');
+          const prepareButton = button(window, 'Prepare interview brief');
+          assert(prepareButton && !prepareButton.disabled, 'Prepare must be enabled with career data, URL and application ready');
+          await bundle.module.act(async () => { prepareButton.click(); await flush(); });
+          await settle(bundle);
+          const beforeResolve = loads.length;
+          await bundle.module.act(async () => { pending.resolve({ brief: publicBrief(), briefRecordId: BRIEF_RECORD_ID }); await flush(); });
+          await settle(bundle, 6);
+          assert(loads.length > beforeResolve, `Q&A must reload after Prepare completes (before ${beforeResolve}, after ${loads.length})`);
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: Q&A editor shows sections, badges and links and edits/adds/deletes through the contract APIs',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const saves = []; const adds = []; const deletes = []; let failNextSave = true;
+        const fixture = qaFixture();
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          loadInterviewQa: async () => qaFixture(),
+          saveInterviewQaCard: async args => {
+            saves.push(args);
+            if (failNextSave) { failNextSave = false; throw new Error('Disk full'); }
+            return { status: 'ready', cards: [{ ...args.card, author: 'user' }, fixture.foundation.cards[1]] };
+          },
+          addInterviewQaCard: async args => { adds.push(args); return { status: 'ready', cards: [...fixture.company.cards, { ...args.card, id: 'c3', author: 'user', origin: 'user' }] }; },
+          deleteInterviewQaCard: async args => { deletes.push(args); return { status: 'ready', cards: [fixture.company.cards[1]] }; },
+        };
+        const root = await mount(bundle, window, { nodes: sourceNodes() });
+        try {
+          await settle(bundle);
+          const summary = [...window.document.querySelectorAll('[role="status"]')].find(item => item.textContent.startsWith('Foundation '));
+          assert(summary?.textContent === 'Foundation 2 · Discord 2 · 1 disclosed · 1 need prep', `summary must count sections, got ${summary?.textContent}`);
+          await bundle.module.act(async () => { button(window, 'Edit Q&A').click(); await flush(); });
+          await settle(bundle);
+          const dialog = window.document.querySelector('[role="dialog"]');
+          assert(dialog?.getAttribute('aria-modal') === 'true', 'Edit Q&A must open a modal dialog');
+          const headings = [...dialog.querySelectorAll('h3')].map(item => item.textContent);
+          assert(headings.includes('Foundation Q&A · shared across all interviews') && headings.includes('Discord Q&A'), `both sections must be labelled, got ${headings.join(' | ')}`);
+          const f1 = article(window, 'Tell me about yourself.');
+          assert(f1.querySelector('.qa-origin').textContent === 'Standard', 'catalog cards must show the Standard badge');
+          const linkItem = [...f1.querySelectorAll('li')].find(item => item.textContent.startsWith('Also asked at'));
+          assert(linkItem?.textContent === 'Also asked at Discord: “Walk me through your background” — source' && linkItem.querySelector('a').getAttribute('href') === 'https://glassdoor.example/q1', 'foundation links must appear under the matching foundation card');
+          const c1 = article(window, 'How would you grow Nitro?');
+          const disclosed = c1.querySelector('a.qa-origin');
+          assert(disclosed?.textContent === 'Disclosed' && disclosed.getAttribute('href') === 'https://glassdoor.example/q2', 'disclosed cards must link to their source');
+          assert(c1.querySelector('blockquote')?.textContent === 'They asked how to grow Nitro.', 'the disclosed quote must be available on expand');
+          assert(article(window, 'Why Discord?').querySelector('.qa-edited')?.textContent === 'Edited by you', 'user-authored cards must say Edited by you');
+          const f2 = article(window, 'What is your biggest weakness?');
+          assert(f2.querySelector('.qa-needs-prep')?.textContent === 'Needs prep', 'needs-prep cards must be marked');
+          assert(!article(window, 'Tell me about yourself.').querySelector('.qa-needs-prep'), 'ready cards must not be marked as needing prep');
+
+          await bundle.module.act(async () => { within(f1, 'Edit').click(); await flush(); });
+          const form = article(window, 'Tell me about yourself.').querySelector('form');
+          assert(form.querySelector('p').textContent === 'Foundation edits apply to every interview.', 'foundation edits must warn they apply everywhere');
+          const headline = [...form.querySelectorAll('label')].find(item => item.textContent.startsWith('Headline')).querySelector('textarea');
+          await bundle.module.act(async () => { setTextarea(window, headline, 'My new headline'); await flush(); });
+          await bundle.module.act(async () => { within(form, 'Save').click(); await flush(); });
+          await settle(bundle);
+          assert(saves.length === 1 && saves[0].nodeId === 'interview-helper' && saves[0].scope === 'foundation' && saves[0].card.id === 'f1' && saves[0].card.headline === 'My new headline', 'Save must call saveInterviewQaCard with the edited card');
+          assert(form.isConnected && form.querySelector('[role="alert"]')?.textContent === 'Disk full', 'a rejected save must show the error inline');
+          assert(headline.value === 'My new headline', 'a rejected save must keep the unsaved text');
+          await bundle.module.act(async () => { within(form, 'Save').click(); await flush(); });
+          await settle(bundle);
+          const saved = article(window, 'Tell me about yourself.');
+          assert(!saved.querySelector('form') && saved.querySelector('p.whitespace-pre-wrap')?.textContent === 'My new headline', 'a successful save must render the returned section');
+          assert(saved.querySelector('.qa-edited')?.textContent === 'Edited by you', 'the returned user author must be shown');
+
+          const companySection = [...dialog.querySelectorAll('section')].find(item => item.getAttribute('aria-label') === 'Discord Q&A');
+          await bundle.module.act(async () => { within(companySection, 'Add card').click(); await flush(); });
+          const addForm = companySection.querySelector('form[aria-label="Add company card"]');
+          await bundle.module.act(async () => { setInput(window, addForm.querySelector('input'), 'What would you change about Discord?'); await flush(); });
+          await bundle.module.act(async () => { within(addForm, 'Save').click(); await flush(); });
+          await settle(bundle);
+          assert(adds.length === 1 && adds[0].scope === 'company' && adds[0].nodeId === 'interview-helper' && adds[0].card.question === 'What would you change about Discord?' && !adds[0].card.id, 'Add must call addInterviewQaCard without an id');
+          assert(article(window, 'What would you change about Discord?'), 'the added card must render from the returned section');
+
+          await bundle.module.act(async () => { within(article(window, 'How would you grow Nitro?'), 'Delete').click(); await flush(); });
+          assert(deletes.length === 0, 'Delete must ask for confirmation first');
+          await bundle.module.act(async () => { within(article(window, 'How would you grow Nitro?'), 'Confirm delete').click(); await flush(); });
+          await settle(bundle);
+          assert(deletes.length === 1 && deletes[0].scope === 'company' && deletes[0].cardId === 'c1' && deletes[0].nodeId === 'interview-helper', 'Confirm must call deleteInterviewQaCard with the card id');
+          assert(!article(window, 'How would you grow Nitro?') && article(window, 'Why Discord?'), 'the returned section must replace the company cards');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+];
+
 export default [
   { name: 'Undo memory: large nested workspace history is bounded and unchanged snapshots do not clone', async run() {
     await withUndoHarness(async d => {
@@ -1875,4 +2101,5 @@ export default [
       });
     },
   },
+  ...QA_SETUP_TESTS,
 ];

@@ -3,6 +3,28 @@ import './interviewWindow.css';
 import { interviewIgnoredMessage, interviewSubmitErrorMessage, SESSION_ENDED_MESSAGE } from './submitError.js';
 import CallAudioPanel from './CallAudioPanel.jsx';
 import ComingUp from './ComingUp.jsx';
+import { InterviewQaBadges } from '../components/InterviewQaBadges';
+
+function hasPreparedAnswer(card) {
+  return card && !['needs-prep', 'empty'].includes(card.status) && Boolean(card.headline?.trim() || card.bullets?.some(item => item.text?.trim()) || (typeof card.example === 'string' ? card.example.trim() : card.example?.text?.trim()));
+}
+
+function normalizeAnswerCard(card) {
+  return { ...card, bullets: card.bullets || [], example: typeof card.example === 'string' ? { text: card.example, evidenceIds: [] } : card.example || { text: '', evidenceIds: [] }, evidence: card.evidence || [], optionalExtension: card.optionalExtension || card.extensions || [] };
+}
+
+function PreparedQuestionGroups({ cards, company, selectedId, onSelect }) {
+  return [['foundation', 'Foundation'], ['company', company || 'Company']].map(([scope, label]) => {
+    const group = cards.filter(card => (card.scope || 'company') === scope);
+    return group.length > 0 && <section className="prepared-question-group" aria-label={`${label} questions`} key={scope}>
+      <h4>{label}</h4>
+      <div className="prepared-question-options">{group.map(card => <button key={card.id} type="button" aria-pressed={selectedId === card.id} onClick={() => onSelect(card)}>
+        <span>{card.question}</span>{card.origin === 'disclosed' && <span className="question-disclosed">Disclosed</span>}
+        {['needs-prep', 'empty'].includes(card.status) && <small>{card.status === 'needs-prep' ? 'Needs prep' : 'Empty'}</small>}
+      </button>)}</div>
+    </section>;
+  });
+}
 
 const componentLabels = { decision: 'decision/trade-off', outcome: 'outcome', lesson: 'lesson learned' };
 const LOAD_FAILED_MESSAGE = 'The interview window could not load its prepared brief. Retry, or close this window and launch it again from the Interview Helper.';
@@ -28,9 +50,19 @@ function AnswerCitations({ evidenceIds, sourceNumbers, showSource }) {
   return <span className="answer-citation-refs">{(evidenceIds || []).filter(id => sourceNumbers.has(id)).map(id => <button key={id} type="button" className="answer-citation-ref" onClick={() => showSource(id)} aria-label={`Show exact cited evidence ${sourceNumbers.get(id)}`}>[{sourceNumbers.get(id)}]</button>)}</span>;
 }
 
-function PreparedAnswer({ card, headingRef, mode = 'recall', provisionalConfidence }) {
+function PreparedAnswer({ card: rawCard, headingRef, mode = 'recall', provisionalConfidence }) {
   const evidenceDetails = useRef(null);
   const sourceItems = useRef(new Map());
+  const card = normalizeAnswerCard(rawCard);
+  if (!hasPreparedAnswer(rawCard)) {
+    return <section className="spoken-answer no-prepared-answer" aria-label="Prepared spoken answer">
+      <p className="eyebrow">Your prepared answer</p>
+      <h2 ref={headingRef} tabIndex={-1}>{card.question}</h2>
+      <InterviewQaBadges card={card} />
+      <p className="no-answer-text" role="status">No prepared answer yet</p>
+      <p className="keyboard-help">Answer in your own words. Add an answer in Edit Q&A before your next interview.</p>
+    </section>;
+  }
   const sourceNumbers = new Map(card.evidence.map((item, index) => [item.id, index + 1]));
   const showSource = id => {
     if (evidenceDetails.current) evidenceDetails.current.open = true;
@@ -111,6 +143,7 @@ export function InterviewWindowApp() {
   const hasResponse = !!answerCard || !!plan;
   const supported = !!answerCard || plan?.status === 'supported';
   const preparedCards = brief?.briefing?.preparedCards || [];
+  const scopedQuestions = preparedCards.some(card => card.scope === 'foundation' || card.scope === 'company');
   const hasPreparedAnswers = preparedCards.length > 0 || !!brief?.briefing?.preparedQuestions?.length;
   const likelyQuestions = brief?.briefing?.likelyQuestions || [];
   const [step, setStep] = useState(0);
@@ -279,6 +312,13 @@ export function InterviewWindowApp() {
   });
 
   const copyCues = async () => {
+    const rawAnswer = brief?.answerCard || null;
+    if (rawAnswer && !hasPreparedAnswer(rawAnswer)) {
+      try { await navigator.clipboard.writeText(`${rawAnswer.question}\n\nNo prepared answer yet`); setCopyStatus('Copied question. No prepared answer yet.'); }
+      catch { setCopyStatus('Copy unavailable. Select the question and press ⌘/Ctrl+C.'); }
+      return;
+    }
+    const answerCard = rawAnswer ? normalizeAnswerCard(rawAnswer) : null;
     const sourceNumbers = new Map((answerCard?.evidence || []).map((item, index) => [item.id, index + 1]));
     const cited = (statement, ids) => `${statement}${(ids || []).filter(id => sourceNumbers.has(id)).map(id => ` [${sourceNumbers.get(id)}]`).join('')}`;
     const extensions = Array.isArray(answerCard?.optionalExtension) ? answerCard.optionalExtension : [];
@@ -315,8 +355,8 @@ export function InterviewWindowApp() {
     {!brief && loadingFailed && <section className="interview-load-error" role="alert"><p>{error || LOAD_FAILED_MESSAGE}</p><button type="button" onClick={retryLoad}>Retry</button><button type="button" onClick={() => window.interviewAPI?.close?.()}>Close</button></section>}
     {brief && hasResponse && error && errorTarget !== 'replacement' && !(errorTarget === 'followUp' && followUpOpen) && <p className="interview-warning" role="alert">{error}</p>}
     {brief && followUpNotice && <p className="interview-warning" role="status">{followUpNotice}</p>}
-    {brief && hasPreparedAnswers && plan && !mainCard && <p className="interview-plan-note" role="status">No confident prepared answer match. Showing exact saved career cues only.</p>}
-    {brief && !mainCard && plan?.status === 'unsupported' && <section className="interview-warning" role="status"><p className="eyebrow">Current question</p><p>{plan.question}</p><p>{plan.message}</p><p>Try the specific project, skill, or result mentioned in your saved career evidence.</p><div className="question-actions"><button ref={unsupportedEdit} type="button" disabled={pending} onClick={() => nextQuestion(true)}>Edit question</button><button type="button" disabled={pending} onClick={() => nextQuestion()}>Enter another question</button></div></section>}
+    {brief && hasPreparedAnswers && plan && !mainCard && plan.status !== 'unsupported' && <p className="interview-plan-note glance-chip" role="status" title="No confident prepared answer match. Showing exact saved career cues only.">No prepared answer · saved cues</p>}
+    {brief && !mainCard && plan?.status === 'unsupported' && <section className="interview-warning interview-no-answer" role="status"><p className="glance-chip glance-chip-warn">No prepared answer · answer freely</p><p className="glance-question">{plan.question}</p><details className="glance-why"><summary>Why?</summary><p>{plan.message}</p><p>Try the specific project, skill, or result mentioned in your saved career evidence.</p></details><div className="question-actions"><button ref={unsupportedEdit} type="button" disabled={pending} onClick={() => nextQuestion(true)}>Edit question</button><button type="button" disabled={pending} onClick={() => nextQuestion()}>Enter another question</button></div></section>}
     {brief && (supported || mainCard) && <>
       <section className="locked-question"><details><summary><span className="eyebrow">{supported ? 'Locked question' : 'Question in progress'}</span><span className="locked-question-preview">{supported ? currentQuestion : preview?.transcript}</span></summary><p className="current-question-text">{supported ? currentQuestion : preview?.transcript}</p></details><button type="button" disabled={pending || !supported} onClick={() => nextQuestion(true)}>Edit question</button></section>
       <ComingUp preview={comingUp}>{comingUp && <PreparedAnswer card={comingUp.card} />}</ComingUp>
@@ -334,10 +374,10 @@ export function InterviewWindowApp() {
     {brief && <CallAudioPanel onDisplay={receiveDisplay} />}
     {brief && !hasResponse && <>
       <form onSubmit={submit} aria-busy={pending}><label htmlFor="interview-question">Current question</label><textarea id="interview-question" ref={questionInput} value={question} disabled={pending} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing && !event.repeat) { event.preventDefault(); void submitQuestion(question); } }} placeholder="Type or paste the interviewer’s question" maxLength="2000" aria-describedby="interview-question-help" /><p id="interview-question-help" className="keyboard-help">Enter: {hasPreparedAnswers ? 'find answer' : 'find evidence'} · Shift+Enter: new line</p><button type="submit" disabled={pending}>{pending ? hasPreparedAnswers ? 'Finding prepared answer…' : 'Finding saved evidence…' : hasPreparedAnswers ? 'Find prepared answer' : 'Find saved evidence'}</button>{error && <p role="alert">{error}</p>}</form>
-      {preparedCards.length > 0 ? <section className="prepared-questions" aria-label="Prepared questions"><h3>Prepared questions</h3>{preparedCards.map(card => <button key={card.id} type="button" onClick={() => selectPreparedCard(card)}>{card.question}</button>)}</section>
+      {preparedCards.length > 0 ? <section className="prepared-questions" aria-label="Prepared questions"><h3>Prepared questions</h3>{scopedQuestions ? <PreparedQuestionGroups cards={preparedCards} company={brief.briefing?.role?.company} onSelect={selectPreparedCard} /> : preparedCards.map(card => <button key={card.id} type="button" onClick={() => selectPreparedCard(card)}>{card.question}</button>)}</section>
         : likelyQuestions.length > 0 && <section className="prepared-questions" aria-label="Likely questions"><h3>Likely questions</h3>{likelyQuestions.map((item, index) => <button key={index} type="button" disabled={pending} onClick={() => submitQuestion(item)}>{item}</button>)}</section>}
     </>}
-    {brief && hasResponse && preparedCards.length > 0 && <section className="other-prepared-answers" aria-label="Other prepared answers"><h3>Other prepared answers</h3><div className="prepared-answer-picker">{preparedCards.map(card => <button key={card.id} type="button" aria-pressed={answerCard?.id === card.id} onClick={() => selectPreparedCard(card)}>{card.question}</button>)}</div></section>}
+    {brief && hasResponse && preparedCards.length > 0 && <section className="other-prepared-answers" aria-label="Other prepared answers"><h3>Other prepared answers</h3><div className={`prepared-answer-picker${scopedQuestions ? ' grouped' : ''}`}>{scopedQuestions ? <PreparedQuestionGroups cards={preparedCards} company={brief.briefing?.role?.company} selectedId={answerCard?.id} onSelect={selectPreparedCard} /> : preparedCards.map(card => <button key={card.id} type="button" aria-pressed={answerCard?.id === card.id} onClick={() => selectPreparedCard(card)}>{card.question}</button>)}</div></section>}
     {brief && hasResponse && <form className="typed-question-fallback" aria-label="Type a different question" aria-busy={pending} onSubmit={event => { event.preventDefault(); if (typedDraft.trim()) void submitQuestion(typedDraft, false, true); }}><label htmlFor="interview-manual-question">Type a different question</label><textarea id="interview-manual-question" ref={typedDraftInput} value={typedDraft} disabled={pending} onChange={event => setTypedDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing && !event.repeat) { event.preventDefault(); if (typedDraft.trim()) void submitQuestion(typedDraft, false, true); } }} placeholder="Typing is always available" maxLength="2000" aria-describedby="interview-manual-question-help" /><p id="interview-manual-question-help" className="keyboard-help">Enter: replace the current question · Shift+Enter: new line</p>{error && errorTarget === 'replacement' && <p role="alert">{error}</p>}<button type="submit" disabled={pending || !typedDraft.trim()}>{pending ? 'Checking question…' : 'Use typed question'}</button></form>}
     <Briefing briefing={brief?.briefing} />
     <label className="pin"><input type="checkbox" checked={alwaysOnTop} onChange={toggleAlwaysOnTop} /> Keep this window on top</label>

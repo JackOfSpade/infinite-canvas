@@ -15,29 +15,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { APPLICATION_STAGE_PROFILES, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL } from './careerWritingCore.js';
 import { buildEditorialPlanPrompt, editorialPlanAllowedIds, editorialPlanBinding, parseEditorialPlanResponse, writerPromptWithEditorialPlan } from './applicationEditorialPlan.js';
 import { loadEditorialPlan, saveEditorialPlan } from './applicationEditorialPlanArchive.js';
 
 // Claude Code's aliases for the newest model in each line, so a new Sonnet or
 // Opus release is used without a code change. The answer is checked by family.
-export const CLAUDE_SONNET_MODEL = 'sonnet';
-export const CLAUDE_OPUS_MODEL = 'opus';
-// The default profile, for any stage the table below does not name.
+// Stage model profiles live in the shared career writing core so application
+// and interview Q&A generation run on one tested model split.
+export { CLAUDE_SONNET_MODEL, CLAUDE_OPUS_MODEL };
+// The default profile, for any stage the table does not name.
 export const CLAUDE_APPLICATION_MODEL = CLAUDE_SONNET_MODEL;
 export const CLAUDE_APPLICATION_EFFORT = 'high';
-// Opus where the stage decides the writing (write) or picks it (pick);
-// Sonnet for the rule-following repair, trim, fact and conversion stages.
-export const CLAUDE_STAGE_PROFILES = Object.freeze({
-  'editorial-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
-  write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
-  pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  convert: Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'medium' }),
-  'verify-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fit-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fact-check': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fact-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fact-recheck': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-});
+export const CLAUDE_STAGE_PROFILES = APPLICATION_STAGE_PROFILES;
 const MODEL_FAMILIES = Object.freeze({
   [CLAUDE_SONNET_MODEL]: Object.freeze({ label: 'Sonnet', id: /^claude-sonnet-/ }),
   [CLAUDE_OPUS_MODEL]: Object.freeze({ label: 'Opus', id: /^claude-opus-/ }),
@@ -99,6 +89,9 @@ export function claudeCliArgs({
   effort = CLAUDE_APPLICATION_EFFORT,
   sessionId,
   resume = false,
+  // Application stages run with no tools. Interview research alone opts into
+  // a named allow-list (web search/fetch); no file, shell or MCP tools.
+  tools = '',
 } = {}) {
   let sessionArgs = [];
   if (typeof sessionId === 'string' && sessionId.length > 0) {
@@ -112,7 +105,9 @@ export function claudeCliArgs({
     '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT,
     '--restricted',
     '--strict-mcp-config',
-    '--tools', '',
+    '--tools', tools,
+    // Headless runs cannot prompt, so an offered tool must also be allowed.
+    ...(tools ? ['--allowedTools', tools] : []),
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
@@ -247,6 +242,7 @@ export function runClaudeStage({
   effort = CLAUDE_APPLICATION_EFFORT,
   sessionId,
   resume = false,
+  tools = '',
   spawnImpl = childProcess.spawn,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   setTimeoutImpl = globalThis.setTimeout,
@@ -259,7 +255,7 @@ export function runClaudeStage({
     }
     let child;
     try {
-      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)

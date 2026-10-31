@@ -240,7 +240,7 @@ export default [
           assert(!window.document.querySelector('.evidence-card') && !window.document.querySelector('.interview-plan-note'), 'the raw retrieval cue and its message must not compete with the prepared answer');
           await bundle.module.act(async () => { update({ ...DISPLAY, answerCard: null, briefing: { ...DISPLAY.briefing, preparedQuestions: [ANSWER_CARD.question] } }); await flush(); });
           assert(!window.document.querySelector('.spoken-answer') && window.document.querySelector('.evidence-card')?.textContent.includes(DISPLAY.plan.steps[0].cue), 'an unmatched question must return to the exact saved cue view');
-          assert(window.document.querySelector('h1').textContent === 'Saved career evidence' && window.document.body.textContent.includes('No confident prepared answer match. Showing exact saved career cues only.'), 'a prepared-session fallback must visibly identify itself as exact evidence rather than a spoken answer');
+          assert(window.document.querySelector('h1').textContent === 'Saved career evidence' && window.document.querySelector('.interview-plan-note.glance-chip')?.textContent === 'No prepared answer · saved cues' && window.document.querySelector('.interview-plan-note').getAttribute('title') === 'No confident prepared answer match. Showing exact saved career cues only.', 'a prepared-session fallback must visibly identify itself as exact evidence rather than a spoken answer');
           assert(window.document.body.textContent.includes('Saved evidence does not document: lesson learned. Do not fill that gap from this rail.'), 'fallback must retain the missing-evidence honesty warning');
           assert(window.document.activeElement === window.document.querySelector('.evidence-card h2'), 'fallback result must receive keyboard focus');
         } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
@@ -306,6 +306,12 @@ export default [
           const unsupported = { ...DISPLAY, plan: { status: 'unsupported', question: 'retenton?', currentStep: 0, message: 'No saved evidence matches.', missingComponents: [], steps: [] } };
           await bundle.module.act(async () => { update(unsupported); await flush(); });
           assert(window.document.body.textContent.includes('retenton?'), 'unsupported state must retain the rejected question visibly');
+          // Live glanceability: one short chip is visible; the long explanation is collapsed behind "Why?".
+          const noAnswer = window.document.querySelector('.interview-no-answer');
+          assert(noAnswer.querySelector('.glance-chip').textContent === 'No prepared answer · answer freely', 'unsupported state must lead with a short glanceable chip');
+          const why = noAnswer.querySelector('details.glance-why');
+          assert(why && !why.open && why.textContent.includes('No saved evidence matches.'), 'the long explanation must stay available but collapsed');
+          assert(noAnswer.querySelector('.question-actions button'), 'actions stay visible outside the collapsed explanation');
           await bundle.module.act(async () => { button(window, 'Edit question').click(); await flush(); });
           assert(nextCalls === 2 && window.document.querySelector('textarea').value === 'retenton?' && window.document.activeElement === window.document.querySelector('textarea'), 'unsupported typo correction must preserve and focus the entered text');
         } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }

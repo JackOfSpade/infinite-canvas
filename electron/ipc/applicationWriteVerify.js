@@ -3,6 +3,7 @@ import { applicationUnitRegistry, argumentBindings, renderedUnitCharacters, UNIT
 import { bootstrapApplicationUnitState } from './applicationGateFindings.js';
 /** Application protocol v2 state and prompt policy. No candidate data is kept here. */
 import { APPLICATION_V2_LIMITS } from './applicationV2Limits.js';
+import { careerChangedFindingErrors, careerFactFindingErrors, careerFactFindingsSection, careerFactTransition, careerInflationRules } from './careerWritingCore.js';
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { cleanCareerSkillNames } from './careerCleanLayer.js';
 import { applicationSkillPermittedForPosting } from './applicationCareerAuthority.js';
@@ -242,40 +243,9 @@ export function writeVerifyUnitListing(documents) {
   }).filter(Boolean).join('\n');
 }
 
-const FACT_FINDING_MAX_LINES = 20;
-const foldFinding = value => value.normalize('NFKC').replace(/[\u2018\u2019]/g, "'").replace(/[\u201c\u201d]/g, '"').replace(/[\u2010-\u2015]/g, '-').replace(/\s+/g, ' ');
+// The finding contract is shared with interview Q&A through careerWritingCore.
 export function writeVerifyFactFindingErrors(findings, documents) {
-  if (!Array.isArray(findings)) return [`fact-findings-shape: The reply needs a "findings" array (an empty array when every claim is supported); it has ${findings === undefined ? 'no "findings" field' : `a ${findings === null ? 'null' : typeof findings}`}.`];
-  const errors = [];
-  for (const [i, finding] of findings.entries()) {
-    if (!finding || typeof finding !== 'object' || Array.isArray(finding)) {
-      errors.push(`fact-finding-shape: findings[${i}] is ${finding === null ? 'null' : Array.isArray(finding) ? 'an array' : `a ${typeof finding}`}, not an object with id, claim and reason.`);
-      continue;
-    }
-    const { id, claim, reason } = finding;
-    const unit = writeVerifyUnitText(documents, id);
-    const segments = [];
-    if (unit === null) segments.push(`fact-finding-unit: findings[${i}].id ${typeof id === 'string' ? JSON.stringify(clip(id, 60)) : `(${id === undefined ? 'missing' : typeof id})`} is not a unit id of the documents (use only the ids under CHECKABLE UNITS).`);
-    if (typeof claim !== 'string' || !claim.trim()) segments.push(`fact-finding-claim: findings[${i}].claim is missing or empty.`);
-    else if (unit !== null && !unit.includes(claim)) {
-      let k = 0;
-      let upper = claim.length;
-      while (k + 1 < upper) {
-        const middle = Math.floor((k + upper) / 2);
-        if (unit.includes(claim.slice(0, middle))) k = middle;
-        else upper = middle;
-      }
-      const cause = /\u2026|\.\.\./u.test(claim)
-        ? ` A claim is one unbroken span; it cannot contain "${String.fromCharCode(0x2026)}" or "...".`
-        : foldFinding(unit).includes(foldFinding(claim))
-          ? " It matches once whitespace, quote marks and dashes are ignored; copy the span character for character, with the unit's own spacing and marks."
-          : ' Copy the span character for character from that unit in the DOCUMENTS block; do not paraphrase.';
-      segments.push(`fact-finding-span: findings[${i}].claim ${JSON.stringify(clip(claim, 80))} is not a verbatim span of unit ${id}: its first ${k} of ${claim.length} characters appear in the unit and character ${k + 1} does not.${cause}`);
-    }
-    if (typeof reason !== 'string' || !reason.trim()) segments.push(`fact-finding-reason: findings[${i}].reason is missing or empty.`);
-    if (segments.length) errors.push(segments.join(' | '));
-  }
-  return errors.length > FACT_FINDING_MAX_LINES ? [...errors.slice(0, FACT_FINDING_MAX_LINES), `fact-finding-shape: ${errors.length - FACT_FINDING_MAX_LINES} more findings also failed these checks; correct the lines above first.`] : errors;
+  return careerFactFindingErrors(findings, id => writeVerifyUnitText(documents, id));
 }
 
 export const WRITE_VERIFY_REJECTION_ROWS_MAX = 8;
@@ -290,22 +260,11 @@ function rejectionSection(corrections) {
 }
 
 export function writeVerifyChangedFindingErrors(findings, documents) {
-  return findings.flatMap(finding => {
-    const unit = writeVerifyUnitText(documents, finding.id);
-    return unit && unit.includes(finding.claim)
-      ? [`fact-check-unchanged: ${finding.id} still contains ${JSON.stringify(finding.claim)}.`] : [];
-  });
+  return careerChangedFindingErrors(findings, id => writeVerifyUnitText(documents, id));
 }
 
 export function factCorrectionTransition({ priorRound = 0, failed, factIndex, rankedCount, maxRounds = WRITE_VERIFY_MAX_CORRECTIONS }) {
-  if (!Number.isInteger(priorRound) || priorRound < 0 || !Number.isInteger(maxRounds) || maxRounds < 1) {
-    throw new Error('Invalid fact-correction round state.');
-  }
-  if (!failed) return { round: priorRound + 1, factIndex, nextStage: 'fact-recheck' };
-  const round = priorRound + 1;
-  if (round < maxRounds) return { round, factIndex, nextStage: 'fact-correction' };
-  const nextIndex = factIndex + 1;
-  return { round, factIndex: nextIndex, nextStage: nextIndex < rankedCount ? 'fact-check' : 'write-verify-human-stop' };
+  return careerFactTransition({ priorRound, failed, factIndex, rankedCount, maxRounds });
 }
 
 const WRITE_VERIFY_CHECK_ID_PREFIX_RE = /^([a-z][a-z0-9-]*):\s/u;
@@ -391,10 +350,7 @@ function priorRoundsSection(texts) {
   return `\n\n${WRITE_VERIFY_PRIOR_ROUNDS_HEADING}:\nEarlier rounds of this same draft were returned for the findings below; the unit each names was then repaired and the rewrite tripped the current rejection text. Keep every one of these satisfied together with the current rejection text; change nothing that already passes.\n${texts.map(text => `- ${text}`).join('\n')}`;
 }
 
-function factFindingsSection(findings) {
-  if (!Array.isArray(findings) || !findings.length) throw new Error('Fact correction requires the fact-check findings.');
-  return `\n\nFACT-CHECK FINDINGS TO CORRECT (every flagged span must change; a span returned unchanged is rejected):\n${findings.map(finding => `- ${finding?.id}: the span ${JSON.stringify(finding?.claim)} is not supported. ${finding?.reason}${typeof finding?.quote === 'string' && finding.quote.trim() ? ` Cited quote: ${JSON.stringify(finding.quote)}` : ''}`).join('\n')}`;
-}
+const factFindingsSection = careerFactFindingsSection;
 
 const PRODUCTION_SHAPES = 'Return a single JSON object with production shapes: {"resume":{"schemaVersion":"structured-resume.v1","identity":{"name":string,"contact":[string]},"roles":[{"id":sourceRoleId,"title":exactTrustedTitle,"company":exactTrustedCompany,"dates":exactTrustedDates,"location":exactTrustedLocation,"bullets":[{"id":string,"text":string,"evidenceIds":[catalogId]}]}],"projects":[{"id":string,"name":exactApprovedName,"description":string,"evidenceIds":[catalogId]}],"skills":[{"id":string,"group":string,"items":[string],"evidenceIds":[catalogId]}],"education":[{"id":string,"credential":string,"institution":string,"dates":string,"evidenceIds":[catalogId]}],"credentials":[{"id":string,"name":string,"issuer":string,"dates":string,"evidenceIds":[catalogId]}]},"coverLetter":{"name":string,"contact":[string],"salutation":string,"paragraphs":[{"id":string,"text":string,"evidenceIds":[catalogId]}],"closing":string,"roleThesis":string,"coverLetterArgument":{"primaryEvidence":{"evidence":exactResumeBulletText,"evidenceRole":exactResumeRoleTitlePlusAtCompany,"relationToThesis":string},"secondaryEvidence":{"evidence":exactResumeBulletText,"evidenceRole":exactResumeRoleTitlePlusAtCompany,"narrativeRole":"foundation|corroborates|deepens|extends|qualifies","relationToPrimary":string}}}}. Optional arrays or secondaryEvidence may be omitted. Every bullet, project, skill group, education item, credential and paragraph needs its own cited catalog IDs. Use no more than four distinct career quotes per unit. Select only the roles you want to show; copy their trusted fields exactly. Every claim must be supported by the quotes that unit cites. Citation IDs must be copied byte-for-byte from the bracketed FULL APPROVED CATALOG or FROZEN REQUIREMENTS AND LISTING QUOTES; a short entity ID such as p0001-ach-2 is never a catalog citation ID. Role bullets need career achievement or skill quote IDs bound to that same role. "projects" holds at most one project, from Standalone projects, and is omitted when the writer result has no project. A project needs project quote IDs from exactly one approved project, and its name must exactly match that project. Education and credentials need their corresponding entity quote IDs. Copy institution and issuer from TRUSTED EDUCATION AND CREDENTIAL FIELDS; do not append a location to either field. A skill group may cite only the skill quote IDs listed under INDEX-ELIGIBLE SKILLS, must include a citation for each item, and may list only those exact skill names. Achievement or project quote IDs cannot be skill-group citations. Every letter paragraph, including the last, needs at least one full career catalog ID. For each coverLetterArgument evidenceRole, use the exact title and company of the résumé role containing its exact evidence bullet, written as "Title at Company" (or only "Title" if company is empty). No commentary outside JSON.';
 
@@ -443,7 +399,7 @@ export function writeVerifyPrompt({ stage, state, sourcePrompt, posting, hand, e
     const citedListingIds = new Set((winner?.structured?.coverLetter?.paragraphs || []).flatMap(paragraph => paragraph?.evidenceIds || []));
     const citedListingQuotes = listingEvidence.filter(row => row?.sourceId === 'job-listing' && citedListingIds.has(row.id))
       .map(({ id, quote }) => ({ id, quote }));
-    return `${prefix}Compare every claim in the following résumé and letter with its cited quotes. List only actual inflation of ownership, scope, metrics, dates, tools or employment. Employment inflation is any statement or implication that the candidate works at, worked at, joined, left, or was otherwise employed by or affiliated with ${target}, unless ${target} is one of the résumé role companies. Applying to ${target}, wanting to join it, or describing what you would do there is not employment. Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported. Flag only text inside the units listed under CHECKABLE UNITS, and a finding id must be exactly one of those ids. Role headers, the résumé identity, education and credential records, the letterhead, salutation and closing, and the roleThesis and coverLetterArgument fields are fixed by the host or are not part of the delivered text, so never flag them.\nCITED QUOTES:\n${hand}\nCITED LISTING QUOTES (posting evidence only; never candidate career evidence):\n${JSON.stringify(citedListingQuotes)}\nDOCUMENTS:\n${JSON.stringify(winner?.structured)}\nCHECKABLE UNITS (a finding id must be exactly one of these ids; its claim must be a span of that unit's own text):\n${writeVerifyUnitListing(winner?.structured)}${rejectionSection(corrections) || '\n'}Echo the APPLICATION V2 HANDOFF fields at the top level.\n`;
+    return `${prefix}Compare every claim in the following résumé and letter with its cited quotes. ${careerInflationRules(target)} Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported. Flag only text inside the units listed under CHECKABLE UNITS, and a finding id must be exactly one of those ids. Role headers, the résumé identity, education and credential records, the letterhead, salutation and closing, and the roleThesis and coverLetterArgument fields are fixed by the host or are not part of the delivered text, so never flag them.\nCITED QUOTES:\n${hand}\nCITED LISTING QUOTES (posting evidence only; never candidate career evidence):\n${JSON.stringify(citedListingQuotes)}\nDOCUMENTS:\n${JSON.stringify(winner?.structured)}\nCHECKABLE UNITS (a finding id must be exactly one of these ids; its claim must be a span of that unit's own text):\n${writeVerifyUnitListing(winner?.structured)}${rejectionSection(corrections) || '\n'}Echo the APPLICATION V2 HANDOFF fields at the top level.\n`;
   }
   throw new Error(`No application v2 prompt for ${stage}.`);
 }

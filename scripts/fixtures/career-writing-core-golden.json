@@ -1,0 +1,159 @@
+{
+ "fact-check": "APPLICATION V2 HANDOFF\n{\"protocol\":1}\nReply within 16384 output tokens.\nCompare every claim in the following résumé and letter with its cited quotes. List only actual inflation of ownership, scope, metrics, dates, tools or employment. Employment inflation is any statement or implication that the candidate works at, worked at, joined, left, or was otherwise employed by or affiliated with \"Discord\", unless \"Discord\" is one of the résumé role companies. Applying to \"Discord\", wanting to join it, or describing what you would do there is not employment. Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported. Flag only text inside the units listed under CHECKABLE UNITS, and a finding id must be exactly one of those ids. Role headers, the résumé identity, education and credential records, the letterhead, salutation and closing, and the roleThesis and coverLetterArgument fields are fixed by the host or are not part of the delivered text, so never flag them.\nCITED QUOTES:\nHAND\nCITED LISTING QUOTES (posting evidence only; never candidate career evidence):\n[{\"id\":\"job-listing-1\",\"quote\":\"We build services.\"}]\nDOCUMENTS:\n{\"resume\":{\"name\":\"Ada Lovelace\",\"contact\":\"ada@example.test\",\"roles\":[{\"id\":\"role-acme\",\"title\":\"Engineer\",\"company\":\"Acme\",\"dates\":\"\",\"bullets\":[{\"id\":\"b-1\",\"text\":\"Built reliable services.\",\"evidenceIds\":[\"e1\"]},{\"id\":\"b-2\",\"text\":\"Delivered a synthetic unsupported outcome — “quoted”.\",\"evidenceIds\":[\"e1\"]}]}],\"projects\":[],\"skills\":[{\"id\":\"s-1\",\"group\":\"Languages\",\"items\":[\"Python\",\"Go\"],\"evidenceIds\":[\"e1\"]}],\"education\":[],\"credentials\":[]},\"coverLetter\":{\"name\":\"Ada Lovelace\",\"contact\":\"ada@example.test\",\"roleThesis\":\"My prior work is relevant to the role.\",\"coverLetterArgument\":{\"primaryEvidence\":{\"evidence\":\"Built reliable services.\",\"evidenceRole\":\"Engineer at Acme\",\"relationToThesis\":\"The prior delivery supports the thesis.\"}},\"paragraphs\":[{\"id\":\"p-1\",\"text\":\"My synthetic first paragraph makes a claim.\",\"evidenceIds\":[\"e1\",\"job-listing-1\"]}]}}\nCHECKABLE UNITS (a finding id must be exactly one of these ids; its claim must be a span of that unit's own text):\n- résumé bullets: b-1, b-2\n- skill groups: s-1\n- letter paragraphs: p-1\nEcho the APPLICATION V2 HANDOFF fields at the top level.\n",
+ "fact-check-nocompany": "APPLICATION V2 HANDOFF\n{\"protocol\":1}\nReply within 16384 output tokens.\nCompare every claim in the following résumé and letter with its cited quotes. List only actual inflation of ownership, scope, metrics, dates, tools or employment. Employment inflation is any statement or implication that the candidate works at, worked at, joined, left, or was otherwise employed by or affiliated with the employer this letter is addressed to, unless the employer this letter is addressed to is one of the résumé role companies. Applying to the employer this letter is addressed to, wanting to join it, or describing what you would do there is not employment. Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported. Flag only text inside the units listed under CHECKABLE UNITS, and a finding id must be exactly one of those ids. Role headers, the résumé identity, education and credential records, the letterhead, salutation and closing, and the roleThesis and coverLetterArgument fields are fixed by the host or are not part of the delivered text, so never flag them.\nCITED QUOTES:\nHAND\nCITED LISTING QUOTES (posting evidence only; never candidate career evidence):\n[{\"id\":\"job-listing-1\",\"quote\":\"We build services.\"}]\nDOCUMENTS:\n{\"resume\":{\"name\":\"Ada Lovelace\",\"contact\":\"ada@example.test\",\"roles\":[{\"id\":\"role-acme\",\"title\":\"Engineer\",\"company\":\"Acme\",\"dates\":\"\",\"bullets\":[{\"id\":\"b-1\",\"text\":\"Built reliable services.\",\"evidenceIds\":[\"e1\"]},{\"id\":\"b-2\",\"text\":\"Delivered a synthetic unsupported outcome — “quoted”.\",\"evidenceIds\":[\"e1\"]}]}],\"projects\":[],\"skills\":[{\"id\":\"s-1\",\"group\":\"Languages\",\"items\":[\"Python\",\"Go\"],\"evidenceIds\":[\"e1\"]}],\"education\":[],\"credentials\":[]},\"coverLetter\":{\"name\":\"Ada Lovelace\",\"contact\":\"ada@example.test\",\"roleThesis\":\"My prior work is relevant to the role.\",\"coverLetterArgument\":{\"primaryEvidence\":{\"evidence\":\"Built reliable services.\",\"evidenceRole\":\"Engineer at Acme\",\"relationToThesis\":\"The prior delivery supports the thesis.\"}},\"paragraphs\":[{\"id\":\"p-1\",\"text\":\"My synthetic first paragraph makes a claim.\",\"evidenceIds\":[\"e1\",\"job-listing-1\"]}]}}\nCHECKABLE UNITS (a finding id must be exactly one of these ids; its claim must be a span of that unit's own text):\n- résumé bullets: b-1, b-2\n- skill groups: s-1\n- letter paragraphs: p-1\nEcho the APPLICATION V2 HANDOFF fields at the top level.\n",
+ "fact-recheck": "APPLICATION V2 HANDOFF\n{\"protocol\":1}\nReply within 16384 output tokens.\nCompare every claim in the following résumé and letter with its cited quotes. List only actual inflation of ownership, scope, metrics, dates, tools or employment. Employment inflation is any statement or implication that the candidate works at, worked at, joined, left, or was otherwise employed by or affiliated with \"Acme\", unless \"Acme\" is one of the résumé role companies. Applying to \"Acme\", wanting to join it, or describing what you would do there is not employment. Each finding id must name the document unit id; claim must be an exact verbatim span of that unit. Return JSON {findings:[{id,checkId,claim,quote,reason}]} with an empty findings array when every claim is supported. Flag only text inside the units listed under CHECKABLE UNITS, and a finding id must be exactly one of those ids. Role headers, the résumé identity, education and credential records, the letterhead, salutation and closing, and the roleThesis and coverLetterArgument fields are fixed by the host or are not part of the delivered text, so never flag them.\nCITED QUOTES:\nHAND\nCITED LISTING QUOTES (posting evidence only; never candidate career evidence):\n[{\"id\":\"job-listing-1\",\"quote\":\"We build services.\"}]\nDOCUMENTS:\n{\"resume\":{\"name\":\"Ada Lovelace\",\"contact\":\"ada@example.test\",\"roles\":[{\"id\":\"role-acme\",\"title\":\"Engineer\",\"company\":\"Acme\",\"dates\":\"\",\"bullets\":[{\"id\":\"b-1\",\"text\":\"Built reliable services.\",\"evidenceIds\":[\"e1\"]},{\"id\":\"b-2\",\"text\":\"Delivered a synthetic unsupported outcome — “quoted”.\",\"evidenceIds\":[\"e1\"]}]}],\"projects\":[],\"skills\":[{\"id\":\"s-1\",\"group\":\"Languages\",\"items\":[\"Python\",\"Go\"],\"evidenceIds\":[\"e1\"]}],\"education\":[],\"credentials\":[]},\"coverLetter\":{\"name\":\"Ada Lovelace\",\"contact\":\"ada@example.test\",\"roleThesis\":\"My prior work is relevant to the role.\",\"coverLetterArgument\":{\"primaryEvidence\":{\"evidence\":\"Built reliable services.\",\"evidenceRole\":\"Engineer at Acme\",\"relationToThesis\":\"The prior delivery supports the thesis.\"}},\"paragraphs\":[{\"id\":\"p-1\",\"text\":\"My synthetic first paragraph makes a claim.\",\"evidenceIds\":[\"e1\",\"job-listing-1\"]}]}}\nCHECKABLE UNITS (a finding id must be exactly one of these ids; its claim must be a span of that unit's own text):\n- résumé bullets: b-1, b-2\n- skill groups: s-1\n- letter paragraphs: p-1\nEcho the APPLICATION V2 HANDOFF fields at the top level.\n",
+ "fact-correction": "APPLICATION V2 HANDOFF\n{\"protocol\":1}\nReply within 16384 output tokens.\nSOURCE\n\nCURRENT DOCUMENTS BY UNIT (one line per unit: [<unit id>] <OPEN (check ids) | settled> <kind>: <editable fields as JSON>).\nROLE role-acme: Engineer at Acme,  (host-owned, not a unit)\nRESUME\n[b-1] OPEN (fact-check) bullet: {\"text\":\"Built reliable services.\",\"evidenceIds\":[\"e1\"]}\n[b-2] settled bullet: {\"text\":\"Delivered a synthetic unsupported outcome — “quoted”.\",\"evidenceIds\":[\"e1\"]}\n[s-1] settled skill: {\"group\":\"Languages\",\"items\":[\"Python\",\"Go\"],\"evidenceIds\":[\"e1\"]}\nCOVER LETTER\n[p-1] settled paragraph: {\"text\":\"My synthetic first paragraph makes a claim.\",\"evidenceIds\":[\"e1\",\"job-listing-1\"]}\n[@roleThesis] settled thesis: {\"text\":\"My prior work is relevant to the role.\"}\n[@argument.primary] OPEN (fact-check) argument-primary: bound to bullet b-1; fields {\"bullet\":\"b-1\",\"relationToThesis\":\"The prior delivery supports the thesis.\"} (the app fills in the argument evidence text and role)\nUNITS OPEN THIS ROUND: b-1, @argument.primary. Every other unit is settled: a patch to it is rejected, so leave it out.\n\nFACT-CHECK FINDINGS TO CORRECT (every flagged span must change; a span returned unchanged is rejected):\n- b-1: the span \"Built reliable services.\" is not supported. Synthetic finding. Cited quote: \"Built services.\"\nReturn only this JSON object, echoing the APPLICATION V2 HANDOFF fields at the top level: {\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"protocol\",\"jobId\",\"stage\",\"handoffCode\",\"baseHashes\",\"patches\"],\"properties\":{\"protocol\":{\"const\":1},\"jobId\":{\"type\":\"string\"},\"stage\":{\"enum\":[\"verify-correction\",\"fit-correction\",\"fact-correction\"]},\"handoffCode\":{\"type\":[\"string\",\"null\"]},\"baseHashes\":{\"type\":\"object\"},\"patches\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":64,\"items\":{\"oneOf\":[{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"unit\",\"op\",\"fields\"],\"properties\":{\"unit\":{\"type\":\"string\"},\"op\":{\"const\":\"set\"},\"fields\":{\"type\":\"object\",\"minProperties\":1}}},{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"unit\",\"op\"],\"properties\":{\"unit\":{\"type\":\"string\"},\"op\":{\"const\":\"remove\"}}}]}}}}\n",
+ "fact-correction-corrections": "APPLICATION V2 HANDOFF\n{\"protocol\":1}\nReply within 16384 output tokens.\nSOURCE\n\nCURRENT DOCUMENTS BY UNIT (one line per unit: [<unit id>] <OPEN (check ids) | settled> <kind>: <editable fields as JSON>).\nROLE role-acme: Engineer at Acme,  (host-owned, not a unit)\nRESUME\n[b-1] OPEN (fact-check) bullet: {\"text\":\"Built reliable services.\",\"evidenceIds\":[\"e1\"]}\n[b-2] settled bullet: {\"text\":\"Delivered a synthetic unsupported outcome — “quoted”.\",\"evidenceIds\":[\"e1\"]}\n[s-1] settled skill: {\"group\":\"Languages\",\"items\":[\"Python\",\"Go\"],\"evidenceIds\":[\"e1\"]}\nCOVER LETTER\n[p-1] settled paragraph: {\"text\":\"My synthetic first paragraph makes a claim.\",\"evidenceIds\":[\"e1\",\"job-listing-1\"]}\n[@roleThesis] settled thesis: {\"text\":\"My prior work is relevant to the role.\"}\n[@argument.primary] OPEN (fact-check) argument-primary: bound to bullet b-1; fields {\"bullet\":\"b-1\",\"relationToThesis\":\"The prior delivery supports the thesis.\"} (the app fills in the argument evidence text and role)\nUNITS OPEN THIS ROUND: b-1, @argument.primary. Every other unit is settled: a patch to it is rejected, so leave it out.\n\nFACT-CHECK FINDINGS TO CORRECT (every flagged span must change; a span returned unchanged is rejected):\n- b-1: the span \"Built reliable services.\" is not supported. Synthetic finding. Cited quote: \"Built services.\"\nReturn only this JSON object, echoing the APPLICATION V2 HANDOFF fields at the top level: {\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"protocol\",\"jobId\",\"stage\",\"handoffCode\",\"baseHashes\",\"patches\"],\"properties\":{\"protocol\":{\"const\":1},\"jobId\":{\"type\":\"string\"},\"stage\":{\"enum\":[\"verify-correction\",\"fit-correction\",\"fact-correction\"]},\"handoffCode\":{\"type\":[\"string\",\"null\"]},\"baseHashes\":{\"type\":\"object\"},\"patches\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":64,\"items\":{\"oneOf\":[{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"unit\",\"op\",\"fields\"],\"properties\":{\"unit\":{\"type\":\"string\"},\"op\":{\"const\":\"set\"},\"fields\":{\"type\":\"object\",\"minProperties\":1}}},{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"unit\",\"op\"],\"properties\":{\"unit\":{\"type\":\"string\"},\"op\":{\"const\":\"remove\"}}}]}}}} The rejection text follows verbatim:\nfact-check-unchanged: b-1 still contains \"x\".\n",
+ "findingErrors": [
+  "fact-finding-span: findings[1].claim \"synthetic unsupported outcome - \\\"quoted\\\"\" is not a verbatim span of unit b-2: its first 30 of 40 characters appear in the unit and character 31 does not. It matches once whitespace, quote marks and dashes are ignored; copy the span character for character, with the unit's own spacing and marks.",
+  "fact-finding-span: findings[2].claim \"Delivered a … outcome\" is not a verbatim span of unit b-2: its first 12 of 21 characters appear in the unit and character 13 does not. A claim is one unbroken span; it cannot contain \"…\" or \"...\".",
+  "fact-finding-unit: findings[3].id \"nope\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS). | fact-finding-claim: findings[3].claim is missing or empty. | fact-finding-reason: findings[3].reason is missing or empty.",
+  "fact-finding-shape: findings[4] is null, not an object with id, claim and reason.",
+  "fact-finding-shape: findings[5] is an array, not an object with id, claim and reason.",
+  "fact-finding-shape: findings[6] is a number, not an object with id, claim and reason."
+ ],
+ "findingErrorsShape": [
+  [
+   "fact-findings-shape: The reply needs a \"findings\" array (an empty array when every claim is supported); it has no \"findings\" field."
+  ],
+  [
+   "fact-findings-shape: The reply needs a \"findings\" array (an empty array when every claim is supported); it has a null."
+  ],
+  [
+   "fact-findings-shape: The reply needs a \"findings\" array (an empty array when every claim is supported); it has a string."
+  ]
+ ],
+ "findingErrorsMany": [
+  "fact-finding-unit: findings[0].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[1].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[2].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[3].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[4].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[5].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[6].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[7].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[8].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[9].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[10].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[11].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[12].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[13].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[14].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[15].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[16].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[17].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[18].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-unit: findings[19].id \"zz\" is not a unit id of the documents (use only the ids under CHECKABLE UNITS).",
+  "fact-finding-shape: 5 more findings also failed these checks; correct the lines above first."
+ ],
+ "changedErrors": [
+  "fact-check-unchanged: b-1 still contains \"Built reliable services.\"."
+ ],
+ "transitions": [
+  {
+   "round": 1,
+   "factIndex": 0,
+   "nextStage": "fact-recheck"
+  },
+  {
+   "round": 1,
+   "factIndex": 0,
+   "nextStage": "fact-correction"
+  },
+  {
+   "round": 3,
+   "factIndex": 1,
+   "nextStage": "fact-check"
+  },
+  {
+   "round": 3,
+   "factIndex": 2,
+   "nextStage": "write-verify-human-stop"
+  },
+  {
+   "round": 2,
+   "factIndex": 0,
+   "nextStage": "fact-correction"
+  }
+ ],
+ "stageProfiles": {
+  "editorial-plan": {
+   "model": "opus",
+   "effort": "xhigh"
+  },
+  "write": {
+   "model": "opus",
+   "effort": "xhigh"
+  },
+  "pick": {
+   "model": "opus",
+   "effort": "high"
+  },
+  "convert": {
+   "model": "sonnet",
+   "effort": "medium"
+  },
+  "verify-correction": {
+   "model": "sonnet",
+   "effort": "high"
+  },
+  "fit-correction": {
+   "model": "sonnet",
+   "effort": "high"
+  },
+  "fact-check": {
+   "model": "sonnet",
+   "effort": "high"
+  },
+  "fact-correction": {
+   "model": "sonnet",
+   "effort": "high"
+  },
+  "fact-recheck": {
+   "model": "sonnet",
+   "effort": "high"
+  },
+  "unknown-stage": {
+   "model": "sonnet",
+   "effort": "high"
+  }
+ },
+ "cliArgs": [
+  "-p",
+  "--model",
+  "sonnet",
+  "--effort",
+  "high",
+  "--append-system-prompt",
+  "You are answering a structured handoff from a desktop application. When the message asks for a JSON object, reply with only that JSON object, optionally inside one json code fence, with no text before or after it. When it asks for plain text, reply with only the requested text.",
+  "--restricted",
+  "--strict-mcp-config",
+  "--tools",
+  "",
+  "--input-format",
+  "stream-json",
+  "--output-format",
+  "stream-json",
+  "--verbose"
+ ],
+ "cliArgsOpus": [
+  "-p",
+  "--session-id",
+  "s1",
+  "--model",
+  "opus",
+  "--effort",
+  "xhigh",
+  "--append-system-prompt",
+  "You are answering a structured handoff from a desktop application. When the message asks for a JSON object, reply with only that JSON object, optionally inside one json code fence, with no text before or after it. When it asks for plain text, reply with only the requested text.",
+  "--restricted",
+  "--strict-mcp-config",
+  "--tools",
+  "",
+  "--input-format",
+  "stream-json",
+  "--output-format",
+  "stream-json",
+  "--verbose"
+ ]
+}

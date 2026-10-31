@@ -506,6 +506,32 @@ export default [
     assert(faultLines.includes('[HandoffBridge] listener_error code=socket_unavailable') && !faultLines.some(line => line.includes('[HandoffBridge] socket_unavailable')),
       'controller faults must use a valid listener_error projection instead of an invalid free log code');
   } },
+  { name: 'handoff bridge: controls: composition routes /practice/mcp (and its Expect preflight) before the OAuth handler', run: async () => {
+    const practiceCalls = []; let captured = null;
+    const graph = composeHandoffBridge({
+      userData: '/tmp/ic-b6-practice-route',
+      config: { hostname: HOST, scope: { applications: true, scoring: false }, limits: { idlePauseMinutes: 1440 }, prefs: { sourcePolicy: 'enforce', pairingNetworkCheck: true } },
+      tunnelState: { binaryPath: '/tmp/fake-cloudflared', binaryTrusted: true, credentialsPath: '/tmp/fake-credentials' },
+      deps: {
+        engine: enginePort(), laneStore: { loadLanes: () => [] }, application: { describeForConfirm: async () => ({ items: [] }) }, push: { get: async () => ({ status: 'queue_empty' }), submit: async () => ({ status: 'unknown_handoff' }) },
+        audit: { append: async () => true }, oauth: { linkStatus: () => [], pairingStatus: () => ({}), authenticate: async () => null, closePairing: NOOP },
+        practiceRequestHandler: Object.assign(async req => { practiceCalls.push(['handle', req.url]); return req.url.startsWith('/practice/mcp'); }, { preflight: req => (req.url.startsWith('/practice/mcp') ? (practiceCalls.push(['preflight', req.url]), false) : null) }),
+        requestHandler: Object.assign(async req => { practiceCalls.push(['oauth', req.url]); }, { preflight: req => { practiceCalls.push(['oauth-preflight', req.url]); return true; } }),
+        createListener: ({ handler }) => { captured = handler; return { start: async () => ({ ok: true }), stop: async () => undefined, status: () => ({}) }; },
+        tunnel: { start: async () => ({ ok: true }), stop: async () => undefined, status: () => ({ state: 'off' }) },
+        dialogs: { ask: async () => ({ ok: false }), showCode: async () => ({ ok: false }), showNotice: async () => ({ ok: true }) },
+        power: { dispose: NOOP }, tray: { destroy: NOOP }, getCanvasWindows: () => [],
+      },
+    });
+    try {
+      assert(typeof captured === 'function', 'the composed handler reaches the listener');
+      await captured({ url: '/practice/mcp', headers: {} }, {});
+      await captured({ url: '/mcp', headers: {} }, {});
+      assert(await captured.preflight({ url: '/practice/mcp', headers: {} }, {}) === false, 'the practice preflight decides its own Expect requests');
+      assert(await captured.preflight({ url: '/oauth/token', headers: {} }, {}) === true, 'OAuth routes keep their preflight');
+      assert(JSON.stringify(practiceCalls) === JSON.stringify([['handle', '/practice/mcp'], ['handle', '/mcp'], ['oauth', '/mcp'], ['preflight', '/practice/mcp'], ['oauth-preflight', '/oauth/token']]), `routing order: ${JSON.stringify(practiceCalls)}`);
+    } finally { graph.power.dispose?.(); graph.tray.destroy?.(); }
+  } },
   { name: 'handoff bridge: controls: composition preserves an injected log port instead of replacing it', run: () => {
     const received = []; const injected = {
       record: (code, fields) => received.push({ code, fields }),

@@ -259,6 +259,10 @@ import interview_call_audio_render from './tests/interview-call-audio-render.js'
 import interview_call_question_detector from './tests/interview-call-question-detector.js';
 import interview_call_audio_debug from './tests/interview-call-audio-debug.js';
 import interview_call_speech_replay from './tests/interview-call-speech-replay.js';
+import interview_application_folders from './tests/interview-application-folders.js';
+import career_writing_core from './tests/career-writing-core.js';
+import interview_qa from './tests/interview-qa.js';
+import interview_practice from './tests/interview-practice.js';
 import career_recovery_resume from './tests/career-recovery-resume.js';
 import adaptability_skills from './tests/adaptability-skills.js';
 import adaptability_metrics from './tests/adaptability-metrics.js';
@@ -558,6 +562,10 @@ const testGroups = [
   ['interview-call-question-detector.js', interview_call_question_detector],
   ['interview-call-audio-debug.js', interview_call_audio_debug],
   ['interview-call-speech-replay.js', interview_call_speech_replay],
+  ['interview-application-folders.js', interview_application_folders],
+  ['career-writing-core.js', career_writing_core],
+  ['interview-qa.js', interview_qa],
+  ['interview-practice.js', interview_practice],
   ['career-recovery-resume.js', career_recovery_resume],
   ['adaptability-skills.js', adaptability_skills],
   ['adaptability-metrics.js', adaptability_metrics],

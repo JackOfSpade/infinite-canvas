@@ -293,7 +293,7 @@ export default [
         const declined = { kind: 'not-question', cardId: 'none', confidence: 0.99 };
         h.queue.push({ result: declined }); await h.endpoint(question);
         const before = h.session.display;
-        assert.match(h.controller.getListeningState(h.event).message, /Use this question/u);
+        assert.match(h.controller.getListeningState(h.event).message, /^Not matched · Use to match$/u);
         h.queue.push({ result: declined });
         const display = await h.handlers.get('interview-window:use-transcript-question')(h.event);
         assert.notEqual(display, before); assert.equal(display.question, question);
@@ -440,7 +440,7 @@ export default [
         assert.equal(h.session.display, before); assert.equal(h.session.anchorPlan, anchor); assert.equal(h.session.locked, true);
         assert.equal(h.updates().length, updateCount, 'a non-question never projects or publishes a replacement');
         assert.equal(h.transports[0].matches.at(-1).question, question);
-        assert.match(h.controller.getListeningState(h.event).message, /Use this question/u);
+        assert.match(h.controller.getListeningState(h.event).message, /^Not matched · Use to match$/u);
       } finally { h.cleanup(); }
     },
   },

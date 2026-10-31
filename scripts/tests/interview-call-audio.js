@@ -188,11 +188,11 @@ export default [
       assert.deepEqual(h.reads, [1, 1]); assert.equal(h.session.locked, true);
       const anchor = h.session.anchorPlan; h.session.anchorPlan = null;
       await h.endpoint('What did you learn?'); assert.equal(h.session.display.answerCard.id, 'leadership');
-      assert.match(h.controller.getListeningState(h.event).message, /no selected story/u); h.session.anchorPlan = anchor;
+      assert.match(h.controller.getListeningState(h.event).message, /^No story to follow · type it$/u); h.session.anchorPlan = anchor;
       await h.endpoint('How do you prioritize your work?'); assert.equal(h.session.display.answerCard.id, 'priorities');
       assert.deepEqual(h.reads, [1, 1]);
       await h.endpoint('How do you prioritize your work? Tell me about leading a team.');
-      assert.equal(h.session.display.answerCard.id, 'priorities'); assert.match(h.controller.getListeningState(h.event).message, /multiple parts/u);
+      assert.equal(h.session.display.answerCard.id, 'priorities'); assert.match(h.controller.getListeningState(h.event).message, /^Multi-part · pick one$/u);
       await h.endpoint('How did you reduce Kafka consumer lag?');
       assert.equal(h.session.display.answerCard, null); assert.equal(h.session.display.plan.status, 'supported');
       const cues = h.session.display.plan.steps.map(step => step.cue);

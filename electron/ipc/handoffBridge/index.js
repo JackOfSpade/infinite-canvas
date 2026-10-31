@@ -25,6 +25,7 @@ import { createOAuthServer } from './oauth.js';
 import { createCimdFetcher, createJwksFetcher } from './cimd.js';
 import { createMcpHandler } from './mcp.js';
 import { createRequestHandler } from './http.js';
+import { createPracticeMcpHandler, createPracticeRequestHandler, isPracticeRequest } from './practiceMcp.js';
 import { createListener } from './listener.js';
 import { createRealTunnelSupervisor } from './tunnel/index.js';
 import { createHandoffBridgeController } from './controller.js';
@@ -1046,8 +1047,13 @@ export function composeHandoffBridge({ userData, config, tunnelState, setupState
   // The listener is the only place that sees Cf-Connecting-IP.  It consumes
   // the one-shot HMAC observation before the OAuth route can inspect pairing.
   let supervisedTunnel = null;
-  const listenerHandler = wrapRequestHandlerWithEgressObservation(requestHandler, value => pairing?.recordOwnEgress?.(value));
-  const listener = deps.listener || createListener({ socketPath, handler: listenerHandler, fsModule: deps.fsImpl, timers, beforeRebind: async () => { await supervisedTunnel?.stop?.(); } });
+  // The practice-interview connector (/practice/mcp) is routed before the
+  // OAuth bridge and never reaches it; see practiceMcp.js for its boundary.
+  const practiceHandler = deps.practiceRequestHandler || createPracticeRequestHandler({ hostname: config.hostname, mcp: createPracticeMcpHandler(), now, setTimeoutImpl: timers.setTimeout, clearTimeoutImpl: timers.clearTimeout });
+  const routedHandler = async (req, res) => (await practiceHandler(req, res) ? undefined : requestHandler(req, res));
+  if (typeof requestHandler?.preflight === 'function') Object.defineProperty(routedHandler, 'preflight', { value: (req, res) => (isPracticeRequest(req) ? (typeof practiceHandler.preflight === 'function' ? practiceHandler.preflight(req, res) : false) : requestHandler.preflight(req, res)), enumerable: false });
+  const listenerHandler = wrapRequestHandlerWithEgressObservation(routedHandler, value => pairing?.recordOwnEgress?.(value));
+  const listener = deps.listener || (deps.createListener || createListener)({ socketPath, handler: listenerHandler, fsModule: deps.fsImpl, timers, beforeRebind: async () => { await supervisedTunnel?.stop?.(); } });
   const probe = testMode
     ? options => socketPublicProbe({ ...options, socketPath, request: deps.socketRequest || http.request })
     : options => publicProbe({ ...options, request: deps.publicRequest, lookup: deps.lookup });

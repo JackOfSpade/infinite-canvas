@@ -1,6 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { interviewIgnoredMessage } from './submitError.js';
 
+// Failures that can happen mid-interview get a glanceable chip; the full
+// explanation stays one click away. Setup errors keep their full sentence.
+const GLANCE_ERRORS = Object.freeze({
+  'capture-failed': 'Audio stopped · retry Listen',
+  'recognition-failed': 'Transcription stopped · retry',
+  'lookup-failed': 'Match failed · type it',
+});
 const IDLE = { status: 'idle', transcript: '', question: '', errorCode: null, message: '' };
 const AUDIO_FAILED = 'Listening is unavailable. Try Listen again, or type the question below.';
 
@@ -103,7 +110,9 @@ export default function CallAudioPanel({ onDisplay }) {
     <div className="call-audio-controls"><p className="call-audio-status" role="status"><span className="call-audio-dot" aria-hidden="true" />{label}</p><button type="button" aria-pressed={running} onClick={toggle}>{running ? 'Stop listening' : 'Listen'}</button></div>
     {audio.status === 'starting' && <p className="call-audio-help">{audio.message || 'Preparing on-device speech and requesting system audio access…'}</p>}
     {audio.status !== 'starting' && audio.status !== 'error' && audio.message && <p className="call-audio-help" role="status">{audio.message}</p>}
-    {audio.status === 'error' && <p className="call-audio-error" role="alert">{audio.message || AUDIO_FAILED}</p>}
+    {audio.status === 'error' && (GLANCE_ERRORS[audio.errorCode]
+      ? <div className="call-audio-error" role="alert"><p className="glance-chip glance-chip-warn">{GLANCE_ERRORS[audio.errorCode]}</p><details className="glance-why"><summary>Why?</summary><p>{audio.message || AUDIO_FAILED}</p></details></div>
+      : <p className="call-audio-error" role="alert">{audio.message || AUDIO_FAILED}</p>)}
     {audio.transcript && <div className="call-audio-preview"><p className="call-audio-transcript" aria-label="Live transcript" title={audio.transcript}>{lastTranscriptLine}</p><button type="button" className="call-audio-use" disabled={usingQuestion || !audio.question} onClick={useQuestion}>{usingQuestion ? 'Checking transcript…' : 'Use this question'}</button></div>}
     {useError && <p className="call-audio-error" role="alert">{useError}</p>}
     </div>

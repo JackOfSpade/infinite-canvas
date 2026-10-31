@@ -28,3 +28,17 @@ export const INTERVIEW_ANSWER_QUESTION_CATALOG = Object.freeze([
   ['How do you approach planning and delivery?', ['Tell me about bringing work to completion.', 'How do you organize delivery?']],
   ['What would you like us to know about your experience?', ['Is there another example you would like to discuss?', 'What else is relevant to this conversation?']],
 ].map(([question, variants]) => Object.freeze({ question, variants: Object.freeze(variants) })));
+
+// Questions asked at nearly every interview. Their answers come from career
+// data alone, so one Foundation set is shared by every Interview Helper; all
+// other catalog questions belong to a helper's company-specific Q&A.
+const FOUNDATION_QUESTION_TEXT = Object.freeze([
+  'Tell me about yourself.',
+  'Walk me through a project.',
+  'What strengths would you bring?',
+  'Describe a challenge you faced.',
+  'How do you handle disagreement?',
+  'Tell me about something that did not go as planned.',
+  'How do you collaborate with others?',
+]);
+export const INTERVIEW_FOUNDATION_QUESTIONS = Object.freeze(INTERVIEW_ANSWER_QUESTION_CATALOG.filter(item => FOUNDATION_QUESTION_TEXT.includes(item.question)));

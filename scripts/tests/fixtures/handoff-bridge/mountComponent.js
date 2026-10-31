@@ -107,7 +107,7 @@ export async function bundleComponent(entry, {
 
 export async function withDom(fn) {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', { url: 'https://example.com/' });
-  const keys = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'MutationObserver', 'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'IS_REACT_ACT_ENVIRONMENT'];
+  const keys = ['window', 'document', 'navigator', 'HTMLElement', 'Node', 'MutationObserver', 'Event', 'CustomEvent', 'requestAnimationFrame', 'cancelAnimationFrame', 'getComputedStyle', 'IS_REACT_ACT_ENVIRONMENT'];
   const previous = new Map(keys.map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const values = {
     window: dom.window,
@@ -116,6 +116,9 @@ export async function withDom(fn) {
     HTMLElement: dom.window.HTMLElement,
     Node: dom.window.Node,
     MutationObserver: dom.window.MutationObserver,
+    // Shared helpers (modal stack) build events with the global constructors.
+    Event: dom.window.Event,
+    CustomEvent: dom.window.CustomEvent,
     requestAnimationFrame: callback => setTimeout(() => callback(Date.now()), 0),
     cancelAnimationFrame: clearTimeout,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),

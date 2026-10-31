@@ -33,7 +33,7 @@ const allBridgeSiblings = [
   './constants.js', './contracts.js', './respond.js', './wire.js', './http.js', './listener.js', './tools.js', './mcp.js',
   './oauth.js', './oauthPages.js', './clientAuth.js', './cimd.js', './egressProbe.js', './oauthStore.js', './store.js',
   './laneStore.js', './engine.js', './lanes.js', './workerPool.js', './preflight.js', './framing.js', './errors.js', './audit.js', './log.js',
-  './telemetry.js', './restartContext.js', './observedChatContext.js', './controller.js', './pairing.js', './ui.js', './chatLauncher.js', './uiDialogs.js', './tray.js', './power.js', './index.js',
+  './telemetry.js', './restartContext.js', './observedChatContext.js', './controller.js', './pairing.js', './ui.js', './chatLauncher.js', './uiDialogs.js', './tray.js', './power.js', './practiceMcp.js', './index.js',
 ];
 const sibling = (...imports) => [...imports, ...allBridgeSiblings];
 
@@ -90,6 +90,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'uiDialogs.js': { allow: sibling('electron') },
   'tray.js': { allow: sibling('electron') },
   'power.js': { allow: sibling('electron') },
+  'practiceMcp.js': { allow: sibling('../interviewQaPractice.js', '../interviewPracticeRegistry.js') },
   'index.js': { allow: sibling('electron', 'node:fs', 'node:path', 'node:os', 'node:http', 'node:crypto', '../../../src/utils/handoffBridgeConfig.js', './sources/application.js', './sources/syntheticPreflight.js', './sources/push.js', './tunnel/index.js', '../bugReport/helpers.js', '../nonApiAi.js', '../localAiApplication.js') },
   'tunnel/constants.js': { allow: [] },
   'tunnel/validate.js': { allow: ['../../../../src/utils/handoffBridgeConfig.js', '../constants.js', './constants.js'] },
@@ -361,7 +362,7 @@ export default [
   {
     name: 'handoff bridge: source-scan: complete table skips absent planned modules and rejects a no-row module',
     run: () => {
-      assert(Object.keys(SOURCE_SCAN_ROWS).length === 54, 'every planned handoffBridge module needs exactly one row');
+      assert(Object.keys(SOURCE_SCAN_ROWS).length === 55, 'every planned handoffBridge module needs exactly one row');
       assert(scanHandoffBridgeSource().length === 0, 'the current subset and absent planned rows must conform');
       const root = makeScratchBridge();
       try {

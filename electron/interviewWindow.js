@@ -8,11 +8,21 @@ import { prepareInterviewExtensionCandidates } from './ipc/interviewAnswerExtens
 import { requestNonApiAi } from './ipc/nonApiAi.js';
 import { runWithIpcRequestContext } from './ipc/ipcUtils.js';
 import { loadInterviewPreparationBundle, loadInterviewPreparedBrief, loadInterviewPreparedAnswerBank } from './ipc/interviewPreparation.js';
+import { loadInterviewQaLiveCards } from './ipc/interviewQaStore.js';
 import { isInterviewAnswerBank } from './ipc/interviewAnswerBank.js';
 import { logger } from './logger.js';
 import { createInterviewCallAudioService, idleInterviewListeningState, interviewAudioHelperPath } from './interviewCallAudio.js';
 import { selectInterviewCallQuestion, isInterviewPartialEligible } from './interviewCallQuestionDetector.js';
 import { createInterviewSpeculativeMatcher } from './interviewSpeculativeMatcher.js';
+
+// Live-call notices are read mid-interview at a glance: a few words, never a
+// sentence. "Use this question" beside the transcript is the action they name.
+export const AUDIO_NOTICES = Object.freeze({
+  tooLong: 'Too long · type it',
+  multipart: 'Multi-part · pick one',
+  notMatched: 'Not matched · Use to match',
+  noStory: 'No story to follow · type it',
+});
 
 const { BrowserWindow: ElectronBrowserWindow, ipcMain: electronIpcMain, app } = electronPkg;
 const SNAPSHOT_ID = /^[a-f0-9]{64}$/u;
@@ -260,6 +270,65 @@ function projectAnswerCard(card, bank) {
   });
 }
 
+// Editable Q&A (interviewQaStore) is layered over the sealed bank. The sealed
+// bank still proves the brief/snapshot binding; the live list decides which
+// cards exist, in what scope, and with what (possibly user-written) text.
+const LIVE_CARDS = new WeakMap();
+const CARD_META = new WeakMap();
+const OVERLAY_CARDS = new WeakSet();
+export const cardsOf = bank => (bank ? LIVE_CARDS.get(bank) || bank.cards : []);
+const statementOf = value => (typeof value === 'string' ? value : value?.text || '');
+const sameCardText = (left, right) => statementOf(left.headline) === statementOf(right.headline)
+  && statementOf(left.example) === statementOf(right.example)
+  && JSON.stringify((left.bullets || []).map(statementOf)) === JSON.stringify((right.bullets || []).map(statementOf));
+
+/** Build the live card list for a sealed bank from stored Q&A cards. */
+export function attachInterviewLiveCards(bank, storeCards) {
+  if (!bank) return bank;
+  if (!Array.isArray(storeCards) || !storeCards.length) { LIVE_CARDS.delete(bank); return bank; }
+  const sealedById = new Map(bank.cards.map(card => [card.id, card]));
+  const live = storeCards.map(stored => {
+    const meta = Object.freeze({ scope: stored.scope === 'foundation' ? 'foundation' : 'company', origin: stored.origin || 'catalog',
+      source: stored.source && typeof stored.source.url === 'string' ? Object.freeze({ url: stored.source.url, date: String(stored.source.date || 'unknown'), quote: String(stored.source.quote || '') }) : null,
+      author: stored.author === 'user' ? 'user' : 'generated' });
+    const sealed = sealedById.get(stored.id);
+    // An unedited card from this same preparation is the sealed object itself.
+    const card = sealed && sealed.question === stored.question && meta.author !== 'user' && sameCardText(sealed, stored) ? sealed : (() => {
+      const overlay = Object.freeze({ ...stored });
+      OVERLAY_CARDS.add(overlay);
+      return overlay;
+    })();
+    const answered = !!(statementOf(card.headline).trim() || (card.bullets || []).some(item => statementOf(item).trim()) || statementOf(card.example).trim());
+    CARD_META.set(card, Object.freeze({ ...meta, status: answered ? 'ready' : meta.origin === 'disclosed' ? 'needs-prep' : 'empty' }));
+    return card;
+  });
+  LIVE_CARDS.set(bank, Object.freeze(live));
+  return bank;
+}
+
+function projectOverlayCard(card, bank) {
+  const statement = value => Object.freeze({ text: statementOf(value), evidenceIds: [...(Array.isArray(value?.evidenceIds) ? value.evidenceIds : [])] });
+  const cited = new Set([card.headline, ...(card.bullets || []), card.example].flatMap(item => (Array.isArray(item?.evidenceIds) ? item.evidenceIds : [])));
+  return Object.freeze({
+    id: card.id, question: card.question, headline: statementOf(card.headline), headlineEvidenceIds: [...(card.headline?.evidenceIds || [])],
+    thinEvidence: card.thinEvidence === true,
+    bullets: Object.freeze((card.bullets || []).filter(item => statementOf(item).trim()).map(item => Object.freeze({ stage: typeof item?.stage === 'string' ? item.stage : 'point', ...statement(item) }))),
+    example: statement(card.example),
+    optionalExtension: Object.freeze((card.extensions || []).filter(item => statementOf(item).trim()).map((item, index) => Object.freeze({
+      id: typeof item?.id === 'string' ? item.id : `ext-${index + 1}`, text: statementOf(item), exampleHook: '', sourceLabel: '', evidenceIds: [...(item?.evidenceIds || [])],
+    }))),
+    consistency: Object.freeze({ consistentWithResume: card.consistency?.consistentWithResume === true, resumeQuote: String(card.consistency?.resumeQuote || '') }),
+    evidence: Object.freeze(bank.evidence.filter(item => cited.has(item.id)).map(item => Object.freeze({ id: item.id, quote: item.text, sourceLabel: item.sourceLabel }))),
+  });
+}
+
+function projectLiveCard(card, bank) {
+  if (!card) return null;
+  const projected = OVERLAY_CARDS.has(card) ? projectOverlayCard(card, bank) : projectAnswerCard(card, bank);
+  const meta = CARD_META.get(card);
+  return meta ? Object.freeze({ ...projected, scope: meta.scope, origin: meta.origin, source: meta.source, author: meta.author, status: meta.status }) : projected;
+}
+
 function cardSharesExactStory(plan, card, bank) {
   if (!card) return true;
   if (plan?.status !== 'supported') return false;
@@ -278,7 +347,7 @@ function cardSharesExactStory(plan, card, bank) {
 export function projectInterviewDisplay({ brief, plan = null, question = null, snapshotId, currentStep, roleAttribution = () => '', answerBank = null, answerCard = null, matching = null }) {
   if (!isInterviewBrief(brief, snapshotId) || (plan !== null && !validPlan(plan, snapshotId))) throw new TypeError('Interview display input is invalid.');
   if (answerBank !== null && !bankMatchesBrief(answerBank, brief, snapshotId)) throw new TypeError('Interview answer bank is stale.');
-  if (answerCard !== null && (!answerBank || !answerBank.cards.includes(answerCard))) throw new TypeError('Interview answer card is unavailable.');
+  if (answerCard !== null && (!answerBank || !cardsOf(answerBank).includes(answerCard))) throw new TypeError('Interview answer card is unavailable.');
   if (answerCard && !cardSharesExactStory(plan, answerCard, answerBank)) plan = null;
   return Object.freeze({
     version: BRIEF_VERSION,
@@ -286,7 +355,7 @@ export function projectInterviewDisplay({ brief, plan = null, question = null, s
     // Keep the interviewer's wording even when a prepared card has no cue
     // plan. The catalog prompt is a label, not the submitted question.
     question: question === null ? plan?.analysis?.transcript || null : displayString(question, MAX_QUESTION),
-    answerCard: projectAnswerCard(answerCard, answerBank),
+    answerCard: projectLiveCard(answerCard, answerBank),
     preview: null,
     plan: plan ? Object.freeze({
       status: plan.status,
@@ -317,8 +386,11 @@ export function projectInterviewDisplay({ brief, plan = null, question = null, s
       recentContext: brief.recentContext.map(item => displayString(item.fact, 1_200)),
       likelyQuestions: brief.likelyQuestions.map(item => displayString(item, 800)),
       ...(answerBank ? {
-        preparedQuestions: answerBank.cards.map(item => item.question),
-        preparedCards: Object.freeze(answerBank.cards.map(({ id, question }) => Object.freeze({ id, question }))),
+        preparedQuestions: cardsOf(answerBank).map(item => item.question),
+        preparedCards: Object.freeze(cardsOf(answerBank).map(card => {
+          const meta = CARD_META.get(card);
+          return Object.freeze({ id: card.id, question: card.question, ...(meta ? { scope: meta.scope, origin: meta.origin, status: meta.status } : {}) });
+        })),
       } : {}),
       questionsToAsk: brief.questionsToAsk.map(item => displayString(item, 800)),
       applicationPositioning: brief.applicationPositioning.map(item => displayString(`${item.documentKind === 'resume' ? 'Résumé' : 'Cover letter'}: ${item.point}`, 1_300)),
@@ -361,6 +433,7 @@ export function createInterviewWindowController({
   loadBundle = loadInterviewPreparationBundle,
   loadPreparedBrief = loadInterviewPreparedBrief,
   loadAnswerBank = loadInterviewPreparedAnswerBank,
+  loadQaCards = loadInterviewQaLiveCards,
   buildPlan = buildInterviewPlan,
   createAudioService = createInterviewCallAudioService,
   createMatcher = createInterviewAiMatcher,
@@ -406,13 +479,19 @@ export function createInterviewWindowController({
       effectiveMode: session.latencyMode === 'auto' ? latency.latencyMode : session.latencyMode,
       p50Ms: latency.p50Ms };
   };
-  const ensureMatcher = (session, bank) => {
+  const ensureMatcher = (session, sealedBank) => {
+    // Match over the live (editable) cards; the sealed bank stays the binding.
+    const bank = sealedBank && LIVE_CARDS.has(sealedBank) ? { ...sealedBank, cards: cardsOf(sealedBank) } : sealedBank;
     const key = bank ? sha256(stableJson(bank)) : null;
     if (session.matcher && session.matcherKey === key) return session.matcher;
     session.matcher?.close();
     session.matcherKey = key;
-    const extensions = bank ? Object.fromEntries(Object.entries(prepareInterviewExtensionCandidates(bank))
+    const extensions = sealedBank ? Object.fromEntries(Object.entries(prepareInterviewExtensionCandidates({ ...sealedBank, cards: cardsOf(sealedBank).filter(card => !OVERLAY_CARDS.has(card)) }))
       .map(([cardId, points]) => [cardId, points.map(({ id, text, exampleHook }) => ({ id, text, exampleHook }))])) : {};
+    for (const card of cardsOf(sealedBank).filter(item => OVERLAY_CARDS.has(item))) {
+      const points = (card.extensions || []).filter(item => statementOf(item).trim()).map((item, index) => ({ id: typeof item?.id === 'string' ? item.id : `ext-${index + 1}`, text: statementOf(item), exampleHook: '' }));
+      if (points.length) extensions[card.id] = points;
+    }
     session.matcher = createMatcher({ bank, config: matcherConfig, transportFactory: matcherTransportFactory,
       context: { extensions },
       request: options => runWithIpcRequestContext({ sender: session.owner.webContents, nodeId: session.nodeId,
@@ -427,10 +506,10 @@ export function createInterviewWindowController({
         // Only sealed bank objects can cross the boundary, using precisely
         // the same projection as the locked answer. Model-authored text is
         // never an answer source, even if an adapter adds extra properties.
-        const card = preview && bank?.cards.find(item => item.id === preview.cardId);
+        const card = preview && cardsOf(sealedBank).find(item => item.id === preview.cardId);
         if (preview && !card) return;
         const projected = preview ? Object.freeze({ id: preview.id, cardId: card.id,
-          card: projectAnswerCard(card, bank), confidence: preview.confidence,
+          card: projectLiveCard(card, sealedBank), confidence: preview.confidence,
           transcript: preview.transcript.slice(0, MAX_QUESTION), updatedAt: preview.updatedAt }) : null;
         session.display = Object.freeze({ ...session.display, preview: projected });
         if (!session.closing && !session.child.isDestroyed?.()) session.child.webContents.send?.('interview-window:brief-updated', session.display);
@@ -468,6 +547,15 @@ export function createInterviewWindowController({
     return session;
   };
 
+  // Attach the helper's editable Q&A to a sealed bank. A store failure leaves
+  // the sealed cards in place: preparation already validated those.
+  const refreshLiveCards = async (bank, nodeId) => {
+    if (!bank || typeof nodeId !== 'string') return bank;
+    let cards = null;
+    try { cards = await loadQaCards({ userDataPath: appInstance?.getPath?.('userData'), nodeId }); } catch { cards = null; }
+    return attachInterviewLiveCards(bank, cards);
+  };
+  const loadLiveAnswerBank = nodeId => async loaderArgs => refreshLiveCards(await loadAnswerBank(loaderArgs), nodeId);
   const prepare = async (owner, args) => {
     if (!isInterviewWindowLaunchArgs(args) || !isAuthorizedOwner(owner, args.nodeId)) throw new Error('Interview Window launch is not authorized.');
     // The canvas carries a cache/display copy only. Resolve its full record
@@ -481,7 +569,7 @@ export function createInterviewWindowController({
       || bundle.applicationArtifactDigest !== brief.inputs.applicationArtifactDigest) throw new Error('Interview Window application artifact is unavailable or changed.');
     const snapshot = await loadSafely(loadSnapshot, { snapshotId: args.snapshotId, owner, nodeId: args.nodeId, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window snapshot is unavailable.');
     if (!snapshot || snapshot.snapshotId !== args.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
-    const loadedBank = await loadSafely(loadAnswerBank, { brief, briefRecordId: args.briefRecordId, snapshot, bundle, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window prepared answers are unavailable.');
+    const loadedBank = await loadSafely(loadLiveAnswerBank(args.nodeId), { brief, briefRecordId: args.briefRecordId, snapshot, bundle, userDataPath: appInstance?.getPath?.('userData') }, 'Interview Window prepared answers are unavailable.');
     const answerBank = bankMatchesBrief(loadedBank, brief, args.snapshotId, snapshot) ? loadedBank : null;
     if (args.plan === null) return { snapshot, brief, bundle, answerBank, display: projectInterviewDisplay({ brief, snapshotId: args.snapshotId, currentStep: 0, answerBank }) };
     const canonical = buildPlan({ question: args.plan.analysis.transcript, profile: snapshot, snapshotId: args.snapshotId });
@@ -737,7 +825,7 @@ export function createInterviewWindowController({
       if (!snapshot || snapshot.snapshotId !== target.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
       let loadedBank;
       try {
-        loadedBank = cached ? target.answerBank : await loadSafely(loadAnswerBank,
+        loadedBank = cached ? await refreshLiveCards(target.answerBank, session.nodeId) : await loadSafely(loadLiveAnswerBank(session.nodeId),
           { brief: target.brief, briefRecordId: target.briefRecordId, snapshot, bundle: target.bundle, userDataPath: appInstance?.getPath?.('userData') },
           'Interview Window prepared answers are unavailable.');
       } catch (error) { if (!current()) return superseded(); throw error; }
@@ -791,7 +879,7 @@ export function createInterviewWindowController({
       }
       if (approximateFollowUp) question = approximateGate.question;
       const anchorPlan = followUp ? session.anchorPlan : null;
-      const answerCard = answerBank?.cards.find(card => card.id === selection.cardId) || null;
+      const answerCard = cardsOf(answerBank).find(card => card.id === selection.cardId) || null;
       let plan;
       if (followUp && anchorPlan) {
         const canonical = buildPlan({ question: anchorPlan.analysis.transcript, profile: snapshot, snapshotId: target.snapshotId });
@@ -872,12 +960,12 @@ export function createInterviewWindowController({
       'Interview Window snapshot is unavailable.');
     if (!current()) return session.display;
     if (!snapshot || snapshot.snapshotId !== session.snapshotId || !snapshot.profile) throw new Error('Interview Window snapshot is unavailable.');
-    const answerBank = await loadSafely(loadAnswerBank,
+    const answerBank = await loadSafely(loadLiveAnswerBank(session.nodeId),
       { brief: session.brief, briefRecordId: session.briefRecordId, snapshot, bundle: session.bundle, userDataPath: appInstance?.getPath?.('userData') },
       'Interview Window prepared answers are unavailable.');
     if (!current()) return session.display;
     if (!bankMatchesBrief(answerBank, session.brief, session.snapshotId, snapshot)) throw new Error('Interview prepared answer is unavailable.');
-    const answerCard = answerBank.cards.find(card => card.id === cardId);
+    const answerCard = cardsOf(answerBank).find(card => card.id === cardId);
     if (!answerCard) throw new Error('Interview prepared answer is unavailable.');
     const matching = matchingState(session, { source: 'manual', method: 'manual', approximate: false,
       label: 'Prepared answer selected', kind: 'question', cardId, confidence: 1, reason: null });
@@ -978,10 +1066,10 @@ export function createInterviewWindowController({
         reportSelection({ stage: 'semantic-gate', ...selection });
         if (!selection.accepted) {
           session.audio.notice(selection.reason === 'too-long'
-            ? 'This turn is too long to match safely. Type the specific question you want to use.'
+            ? AUDIO_NOTICES.tooLong
             : selection.reason?.startsWith('multipart')
-            ? 'This question has multiple parts. Review the transcript and choose Use this question, or type a specific part.'
-            : 'Transcript ready. Choose Use this question if you want to match it.');
+            ? AUDIO_NOTICES.multipart
+            : AUDIO_NOTICES.notMatched);
           return;
         }
         const childEvent = { sender: session.child.webContents };
@@ -990,7 +1078,7 @@ export function createInterviewWindowController({
           onSelection: reportSelection,
           onIgnored: () => {
             reportSelection({ stage: 'ignored', reason: 'not-question' });
-            session.audio.notice('Transcript ready. Choose Use this question if you want to match it.');
+            session.audio.notice(AUDIO_NOTICES.notMatched);
           },
           allowApproximate: () => {
             // Only an unavailable AI activates the old conservative audio
@@ -999,12 +1087,12 @@ export function createInterviewWindowController({
             reportSelection({ stage: 'approximate-gate', ...fallback });
             if (fallback.dependent && !(session.locked && session.anchorPlan)) {
               reportSelection({ stage: 'approximate-gate', accepted: false, reason: 'no-selected-story' });
-              session.audio.notice('This follow-up has no selected story to continue. Use the transcript or type the full question.');
+              session.audio.notice(AUDIO_NOTICES.noStory);
               return false;
             }
             if (!fallback.accepted) session.audio.notice(fallback.reason?.startsWith('multipart')
-              ? 'This question has multiple parts. Review the transcript and choose Use this question, or type a specific part.'
-              : 'Transcript ready. Choose Use this question if you want to match it.');
+              ? AUDIO_NOTICES.multipart
+              : AUDIO_NOTICES.notMatched);
             return fallback.accepted;
           },
         });
