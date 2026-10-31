@@ -1147,6 +1147,51 @@ export async function atomicWriteFile(targetPath, data) {
   }
 }
 
+// Google Drive for desktop (and similar sync clients) hard-link a file into a
+// hidden upload-staging folder (`.tmp.driveupload`) for as long as it uploads
+// it, so a large autosaved canvas is briefly nlink>1 after nearly every save.
+// The in-place writer must keep refusing a linked inode; the save IPC instead
+// waits for the client to drop its link and repeats the fully re-validated
+// write. A link that outlives the wait surfaces as WORKSPACE_SYNC_LINK_BUSY so
+// the renderer can keep retrying quietly instead of reporting a hard failure.
+const WORKSPACE_SYNC_LINK_WAIT_MS = 15_000;
+const WORKSPACE_SYNC_LINK_POLL_MS = 250;
+
+export function isWorkspaceSyncLinkRefusal(error) {
+  return error?.code === 'RENDERER_WORKSPACE_PATH_CHANGED' && error.workspacePathCheck === 'target-hardlink';
+}
+
+function workspaceSyncLinkBusyError(error) {
+  const busy = new Error(error.message);
+  busy.code = 'WORKSPACE_SYNC_LINK_BUSY';
+  busy.workspacePathCheck = error.workspacePathCheck;
+  return busy;
+}
+
+export async function writeWorkspaceAwaitingSyncLink(targetPath, payload, {
+  waitMs = WORKSPACE_SYNC_LINK_WAIT_MS,
+  pollMs = WORKSPACE_SYNC_LINK_POLL_MS,
+  now = Date.now,
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
+  const deadline = now() + waitMs;
+  for (;;) {
+    try {
+      return await atomicWriteRendererWorkspaceFile(targetPath, payload, { returnMetadata: true });
+    } catch (error) {
+      if (!isWorkspaceSyncLinkRefusal(error)) throw error;
+      // Only metadata is polled here; every retry re-runs the full write path.
+      let linked = true;
+      while (linked && now() < deadline) {
+        await sleep(pollMs);
+        const stat = await fs.promises.lstat(targetPath).catch(() => null);
+        linked = Boolean(stat && typeof stat.nlink === 'number' && stat.nlink > 1);
+      }
+      if (linked) throw workspaceSyncLinkBusyError(error);
+    }
+  }
+}
+
 function rendererWorkspacePathChangedError(reason = 'binding-changed') {
   const error = new Error(reason === 'target-hardlink'
     ? 'Another file entry shares this workspace file, which can happen during cloud sync. Saving is paused to protect both copies. Retry after syncing finishes, or use Save As to save a separate copy.'
@@ -3282,7 +3327,13 @@ export function registerFilesystemHandlers() {
     await shell.openExternal(url);
   });
 
-  handleSafe('save-workspace', async (event, args) => {
+  // Every hard-link refusal on this route (the rename/Save As pre-write reads
+  // and inspections, not only the canvas write) is a retryable sync wait.
+  handleSafe('save-workspace', (event, args) => saveWorkspace(event, args).catch((error) => {
+    throw isWorkspaceSyncLinkRefusal(error) ? workspaceSyncLinkBusyError(error) : error;
+  }));
+
+  async function saveWorkspace(event, args) {
     const { data, filePath } = args;
     let targetPath = filePath;
     // Keep the renderer-provided owner spelling until the recovery rebind has
@@ -3383,9 +3434,7 @@ export function registerFilesystemHandlers() {
     // write-ahead journal before truncating the canvas. A crash after this
     // point is recovered by finishing that exact payload on next save/load;
     // the prepared rebind journal then completes ownership migration.
-    const workspaceWrite = await atomicWriteRendererWorkspaceFile(targetPath, serializedCanvas, {
-      returnMetadata: true,
-    });
+    const workspaceWrite = await writeWorkspaceAwaitingSyncLink(targetPath, serializedCanvas);
     if (journalPaths) {
       await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
         version: RECOVERY_REBIND_JOURNAL_VERSION,
@@ -3430,7 +3479,7 @@ export function registerFilesystemHandlers() {
       // crash-atomic namespace publication from the latter state.
       workspaceRecoveryStatus: workspaceWrite.recoveryStatus,
     };
-  });
+  }
 
   handleSafe('load-workspace', async (event, opts) => {
     let targetPath = opts?.filePath;

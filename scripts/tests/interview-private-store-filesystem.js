@@ -23,6 +23,7 @@ import {
   registerFilesystemHandlers,
   scanPath,
   syncTextParentDirectory,
+  writeWorkspaceAwaitingSyncLink,
 } from '../../electron/ipc/filesystem.js';
 import {
   assertPrivateLocalFileReservation,
@@ -168,6 +169,51 @@ export default [
         assert(!generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }).markdown.includes('## Workspace Save Diagnostics'),
           'unrelated narrow output reports omit save receipts');
         assert(applyBugReportCode([], {}, 'WSIO').matchedCodes.includes('WSIO'), 'WSIO is a recognized filter');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'workspace save waits out a cloud-sync upload link, then fails as retryable without weakening the boundary',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(process.cwd(), '.workspace-sync-link-')));
+      const canvas = path.join(root, 'canvas.json');
+      const uploadLink = path.join(root, 'upload-staging-link');
+      try {
+        await atomicWriteRendererWorkspaceFile(canvas, '{"v":1}');
+        // Google Drive-style transient link: dropped while the save is waiting.
+        await fs.promises.link(canvas, uploadLink);
+        let clock = 0;
+        let polls = 0;
+        const result = await writeWorkspaceAwaitingSyncLink(canvas, '{"v":2}', {
+          waitMs: 10_000, pollMs: 250, now: () => clock,
+          sleep: async (ms) => { clock += ms; polls += 1; if (polls === 3) await fs.promises.unlink(uploadLink); },
+        });
+        assert(result?.filePath && await fs.promises.readFile(canvas, 'utf8') === '{"v":2}',
+          'the save lands once the sync client drops its link');
+
+        // A link that outlives the wait is reported as retryable, never written.
+        await fs.promises.link(canvas, uploadLink);
+        clock = 0;
+        let busy;
+        try {
+          await writeWorkspaceAwaitingSyncLink(canvas, '{"v":3}', {
+            waitMs: 1_000, pollMs: 250, now: () => clock, sleep: async (ms) => { clock += ms; },
+          });
+        } catch (error) { busy = error; }
+        assert(busy?.code === 'WORKSPACE_SYNC_LINK_BUSY' && busy.workspacePathCheck === 'target-hardlink'
+          && /cloud sync/.test(busy.message), 'a persistent link becomes the retryable sync-busy code');
+        assert(await fs.promises.readFile(uploadLink, 'utf8') === '{"v":2}', 'the shared inode is never written');
+
+        // Other refusals are not retried or relabelled.
+        await fs.promises.unlink(uploadLink);
+        let other;
+        try {
+          await writeWorkspaceAwaitingSyncLink(path.join(root, 'missing-dir', 'canvas.json'), '{}', {
+            now: () => 0, sleep: async () => { throw new Error('must not wait'); },
+          });
+        } catch (error) { other = error; }
+        assert(other && other.code !== 'WORKSPACE_SYNC_LINK_BUSY' && other.message !== 'must not wait',
+          'non-link failures surface unchanged without waiting');
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },
   },

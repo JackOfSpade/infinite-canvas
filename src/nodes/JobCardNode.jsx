@@ -515,21 +515,28 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     && personalRecommendation.status !== 'unavailable' && personalRecommendation.range
     && personalRecommendation.desiredSalary > 0);
   const personalRecommendationOutdated = personalRecommendationAvailable && !personalRecommendationCurrent;
-  const copyDesiredSalary = useCallback(async (event) => {
+  // Both copies are plain numbers (no currency or separators) so they paste
+  // cleanly into application salary fields; a range is "min-max".
+  const copySalaryText = useCallback(async (event, kind) => {
     event.stopPropagation();
     if (!personalRecommendationAvailable) return;
+    const plainNumber = amount => amount.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 });
+    const { min, max } = personalRecommendation.range;
+    const text = kind === 'range'
+      ? (min === max ? plainNumber(min) : `${plainNumber(min)}-${plainNumber(max)}`)
+      : plainNumber(personalRecommendation.desiredSalary);
+    const label = kind === 'range' ? 'salary range' : 'desired salary';
     try {
-      const numericValue = personalRecommendation.desiredSalary.toLocaleString('en-US', {
-        useGrouping: false, maximumFractionDigits: 20,
-      });
-      await navigator.clipboard.writeText(numericValue);
+      await navigator.clipboard.writeText(text);
       addToast(personalRecommendationOutdated
-        ? { title: 'Previous desired salary copied', description: 'This recommendation is outdated because your career data changed.', type: 'success' }
-        : { title: 'Desired salary copied', description: 'The number is ready to paste into an application.', type: 'success' });
+        ? { title: `Previous ${label} copied`, description: 'This recommendation is outdated because your career data changed.', type: 'success' }
+        : { title: `${label.charAt(0).toUpperCase()}${label.slice(1)} copied`, description: kind === 'range' ? 'The range is ready to paste into an application.' : 'The number is ready to paste into an application.', type: 'success' });
     } catch {
-      addToast({ title: 'Could not copy salary', description: 'Select and copy the desired salary number manually.', type: 'error' });
+      addToast({ title: 'Could not copy salary', description: `Select and copy the ${label} manually.`, type: 'error' });
     }
   }, [personalRecommendationAvailable, personalRecommendationOutdated, personalRecommendation, addToast]);
+  const copyDesiredSalary = useCallback(event => copySalaryText(event, 'desired'), [copySalaryText]);
+  const copyRecommendedRange = useCallback(event => copySalaryText(event, 'range'), [copySalaryText]);
   const hiringFitAudit = useMemo(() => compactHiringFitAudit(data.fitAssessment), [data.fitAssessment]);
 
   const score = data.matchScore || 0;
@@ -1829,11 +1836,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                     title="Copy the number only, without currency or separators"
                   >Copy</button>
                 </div>
-                <div className="mt-1.5 text-white/65">
-                  <span className="text-white/40">{personalRecommendation.status === 'personalized'
-                    ? (personalRecommendationOutdated ? 'Previously recommended range for you:' : 'Recommended range for you:')
-                    : (personalRecommendationOutdated ? 'Previous estimated application range:' : 'Estimated application range:')}</span>{' '}
-                  {cashRangeLabel(personalRecommendation.range, 20)}
+                <div className="mt-1.5 flex items-start justify-between gap-2 text-white/65">
+                  <div className="min-w-0">
+                    <span className="text-white/40">{personalRecommendation.status === 'personalized'
+                      ? (personalRecommendationOutdated ? 'Previously recommended range for you:' : 'Recommended range for you:')
+                      : (personalRecommendationOutdated ? 'Previous estimated application range:' : 'Estimated application range:')}</span>{' '}
+                    {cashRangeLabel(personalRecommendation.range, 20)}
+                  </div>
+                  <button
+                    type="button"
+                    className="nodrag shrink-0 rounded border border-white/15 px-2 py-0.5 text-[11px] font-medium text-blue-200 hover:bg-white/10"
+                    onClick={copyRecommendedRange}
+                    aria-label="Copy recommended salary range"
+                    title="Copy the range as min-max numbers, without currency or separators"
+                  >Copy</button>
                 </div>
                 <p className="mt-1.5 text-white/65">{personalRecommendation.explanation}</p>
                 <div className="mt-1 text-[10px] text-white/40">

@@ -22,6 +22,11 @@ export const AUTOSAVE_FAILURE_RETRY_MS = Object.freeze([2000, 5000, 15000]);
 // Sync clients can retain a hard link for minutes. Keep checking at a low
 // frequency after the initial retries so recovery never requires another edit.
 export const AUTOSAVE_FAILURE_POLL_MS = 30000;
+// The host already waits ~15s per attempt for a sync client's upload link to
+// clear, so a short gap here keeps the next save close to the upload's end.
+export const AUTOSAVE_SYNC_LINK_RETRY_MS = 3000;
+// Only tell the user once a sync wait has blocked saving for this long.
+export const AUTOSAVE_SYNC_LINK_NOTICE_MS = 3 * 60_000;
 
 export const TIMINGS = {
   // ── Debounce: input settles → commit ──────────────────────────────────────

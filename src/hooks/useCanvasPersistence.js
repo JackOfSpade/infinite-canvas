@@ -200,7 +200,9 @@ export function useCanvasPersistence({
         const reason = res?.error || 'Could not save the workspace.';
         EventLogger.recordSaveError(reason, attemptedFilePath);
         setSaveStatus('idle');
-        addToast({ title: 'Save Failed', description: reason, type: 'error' });
+        addToast(res?.errorCode === 'WORKSPACE_SYNC_LINK_BUSY'
+          ? { title: 'Waiting for Cloud Sync', description: 'Your sync app is still uploading this canvas. Auto-save will save your changes as soon as the upload finishes.', type: 'info' }
+          : { title: 'Save Failed', description: reason, type: 'error' });
         return false;
       }
     } catch (err) {

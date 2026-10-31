@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from 'react';
 import { EventLogger } from '../utils/EventLogger';
-import { TIMINGS, AUTOSAVE_FAILURE_RETRY_MS, AUTOSAVE_FAILURE_POLL_MS, autosaveDebounceMs } from '../utils/timings';
+import { TIMINGS, AUTOSAVE_FAILURE_RETRY_MS, AUTOSAVE_FAILURE_POLL_MS, AUTOSAVE_SYNC_LINK_RETRY_MS, AUTOSAVE_SYNC_LINK_NOTICE_MS, autosaveDebounceMs } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
 
@@ -100,11 +100,36 @@ export function useCanvasInitialization({
       if (cancelled || !isMountedRef.current || !isCurrentGeneration()
         || currentFileRef.current !== currentFile) return;
       const reason = error?.error || error?.message || (typeof error === 'string' ? error : 'Could not save the workspace.');
-      EventLogger.recordSaveError(reason, currentFile);
       if (saveFailureRef.current?.filePath !== currentFile) {
         saveFailureRef.current = { filePath: currentFile, attempts: 0, notified: false };
       }
       const failure = saveFailureRef.current;
+      const kind = error?.errorCode === 'WORKSPACE_SYNC_LINK_BUSY' ? 'sync-wait' : 'error';
+      if (failure.kind && failure.kind !== kind) {
+        // The cause changed (an upload ended but a real error followed, or the
+        // reverse). Drop the other kind's notice and counters so the toast
+        // always describes the current cause.
+        if (failure.toastId) removeToast?.(failure.toastId);
+        Object.assign(failure, { attempts: 0, notified: false, toastId: undefined, syncWaitSince: undefined });
+      }
+      failure.kind = kind;
+      if (kind === 'sync-wait') {
+        // A cloud-sync client is still uploading the previous save (the host
+        // already waited for it). This is expected with a large canvas in a
+        // synced folder: record the episode once, poll quickly so the save
+        // lands as soon as the upload ends, and only mention it if it lasts.
+        if (!failure.syncWaitSince) {
+          failure.syncWaitSince = Date.now();
+          EventLogger.recordSaveError(reason, currentFile);
+        }
+        retry(AUTOSAVE_SYNC_LINK_RETRY_MS);
+        if (!failure.notified && Date.now() - failure.syncWaitSince >= AUTOSAVE_SYNC_LINK_NOTICE_MS) {
+          failure.notified = true;
+          failure.toastId = addToast?.({ title: 'Waiting for Cloud Sync', description: 'Your sync app is still uploading this canvas, so newer changes are not saved yet. Auto-save will save them as soon as the upload finishes.', type: 'info', duration: 0 });
+        }
+        return;
+      }
+      EventLogger.recordSaveError(reason, currentFile);
       failure.attempts += 1;
       // Re-enter the normal snapshot/path/quit guards on each retry. Never
       // reuse serialized bytes or bypass the host's path identity checks.
