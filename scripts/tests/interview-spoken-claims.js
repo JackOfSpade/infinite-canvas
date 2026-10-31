@@ -76,6 +76,20 @@ function rejected(text, sources, label) {
 
 export default [
   {
+    name: 'interview spoken claims: contractions keep negation, scaled digits match number words, and plurals share stems',
+    run() {
+      for (const text of ['I didn’t build the billing service; I only maintained it.', "I didn't build the billing service; I only maintained it."]) {
+        const denied = source(`denied-${text}`, text);
+        assert(rejected('I built the billing service.', [denied], 'a contracted denial').some(item => item.rule === 'INTERVIEW_ANSWER_NEGATION'), 'a contracted negation is a limitation');
+        supported("I didn't build the billing service; I only maintained it.", [denied], 'a faithful contracted claim');
+      }
+      const users = source('users', 'We reached two million users.');
+      supported('We reached 2 million users.', [users], 'digits with a scale word equal number words');
+      rejected('We reached 3 million users.', [users], 'a different scaled quantity');
+      supported('I maintained the listing pages.', [source('listings', 'I maintained the listings pages.')], 'singular and plural share a stem');
+    },
+  },
+  {
     name: 'interview spoken claims: explicit intro role summaries bind employer and title without borrowing project agency',
     run() {
       const first = { ...source('intro-summary-first', 'I maintained an inherited system with the other engineer. The system was later retired.'),

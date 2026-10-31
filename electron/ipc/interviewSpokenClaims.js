@@ -50,16 +50,24 @@ function root(value) {
   if (NUMBER_WORDS.has(word)) return NUMBER_WORDS.get(word);
   if (/^\d/u.test(word)) return word.replaceAll(',', '');
   if (word.endsWith('ies')) return `${word.slice(0, -3)}y`;
-  if (word.endsWith('ing') && word.length > 5) return word.slice(0, -3).replace(/(.)\1$/u, '$1');
-  if (word.endsWith('ed') && word.length > 4) return word.slice(0, -2).replace(/(.)\1$/u, '$1');
-  if (word.endsWith('s') && word.length > 3 && !word.endsWith('ss')) return word.slice(0, -1);
-  return word;
+  // Strip the plural first so "listings" and "listing" reach the same stem.
+  let stem = word;
+  if (stem.endsWith('s') && stem.length > 3 && !stem.endsWith('ss')) stem = stem.slice(0, -1);
+  if (ROOTS.has(stem)) return ROOTS.get(stem);
+  if (stem.endsWith('ing') && stem.length > 5) return stem.slice(0, -3).replace(/(.)\1$/u, '$1');
+  if (stem.endsWith('ed') && stem.length > 4) return stem.slice(0, -2).replace(/(.)\1$/u, '$1');
+  return stem;
 }
 function tokens(value) {
   const result = [];
   const raw = rawTokens(value);
   for (let index = 0; index < raw.length; index++) {
-    if (!NUMBER_WORDS.has(raw[index].toLowerCase())) { result.push(root(raw[index])); continue; }
+    if (!NUMBER_WORDS.has(raw[index].toLowerCase())) {
+      // "2 million" is the same quantity as "two million".
+      const scale = /^\d+(?:[.,]\d+)*$/u.test(raw[index]) ? Number(NUMBER_WORDS.get((raw[index + 1] || '').toLowerCase())) : 0;
+      if (scale >= 1000) { result.push(String(Math.round(Number(raw[index].replaceAll(',', '')) * scale))); index++; continue; }
+      result.push(root(raw[index])); continue;
+    }
     let total = 0; let part = 0;
     while (index < raw.length && NUMBER_WORDS.has(raw[index].toLowerCase())) {
       const number = Number(NUMBER_WORDS.get(raw[index].toLowerCase()));
@@ -86,8 +94,11 @@ function quantities(value) {
   }
   return result;
 }
+// "didn't" / "wasn’t" carry the same limitation as "did not" / "was not".
+const decontract = value => String(value || '').normalize('NFKC')
+  .replace(/\b(can)['’]t\b/giu, '$1 not').replace(/\bwon['’]t\b/giu, 'will not').replace(/(?<=\p{L})n['’]t\b/giu, ' not');
 function negativePredicates(value) {
-  return [...value.matchAll(/\b(?:did not|does not|do not|never|not|failed to)\s+(?:\w+ly\s+)?([\p{L}]+)/giu)].map(match => root(match[1]));
+  return [...decontract(value).matchAll(/\b(?:did not|does not|do not|never|not|failed to)\s+(?:\w+ly\s+)?([\p{L}]+)/giu)].map(match => root(match[1]));
 }
 export function interviewSpokenWordCount(value) { return String(value || '').trim().split(/\s+/u).filter(Boolean).length; }
 const ACTION_ROOTS = new Set(['build', 'maintain', 'improve', 'implement', 'test', 'migrate', 'create', 'lead', 'review', 'coordinate', 'evaluate', 'add', 'write', 'ship', 'automate', 'resolv', 'coach', 'trac', 'choose', 'interview', 'stop']);
@@ -307,9 +318,10 @@ export function interviewClaimFailures(claim, sources, { intro = false, roleEvid
   if (/\b(?:the other|another) engineer\b/iu.test(original)) { sourceQuantities.add('1:'); sourceQuantities.add('1:engineer'); }
   const wrongQuantities = quantities(value).filter(quantity => !sourceQuantities.has(quantity));
   if (wrongQuantities.length) add('QUANTITY', `returned numeric tokens ${quoted(numericWords(value))} in ${JSON.stringify(value)} bind to unsupported quantity/unit pairs ${quoted(wrongQuantities)}; bind each quantity to its cited unit or counted object. A duration cannot become a count or percentage.`);
-  const unsupported = rawTokens(value).filter(token => {
+  const unsupported = rawTokens(decontract(value)).filter(token => {
     const lower = token.toLowerCase(); const normalized = root(token);
-    if (FUNCTION_WORDS.has(lower) || NUMBER_WORDS.has(lower) || source.has(normalized) || chronology.has(lower)) return false;
+    // Digits are judged by the NUMBER/QUANTITY checks (a scaled "2 million" has no lone "2").
+    if (FUNCTION_WORDS.has(lower) || NUMBER_WORDS.has(lower) || /^\d/u.test(lower) || source.has(normalized) || chronology.has(lower)) return false;
     return !licensedEquivalent(normalized, source, original);
   });
   // Capitalized entities/technologies have no synonym license. Sealed role
@@ -324,7 +336,9 @@ export function interviewClaimFailures(claim, sources, { intro = false, roleEvid
   // Entity and numeric checks above still run; all other speech keeps them.
   if (intro && interviewIntroRoleSummary(claim, cited)) return failures;
   if (intro && /^I worked as\s/u.test(value)) add('INTRO_ROLE_SUMMARY', 'an employment summary must pair each complete sealed title with its own employer, using only I worked as [title] at [employer] and [title] at [employer]. State achievement details in separately cited claims.');
-  const flags = new Set(cited.flatMap(item => deriveInterviewCandorFlags(item.text)));
+  // Contractions are expanded here rather than in the stored candor flags,
+  // which sealed banks re-derive from the raw text when they are validated.
+  const flags = new Set(cited.flatMap(item => [...deriveInterviewCandorFlags(item.text), ...deriveInterviewCandorFlags(decontract(item.text))]));
   // Joining time in a team-decision statement is not a candidate action.
   const agencyValue = value.replace(/\bbefore I joined\b/giu, 'before joining');
   const candidateAgency = /\b(?:I|we|my|our)\b/iu.test(agencyValue);
@@ -344,8 +358,8 @@ export function interviewClaimFailures(claim, sources, { intro = false, roleEvid
   if (flags.has('team-chosen') && candidateAgency && /\bmodified\b/iu.test(value)
     && !/\bteam(?:['’]s\s+|[- ])chosen\b|\b(?:the )?team\s+(?:(?:had|already)\s+)*(?:chose|chosen|selected|decided)\b/iu.test(value)) add('TEAM_CHOSEN', `the modified-algorithm wording ${JSON.stringify(value)} omits the team's earlier choice and can imply modification authorship. Attribute the choice to the cited team in this same claim, or omit modified and describe implementation/testing only.`);
   if (flags.has('observer') && candidateAgency) add('ATTRIBUTION', `the personal subject ${quoted(agencyWords(value))} in ${JSON.stringify(value)} turns observed work into candidate agency. Attribute the event to the actual documented owner and retain observation as the candidate’s contribution.`);
-  if (flags.has('negated') && (negativePredicates(original).some(verb => tokens(value).includes(verb) && !negativePredicates(value).includes(verb))
-    || !/\b(?:not|never|no|without|failed to)\b/iu.test(value)
+  if (flags.has('negated') && (negativePredicates(original).some(verb => tokens(decontract(value)).includes(verb) && !negativePredicates(value).includes(verb))
+    || !/\b(?:not|never|no|without|failed to)\b/iu.test(decontract(value))
     || /failed to/iu.test(original) && /never failed|not fail/iu.test(value))) {
     const affected = rawTokens(value).filter(token => negativePredicates(original).includes(root(token)));
     add('NEGATION', `the returned claim ${JSON.stringify(value)} loses or reverses a cited limitation${affected.length ? ` on your predicate tokens ${quoted(affected)}` : ''}. Preserve the limitation on that same action; unrelated negative words cannot preserve its polarity.`);

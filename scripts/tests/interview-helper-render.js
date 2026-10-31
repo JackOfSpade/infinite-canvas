@@ -278,6 +278,9 @@ const QA_SETUP_TESTS = [
           await settle(bundle);
           assert(button(window, 'Prepare interview brief').disabled, 'Prepare must stay disabled until an application is selected');
           assert(window.document.body.textContent.includes('Fills empty answers; existing answers are kept.'), 'the fill-only note must appear near Prepare');
+          const emptyUrl = window.document.querySelector('[aria-label="Original job listing URL"]');
+          await bundle.module.act(async () => { emptyUrl.focus(); emptyUrl.blur(); await flush(); });
+          assert(!window.document.body.textContent.includes('Enter a valid http or https job listing URL'), 'leaving an untouched empty URL field must not show an error');
           const combobox = window.document.querySelector('[role="combobox"]');
           assert(combobox && combobox.getAttribute('aria-expanded') === 'false', 'the application combobox must start collapsed');
           await bundle.module.act(async () => { combobox.click(); await flush(); });
@@ -287,6 +290,8 @@ const QA_SETUP_TESTS = [
           const listbox = window.document.getElementById(combobox.getAttribute('aria-controls'));
           assert(listbox?.getAttribute('role') === 'listbox', 'the combobox must control a listbox');
           assert(listbox.querySelectorAll('[role="option"]').length === 2, 'both folders must be listed');
+          await bundle.module.act(async () => { keyDown(window, combobox, 'ArrowUp'); await flush(); });
+          assert(combobox.getAttribute('aria-activedescendant') === listbox.querySelectorAll('[role="option"]')[1].id, 'ArrowUp from no selection must activate the last option');
           await bundle.module.act(async () => { typeInto(window, combobox, 'remote'); await flush(); });
           const filtered = [...listbox.querySelectorAll('[role="option"]')];
           assert(filtered.length === 1 && filtered[0].textContent.startsWith('Discord · Product Manager'), 'typing must filter by location');

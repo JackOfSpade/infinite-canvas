@@ -278,16 +278,35 @@ const CARD_META = new WeakMap();
 const OVERLAY_CARDS = new WeakSet();
 export const cardsOf = bank => (bank ? LIVE_CARDS.get(bank) || bank.cards : []);
 const statementOf = value => (typeof value === 'string' ? value : value?.text || '');
+const extensionKey = card => JSON.stringify((card.extensions || []).map(item => [typeof item?.id === 'string' ? item.id : '', statementOf(item)]));
+// Extensions count too: the Prepare fact-check may drop one from the stored card.
 const sameCardText = (left, right) => statementOf(left.headline) === statementOf(right.headline)
   && statementOf(left.example) === statementOf(right.example)
-  && JSON.stringify((left.bullets || []).map(statementOf)) === JSON.stringify((right.bullets || []).map(statementOf));
+  && JSON.stringify((left.bullets || []).map(statementOf)) === JSON.stringify((right.bullets || []).map(statementOf))
+  && extensionKey(left) === extensionKey(right);
 
 /** Build the live card list for a sealed bank from stored Q&A cards. */
 export function attachInterviewLiveCards(bank, storeCards) {
   if (!bank) return bank;
   if (!Array.isArray(storeCards) || !storeCards.length) { LIVE_CARDS.delete(bank); return bank; }
   const sealedById = new Map(bank.cards.map(card => [card.id, card]));
-  const live = storeCards.map(stored => {
+  // Foundation (shared) and Company (per helper) ids are only unique per
+  // store, and the window resolves cards by id alone. The card that matches
+  // its sealed question keeps a contested id; any other duplicate is re-keyed.
+  const owners = new Set(storeCards.filter(stored => sealedById.get(stored.id)?.question === stored.question));
+  const reserved = new Set([...owners].map(stored => stored.id));
+  const used = new Set();
+  const liveId = stored => {
+    let id = stored.id;
+    if (used.has(id) || (reserved.has(id) && !owners.has(stored))) {
+      for (let n = 1; used.has(id) || reserved.has(id) || sealedById.has(id); n += 1) id = `${stored.scope === 'foundation' ? 'f' : 'c'}${n}-${stored.id}`.slice(0, 64);
+    }
+    used.add(id);
+    return id;
+  };
+  const live = storeCards.map(original => {
+    const id = liveId(original);
+    const stored = id === original.id ? original : { ...original, id };
     const meta = Object.freeze({ scope: stored.scope === 'foundation' ? 'foundation' : 'company', origin: stored.origin || 'catalog',
       source: stored.source && typeof stored.source.url === 'string' ? Object.freeze({ url: stored.source.url, date: String(stored.source.date || 'unknown'), quote: String(stored.source.quote || '') }) : null,
       author: stored.author === 'user' ? 'user' : 'generated' });
@@ -463,13 +482,18 @@ export function createInterviewWindowController({
   const LOAD_FAILED_MESSAGE = 'Interview Window could not load its view.';
   const RENDERER_STOPPED_MESSAGE = 'Interview Window renderer stopped while opening.';
 
-  const cancelQuestion = session => {
-    if (session.audioTurnId !== undefined) session.suppressedAudioTurn = session.audioTurnId;
-    session.speculative?.cancel();
-    if (session.display?.preview) session.display = Object.freeze({ ...session.display, preview: null });
+  const cancelQuestion = (session, { resume = false } = {}) => {
+    // A resume re-runs an already retired audio turn; the newest live turn
+    // (and its preview) must not be suppressed on its behalf.
+    if (!resume) {
+      if (session.audioTurnId !== undefined) session.suppressedAudioTurn = session.audioTurnId;
+      session.speculative?.cancel();
+      if (session.display?.preview) session.display = Object.freeze({ ...session.display, preview: null });
+    }
     session.questionAbort?.abort();
     session.questionAbort = null;
     session.questionOrigin = null;
+    session.audioQuestion = null;
     session.questionSequence += 1;
   };
   const ignoredQuestion = (reason, message) => Object.freeze({ ignored: true, reason, message });
@@ -780,7 +804,7 @@ export function createInterviewWindowController({
     // from here, and no other display payload carries it.
     return session ? { ...session.display, alwaysOnTop: session.alwaysOnTop } : null;
   };
-  const answerQuestion = async (event, question, followUp = false, { cached = false, isCurrent = () => true, replace = false, origin = 'user', speculativeSelection = null, allowApproximate = () => true, onIgnored = null, onSelection = () => undefined } = {}) => {
+  const answerQuestion = async (event, question, followUp = false, { cached = false, isCurrent = () => true, replace = false, origin = 'user', speculativeSelection = null, allowApproximate = () => true, onIgnored = null, onSelection = () => undefined, resumed = false, resumedFrom = null } = {}) => {
     const session = getForChild(event?.sender);
     if (!session) throw new Error('Interview session is not available.');
     if (typeof question !== 'string' || question.length > MAX_QUESTION || !question.trim()) throw new Error('Interview question is invalid.');
@@ -804,11 +828,21 @@ export function createInterviewWindowController({
     const previousCardQuestion = session.display.answerCard?.question || '';
     const previousPlanLocked = session.locked && !!session.anchorPlan;
     const retiredSelection = session.selectionPromise;
-    cancelQuestion(session);
+    // An audio turn that the AI later ignores must not silently cost the
+    // in-flight audio answer it pre-empted; that one is resumed instead.
+    // A resumed turn that is ignored again falls back along the chain.
+    const retiredAudio = origin !== 'audio' ? null : resumed ? resumedFrom?.retired || null
+      : session.questionOrigin === 'audio' && session.questionAbort ? session.audioQuestion : null;
+    cancelQuestion(session, { resume: resumed });
     const sequence = session.questionSequence;
     const abort = new AbortController();
     session.questionAbort = abort;
     session.questionOrigin = origin;
+    session.audioQuestion = origin === 'audio' ? { event, question, isCurrent, allowApproximate, onIgnored, onSelection, retired: retiredAudio } : null;
+    const resumeRetired = () => (retiredAudio && retiredAudio.isCurrent() && current()
+      ? answerQuestion(retiredAudio.event, retiredAudio.question, false, { cached: true, replace: true, origin: 'audio', resumed: true, resumedFrom: retiredAudio,
+        isCurrent: retiredAudio.isCurrent, allowApproximate: retiredAudio.allowApproximate, onIgnored: retiredAudio.onIgnored, onSelection: retiredAudio.onSelection })
+      : null);
     const current = () => isCurrent() && sessions.get(session.ownerId) === session
       && session.questionSequence === sequence && !session.closing;
     const superseded = () => origin === 'user'
@@ -853,7 +887,7 @@ export function createInterviewWindowController({
       }
       onSelection({ stage: 'matcher', selection, current: current() });
       if (!current()) return superseded();
-      if (selection.approximate && !allowApproximate()) return session.display;
+      if (selection.approximate && !allowApproximate()) return resumeRetired() || session.display;
       // Classification and card selection share the same AI call. Until it
       // completes, the locked display, anchor and any pending pin stay intact.
       const approximateGate = selection.approximate ? selectInterviewCallQuestion({ text: question }, answerBank) : null;
@@ -861,6 +895,8 @@ export function createInterviewWindowController({
         && session.locked && !!session.anchorPlan;
       if (selection.kind === 'not-question' && !approximateFollowUp) {
         if (origin === 'audio') {
+          const resumedAnswer = resumeRetired();
+          if (resumedAnswer) return resumedAnswer;
           onIgnored?.();
           return session.display;
         }
@@ -924,7 +960,8 @@ export function createInterviewWindowController({
         session.snapshotId = pendingParent.snapshotId;
         session.briefRecordId = pendingParent.briefRecordId;
         session.bundle = pendingParent.bundle;
-        session.pendingParent = null;
+        // A relaunch during the lookup may have queued a newer parent; keep it.
+        if (session.pendingParent === pendingParent) session.pendingParent = null;
       }
       if (replace && session.parentPlanFingerprint !== null) session.dismissedPlanFingerprint = session.parentPlanFingerprint;
       session.display = display;
@@ -939,6 +976,7 @@ export function createInterviewWindowController({
       if (session.questionAbort === abort) {
         session.questionAbort = null;
         session.questionOrigin = null;
+        session.audioQuestion = null;
       }
     }
   };
@@ -947,7 +985,7 @@ export function createInterviewWindowController({
   const selectPreparedCard = async (event, cardId) => {
     const session = getForAudio(event);
     if (!session || typeof cardId !== 'string' || !CARD_ID.test(cardId)
-      || !session.answerBank?.cards.some(card => card.id === cardId)) throw new Error('Interview prepared answer is unavailable.');
+      || !cardsOf(session.answerBank).some(card => card.id === cardId)) throw new Error('Interview prepared answer is unavailable.');
     // A click names an already displayed card, so it retains that display's
     // pin. It supersedes any semantic lookup immediately without waiting for
     // a provider reply or changing the visible answer until validation passes.

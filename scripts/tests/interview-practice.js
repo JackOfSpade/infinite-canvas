@@ -126,6 +126,14 @@ export default [
       const code3 = await registry.arm({ nodeId: 'h' });
       await registry.cancel('h');
       assert.equal((await registry.finish(code3, feedbackPayload(code3))).status, 'cancelled');
+      // A late cancel (stale UI) never overwrites a finished session.
+      const code4 = await registry.arm({ nodeId: 'h' });
+      assert.equal((await registry.finish(code4, feedbackPayload(code4))).status, 'accepted');
+      const late = events.length;
+      await registry.cancel('h');
+      assert.equal((await registry.status('h')).session.status, 'finished', 'cancel after finish keeps the finished session');
+      assert.equal(events.length, late, 'no cancelled notification for a finished session');
+      assert.equal((await registry.finish(code4, feedbackPayload(code4))).status, 'duplicate');
     });
   } },
   { name: 'practice connector: MCP initialize, tools and finish call reach the registry; notifications are 202', async run() {
@@ -192,6 +200,12 @@ export default [
     assert.match(scripts.find(args => /insertText/u.test(args[2] || ''))[2], /location\.origin !== "https:\/\/claude\.ai"/u, 'the insert script itself refuses a foreign origin');
     const off = make(() => { throw Object.assign(new Error('execution error: Google Chrome got an error: Executing JavaScript through AppleScript is turned off.'), { stderr: 'Executing JavaScript through AppleScript is turned off' }); });
     assert.equal((await off.launch({ prompt: 'x' })).reason, 'apple_events_js_off');
+    let editorReads = 0;
+    const offAfterOpen = make((script, args) => { if (args.length === 1) return '1:2'; editorReads += 1; throw Object.assign(new Error('execution error'), { stderr: 'Executing JavaScript through AppleScript is turned off' }); });
+    const offResult = await offAfterOpen.launch({ prompt: 'x' });
+    assert.equal(offResult.reason, 'apple_events_js_off', 'a scripting refusal while reading the editor is reported, not timed out');
+    assert.deepEqual(offResult.tab, { windowId: '1', tabId: '2' });
+    assert.equal(editorReads, 1, 'the editor poll stops at the first refusal');
     assert.equal((await launcher.launch({ prompt: '' })).reason, 'empty_prompt');
   } },
   { name: 'practice IPC: start arms, launches and reports; load and cancel round-trip; the bridge and the brief binding gate it', async run() {

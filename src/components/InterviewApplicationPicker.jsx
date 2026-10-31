@@ -24,6 +24,7 @@ export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disa
     try {
       if (!window.electronAPI?.listInterviewApplicationFolders) throw new Error('Application folders are unavailable.');
       const reply = await window.electronAPI.listInterviewApplicationFolders({ nodeId, canvasFilePath });
+      if (reply?.success === false) throw new Error(reply.error || 'Could not list applications. Open the dropdown to retry.');
       if (request === sequence.current) setResult({ ...reply, folders: Array.isArray(reply?.folders) ? reply.folders : [] });
     } catch (failure) {
       if (request === sequence.current) { setResult({ folders: [] }); setError(failure?.message || 'Could not list applications. Open the dropdown to retry.'); }
@@ -44,7 +45,9 @@ export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disa
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       if (!open) { void show(); return; }
-      const next = options.length ? (active + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length : -1;
+      const n = options.length;
+      // ArrowUp from the unselected state (-1) wraps to the last option.
+      const next = !n ? -1 : event.key === 'ArrowDown' ? (active + 1) % n : active < 0 ? n - 1 : (active - 1 + n) % n;
       setActive(next);
       document.getElementById(`${id}-option-${next}`)?.scrollIntoView?.({ block: 'nearest' });
     } else if (event.key === 'Enter' && open) { event.preventDefault(); if (!loading) void select(options[active]); }

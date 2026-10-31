@@ -102,7 +102,10 @@ export function createPracticeChatLauncher({ run = runUserChromeScript, delay = 
     const started = now();
     let state = null;
     try {
-      state = await poll(async () => { try { return JSON.parse(await js(tab, EDITOR)); } catch { return null; } }, value => value?.origin === CLAUDE_ORIGIN && (value.ready === true || /\/login/u.test(value.path || '')), editorTimeoutMs);
+      state = await poll(async () => {
+        // A refusal to script is final; any other read failure is a page still loading.
+        try { return JSON.parse(await js(tab, EDITOR)); } catch (error) { if (error?.code === 'apple_events_js_off') throw error; return null; }
+      }, value => value?.origin === CLAUDE_ORIGIN && (value.ready === true || /\/login/u.test(value.path || '')), editorTimeoutMs);
     } catch (error) { return { ok: false, reason: error?.code === 'apple_events_js_off' ? 'apple_events_js_off' : 'chrome_unavailable', tab }; }
     if (!state) return { ok: false, reason: 'editor_timeout', tab };
     if (!state.ready) return { ok: false, reason: 'login_required', tab };

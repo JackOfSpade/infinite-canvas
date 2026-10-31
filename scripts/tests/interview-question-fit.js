@@ -6,6 +6,13 @@ const fits = (question, speech, evidence = speech) => interviewQuestionFit(quest
 
 export default [
   {
+    name: 'interview question fit: a decimal effect counts as an effect',
+    run() {
+      assert(fits('Tell me about a result from your work.', 'I saved 1.5 hours per week.'), 'a decimal effect is an effect');
+      assert(fits('Tell me about improving a process.', 'I moved deploys from manual scripts to a CI pipeline, which I built.'), 'a real from/to change still fits');
+    },
+  },
+  {
     name: 'interview question fit: why headlines prefer research and thin cards retain research bullets',
     run() {
       // Sanitized v4 shape: the old combined-speech check accepted a career

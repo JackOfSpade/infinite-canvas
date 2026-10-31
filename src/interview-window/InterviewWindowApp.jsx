@@ -113,6 +113,10 @@ function Briefing({ briefing }) {
   </details>;
 }
 
+// Everything but the speculative preview and matching/layout state, in a
+// key-order-independent form (a spread may move an absent key to the end).
+const displayIdentity = ({ preview: _preview, matching: _matching, ...rest }) => JSON.stringify(rest);
+
 export function InterviewWindowApp() {
   const [brief, setBrief] = useState(null);
   const [question, setQuestion] = useState('');
@@ -175,9 +179,10 @@ export function InterviewWindowApp() {
     }
     displayedBrief.current = value;
     setBrief(value);
-    // Confidence/transcript ticks are not new answers. In particular, do not
-    // reset cue navigation, feedback or any in-progress forms for these events.
-    if (previous && value && JSON.stringify({ ...previous, preview: null }) === JSON.stringify({ ...value, preview: null })) return;
+    // Confidence/transcript ticks and matching/layout changes are not new
+    // answers. In particular, do not reset cue navigation, feedback or any
+    // in-progress forms for these events.
+    if (previous && value && displayIdentity(previous) === displayIdentity(value)) return;
     // A follow-up draft belongs to the answer on which it was opened. Keep
     // its text, but require reopening it explicitly after the story changes.
     if (followUpContext.current && followUpContext.current !== followUpContextKey(value)) {

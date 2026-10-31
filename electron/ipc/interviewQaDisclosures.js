@@ -8,6 +8,9 @@
  * question as a Foundation card, a company card, or something new; wording
  * varies, so this is semantic, never a lexical match.
  */
+
+import { normalizeInterviewPublicUrl } from '../../src/utils/interviewUrlPrivacy.js';
+
 const MAX_DISCLOSURES = 20;
 const MAX_QUESTION = 300;
 const MAX_QUOTE = 600;
@@ -62,10 +65,14 @@ export function groundedDisclosures(value, rawResearch) {
     if (typeof item.sourceUrl !== 'string' || !/^https?:\/\//u.test(item.sourceUrl) || !source.includes(item.sourceUrl)) continue;
     if (typeof item.evidenceQuote !== 'string' || !item.evidenceQuote.trim() || !source.includes(item.evidenceQuote)) continue;
     const sourceDate = typeof item.sourceDate === 'string' && (item.sourceDate === 'unknown' || source.includes(item.sourceDate)) ? item.sourceDate : 'unknown';
+    // Grounded on the raw string, stored only in its public form (no query,
+    // fragment or credentials), like every other Interview URL.
+    const sourceUrl = normalizeInterviewPublicUrl(item.sourceUrl);
+    if (!sourceUrl) continue;
     const key = question.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    kept.push({ question, sourceUrl: item.sourceUrl, sourceDate, evidenceQuote: item.evidenceQuote.slice(0, MAX_QUOTE), kind: KINDS.includes(item.kind) ? item.kind : 'role' });
+    kept.push({ question, sourceUrl, sourceDate, evidenceQuote: item.evidenceQuote.slice(0, MAX_QUOTE), kind: KINDS.includes(item.kind) ? item.kind : 'role' });
     if (kept.length >= MAX_DISCLOSURES) break;
   }
   return kept;

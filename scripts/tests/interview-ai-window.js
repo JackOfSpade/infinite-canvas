@@ -423,6 +423,54 @@ export default [
     },
   },
   {
+    name: 'interview AI window: an ignored audio turn resumes the audio question it pre-empted',
+    async run() {
+      const h = await harness();
+      try {
+        h.controller.startListening(h.event);
+        const first = deferred(); const firstStarted = deferred();
+        h.queue.push({ pending: first, started: firstStarted });
+        const question = 'Tell me about leading a team.';
+        const lookup = h.endpoint(question); await firstStarted.promise;
+        h.queue.push({ result: { kind: 'not-question', cardId: 'none', confidence: 0.99 } });
+        h.queue.push({ result: pick('leadership') });
+        const filler = h.endpoint("Great. So a bit about the team: we're about twelve engineers.");
+        first.resolve(pick('leadership'));
+        await Promise.all([lookup, filler]);
+        assert.equal(h.session.display.question, question, 'the pre-empted question is answered, not lost');
+        assert.equal(h.session.display.answerCard?.id, 'leadership');
+        assert.equal(h.transports[0].matches.length, 3);
+        assert.equal(h.session.questionOrigin, null);
+      } finally { h.cleanup(); }
+    },
+  },
+  {
+    name: 'interview AI window: a resume never suppresses a newer live turn, and walks back through a chain of ignored turns',
+    async run() {
+      const h = await harness();
+      try {
+        h.controller.startListening(h.event);
+        const a = deferred(); const aStarted = deferred(); const b = deferred(); const bStarted = deferred();
+        const question = 'Tell me about leading a team.';
+        h.queue.push({ pending: a, started: aStarted });
+        const lookupA = h.endpoint(question); await aStarted.promise;
+        h.queue.push({ pending: b, started: bStarted });
+        const lookupB = h.endpoint("Great. So a bit about the team: we're about twelve engineers.");
+        a.resolve(pick('leadership')); await bStarted.promise;
+        h.queue.push({ result: { kind: 'not-question', cardId: 'none', confidence: 0.99 } });
+        h.queue.push({ result: { kind: 'not-question', cardId: 'none', confidence: 0.99 } });
+        h.queue.push({ result: pick('leadership') });
+        const lookupC = h.endpoint('Right, okay, and so the team works across three time zones.');
+        h.session.audioTurnId = 99; // a newer live turn started while C was matched
+        b.resolve({ kind: 'not-question', cardId: 'none', confidence: 0.99 });
+        await Promise.all([lookupA, lookupB, lookupC]);
+        assert.equal(h.session.display.question, question, 'two ignored turns still resume the original question');
+        assert.equal(h.session.display.answerCard?.id, 'leadership');
+        assert.notEqual(h.session.suppressedAudioTurn, 99, 'the resume does not suppress the newer live turn');
+      } finally { h.cleanup(); }
+    },
+  },
+  {
     name: 'interview AI window: audio not-question keeps the exact locked display and exposes the transcript notice',
     async run() {
       const h = await harness();

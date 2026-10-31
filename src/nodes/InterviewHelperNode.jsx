@@ -199,6 +199,8 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
   const [question, setQuestion] = useState('');
   const [urlDraft, setUrlDraft] = useState(data.interviewHelperJobUrl || '');
   const [urlError, setUrlError] = useState(null);
+  // A partial-success note from the last Prepare (e.g. the fact-check was skipped).
+  const [prepareNotice, setPrepareNotice] = useState(null);
   const [loaded, setLoaded] = useState({ key: null, status: 'idle', snapshot: null });
   const [unsupportedPlan, setUnsupportedPlan] = useState(null);
   const [showCanvasChooser, setShowCanvasChooser] = useState(false);
@@ -256,7 +258,7 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
   // Update during render rather than waiting for an effect: an async prepare
   // completion can otherwise win between a parent update and effect flush.
   preparationKeyRef.current = preparationKey;
-  const invalidatePreparation = useCallback(() => { preparationOperationRef.current += 1; }, []);
+  const invalidatePreparation = useCallback(() => { preparationOperationRef.current += 1; setPrepareNotice(null); }, []);
   const invalidateCareer = useCallback(() => { careerOperationRef.current += 1; }, []);
   const completeManualAiRun = useCallback(async (runId) => {
     if (!RUN_ID_RE.test(runId || '') || !window.electronAPI?.completeNonApiAiRun) throw new Error('Durable manual-AI cleanup is unavailable.');
@@ -495,6 +497,8 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
     persist({ interviewHelperCareerMode: 'none', interviewHelperSourceNodeId: null, interviewHelperSourceSnapshotId: null, ...clearCareerImportState(), ...clearDependentState() });
   }, [data.interviewHelperCareerMode, data.locked, invalidateCareer, invalidatePreparation, persist, recoverableCareerRunId, recoverablePreparationRunId, retireRecoverableManualAiRun]);
   const commitUrl = useCallback(async () => {
+    // Leaving an empty field that never held a URL is not an invalid entry.
+    if (!urlDraft.trim() && !data.interviewHelperJobUrl) { setUrlError(null); return; }
     const canonical = canonicalInterviewJobUrl(urlDraft);
     if (!canonical) { setUrlError('Enter a valid http or https job listing URL without credentials.'); return; }
     setUrlError(null); setUrlDraft(canonical);
@@ -521,6 +525,7 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
     try {
       const reply = await window.electronAPI[method](fromFolder ? { nodeId: id, token: folderToken } : { nodeId: id });
       if (token !== bundleOperationRef.current || reply?.cancelled) return false;
+      if (fromFolder && reply?.success === false) throw new Error(reply.error || 'The selected application could not be read. Try again.');
       const bundle = projectBundle(reply);
       if (!bundle) throw new Error('The selected application bundle could not be verified.');
       // Never overwrite a saved URL or a draft typed while selection was pending.
@@ -643,6 +648,7 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
     setManualAiBusy(true);
     localPreparationRunRef.current = manualAiRunId;
     persist({ interviewHelperPreparation: { status: 'preparing' }, interviewHelperPreparationRecordId: null, interviewHelperPreparationRunId: manualAiRunId, interviewHelperPreparationInputBinding: binding });
+    setPrepareNotice(null);
     try {
       const reply = await window.electronAPI.prepareInterviewBrief({ nodeId: id, snapshotId: activeSnapshotId, jobUrl, bundleArtifactId: bundle.artifactId, manualAiRunId });
       const brief = reply?.brief;
@@ -653,6 +659,7 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
       const briefRecordId = typeof reply?.briefRecordId === 'string' && DIGEST_RE.test(reply.briefRecordId) ? reply.briefRecordId : null;
       if (!briefRecordId || !validInterviewPreparationBrief(brief, { snapshotId: activeSnapshotId, bundleArtifactId: bundle.artifactId, bundleDigest: bundle.digest })) throw new Error(reply?.error || 'Preparation response was invalid.');
       persist({ interviewHelperPreparation: brief, interviewHelperPreparationRecordId: briefRecordId, interviewHelperPreparationInputBinding: binding, interviewHelperPreparationInputDigest: boundedText(reply?.inputDigest, 256) || null, interviewHelperPreparationRunId: null });
+      setPrepareNotice(boundedText(reply?.qaWarning, 300) || null);
       await retireTerminalManualAiRun('preparation', manualAiRunId);
     } catch {
       if (token === preparationOperationRef.current && operationKey === preparationKeyRef.current) persist({ interviewHelperPreparation: { status: 'failed', error: safePreparationRecoveryError() }, interviewHelperPreparationInputBinding: binding, interviewHelperPreparationRunId: manualAiRunId });
@@ -700,7 +707,7 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
         <label className="block text-[11px] text-white/60">Original job listing URL (editable)<input aria-label="Original job listing URL" className="nodrag mt-1 w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-xs" value={urlDraft} onChange={event => { setUrlDraft(event.target.value); setUrlError(null); }} onBlur={commitUrl} onKeyDown={event => { if (event.key === 'Enter') commitUrl(); }} disabled={data.locked} placeholder="https://company.example/jobs/…" /></label>
         {urlDirty && <button type="button" className="text-xs text-violet-200 underline disabled:opacity-50" onMouseDown={event => event.preventDefault()} onClick={revertUrlDraft} disabled={data.locked} aria-label="Revert job listing URL edit">Revert edit</button>}{data.interviewHelperJobUrl && <button type="button" className="text-xs text-violet-200 underline disabled:opacity-50" onClick={clearJobUrl} disabled={data.locked || manualAiBusy} aria-label="Clear saved job listing URL">Clear saved URL</button>}{urlError && <p role="alert" className="text-[11px] text-red-200">{urlError}</p>}
       </section>
-      <section className="space-y-2 border-t border-white/10 pt-3" aria-label="4. Interview preparation"><p className="text-[11px] font-medium text-violet-200">4. Interview preparation</p><p className="text-[11px] text-white/60">Prepare researches the job, checks the brief, then prepares spoken answers from your approved evidence. Finish preparation before the interview.</p>{urlDirty && <p role="status" className="text-[11px] text-amber-100">Finish or revert the edited job URL before using this brief.</p>}{candidatePrepBrief && !prepBrief && preparationVerificationStatus === 'loading' && <p role="status" className="text-[11px] text-white/55">Checking saved brief…</p>}{candidatePrepBrief && !prepBrief && preparationVerificationStatus === 'error' && <p role="alert" className="text-[11px] text-amber-100">Saved brief could not be verified; prepare again.</p>}<button type="button" className="nodrag w-full rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 disabled:opacity-50" onClick={prepare} disabled={!canPrepare || locallyPreparing}>{locallyPreparing ? 'Preparing…' : preparationStatus === 'preparing' || (preparationStatus === 'failed' && data.interviewHelperPreparationRunId) ? 'Resume preparation' : prepBrief ? 'Prepare again' : 'Prepare interview brief'}</button><p className="text-[11px] text-white/60">Fills empty answers; existing answers are kept.</p>{preparationStatus === 'failed' && <p role="alert" className="text-[11px] text-red-200">{preparationError}</p>}</section>
+      <section className="space-y-2 border-t border-white/10 pt-3" aria-label="4. Interview preparation"><p className="text-[11px] font-medium text-violet-200">4. Interview preparation</p><p className="text-[11px] text-white/60">Prepare researches the job, checks the brief, then prepares spoken answers from your approved evidence. Finish preparation before the interview.</p>{urlDirty && <p role="status" className="text-[11px] text-amber-100">Finish or revert the edited job URL before using this brief.</p>}{candidatePrepBrief && !prepBrief && preparationVerificationStatus === 'loading' && <p role="status" className="text-[11px] text-white/55">Checking saved brief…</p>}{candidatePrepBrief && !prepBrief && preparationVerificationStatus === 'error' && <p role="alert" className="text-[11px] text-amber-100">Saved brief could not be verified; prepare again.</p>}<button type="button" className="nodrag w-full rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 disabled:opacity-50" onClick={prepare} disabled={!canPrepare || locallyPreparing}>{locallyPreparing ? 'Preparing…' : preparationStatus === 'preparing' || (preparationStatus === 'failed' && data.interviewHelperPreparationRunId) ? 'Resume preparation' : prepBrief ? 'Prepare again' : 'Prepare interview brief'}</button><p className="text-[11px] text-white/60">Fills empty answers; existing answers are kept.</p>{preparationStatus === 'failed' && <p role="alert" className="text-[11px] text-red-200">{preparationError}</p>}{prepareNotice && preparationStatus !== 'failed' && <p role="status" className="text-[11px] text-amber-100">{prepareNotice}</p>}</section>
       <InterviewQaPanel nodeId={id} snapshotId={activeSnapshotId} refreshKey={`${preparationStatus}:${data.interviewHelperPreparationRecordId || ''}:${locallyPreparing}`} disabled={data.locked || manualAiBusy || locallyPreparing} />
       {prepBrief && <section className="space-y-2 rounded-lg border border-emerald-400/20 bg-emerald-500/5 p-2" aria-label="Interview preparation ready"><p className="text-xs font-medium text-emerald-100"><BriefcaseBusiness size={13} className="mr-1 inline" />{answerCardCount ? `${answerCardCount} prepared answers ready` : 'Research ready'}{prepBrief.role?.title ? ` · ${prepBrief.role.title}${prepBrief.role.company ? ` at ${prepBrief.role.company}` : ''}` : ''}</p><p className="text-[11px] text-white/70">{answerCardCount ? 'Prepared questions open a ready-to-say answer locally. Unmatched questions fall back to exact saved career cues.' : 'Research is prepared. Live questions retrieve exact saved career cues, not a complete spoken answer. Prepare again to add spoken answer cards.'}</p><p className="text-[11px] text-amber-100">Confirm this career source matches the application you submitted. This bundle is a captured copy; replace it after editing the documents.</p>{[['Researched themes', prepBrief.roleThemes], ['Likely questions', prepBrief.likelyQuestions], ['Submitted wording — reference, not career evidence', prepBrief.applicationPositioning], ['Source warnings', prepBrief.warnings]].map(([label, items]) => <div key={label}><p className="text-[10px] font-semibold uppercase text-white/45">{label}</p><p className="text-[11px] text-white/70">{items.slice(0, 3).map(briefItemText).filter(Boolean).join(' · ') || 'None'}</p></div>)}<button type="button" className="nodrag w-full rounded-md bg-emerald-500/20 px-2 py-1.5 text-xs text-emerald-50 disabled:opacity-50" onClick={launch} disabled={bundleLoadStatus !== 'ready' || !window.electronAPI?.launchInterviewWindow}><Rocket size={13} className="mr-1 inline" />Launch interview view</button>{launchError && <p role="alert" className="text-[11px] text-red-200">{launchError}</p>}</section>}
       <InterviewPracticePanel nodeId={id} briefRecordId={verifiedPreparation.recordId || null} snapshotId={activeSnapshotId || null} canonicalJobUrl={canonicalInterviewJobUrl(data.interviewHelperJobUrl) || null} bundleArtifactId={persistedBundle?.artifactId || null} bundleArtifactDigest={persistedBundle?.digest || null} ready={!!prepBrief && !!verifiedPreparation.recordId && bundleLoadStatus === 'ready' && !!activeSnapshotId && !!canonicalInterviewJobUrl(data.interviewHelperJobUrl)} disabled={data.locked || manualAiBusy || locallyPreparing} />

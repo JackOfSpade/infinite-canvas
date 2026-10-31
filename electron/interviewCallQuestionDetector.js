@@ -8,7 +8,7 @@ const MAX_RETIRED_SEGMENTS = 512;
 const FILLER_PHRASE = "(?:okay|ok|all right|alright|right|so|and|also|well|thanks(?: for that)?|thank you(?: for that)?|great|perfect|cool|nice|got it|i see|(?:that )?makes sense|that['’]s (?:helpful|great)|next one|um|uh|hmm|mm[- ]?hmm?|mhm|uh[- ]?huh)";
 // The offline gate may recognize neutral delivery language, but it must keep
 // detached factual scope (an employer, quantity or requirement) in the turn.
-const DELIVERY_PHRASE = `(?:thanks? for (?:sharing|explaining|clarifying)(?: that)?|thank you for (?:sharing|explaining|clarifying)(?: that)?|that (?:was|sounds?) (?:great|helpful|interesting|useful)|next|${FILLER_PHRASE})`;
+const DELIVERY_PHRASE = `(?:thanks? for (?:sharing|explaining|clarifying)(?: that)?|thank you for (?:sharing|explaining|clarifying)(?: that)?|that (?:was|sounds?) (?:great|helpful|interesting|useful)|next(?!\\s+one\\b)|${FILLER_PHRASE})`;
 const DELIVERY_PREFIX = new RegExp(`^(?:${DELIVERY_PHRASE}\\b[,;:.!?]*\\s+)+`, 'iu');
 const QUESTION_JOIN = /(?:[;,:]\s*|\s+and\s+)(?=(?:and\s+)?(?:how|what|why|when|where|which|who|can you|could you|would you|tell me|describe|walk me)\b)/iu;
 const SAFE_FILLER = new RegExp(`^(?:${FILLER_PHRASE}\\b[\\s,;:.!?]*)+$`, 'iu');

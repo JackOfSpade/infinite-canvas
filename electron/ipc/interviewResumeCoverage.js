@@ -23,14 +23,18 @@ function units(value) {
   }
   flush();
   const result = [];
-  for (const cleaned of blocks) for (const { segment } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(cleaned)) {
-    const next = spaces(segment);
-    if (!next) continue;
-    const previous = result.at(-1);
-    // Segmenter sometimes treats an abbreviation as a sentence. Never let
-    // that boundary discard an observation/negation or a colon continuation.
-    if (previous && /(?:\b(?:e\.g|i\.e|dr|mr|mrs|ms|prof|sr|jr|vs|etc)|\b[a-z])\.$|:$/iu.test(previous)) result[result.length - 1] += ` ${next}`;
-    else result.push(next);
+  for (const cleaned of blocks) {
+    // Blocks (bullets, paragraphs) are already separate; only join within one.
+    const start = result.length;
+    for (const { segment } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(cleaned)) {
+      const next = spaces(segment);
+      if (!next) continue;
+      const previous = result.length > start ? result.at(-1) : undefined;
+      // Segmenter sometimes treats an abbreviation as a sentence. Never let
+      // that boundary discard an observation/negation or a colon continuation.
+      if (previous && /(?:\b(?:e\.g|i\.e|dr|mr|mrs|ms|prof|sr|jr|vs|etc)|\b[a-z])\.$|:$/iu.test(previous)) result[result.length - 1] += ` ${next}`;
+      else result.push(next);
+    }
   }
   return result;
 }

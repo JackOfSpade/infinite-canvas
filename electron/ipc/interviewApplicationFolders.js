@@ -45,7 +45,11 @@ export async function applicationFolderJobUrl(folder) {
     const buffer = Buffer.alloc(MAX_LISTING_HEAD_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const head = buffer.subarray(0, bytesRead).toString('utf8');
-    const match = /^\*\*(?:Official posting|Listing) URL:\*\*\s*<?(https?:\/\/[^\s>]+)>?\s*$/mu.exec(head);
+    // The bundle writer emits `**Official posting:** <url>` and
+    // `**Listing URL:** <url>` (optionally ` (closed on Board)`); prefer the official one.
+    const official = /^\*\*Official posting:\*\*\s*<?(https?:\/\/[^\s>]+)>?\s*$/mu.exec(head);
+    const listing = /^\*\*Listing URL:\*\*\s*<?(https?:\/\/[^\s>]+)>?(?:\s+\(closed on [^)\r\n]{1,40}\))?\s*$/mu.exec(head);
+    const match = official || listing;
     return match ? match[1] : null;
   } catch { return null; }
   finally { await handle?.close().catch(() => {}); }
@@ -61,11 +65,11 @@ export async function enumerateApplicationFolders(root) {
         const listing = await regularFile(path.join(folder, LISTING_FILE));
         if (!listing) continue;
         folders.push({ folder, company, location, role, modifiedAt: listing.mtimeMs });
-        if (folders.length >= MAX_FOLDERS) break;
       }
     }
   }
-  return folders.sort((left, right) => right.modifiedAt - left.modifiedAt);
+  // Cap after sorting so the newest applications survive regardless of name.
+  return folders.sort((left, right) => right.modifiedAt - left.modifiedAt).slice(0, MAX_FOLDERS);
 }
 
 /**

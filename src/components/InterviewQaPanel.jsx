@@ -138,6 +138,7 @@ export function InterviewQaPanel({ nodeId, snapshotId, refreshKey, disabled = fa
     setLoading(true); setError('');
     try {
       const reply = await window.electronAPI.loadInterviewQa({ nodeId, snapshotId: snapshotId || null });
+      if (reply?.success === false) throw new Error(reply.error || 'Q&A response was invalid.');
       if (!Array.isArray(reply?.foundation?.cards) || !Array.isArray(reply?.company?.cards)) throw new Error('Q&A response was invalid.');
       if (request === sequence.current) setQa(reply);
     } catch (failure) { if (request === sequence.current) setError(failure?.message || 'Could not load Q&A. Try again.'); }
@@ -158,6 +159,7 @@ export function InterviewQaPanel({ nodeId, snapshotId, refreshKey, disabled = fa
       const method = { save: 'saveInterviewQaCard', add: 'addInterviewQaCard', delete: 'deleteInterviewQaCard' }[operation];
       if (!window.electronAPI?.[method]) throw new Error('Q&A editing is unavailable in this app version.');
       const reply = await window.electronAPI[method](operation === 'delete' ? { nodeId, scope, cardId: card.id } : { nodeId, scope, card });
+      if (reply?.success === false) throw new Error(`${reply.error || 'Q&A update failed.'} Your text has been kept.`);
       if (!Array.isArray(reply?.cards)) throw new Error('Q&A update response was invalid. Your text has been kept.');
       setQa(previous => ({ ...previous, [scope]: { ...previous[scope], ...reply } }));
       // Other helpers reload the one shared Foundation set; local edits use the

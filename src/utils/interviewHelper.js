@@ -180,6 +180,8 @@ export function interviewHelperTerms(value) {
   return String(value || '')
     .toLocaleLowerCase()
     .normalize('NFKD')
+    // Drop combining marks so "Müller" and an unaccented "Muller" share a term.
+    .replace(/\p{M}+/gu, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .split(/\s+/u)
     .map(canonicalWord)
@@ -424,12 +426,19 @@ function literalQuestionConstraints(transcript, cue) {
   const numericAnchors = String(transcript || '').match(/(?<![\p{L}\p{N}])\d+(?:[.,]\d+)?%?(?![\p{L}\p{N}])/gu) || [];
   const cueNumbers = new Set(String(cue || '').match(/(?<![\p{L}\p{N}])\d+(?:[.,]\d+)?%?(?![\p{L}\p{N}])/gu) || []);
   if (numericAnchors.some(number => !cueNumbers.has(number))) return false;
-  const negations = String(transcript || '').toLocaleLowerCase().match(/\b(?:not|never|without|no)\b|\b\p{L}+n['’]t\b/gu) || [];
-  const cueNegations = new Set(String(cue || '').toLocaleLowerCase().match(/\b(?:not|never|without|no)\b|\b\p{L}+n['’]t\b/gu) || []);
+  // Curly and straight apostrophes spell the same contraction.
+  const negationsOf = text => String(text || '').toLocaleLowerCase().replace(/[’‘ʼ]/gu, "'").match(/\b(?:not|never|without|no)\b|\b\p{L}+n't\b/gu) || [];
+  const negations = negationsOf(transcript);
+  const cueNegations = new Set(negationsOf(cue));
   return negations.every(negation => cueNegations.has(negation));
 }
 
 /** Rank exact career evidence. Category/intent is explanatory only and never scores a match. */
+// Canonicalized like question terms ("discuss" becomes "discus"); built lazily
+// because the term normalizer's tables are defined further down this module.
+let scopedScaffoldTerms = null;
+const SCOPED_SCAFFOLD_TERMS = { has: term => (scopedScaffoldTerms ||= new Set(interviewHelperTerms('handle explain describe discuss walk give share'))).has(term) };
+
 export function rankInterviewEvidence(question, input) {
   const analysis = typeof question === 'object' && Array.isArray(question?.terms) ? question : analyzeInterviewQuestion(question);
   const questionTerms = analysis.terms;
@@ -440,7 +449,7 @@ export function rankInterviewEvidence(question, input) {
   const employerTerms = new Set(arrayValue(profileFrom(input)?.roles)
     .filter(role => roleScope?.has(role.id)).flatMap(role => interviewHelperTerms(role.employer)));
   const scopedTopicTerms = questionTerms.filter(term => !employerTerms.has(term)
-    && !['handle', 'explain', 'describe', 'discuss', 'walk', 'give', 'share'].includes(term));
+    && !SCOPED_SCAFFOLD_TERMS.has(term));
 
   return Object.freeze(extractInterviewProfileEvidence(input)
     .filter(candidate => (roleScope === null || roleScope.has(candidate.roleId))
@@ -648,8 +657,24 @@ export function isDependentInterviewFollowUp(value) {
   return /^(?:what did you do(?: next)?|what happened(?: next)?|what (?:was|were) (?:the |your )?(?:outcome|result|results|impact)|what did you learn(?: from (?:it|that|this))?|how did you (?:resolve|handle|approach|do) (?:it|that|this)|why did (?:it|that|this) matter|what (?:trade-?offs?|decisions?) did you make|what would you do differently)$/u.test(sentence);
 }
 
+// A period after these is not a sentence end ("Acme Inc. during", "U.S. Army")
+// unless a question-shaped sentence follows ("left Acme Inc. How did you…").
+const ABBREVIATION_END = /(?:^|[\s(])(?:Inc|Corp|Ltd|Co|LLC|Dr|Mr|Mrs|Ms|Prof|St|Jr|Sr|vs|e\.g|i\.e|(?:[A-Z]\.)+[A-Z])\.$/u;
+const abbreviationContinues = (text, period, next) => ABBREVIATION_END.test(text.slice(0, period + 1)) && !isLikelyInterviewQuestion(text.slice(next));
+const isSentenceBoundary = (text, match) => match[0][0] !== '.' || !abbreviationContinues(text, match.index, match.index + match[0].length);
+
+function splitSentences(text) {
+  const parts = []; let start = 0;
+  for (const match of text.matchAll(/(?<=[.!])\s+/gu)) {
+    if (text[match.index - 1] === '.' && abbreviationContinues(text, match.index - 1, match.index + match[0].length)) continue;
+    parts.push(text.slice(start, match.index)); start = match.index + match[0].length;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
 function latestQuestionWithDependentFollowUp(text) {
-  const boundaries = [...text.matchAll(/[.!?]\s+/gu)];
+  const boundaries = [...text.matchAll(/[.!?]\s+/gu)].filter(match => isSentenceBoundary(text, match));
   const priorBoundary = boundaries.at(-1);
   const latestStart = priorBoundary ? priorBoundary.index + priorBoundary[0].length : 0;
   const latest = stringValue(text.slice(latestStart));
@@ -704,7 +729,7 @@ export function extractLatestInterviewQuestion(transcript) {
     // it owns the last question mark. Instructions and ordinary prose may
     // precede or follow the new request, so inspect each trailing sentence.
     const tail = stringValue(text.slice(questionEnd + 1).replace(/[\s.!]+$/u, ''));
-    const sentences = tail.split(/(?<=[.!])\s+/u);
+    const sentences = splitSentences(tail);
     for (let index = sentences.length - 1; index >= 0; index -= 1) {
       const candidate = stringValue(sentences[index]
         .replace(/^(?:(?:and|also|then|next)\b[\s,;:]*)+/iu, '')
@@ -728,10 +753,15 @@ export function extractLatestInterviewQuestion(transcript) {
   return isLikelyInterviewQuestion(candidate) ? candidate : null;
 }
 
+// Call logistics ("Share your screen", "Explain it") are not interview
+// requests; any other share/discuss/explain prompt is.
+const BARE_IMPERATIVE = /^(?:please\s+)?(?:briefly\s+)?(?:share|discuss|explain)\b(?=[\s.!]*$|\s+(?:(?:my|your|the|this|that|a|an)\s+)?(?:it|that|this|screen|window|link|document|doc|file|slides?|deck|calendar|invite|resume|cv|copy)\b)/iu;
+
 export function isLikelyInterviewQuestion(value) {
   const text = stringValue(value).toLocaleLowerCase()
-    .replace(/^(?:please\s+)?(?:briefly\s+)?(?=(?:tell me|describe|walk me|explain|give me|share)\b)/u, '');
-  return /^(?:tell me|describe|walk me|give me an example|how|what|why|when|where|which|who|can you|could you|have you|do you|did you|would you|are you|is there|salary|notice)\b/u.test(text);
+    .replace(/^(?:please\s+)?(?:briefly\s+)?(?=(?:tell me|describe|walk me|explain|give me|share|discuss)\b)/u, '');
+  return /^(?:tell me|describe|walk me|explain|share|discuss|give me an example|how|what|why|when|where|which|who|can you|could you|have you|do you|did you|would you|are you|is there|salary|notice)\b/u.test(text)
+    && !BARE_IMPERATIVE.test(text);
 }
 
 /**

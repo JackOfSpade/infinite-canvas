@@ -582,6 +582,8 @@ export default [
           const next = [...window.document.querySelectorAll('button')].find(item => item.textContent === 'Next');
           await bundle.module.act(async () => { next.click(); await flush(); });
           assert([...rail.children].filter(item => item.getAttribute('aria-current') === 'step').length === 1 && rail.children[1].getAttribute('aria-current') === 'step', 'Next must move marker without reordering the fixed rail');
+          await bundle.module.act(async () => { update({ ...DISPLAY, matching: { ...(DISPLAY.matching || {}), mode: 'recall', effectiveMode: 'recall' } }); await flush(); });
+          { const live = window.document.querySelector('[aria-label="Saved evidence rail"]'); assert(live && live.children[1].getAttribute('aria-current') === 'step', 'a matching/layout-only update must keep the current cue'); }
           await bundle.module.act(async () => { update({ ...DISPLAY, plan: { ...DISPLAY.plan, currentStep: 1 } }); await flush(); });
           assert(rail.children[1].getAttribute('aria-current') === 'step', 'main-process update event must safely replace display state');
           const nextQuestion = [...window.document.querySelectorAll('button')].find(item => item.textContent === 'Next question');

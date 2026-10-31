@@ -14,7 +14,8 @@ function outcomeShape(value) {
   if (OUTCOME_STATE.test(value)) return true;
   // "Improved a system" names work, not its effect. Require an achieved effect
   // on something concrete; a following purpose clause cannot supply it.
-  return [...value.matchAll(/\b(?:reduced|increased|improved|saved|eliminated|prevented|accelerated|grew)\s+([^.;]+)/giu)]
+  // A decimal point ("1.5 hours") does not end the effect object.
+  return [...value.matchAll(/\b(?:reduced|increased|improved|saved|eliminated|prevented|accelerated|grew)\s+((?:[^.;]|\.(?=\d))+)/giu)]
     .some(match => EFFECT_OBJECT.test(match[1].split(/\b(?:to|for|so|because)\b/iu)[0]));
 }
 function collaborationShape(value) {

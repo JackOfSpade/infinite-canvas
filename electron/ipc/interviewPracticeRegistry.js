@@ -92,7 +92,8 @@ export function createInterviewPracticeRegistry({ userDataPath, now = Date.now, 
   }
 
   async function cancel(nodeId) {
-    const updated = await store.updateInterviewPracticeSession({ userDataPath, nodeId, patch: { status: 'cancelled', cancelledAt: new Date(now()).toISOString() } });
+    const updated = await store.updateInterviewPracticeSession({ userDataPath, nodeId, patch: { status: 'cancelled', cancelledAt: new Date(now()).toISOString() },
+      when: session => session.status === 'armed' });
     if (updated) notify({ nodeId, kind: 'cancelled' });
     return status(nodeId);
   }

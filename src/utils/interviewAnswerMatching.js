@@ -15,7 +15,8 @@ function normalizedQuestion(value) {
 }
 
 const SPECIFIC_COMPONENTS = ['decision', 'outcome', 'lesson'];
-const QUESTION_SCAFFOLD = new Set(['explain', 'describe', 'discuss', 'walk', 'give', 'share']);
+// Canonicalized like question terms ("discuss" becomes "discus").
+const QUESTION_SCAFFOLD = new Set(interviewHelperTerms('explain describe discuss walk give share'));
 function numbers(value) { return value.match(/\d+(?:[.,]\d+)?%?/gu) || []; }
 
 function singleDroppedOrTransposedLetter(left, right) {

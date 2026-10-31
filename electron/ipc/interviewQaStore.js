@@ -191,6 +191,9 @@ export async function saveInterviewQaCard({ userDataPath, nodeId, scope, card })
     if (index < 0) throw new Error('This Q&A card no longer exists. Reload Q&A and try again.');
     const previous = store.cards[index];
     const edited = userCardFromPayload(card, { id: previous.id });
+    if (store.cards.some(item => item.id !== previous.id && normalizeQuestion(item.question) === normalizeQuestion(edited.question))) {
+      throw new Error('That question is already in this section.');
+    }
     store.cards[index] = { ...edited, origin: previous.origin || 'catalog', source: previous.source || null };
     await writeStore(userDataPath, scope, nodeId, store);
     return section(store, scope);
@@ -231,13 +234,30 @@ function generatedCard(card, { origin = 'catalog', source = null } = {}) {
   return { ...structuredClone(card), origin, source, author: 'generated', updatedAt: new Date().toISOString() };
 }
 
+const companyKey = value => normalizeQuestion(String(value || '').replace(/\b(?:incorporated|inc|llc|ltd|limited|corp|corporation|co|company|gmbh|plc)\b\.?/giu, ' '));
+const isCompanyPlaceholder = value => /^unknown(?: company)?$/iu.test(String(value || '').trim());
+
+function uniqueCardId(store, id, key) {
+  const taken = new Set(store.cards.map(item => item.id));
+  if (!taken.has(id)) return id;
+  for (let n = 1; ; n += 1) {
+    const candidate = `g-${crypto.createHash('sha256').update(n === 1 ? key : `${key}#${n}`).digest('hex').slice(0, 12)}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+}
+
 function fillCards(store, incoming) {
   const tombstoned = new Set(store.tombstones);
   for (const card of incoming) {
     const key = normalizeQuestion(card.question);
     if (tombstoned.has(key)) continue;
     const index = store.cards.findIndex(item => normalizeQuestion(item.question) === key);
-    if (index < 0) { if (store.cards.length < MAX_CARDS) store.cards.push(card); continue; }
+    if (index < 0) {
+      // Worker ids are only unique within one bank; another helper's fill may
+      // already hold the same id for a different question.
+      if (store.cards.length < MAX_CARDS) store.cards.push({ ...card, id: uniqueCardId(store, card.id, key) });
+      continue;
+    }
     const existing = store.cards[index];
     // FILL-ONLY: an answer that is not empty is kept, whoever wrote it.
     if (isAnsweredCard(existing)) {
@@ -261,14 +281,16 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   const links = [];
   for (const item of disclosureMapping) {
     const source = { url: item.sourceUrl, date: item.sourceDate || 'unknown', quote: item.evidenceQuote || '' };
+    // A company mapping whose card did not survive (e.g. emptied by the fact
+    // check) falls through to a needs-prep disclosed card.
+    const mapped = item.target === 'company' && item.cardQuestion
+      ? companyIncoming.find(entry => normalizeQuestion(entry.question) === normalizeQuestion(item.cardQuestion))
+      : null;
     if (item.target === 'foundation' && item.cardQuestion) {
       links.push({ foundationQuestion: item.cardQuestion, question: item.question, sourceUrl: item.sourceUrl });
-    } else if (item.target === 'company' && item.cardQuestion) {
-      const card = companyIncoming.find(entry => normalizeQuestion(entry.question) === normalizeQuestion(item.cardQuestion));
-      if (card) {
-        card.variants = [...new Set([...(card.variants || []), item.question])].slice(0, MAX_VARIANTS);
-        if (!card.source) { card.origin = 'disclosed'; card.source = source; }
-      }
+    } else if (mapped) {
+      mapped.variants = [...new Set([...(mapped.variants || []), item.question])].slice(0, MAX_VARIANTS);
+      if (!mapped.source) { mapped.origin = 'disclosed'; mapped.source = source; }
     } else if (!companyIncoming.some(entry => normalizeQuestion(entry.question) === normalizeQuestion(item.question))) {
       companyIncoming.push({ id: `disclosed-${crypto.createHash('sha256').update(normalizeQuestion(item.question)).digest('hex').slice(0, 12)}`,
         question: item.question, variants: [], headline: { text: '', evidenceIds: [], quotes: [] }, bullets: [],
@@ -283,8 +305,19 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   });
   await serialized(queueKey(userDataPath, 'company', nodeId), async () => {
     const store = await readStore(userDataPath, 'company', nodeId);
+    const incomingCompany = String(company || '').trim().slice(0, 200);
+    const priorCompany = String(store.company || '').trim();
+    // A placeholder or a legal-suffix spelling ("Acme" vs "Acme, Inc.") is the same company.
+    if (incomingCompany && priorCompany && !isCompanyPlaceholder(incomingCompany) && !isCompanyPlaceholder(priorCompany)
+      && companyKey(incomingCompany) !== companyKey(priorCompany)) {
+      // Re-pointed at another company: the old company's generated answers,
+      // links and deletions do not apply. The person's own cards stay.
+      store.cards = store.cards.filter(card => card.author === 'user');
+      store.foundationLinks = [];
+      store.tombstones = [];
+    }
     fillCards(store, companyIncoming);
-    if (company) store.company = String(company).slice(0, 200);
+    if (incomingCompany && !(isCompanyPlaceholder(incomingCompany) && priorCompany)) store.company = incomingCompany;
     const seen = new Set(store.foundationLinks.map(link => `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`));
     for (const link of links) {
       const key = `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`;
@@ -339,11 +372,13 @@ export async function saveInterviewPracticeSession({ userDataPath, nodeId, sessi
   });
 }
 
-export async function updateInterviewPracticeSession({ userDataPath, nodeId, patch }) {
+export async function updateInterviewPracticeSession({ userDataPath, nodeId, patch, when = null }) {
   return serialized(queueKey(userDataPath, 'company', nodeId), async () => {
     const store = await readStore(userDataPath, 'company', nodeId);
     const practice = practiceOf(store);
     if (!practice.session) return null;
+    // Checked inside the queue so a racing finish cannot be overwritten.
+    if (typeof when === 'function' && !when(practice.session)) return null;
     store.practice = { ...practice, session: { ...practice.session, ...patch } };
     await writeStore(userDataPath, 'company', nodeId, store);
     return store.practice.session;

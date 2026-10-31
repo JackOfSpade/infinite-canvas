@@ -21,6 +21,16 @@ const statements = [
 
 export default [
   {
+    name: 'interview résumé coverage: separate résumé blocks are never glued together',
+    run: () => {
+      const evidence = [{ id: 'dashboards', text: 'Built dashboards.' }];
+      const claims = [{ text: 'I built dashboards.', evidenceIds: ['dashboards'] }];
+      for (const resume of ['Ported to C.\u2029Built dashboards.', 'Moved to the U.S.\u2029Built dashboards.']) {
+        assert(deriveInterviewResumeConsistency(claims, evidence, resume), `matched: ${resume}`);
+      }
+    },
+  },
+  {
     name: 'interview résumé coverage: captured role headings and nonadjacent complete excerpts preserve a genuine match',
     run: () => {
       const quote = `Software Engineer · Aster Labs May 2023 – June 2026 · Remote ${FIRST} Data Engineer · Birch Works October 2021 – January 2023 · Remote ${SECOND}`;

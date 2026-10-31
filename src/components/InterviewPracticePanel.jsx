@@ -58,6 +58,22 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     const unsubscribe = api?.onInterviewPracticeUpdated ? api.onInterviewPracticeUpdated(event => { if (event?.nodeId === nodeId) { setHistoryIndex(-1); if (event.kind === 'feedback') setNotice(null); void reload(); } }) : () => {};
     return () => { clearTimeout(timer); unsubscribe(); };
   }, [api, nodeId, reload]);
+  // Expiry is computed on read and never pushed; re-read while a session is armed.
+  const armed = view?.session?.status === 'armed';
+  useEffect(() => {
+    if (!armed) return undefined;
+    const timer = setInterval(() => { void reload(); }, 60_000);
+    return () => clearInterval(timer);
+  }, [armed, reload]);
+  // Turning the handoff bridge on in Settings sends no event either.
+  const bridgeNotReady = !!view && !view.bridge?.ready;
+  useEffect(() => {
+    if (!bridgeNotReady) return undefined;
+    const timer = setInterval(() => { void reload(); }, 5000);
+    const onFocus = () => { void reload(); };
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); };
+  }, [bridgeNotReady, reload]);
 
   const start = async () => {
     if (!api?.startInterviewPractice || busy) return;

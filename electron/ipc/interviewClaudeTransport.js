@@ -96,7 +96,11 @@ export function createInterviewClaudeTransport({
         text = rejectionPrompt(error);
       }
     }
-    throw lastError || new Error('Claude did not return an acceptable reply.');
+    // Every attempt was a reply rejection (unparseable or invalid), not a
+    // transport failure: callers treat it like any exhausted validation.
+    const exhausted = lastError || new Error('Claude did not return an acceptable reply.');
+    if (exhausted && typeof exhausted === 'object' && !exhausted.code) exhausted.code = 'VALIDATION_FAILED';
+    throw exhausted;
   }
 
   return Object.freeze({

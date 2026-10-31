@@ -46,6 +46,14 @@ const liveTurns = [
 
 export default [
   {
+    name: 'interview call detector: a "Next one" lead-in is removed whole',
+    run() {
+      for (const text of ['Next one, tell me about leading a team.', 'Next one: tell me about leading a team.', 'Next one. Tell me about leading a team?']) {
+        assert(/^tell me about leading a team[.?]$/iu.test(classifyInterviewCallQuestion(text)?.question || ''), `no stray "one": ${text}`);
+      }
+    },
+  },
+  {
     name: 'interview call detector: ASR boundary artefacts are trimmed without stripping meaningful punctuation',
     run() {
       for (const [input, expected] of [

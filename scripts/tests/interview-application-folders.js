@@ -23,6 +23,14 @@ async function application(root, company, location, role, { mtime, url = null, l
 }
 
 export default [
+  { name: 'interview application folders: the job URL is read from the header lines the bundle writer emits, official first', async run() {
+    await workspace(async base => {
+      const header = async lines => { const folder = path.join(base, String(Math.random()).slice(2)); await fs.promises.mkdir(folder); await fs.promises.writeFile(path.join(folder, 'Original Job Listing.md'), `# Role\n\n${lines.join('\n')}\n\n---\n`); return applicationFolderJobUrl(folder); };
+      assert.equal(await header(['**Listing URL:** <https://www.linkedin.com/jobs/view/1>', '**Official posting:** <https://acme.example/careers/1>']), 'https://acme.example/careers/1');
+      assert.equal(await header(['**Listing URL:** <https://www.linkedin.com/jobs/view/2> (closed on LinkedIn)']), 'https://www.linkedin.com/jobs/view/2');
+      assert.equal(await header(['**Official posting:** <https://acme.example/careers/3>']), 'https://acme.example/careers/3');
+    });
+  } },
   { name: 'interview application folders: lists Company/Location/Role folders newest first, skipping dot dirs, symlinks and folders without a listing', async run() {
     await workspace(async base => {
       const root = path.join(base, APPLIED_JOBS_DIRECTORY);

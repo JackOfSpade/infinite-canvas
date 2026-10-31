@@ -104,6 +104,26 @@ senderEvent.nextId = 50_000;
 
 export default [
   {
+    name: 'interview helper: abbreviation periods, curly apostrophes and accents do not break matching',
+    run: () => {
+      assert(extractLatestInterviewQuestion('How did you reduce costs at Acme Inc. during the migration?') === 'How did you reduce costs at Acme Inc. during the migration?', 'an "Inc." period is not a sentence end');
+      assert(extractLatestInterviewQuestion('Thanks. How did you scale the U.S. Army logistics system?') === 'How did you scale the U.S. Army logistics system?', 'an initialism is not a sentence end, but a real one still is');
+      assert(extractLatestInterviewQuestion('So you left Acme Inc. How did you handle the transition?') === 'How did you handle the transition?', 'an abbreviation that really ends a sentence before a question still splits');
+      assert(extractLatestInterviewQuestion('Explain your approach to conflict resolution') === 'Explain your approach to conflict resolution', 'a bare Explain imperative is a question');
+      assert(extractLatestInterviewQuestion('Tell me about a time you led a team through conflict? Share your screen when ready.') === 'Tell me about a time you led a team through conflict?', 'logistics prose after the question does not supersede it');
+      assert(extractLatestInterviewQuestion('Tell me about your last role? Explain the difference between REST and GraphQL.') === 'Explain the difference between REST and GraphQL', 'a real Explain request after a question supersedes it');
+      assert(extractLatestInterviewQuestion('Tell me about yourself? Share a bit about your background.') === 'Share a bit about your background', 'a real Share request after a question supersedes it');
+      for (const logistics of ['Share your screen.', 'Great. Please share your screen', 'Explain it.']) assert(extractLatestInterviewQuestion(logistics) === null, `call logistics are not a question: ${logistics}`);
+      assert(extractLatestInterviewQuestion('Please discuss a time you failed') === 'Please discuss a time you failed', 'a Please discuss imperative is a question');
+      assert(JSON.stringify(interviewHelperTerms('Müller Citroën')) === JSON.stringify(interviewHelperTerms('Muller Citroen')), 'accented and plain spellings share terms');
+      const profile = { ...profileFixture(), achievements: [{ id: 'achievement-onboarding', roleId: 'role-acme', claim: "I didn't miss a single release deadline across twelve launches.", technologies: [], metrics: [], evidenceSegmentIds: ['segment-0003'] }], projects: [], skills: [] };
+      profile.roles = [{ ...profile.roles[0], achievementIds: ['achievement-onboarding'], skillIds: [] }];
+      for (const question of ["Tell me about a time you didn't miss a release deadline?", 'Tell me about a time you didn\u2019t miss a release deadline?']) {
+        assert(buildInterviewPlan({ question, profile, snapshotId: INTERVIEW_SNAPSHOT_ID }).status === 'supported', `negation matching ignores apostrophe style: ${question}`);
+      }
+    },
+  },
+  {
     name: 'interview helper: renderer and IPC canonicalize repaired job URLs identically',
     run: async () => {
       const { normalizeInterviewPreparationJobUrl } = await import('../../electron/ipc/interviewPreparation.js');
