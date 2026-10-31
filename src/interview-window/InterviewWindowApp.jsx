@@ -115,7 +115,7 @@ function Briefing({ briefing }) {
 
 // Everything but the speculative preview and matching/layout state, in a
 // key-order-independent form (a spread may move an absent key to the end).
-const displayIdentity = ({ preview: _preview, matching: _matching, ...rest }) => JSON.stringify(rest);
+const displayIdentity = state => JSON.stringify(Object.fromEntries(Object.entries(state).filter(([key]) => key !== 'preview' && key !== 'matching')));
 
 export function InterviewWindowApp() {
   const [brief, setBrief] = useState(null);
