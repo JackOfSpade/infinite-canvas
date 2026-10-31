@@ -18,7 +18,7 @@ export default [
       // Sanitized v4 shape: the old combined-speech check accepted a career
       // headline because an interest frame appeared in a later research bullet.
       const evidence = [
-        career('career-web', 'Built a full-stack web app for internal tools.'),
+        career('career-web', 'Built a full-stack intranet portal for back-office utilities.'),
         career('career-api', 'Built APIs for controlled access to a records database.'),
         { id: 'research-role', kind: 'research', text: 'End-to-end delivery with Product and Design.' },
         { id: 'research-company', kind: 'research', text: 'Example Company keeps its core product free to use.' },
@@ -26,7 +26,7 @@ export default [
       const line = (text, ...evidenceIds) => ({ text, evidenceIds });
       const v4Role = {
         question: 'Why are you interested in this role?', thinEvidence: true,
-        headline: line('I built a full-stack web app for the internal tools team.', 'career-web'),
+        headline: line('I built a full-stack intranet portal for the back-office utilities team.', 'career-web'),
         bullets: [line('This role interests me because of end-to-end delivery with Product and Design.', 'research-role'), line('I built APIs for controlled access to the records database.', 'career-api')],
       };
       assert(interviewQuestionFit(v4Role.question, [v4Role.headline, ...v4Role.bullets].map(item => item.text).join(' '), evidence), 'the earlier combined-speech shape explains the v4 escape');
@@ -38,7 +38,7 @@ export default [
       assert(preferredFailures.some(item => item.rule === 'INTERVIEW_ANSWER_WHY_CAREER_CONNECTION'), 'full career connections follow the reason');
       const fixedRole = { ...v4Role, thinEvidence: false,
         headline: line('This role interests me because of end-to-end delivery with Product and Design.', 'research-role'),
-        bullets: [line('I built a full-stack web app for internal tools.', 'career-web'), line('I built APIs for controlled access to a records database.', 'career-api')],
+        bullets: [line('I built a full-stack intranet portal for back-office utilities.', 'career-web'), line('I built APIs for controlled access to a records database.', 'career-api')],
       };
       assert(interviewWhyCardFailures(fixedRole, evidence).length === 0, 'research-led reason plus two own facts is expressible');
       const company = { ...fixedRole, question: 'Why are you interested in this company?',

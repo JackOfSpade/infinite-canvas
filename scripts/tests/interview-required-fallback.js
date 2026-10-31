@@ -8,7 +8,7 @@ const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 function contextFixture(text = 'I built an internal reporting hub. I tested the reporting workflow.') {
   const bundle = { digests: { applicationHtml: 'b'.repeat(64) }, applicationPositioning: { resume: '', coverLetter: '' } };
   const snapshot = { snapshotId: 'a'.repeat(64), profile: {
-    roles: [{ id: 'role-main', title: 'Software Engineer', employer: 'Sample Works', endDate: 'June 2026' }],
+    roles: [{ id: 'role-main', title: 'Software Engineer', employer: 'Sample Works', endDate: 'June 2025' }],
     achievements: [{ id: 'achievement-main', roleId: 'role-main', claim: text, evidenceSegmentIds: ['segment-0001'] }],
     projects: [], otherEvidence: [],
   } };

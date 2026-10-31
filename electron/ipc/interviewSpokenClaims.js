@@ -118,7 +118,7 @@ export function deriveInterviewCandorFlags(value) {
   const flags = new Set();
   if (/\binherit\w*\b|not (?:originally )?built by me|(?:built|designed|created) by (?:another|other|external)/iu.test(value)) flags.add('inherited');
   if (/co[- ]built|(?:with|together with) (?:the |an? )?(?:other|another) engineer/iu.test(value)) flags.add('co-built');
-  if (/some (?:built )?solo.*(?:others?|co[- ]built)/iu.test(value)) flags.add('mixed-solo-co-built');
+  if (/some (?:built )?solo.*(?:other|co[- ]built)/iu.test(value)) flags.add('mixed-solo-co-built');
   if (/\bteam\b[^.]*\b(?:chosen|chose|decided|selected)\b[^.]*\bbefore\b|(?:chosen|decided|selected) before I joined/iu.test(value)) flags.add('team-chosen');
   if (/\bretired\b/iu.test(value)) flags.add('retired');
   if (/\breplaced\b|retired in favor of/iu.test(value)) flags.add('replaced');

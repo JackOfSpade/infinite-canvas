@@ -168,8 +168,8 @@ export default [
     run: () => {
       const replay = JSON.parse(fs.readFileSync(new globalThis.URL('../fixtures/interview-answer-v4-replay.json', import.meta.url), 'utf8'));
       const context = contextFixture();
-      context.snapshot.profile.roles[0].endDate = 'June 2026';
-      context.snapshot.profile.roles[1].endDate = 'January 2023';
+      context.snapshot.profile.roles[0].endDate = 'June 2025';
+      context.snapshot.profile.roles[1].endDate = 'January 2022';
       const evidence = buildInterviewAnswerEvidence(context);
       const recent = evidence.find(item => item.entityId === 'synthetic-0');
       const earlier = evidence.find(item => item.entityId === 'achievement-3');
@@ -236,8 +236,8 @@ export default [
     name: 'interview answer bank: multi-evidence intro arc names verified employers and binds why to research',
     run: () => {
       const context = contextFixture();
-      context.snapshot.profile.roles[0].endDate = 'June 2026';
-      context.snapshot.profile.roles[1].endDate = 'January 2023';
+      context.snapshot.profile.roles[0].endDate = 'June 2025';
+      context.snapshot.profile.roles[1].endDate = 'January 2022';
       const value = responseFixture(context);
       value.cards[7].question = INTERVIEW_ANSWER_QUESTION_CATALOG[23].question;
       value.cards[7].variants = [...INTERVIEW_ANSWER_QUESTION_CATALOG[23].variants];

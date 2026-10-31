@@ -27,7 +27,7 @@ const assessment = { role: { title: 'Engineer', company: 'Example Studio', locat
 async function fixture(root) {
   const directory = path.join(root, 'bundle');
   await fs.promises.mkdir(directory);
-  await fs.promises.writeFile(path.join(directory, 'Application.html'), `<section data-ic-document-panel="resume"><main><h2>Experience</h2><h3>Engineer · Fixture Labs</h3><p>May 2023 – June 2026</p><ul>${snapshot.profile.achievements.map(item => `<li>${item.claim}</li>`).join('')}</ul></main></section>`);
+  await fs.promises.writeFile(path.join(directory, 'Application.html'), `<section data-ic-document-panel="resume"><main><h2>Experience</h2><h3>Engineer · Fixture Labs</h3><p>May 2022 – June 2025</p><ul>${snapshot.profile.achievements.map(item => `<li>${item.claim}</li>`).join('')}</ul></main></section>`);
   await fs.promises.writeFile(path.join(directory, 'Original Job Listing.md'), '# Engineer\n\n**Company:** Example Studio\n**Location:** Remote\n\n---\n\nRelease automation.');
   const captured = await captureInterviewPreparationBundle({ directory, userDataPath: root });
   const bundle = JSON.parse(await fs.promises.readFile(path.join(root, 'interview-helper-artifacts', `${captured.artifactId}.json`), 'utf8'));
@@ -207,8 +207,8 @@ export default [
         const directory = path.join(root, 'bundle');
         await fs.promises.mkdir(directory);
         await fs.promises.writeFile(path.join(directory, 'Application.html'), `<section data-ic-document-panel="resume"><main>
-          <h2>Experience</h2><h3>Software Engineer · Fixture Labs</h3><p>May 2023 – June 2026</p>
-          <ul><li><span>Built a full-stack web app with a</span><span>React and TypeScript frontend.</span></li>
+          <h2>Experience</h2><h3>Software Engineer · Fixture Labs</h3><p>May 2022 – June 2025</p>
+          <ul><li><span>Built a full-stack intranet portal with a</span><span>React and TypeScript frontend.</span></li>
           <li>Maintained scheduled data integrations for internal staff.</li></ul>
           <p>Observed:</p><ul><li>Led external delivery.</li></ul>
           <p>Contact fixture@example.test or 555-123-4567.</p>
@@ -217,9 +217,9 @@ export default [
         const captured = await captureInterviewPreparationBundle({ directory, userDataPath: root });
         const bundle = JSON.parse(await fs.promises.readFile(path.join(root, 'interview-helper-artifacts', `${captured.artifactId}.json`), 'utf8'));
         const resume = bundle.applicationPositioning.resume;
-        const quote = 'Built a full-stack web app with a React and TypeScript frontend.';
+        const quote = 'Built a full-stack intranet portal with a React and TypeScript frontend.';
         const evidence = [{ id: 'first-bullet', text: quote }];
-        assert(resume.includes(`June 2026\u2029${quote}`) && !/[\p{Cc}\p{Cf}]/u.test(resume), 'paragraph separators preserve role and item boundaries without allowing control characters');
+        assert(resume.includes(`June 2025\u2029${quote}`) && !/[\p{Cc}\p{Cf}]/u.test(resume), 'paragraph separators preserve role and item boundaries without allowing control characters');
         assert(resume.includes('[redacted email]') && resume.includes('[redacted phone]') && !resume.includes('fixture@example.test'), 'each captured semantic block retains identity redaction');
         assert(resumeCoverage(quote, evidence, resume, true, [{ text: `I ${quote[0].toLowerCase()}${quote.slice(1)}`, evidenceIds: ['first-bullet'] }]), 'the first genuine résumé statement matches despite preceding role metadata and inline wrapping');
         assert(!resumeCoverage('Led external delivery.', [{ id: 'observed', text: 'Led external delivery.' }], resume, true, [{ text: 'I led external delivery.', evidenceIds: ['observed'] }]), 'a paragraph boundary after an observation colon cannot detach its qualifier');

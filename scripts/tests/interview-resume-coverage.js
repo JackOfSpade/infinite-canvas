@@ -6,9 +6,9 @@ import { deriveInterviewResumeConsistency, resumeCoverage } from '../../electron
 const FIRST = 'Built a reporting dashboard in Python for internal staff.';
 const SECOND = 'Maintained scheduled data integrations for the support team.';
 const capturedResume = [
-  'Experience', 'Software Engineer · Aster Labs', 'May 2023 – June 2026 · Remote', FIRST,
+  'Experience', 'Software Engineer · Aster Labs', 'May 2022 – June 2025 · Remote', FIRST,
   'Created a deployment checklist for internal staff.',
-  'Data Engineer · Birch Works', 'October 2021 – January 2023 · Remote', SECOND,
+  'Data Engineer · Birch Works', 'October 2021 – January 2022 · Remote', SECOND,
 ].join('\u2029');
 const career = [
   { id: 'reporting', text: FIRST, roleContext: { title: 'Software Engineer', employer: 'Aster Labs' } },
@@ -33,7 +33,7 @@ export default [
   {
     name: 'interview résumé coverage: captured role headings and nonadjacent complete excerpts preserve a genuine match',
     run: () => {
-      const quote = `Software Engineer · Aster Labs May 2023 – June 2026 · Remote ${FIRST} Data Engineer · Birch Works October 2021 – January 2023 · Remote ${SECOND}`;
+      const quote = `Software Engineer · Aster Labs May 2022 – June 2025 · Remote ${FIRST} Data Engineer · Birch Works October 2021 – January 2022 · Remote ${SECOND}`;
       assert(resumeCoverage(quote, career, capturedResume, true, statements), 'flattened role/date headings and omitted unrelated bullets must retain exact complete-sentence coverage');
       assert(!resumeCoverage(`${SECOND} ${FIRST}`, career, capturedResume, true, statements), 'quoted excerpts must retain captured résumé order');
       assert(!resumeCoverage('a reporting dashboard in Python for internal staff.', career, capturedResume, true, statements), 'an excerpt cannot start inside a captured sentence');
