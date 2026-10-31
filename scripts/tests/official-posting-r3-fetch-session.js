@@ -55,6 +55,65 @@ function forwarded(pages, timer, starts = [], lookup = async () => [{ address: '
 
 export default [
   {
+    name: 'Snapshot sessions fetch recovered rows after three host failures while preserving pacing and coalescing',
+    async run() {
+      const timer = clock(); const starts = []; let calls = 0;
+      const failures = [new OfficialPostingFetchError('fetch-failed', { statusCode: 429 }),
+        new OfficialPostingFetchError('fetch-failed', { statusCode: 503 }), new OfficialPostingFetchError('fetch-timeout')];
+      const session = createOfficialPostingFetchSession({ now: timer.now, sleep: timer.sleep,
+        cacheFailures: false, hostBreaker: false, fetch: async url => {
+          starts.push(timer.now());
+          if (calls++ < failures.length) throw failures[calls - 1];
+          return page(url);
+        } });
+      try {
+        // Snapshot retries must reach the network, even for the same URL.
+        for (let index = 0; index < failures.length; index++) {
+          const failed = assert.rejects(session.fetch('https://jobs.northwind.test/first'), error => error === failures[index]);
+          await flush(); if (index) await timer.tick(250); await failed;
+        }
+        const outcome = promise => promise.then(value => ({ value }), error => ({ error }));
+        const recovered = outcome(session.fetch('https://jobs.northwind.test/later'));
+        const shared = outcome(session.fetch('https://jobs.northwind.test/later'));
+        await flush(); await timer.tick(249);
+        assert.equal(calls, 3, 'host pacing still delays the recovered row');
+        await timer.tick(1);
+        assert.ifError((await recovered).error);
+        assert.equal((await recovered).value.statusCode, 200, 'a later row reaches the recovered host');
+        assert.ifError((await shared).error);
+        assert.equal((await shared).value.statusCode, 200);
+        await session.fetch('https://jobs.northwind.test/later');
+        assert.deepEqual(starts, [0, 250, 500, 750], 'concurrent and cached readers share the successful transfer');
+        assert.equal(session.telemetry().breakerTrips, 0);
+      } finally { session.dispose(); }
+    },
+  },
+  {
+    name: 'Snapshot sessions discard failed redirect aliases while retaining recovered successful bytes',
+    async run() {
+      const timer = clock(); const starts = [];
+      const pages = { 'https://northwind.test/start': { status: 302, headers: { location: '/final' } },
+        'https://northwind.test/final': { status: 503 } };
+      const session = createOfficialPostingFetchSession({ fetch: forwarded(pages, timer, starts),
+        now: timer.now, sleep: timer.sleep, cacheFailures: false });
+      try {
+        const rejected = assert.rejects(session.fetch('https://northwind.test/start'), error => error.statusCode === 503);
+        await flush(); await timer.tick(250); await rejected;
+        pages['https://northwind.test/final'] = { body: 'Recovered posting' };
+        const recovered = session.fetch('https://northwind.test/final');
+        await timer.tick(250);
+        assert.equal((await recovered).body, 'Recovered posting');
+        const fromStart = session.fetch('https://northwind.test/start');
+        await timer.tick(250);
+        assert.equal((await fromStart).body, 'Recovered posting');
+        assert.deepEqual(starts.map(item => item.url), ['https://northwind.test/start', 'https://northwind.test/final',
+          'https://northwind.test/final', 'https://northwind.test/start']);
+        await session.fetch('https://northwind.test/final');
+        assert.equal(starts.length, 4, 'successful recovered bytes remain shared');
+      } finally { session.dispose(); }
+    },
+  },
+  {
     name: 'Official session shares host limits while separating rendered-resource admission from posting bytes',
     async run() {
       const calls = [];

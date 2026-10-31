@@ -1,0 +1,121 @@
+{"type": "helper-event", "receivedAtMs": 2721940.037458, "event": {"type": "status", "state": "preparing"}}
+{"type": "helper-event", "receivedAtMs": 2722367.809875, "event": {"type": "activity", "speaking": false}}
+{"type": "helper-event", "receivedAtMs": 2722490.038417, "event": {"type": "status", "state": "listening"}}
+{"type": "helper-event", "receivedAtMs": 2735168.488708, "event": {"type": "activity", "speaking": true}}
+{"type": "helper-event", "receivedAtMs": 2736069.731625, "event": {"startMs": 0, "endMs": 13560, "type": "transcript", "text": "All", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2736071.766792, "event": {"startMs": 0, "endMs": 13560, "type": "transcript", "text": "All right", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737025.108917, "event": {"startMs": 0, "endMs": 14520, "type": "transcript", "text": "All right,", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737025.9605, "event": {"startMs": 0, "endMs": 14520, "type": "transcript", "text": "All right, so", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737027.143792, "event": {"startMs": 0, "endMs": 14520, "type": "transcript", "text": "All right, so to", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737028.854917, "event": {"startMs": 0, "endMs": 14520, "type": "transcript", "text": "All right, so to get", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737029.883458, "event": {"startMs": 0, "endMs": 14520, "type": "transcript", "text": "All right, so to get things", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737669.356417, "event": {"speaking": false, "type": "activity"}}
+{"type": "helper-event", "receivedAtMs": 2737768.725333, "event": {"speaking": true, "type": "activity"}}
+{"type": "helper-event", "receivedAtMs": 2737986.339917, "event": {"startMs": 0, "endMs": 15480, "type": "transcript", "text": "All right, so to get things started", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2737987.170708, "event": {"startMs": 0, "endMs": 15480, "type": "transcript", "text": "All right, so to get things started,", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2738940.511292, "event": {"startMs": 0, "endMs": 16440, "type": "transcript", "text": "All right, so to get things started, could", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2738942.690542, "event": {"startMs": 0, "endMs": 16440, "type": "transcript", "text": "All right, so to get things started, could you", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2738943.805583, "event": {"startMs": 0, "endMs": 16440, "type": "transcript", "text": "All right, so to get things started, could you walk", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2738944.34575, "event": {"startMs": 0, "endMs": 16440, "type": "transcript", "text": "All right, so to get things started, could you walk me", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2738944.83025, "event": {"startMs": 0, "endMs": 16440, "type": "transcript", "text": "All right, so to get things started, could you walk me through", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2739896.632625, "event": {"startMs": 0, "endMs": 17400, "type": "transcript", "text": "All right, so to get things started, could you walk me through a", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2739897.432917, "event": {"startMs": 0, "endMs": 17400, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2739898.015417, "event": {"startMs": 0, "endMs": 17400, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2739898.81725, "event": {"startMs": 0, "endMs": 17400, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2740857.341875, "event": {"startMs": 0, "endMs": 18360, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2740858.276583, "event": {"startMs": 0, "endMs": 18360, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2740859.021792, "event": {"startMs": 0, "endMs": 18360, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2740860.114792, "event": {"startMs": 0, "endMs": 18360, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2740860.825958, "event": {"startMs": 0, "endMs": 18360, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2740862.143458, "event": {"startMs": 0, "endMs": 18360, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2741468.051083, "event": {"speaking": false, "type": "activity"}}
+{"type": "helper-event", "receivedAtMs": 2741818.429917, "event": {"startMs": 0, "endMs": 19320, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really pr", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2741819.957167, "event": {"startMs": 0, "endMs": 19320, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really proud", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2741821.012125, "event": {"startMs": 0, "endMs": 19320, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really proud of", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2741822.082292, "event": {"startMs": 0, "endMs": 19320, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really proud of.", "segmentId": "0", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2741915.912625, "event": {"startMs": 12420, "endMs": 18600, "type": "transcript", "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really proud of?", "segmentId": "12420", "final": true}}
+{"type": "detector-endpoint", "receivedAtMs": 2742314.322333, "endpoint": {"id": 1, "text": "All right, so to get things started, could you walk me through a project you have worked on that you are really proud of?", "question": "to get things started, could you walk me through a project you have worked on that you are really proud of?", "parts": ["could you walk me through a project you have worked on that you are really proud of?"], "dependent": false, "multipart": false, "reason": "question"}}
+{"type": "helper-event", "receivedAtMs": 2752169.006542, "event": {"type": "activity", "speaking": true}}
+{"type": "helper-event", "receivedAtMs": 2752664.429292, "event": {"startMs": 19480, "endMs": 30160, "type": "transcript", "text": "Great", "segmentId": "19480", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2752768.016208, "event": {"type": "activity", "speaking": false}}
+{"type": "helper-event", "receivedAtMs": 2752968.445083, "event": {"type": "activity", "speaking": true}}
+{"type": "helper-event", "receivedAtMs": 2753622.442208, "event": {"startMs": 19480, "endMs": 31120, "type": "transcript", "text": "Great.", "segmentId": "19480", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2753640.918125, "event": {"startMs": 28720, "endMs": 30280, "type": "transcript", "text": "Great.", "segmentId": "28720", "final": true}}
+{"type": "helper-event", "receivedAtMs": 2753641.075625, "event": {"startMs": 30280, "endMs": 31140, "type": "transcript", "text": "Thanks", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2753641.642917, "event": {"startMs": 30280, "endMs": 31140, "type": "transcript", "text": "Thanks for", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2754573.138167, "event": {"startMs": 30280, "endMs": 32080, "type": "transcript", "text": "Thanks for sh", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2754574.229125, "event": {"startMs": 30280, "endMs": 32080, "type": "transcript", "text": "Thanks for sharing", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2754574.721958, "event": {"startMs": 30280, "endMs": 32080, "type": "transcript", "text": "Thanks for sharing that", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2754575.383667, "event": {"startMs": 30280, "endMs": 32080, "type": "transcript", "text": "Thanks for sharing that.", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2755068.2015, "event": {"type": "activity", "speaking": false}}
+{"type": "helper-event", "receivedAtMs": 2755167.748917, "event": {"type": "activity", "speaking": true}}
+{"type": "helper-event", "receivedAtMs": 2755534.027, "event": {"startMs": 30280, "endMs": 33040, "type": "transcript", "text": "Thanks for sharing that. Now", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2755534.839958, "event": {"startMs": 30280, "endMs": 33040, "type": "transcript", "text": "Thanks for sharing that. Now,", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2756497.432167, "event": {"startMs": 30280, "endMs": 34000, "type": "transcript", "text": "Thanks for sharing that. Now, I", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2756498.317667, "event": {"startMs": 30280, "endMs": 34000, "type": "transcript", "text": "Thanks for sharing that. Now, I am", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2756499.134, "event": {"startMs": 30280, "endMs": 34000, "type": "transcript", "text": "Thanks for sharing that. Now, I am c", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2756499.692167, "event": {"startMs": 30280, "endMs": 34000, "type": "transcript", "text": "Thanks for sharing that. Now, I am curious", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2757456.229125, "event": {"startMs": 30280, "endMs": 34960, "type": "transcript", "text": "Thanks for sharing that. Now, I am curious.", "segmentId": "30280", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2757503.811708, "event": {"startMs": 30280, "endMs": 34000, "type": "transcript", "text": "Thanks for sharing that. Now, I am curious.", "segmentId": "30280", "final": true}}
+{"type": "helper-event", "receivedAtMs": 2757504.017, "event": {"startMs": 34000, "endMs": 35000, "type": "transcript", "text": "Why", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2757504.527958, "event": {"startMs": 34000, "endMs": 35000, "type": "transcript", "text": "Why are", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2757504.964333, "event": {"startMs": 34000, "endMs": 35000, "type": "transcript", "text": "Why are you", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2757505.839, "event": {"startMs": 34000, "endMs": 35000, "type": "transcript", "text": "Why are you interested", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2758438.288083, "event": {"startMs": 34000, "endMs": 35940, "type": "transcript", "text": "Why are you interested in", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2758438.94425, "event": {"startMs": 34000, "endMs": 35940, "type": "transcript", "text": "Why are you interested in working", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2758439.352917, "event": {"startMs": 34000, "endMs": 35940, "type": "transcript", "text": "Why are you interested in working at", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2759385.145292, "event": {"startMs": 34000, "endMs": 36880, "type": "transcript", "text": "Why are you interested in working at Dis", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2759386.007042, "event": {"startMs": 34000, "endMs": 36880, "type": "transcript", "text": "Why are you interested in working at Disc", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2759386.655625, "event": {"startMs": 34000, "endMs": 36880, "type": "transcript", "text": "Why are you interested in working at Discord specific", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2759387.293208, "event": {"startMs": 34000, "endMs": 36880, "type": "transcript", "text": "Why are you interested in working at Discord specifically", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2759568.432875, "event": {"type": "activity", "speaking": false}}
+{"type": "helper-event", "receivedAtMs": 2760088.606083, "event": {"startMs": 34000, "endMs": 37580, "type": "transcript", "text": "Why are you interested in working at Discord specifically?", "segmentId": "34000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2760125.499792, "event": {"startMs": 34000, "endMs": 36880, "type": "transcript", "text": "Why are you interested in working at Discord specifically?", "segmentId": "34000", "final": true}}
+{"type": "detector-endpoint", "receivedAtMs": 2760368.651333, "endpoint": {"id": 2, "text": "Great. Thanks for sharing that. Now, I am curious. Why are you interested in working at Discord specifically?", "question": "Now, I am curious. Why are you interested in working at Discord specifically?", "parts": ["Why are you interested in working at Discord specifically?"], "dependent": false, "multipart": false, "reason": "question"}}
+{"type": "helper-event", "receivedAtMs": 2775525.276708, "event": {"startMs": 49820, "endMs": 52580, "type": "transcript", "text": ".", "segmentId": "49820", "final": true}}
+{"type": "helper-event", "receivedAtMs": 2780325.777917, "event": {"startMs": 52580, "endMs": 57820, "type": "transcript", "text": ".", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2789669.173417, "event": {"speaking": true, "type": "activity"}}
+{"type": "helper-event", "receivedAtMs": 2790873.7725, "event": {"startMs": 52580, "endMs": 68380, "type": "transcript", "text": "That", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2790874.615375, "event": {"startMs": 52580, "endMs": 68380, "type": "transcript", "text": "That makes", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2790875.638833, "event": {"startMs": 52580, "endMs": 68380, "type": "transcript", "text": "That makes a", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2790877.698833, "event": {"startMs": 52580, "endMs": 68380, "type": "transcript", "text": "That makes a lot", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2790878.944833, "event": {"startMs": 52580, "endMs": 68380, "type": "transcript", "text": "That makes a lot of", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2790880.030583, "event": {"startMs": 52580, "endMs": 68380, "type": "transcript", "text": "That makes a lot of sense", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2791368.352583, "event": {"type": "activity", "speaking": false}}
+{"type": "helper-event", "receivedAtMs": 2791468.744542, "event": {"type": "activity", "speaking": true}}
+{"type": "helper-event", "receivedAtMs": 2791829.601417, "event": {"startMs": 52580, "endMs": 69340, "type": "transcript", "text": "That makes a lot of sense.", "segmentId": "52580", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2791847.574875, "event": {"startMs": 67100, "endMs": 68420, "type": "transcript", "text": "That makes a lot of sense.", "segmentId": "67100", "final": true}}
+{"type": "helper-event", "receivedAtMs": 2791847.734458, "event": {"startMs": 68420, "endMs": 69360, "type": "transcript", "text": "Our", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2792792.91875, "event": {"startMs": 68420, "endMs": 70300, "type": "transcript", "text": "Our team", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2792794.057542, "event": {"startMs": 68420, "endMs": 70300, "type": "transcript", "text": "Our team actually", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2792794.730625, "event": {"startMs": 68420, "endMs": 70300, "type": "transcript", "text": "Our team actually la", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2792795.125125, "event": {"startMs": 68420, "endMs": 70300, "type": "transcript", "text": "Our team actually laun", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2793771.746458, "event": {"startMs": 68420, "endMs": 71260, "type": "transcript", "text": "Our team actually launched something", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2793773.188042, "event": {"startMs": 68420, "endMs": 71260, "type": "transcript", "text": "Our team actually launched something pretty", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2794722.02875, "event": {"startMs": 68420, "endMs": 72220, "type": "transcript", "text": "Our team actually launched something pretty similar", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2794723.109083, "event": {"startMs": 68420, "endMs": 72220, "type": "transcript", "text": "Our team actually launched something pretty similar last", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2794723.763417, "event": {"startMs": 68420, "endMs": 72220, "type": "transcript", "text": "Our team actually launched something pretty similar last year", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2794968.211125, "event": {"type": "activity", "speaking": false}}
+{"type": "helper-event", "receivedAtMs": 2795489.767667, "event": {"startMs": 68420, "endMs": 73000, "type": "transcript", "text": "Our team actually launched something pretty similar last year.", "segmentId": "68420", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2795532.547375, "event": {"startMs": 68780, "endMs": 72260, "type": "transcript", "text": "Our team actually launched something pretty similar last year.", "segmentId": "68780", "final": true}}
+{"type": "detector-endpoint", "receivedAtMs": 2795824.33325, "endpoint": {"id": 3, "text": "That makes a lot of sense. Our team actually launched something pretty similar last year.", "question": null, "parts": [], "dependent": false, "multipart": false, "reason": "not-question"}}
+{"type": "helper-event", "receivedAtMs": 2804768.453, "event": {"speaking": true, "type": "activity"}}
+{"type": "helper-event", "receivedAtMs": 2805234.069708, "event": {"startMs": 73000, "endMs": 82740, "type": "transcript", "text": "Okay", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2806181.757, "event": {"startMs": 73000, "endMs": 83680, "type": "transcript", "text": "Okay,", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2806182.84, "event": {"startMs": 73000, "endMs": 83680, "type": "transcript", "text": "Okay, and", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2806183.630125, "event": {"startMs": 73000, "endMs": 83680, "type": "transcript", "text": "Okay, and what", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2807131.470667, "event": {"startMs": 73000, "endMs": 84640, "type": "transcript", "text": "Okay, and what are", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2807132.703417, "event": {"startMs": 73000, "endMs": 84640, "type": "transcript", "text": "Okay, and what are your", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2807133.652625, "event": {"startMs": 73000, "endMs": 84640, "type": "transcript", "text": "Okay, and what are your sal", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2807134.147833, "event": {"startMs": 73000, "endMs": 84640, "type": "transcript", "text": "Okay, and what are your salary", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2808113.776792, "event": {"startMs": 73000, "endMs": 85620, "type": "transcript", "text": "Okay, and what are your salary expect", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2808114.601667, "event": {"startMs": 73000, "endMs": 85620, "type": "transcript", "text": "Okay, and what are your salary expectations", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2808115.240042, "event": {"startMs": 73000, "endMs": 85620, "type": "transcript", "text": "Okay, and what are your salary expectations for", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2808115.616292, "event": {"startMs": 73000, "endMs": 85620, "type": "transcript", "text": "Okay, and what are your salary expectations for this", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2808868.50275, "event": {"speaking": false, "type": "activity"}}
+{"type": "helper-event", "receivedAtMs": 2809071.6205, "event": {"startMs": 73000, "endMs": 86560, "type": "transcript", "text": "Okay, and what are your salary expectations for this position", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2809073.339292, "event": {"startMs": 73000, "endMs": 86560, "type": "transcript", "text": "Okay, and what are your salary expectations for this position?", "segmentId": "73000", "final": false}}
+{"type": "helper-event", "receivedAtMs": 2809124.431875, "event": {"startMs": 82000, "endMs": 85900, "type": "transcript", "text": ". Okay, and what are your salary expectations?", "segmentId": "82000", "final": true}}
+{"type": "detector-endpoint", "receivedAtMs": 2809735.244583, "endpoint": {"id": 4, "text": ". Okay, and what are your salary expectations?", "question": ". Okay, and what are your salary expectations?", "parts": ["what are your salary expectations?"], "dependent": false, "multipart": false, "reason": "question"}}
+{"type": "helper-event", "receivedAtMs": 2824783.956625, "event": {"startMs": 99020, "endMs": 101780, "type": "transcript", "text": ".", "segmentId": "99020", "final": true}}
+{"type": "helper-event", "receivedAtMs": 2829563.877667, "event": {"startMs": 101780, "endMs": 107060, "type": "transcript", "text": ".", "segmentId": "101780", "final": false}}

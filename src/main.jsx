@@ -7,9 +7,11 @@ import './index.css'
 // side effects) into this compact child even though it never renders App.
 const isInterviewWindow = new URLSearchParams(window.location.search).get('view') === 'interview'
   && typeof window.interviewAPI?.getBrief === 'function';
-const activeView = lazy(() => isInterviewWindow
-  ? import('./interview-window/InterviewWindowApp.jsx')
-  : import('./App.jsx'));
+// Two separate lazy() calls, not one with a ternary: the bundler then emits each
+// view's own preload list, so the interview view's stylesheet actually loads.
+const activeView = isInterviewWindow
+  ? lazy(() => import('./interview-window/InterviewWindowApp.jsx'))
+  : lazy(() => import('./App.jsx'));
 
 createRoot(document.getElementById('root')).render(
   <StrictMode>

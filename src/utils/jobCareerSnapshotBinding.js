@@ -2,7 +2,7 @@
 // the authority boundary; fingerprints and projections can coincide across
 // distinct approved source records, so they are never sufficient cache keys.
 
-export const JOB_CAREER_QUERY_CACHE_STRATEGY_VERSION = 7;
+export const JOB_CAREER_QUERY_CACHE_STRATEGY_VERSION = 9;
 
 export function normalizedJobCareerSnapshotId(value) {
   const snapshotId = typeof value === 'string' ? value.trim() : '';
@@ -50,6 +50,7 @@ export function buildJobCareerQueryCacheKey({
   resumeFingerprint,
   jobPreferences,
   preferredLocation,
+  titles,
 } = {}) {
   const snapshotId = normalizedJobCareerSnapshotId(careerSnapshotId);
   // A missing/legacy id deliberately produces no reusable key. Callers must
@@ -61,5 +62,8 @@ export function buildJobCareerQueryCacheKey({
     resumeFingerprint: String(resumeFingerprint || ''),
     jobPreferences: String(jobPreferences || '').trim(),
     preferredLocation: String(preferredLocation || '').trim(),
+    // Re-analysis can change the resolved plan while the source and brief
+    // stay identical. Preserve the exact title order used by this scan.
+    titles: Array.isArray(titles) ? titles : [],
   });
 }

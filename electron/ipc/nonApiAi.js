@@ -28,6 +28,12 @@ const { app, ipcMain, shell } = electronPkg;
 export const NON_API_AI_TRANSPORT = 'non-api-ai';
 
 const pendingRequests = new Map();
+// Own a logical step before durable admission yields. Reload/resume callers
+// join this owner through settlement instead of issuing another worker task.
+const liveStepRequests = new Map();
+const handoffRendererObservers = new WeakMap();
+const PRESENTATION_RETRY_BASE_MS = 250;
+const PRESENTATION_RETRY_MAX_MS = 30_000;
 // The MCP bridge needs to notice a newly parked handoff before it can offer
 // its main-owned hub selector. Keep this deliberately content-free: listeners
 // are only told that the pending registry changed, never which request did.
@@ -269,6 +275,16 @@ export const SAFE_NON_API_AI_LOG_ERROR_CODES = new Set([
 
 const COMPARATIVE_MATCH_TASK = 'job-official-posting-match';
 const COMPARISON_KEY_RE = /^[a-f0-9]{64}$/u;
+const BRIDGE_REQUEUE_LIMIT = 2;
+const BRIDGE_RECOVERY_CODES = Object.freeze({
+  'worker-lost': 'BRIDGE_WORKER_LOST',
+  'worker-replaced': 'BRIDGE_WORKER_REPLACED',
+  'comparison-contaminated': 'BRIDGE_COMPARISON_CONTAMINATED',
+  'fresh-context-required': 'BRIDGE_FRESH_CONTEXT_REQUIRED',
+});
+function rendererUnavailableError() {
+  return Object.assign(new Error('The originating renderer is unavailable for the AI handoff.'), { code: 'BRIDGE_RENDERER_UNAVAILABLE' });
+}
 function comparisonError(kind = 'UNAVAILABLE') {
   return Object.assign(new Error(kind === 'INVALID'
     ? 'The comparative match run failed its validation retry.'
@@ -1192,7 +1208,7 @@ function clearDurableRuns(runIds) {
 }
 
 export function hasPendingNonApiAiRequestsForSender(sender) {
-  for (const record of pendingRequests.values()) if (record.sender === sender) return true;
+  for (const record of pendingRequests.values()) if ((record.presentationSender || record.sender) === sender) return true;
   return false;
 }
 
@@ -2309,12 +2325,12 @@ function publicRequest(record, validationError = record.validationError || null)
 }
 
 function send(record, channel, payload) {
-  if (!record.sender || record.sender.isDestroyed?.()) return false;
+  if (rendererIsGone(record)) return false;
   // `isDestroyed()` and `.send()` are not atomic: a window can begin closing
-  // between them. Treat a failed delivery exactly like a closed sender so the
-  // Promise created below cannot remain forever in `pendingRequests`.
+  // between them. A send failure alone does not prove the renderer is gone:
+  // navigation and renderer startup can temporarily prevent dock delivery.
   try {
-    record.sender.send(channel, payload);
+    (record.presentationSender || record.sender).send(channel, payload);
     return true;
   } catch (error) {
     logger.warn(`[Non-API AI] Could not deliver ${channel} for task '${record.task || 'unknown'}': ${error?.message || error}`);
@@ -2473,6 +2489,70 @@ function clearReissueTimer(record) {
   record.retryTimer = null;
 }
 
+function clearPresentationRetry(record) {
+  if (record.presentationRetryTimer) clearTimeout(record.presentationRetryTimer);
+  record.presentationRetryTimer = null;
+}
+
+function rendererIsGone(record) {
+  const sender = record.presentationSender || record.sender;
+  return !sender || sender.isDestroyed?.() || record.rendererStopped
+    || record.rendererUnavailable?.() === true;
+}
+
+function schedulePresentationRetry(record, deliveryKind) {
+  if (record.presentationRetryTimer || rendererIsGone(record)
+    || pendingRequests.get(record.requestId) !== record || record.signal?.aborted) return;
+  const delay = record.presentationRetryDelay || PRESENTATION_RETRY_BASE_MS;
+  record.presentationRetryDelay = Math.min(PRESENTATION_RETRY_MAX_MS, delay * 2);
+  record.presentationRetryTimer = setTimeout(() => {
+    record.presentationRetryTimer = null;
+    sendRequest(record, deliveryKind);
+  }, delay);
+  record.presentationRetryTimer.unref?.();
+}
+
+function observeHandoffRenderer(record) {
+  const sender = record.presentationSender || record.sender;
+  if (typeof sender?.on !== 'function') return;
+  let observer = handoffRendererObservers.get(sender);
+  if (!observer) {
+    observer = { records: new Set(), listeners: [], stopped: false };
+    const onGone = (message, code) => {
+      observer.stopped = true;
+      for (const pending of [...observer.records]) {
+        pending.rendererStopped = true;
+        clearPresentationRetry(pending);
+        // MCP workers serve independently of this display. Manual requests
+        // have no remaining transport once their originating process dies.
+        if (pending.handoffRoute === 'manual') abortPending(pending, Object.assign(new Error(message), { code }));
+      }
+    };
+    observer.listeners = [
+      ['destroyed', () => onGone('Sender destroyed', 'IPC_SENDER_DESTROYED')],
+      ['render-process-gone', () => onGone('Renderer stopped', 'IPC_RENDERER_STOPPED')],
+      ['dom-ready', () => {
+        observer.stopped = false;
+        for (const pending of observer.records) {
+          pending.rendererStopped = false;
+          pending.presentationRetryDelay = 0;
+          schedulePresentationRetry(pending, 'replay');
+        }
+      }],
+    ];
+    for (const [event, listener] of observer.listeners) sender.on(event, listener);
+    handoffRendererObservers.set(sender, observer);
+  }
+  record.rendererStopped = observer.stopped;
+  observer.records.add(record);
+  record.removeRendererListeners = () => {
+    observer.records.delete(record);
+    if (observer.records.size) return;
+    for (const [event, listener] of observer.listeners) sender.removeListener?.(event, listener);
+    handoffRendererObservers.delete(sender);
+  };
+}
+
 function schedulePacedReissue(record, deliveryKind = 'reissue') {
   clearReissueTimer(record);
   if (pendingRequests.get(record.requestId) !== record || record.signal?.aborted) return;
@@ -2508,9 +2588,16 @@ function schedulePacedReissue(record, deliveryKind = 'reissue') {
 
 function settle(record, outcome) {
   if (!pendingRequests.delete(record.requestId)) return;
+  releaseLiveStepAdmission(record.liveStepAdmission);
+  record.onHandoffAssigned = null;
+  record.routeObservers?.clear();
   clearReissueTimer(record);
+  clearPresentationRetry(record);
+  record.removeRendererListeners?.();
   releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
   if (record.abortListener) record.signal?.removeEventListener?.('abort', record.abortListener);
+  for (const [signal, listener] of record.adoptedAbortListeners || []) signal.removeEventListener?.('abort', listener);
+  record.adoptedAbortListeners?.clear();
   // `steppedBack` is a controlled, user-triggered rewind of the handoff (see
   // the step-back handler's settle() call) — not a failure. Without its own
   // branch it fell through to 'failed' and every navigational Back click was
@@ -2522,6 +2609,7 @@ function settle(record, outcome) {
 }
 
 function abortPending(record, reason) {
+  if (pendingRequests.get(record.requestId) !== record) return;
   const error = reason instanceof Error ? reason : new Error(String(reason || 'Manual AI request cancelled'));
   // An attempt-local abort can split/reissue work while its sibling handoffs
   // remain valid. Keep their explicit scope and committed contributions; full
@@ -2566,7 +2654,18 @@ function hostStagedAttachmentsPresentSync(record) {
   return true;
 }
 
+function notifyHandoffAssigned(record) {
+  if (pendingRequests.get(record.requestId) !== record || record.signal?.aborted) return false;
+  if (record.handoffAssigned) return true;
+  record.handoffAssigned = true;
+  const notify = record.onHandoffAssigned;
+  record.onHandoffAssigned = null;
+  try { notify?.(); } catch { /* timeout observers must not affect assignment */ }
+  return true;
+}
+
 function sendRequest(record, deliveryKind = 'initial') {
+  if (pendingRequests.get(record.requestId) !== record || record.signal?.aborted) return false;
   // Every delivery path (first show, dock-remount replay, paced re-issue)
   // funnels through here, so this is the one place that guarantees a shown
   // prompt never names a host-staged attachment that has disappeared.
@@ -2575,16 +2674,26 @@ function sendRequest(record, deliveryKind = 'initial') {
     return false;
   }
   if (send(record, 'non-api-ai-request', publicRequest(record))) {
+    clearPresentationRetry(record);
+    record.presentationRetryDelay = 0;
+    // The dock owns manual work as soon as it is presented. MCP work waits
+    // for a worker claim; replay and escalation share the one-shot receipt.
+    if (record.handoffRoute === 'manual') notifyHandoffAssigned(record);
     updateHandoffLifecycle(record, deliveryKind === 'replay'
       ? 'replayed'
       : deliveryKind === 'reissue' ? 'reissued' : 'delivered');
     emitNonApiAiEvent();
     return true;
   }
-  // A failed retry/replay delivery is just as terminal as a failed first
-  // delivery. Leaving it in the map would create a handoff no renderer can
-  // ever complete, particularly during a window-close race.
-  abortPending(record, new Error('Originating window closed before the Non-API AI request could be shown.'));
+  if (record.handoffRoute === 'manual' && rendererIsGone(record)) {
+    abortPending(record, rendererUnavailableError());
+    return false;
+  }
+  // Dock delivery is presentation for MCP work, and a transient gap even on
+  // the manual route. Keep the same request/proof/assignment/deadlines. Wake
+  // push observers even if the very first dock presentation failed.
+  schedulePresentationRetry(record, deliveryKind);
+  emitNonApiAiEvent();
   return false;
 }
 
@@ -2605,9 +2714,79 @@ function emitNonApiAiEvent() {
   }
 }
 
+function liveStepIdentity(runId, stepKey) {
+  return runId && stepKey ? JSON.stringify([runId, stepKey]) : null;
+}
+
+function releaseLiveStepAdmission(admission) {
+  for (const key of admission?.keys || []) {
+    if (liveStepRequests.get(key) === admission) liveStepRequests.delete(key);
+  }
+}
+
+function createLiveStepAdmission(key) {
+  if (!key) return null;
+  const admission = { keys: new Set([key]) };
+  admission.ready = new Promise((resolve, reject) => {
+    admission.resolve = resolve;
+    admission.reject = reject;
+  });
+  // An admission can fail before any resume caller has joined it.
+  void admission.ready.catch(() => {});
+  liveStepRequests.set(key, admission);
+  return admission;
+}
+
+function replayLiveStepAdmission(admission, value, route) {
+  admission?.resolve({ resultPromise: Promise.resolve(value), ...route });
+  releaseLiveStepAdmission(admission);
+  return value;
+}
+
+async function adoptLiveStep(admission, context, signal, onHandoffAssigned, comparisonGroup, comparisonRun, onHandoffRoute) {
+  const record = await admission.ready;
+  if (record.comparisonGroup && (record.comparisonGroup !== comparisonGroup || record.comparisonRun !== comparisonRun)) throw comparisonError();
+  notifyHandoffRoute(onHandoffRoute, record);
+  // Durable replay or acceptance may have completed while admission yielded.
+  // Its shared result remains authoritative even after registry removal.
+  if (!record.requestId || pendingRequests.get(record.requestId) !== record) return record.resultPromise;
+  if (typeof onHandoffRoute === 'function') record.routeObservers.add(onHandoffRoute);
+  context.retainHandoffRendererLifecycle?.(record.handoffRoute);
+  if (signal?.aborted) {
+    abortPending(record, signal.reason || new Error('Operation cancelled'));
+    return record.resultPromise;
+  }
+  if (signal && signal !== record.signal && !record.adoptedAbortListeners.has(signal)) {
+    const listener = () => abortPending(record, signal.reason || new Error('Operation cancelled'));
+    record.adoptedAbortListeners.set(signal, listener);
+    signal.addEventListener?.('abort', listener, { once: true });
+  }
+  if (typeof onHandoffAssigned === 'function') {
+    if (record.handoffAssigned) {
+      try { onHandoffAssigned(); } catch { /* timeout observers must not affect assignment */ }
+    } else {
+      const previous = record.onHandoffAssigned;
+      record.onHandoffAssigned = () => {
+        try { previous?.(); } catch { /* notify every attached caller */ }
+        onHandoffAssigned();
+      };
+    }
+  }
+  // Push claims are scoped to the original main-verified sender/window. Move
+  // only dock presentation, preserving that authorization and worker identity.
+  record.removeRendererListeners?.();
+  clearPresentationRetry(record);
+  record.presentationSender = context.sender;
+  record.rendererUnavailable = context.isHandoffRendererGone;
+  record.rendererStopped = false;
+  observeHandoffRenderer(record);
+  sendRequest(record, 'replay');
+  return record.resultPromise;
+}
+
 /**
- * Send a human handoff request and wait until the originating renderer submits
- * an accepted response. The returned value matches the legacy LLM facades:
+ * Issue or adopt one logical handoff and wait for its accepted response.
+ * Resumed callers share the live record's result. The value matches the LLM facades:
  * structured calls return parsed JSON and raw calls return raw text.
  */
 export async function requestNonApiAi({
@@ -2679,14 +2858,23 @@ export async function requestNonApiAi({
   initialResponse,
   comparisonGroup,
   comparisonRun,
+  onHandoffAssigned = null,
+  // Main-only diagnostic observer. Never persisted or exposed to a worker.
+  onHandoffRoute = null,
   signal,
 } = {}) {
+  const normalizedAttachmentPaths = cleanAttachmentPaths(attachmentPaths);
+  const prospectiveRoute = handoffRouteDiagnostic({
+    task, responseSchema, attachmentPaths: normalizedAttachmentPaths, attachmentReader,
+    requestKind, grounded: grounding === true, responseValidator, initialResponse,
+  });
+  notifyHandoffRoute(onHandoffRoute, prospectiveRoute);
   const comparative = task === COMPARATIVE_MATCH_TASK;
   if (comparative && (!comparisonMetadataValid(comparisonGroup, comparisonRun) || initialResponse || legacyReplay)) throw comparisonError();
   const context = getCurrentIpcRequestContext();
   const sender = context?.sender;
-  if (!sender || sender.isDestroyed?.()) {
-    throw new Error(`Non-API AI task '${task || 'unknown'}' requires an active originating renderer window.`);
+  if (!sender) {
+    throw rendererUnavailableError();
   }
   if (signal?.aborted) throw signal.reason || new Error('Operation cancelled');
 
@@ -2704,9 +2892,13 @@ export async function requestNonApiAi({
     progressUnits,
     measureProgressUnits: typeof measureProgressUnits === 'function' ? measureProgressUnits : null,
   };
-  const normalizedAttachmentPaths = cleanAttachmentPaths(attachmentPaths);
   const normalizedAttachmentIdentities = cleanAttachmentIdentities(attachmentIdentities, normalizedAttachmentPaths);
   const keyedAttachmentInputs = logicalAttachmentInputs(normalizedAttachmentPaths, normalizedAttachmentIdentities);
+  // Durable admission yields before the final route (which may restore a
+  // manual draft) is known. Protect prospective worker transport now, so a
+  // renderer loss during that read cannot cancel an otherwise live handoff.
+  // A restored manual route still checks confirmed renderer loss below.
+  context.retainHandoffRendererLifecycle?.(prospectiveRoute.handoffRoute);
   const batchMeta = cleanBatchMetadata(batch, batchTotal);
   // Stage 1: Build base prompt WITHOUT handoff code. This keeps durableStepKey
   // hashing byte-identical to prior versions so existing durable steps stay reachable.
@@ -2727,325 +2919,372 @@ export async function requestNonApiAi({
     attachmentPaths: keyedAttachmentInputs,
   });
   let stepKey = runId ? currentStepKeys.logicalKey : '';
-  // Read the durable step before choosing a code. Selection and reservation
-  // below are synchronous, so there is no await between checking live claims
-  // and reserving the winner for this new request.
-  const savedCurrent = await durableStepByLogicalOrRawKey(runId, currentStepKeys);
-  const savedStep = savedCurrent?.step || null;
-  if (comparative && savedStep && (savedStep.comparisonGroup !== comparisonGroup || savedStep.comparisonRun !== comparisonRun)) throw comparisonError();
-  if (comparative && Number(savedStep?.comparisonInvalidCount) >= 2) throw comparisonError('INVALID');
-  if (comparative && savedStep?.status === 'accepted' && !comparisonProofValid(savedStep.comparisonProof, comparisonRun)) throw comparisonError();
-  if (savedCurrent?.stepKey) stepKey = savedCurrent.stepKey;
-  let pendingLegacyReplay = null;
-  const validLegacyReplay = legacyReplay && typeof legacyReplay === 'object'
-    && typeof legacyReplay.prompt === 'string'
-    && legacyReplay.responseSchema && typeof legacyReplay.responseSchema === 'object'
-    && !Array.isArray(legacyReplay.responseSchema)
-    && typeof legacyReplay.responseValidator === 'function'
-    ? legacyReplay
-    : null;
-  // Check the current v2 key first. Only when it has no durable entry at all
-  // may an exact v1 alias be consulted; a pending v2 handoff must remain the
-  // user's active work, and a malformed v2 accepted response must be reissued
-  // as v2 rather than silently falling through to a positional contract.
-  if (!savedStep && validLegacyReplay && !(typeof initialResponse === 'string' && initialResponse)) {
-    const legacyBasePrompt = materializeNonApiPrompt({
-      prompt: validLegacyReplay.prompt, cachedPrefix, task,
-      responseSchema: validLegacyReplay.responseSchema, grounding, maxOutputTokens,
-      formulaSeed, requestKind, retryOnTruncation, handoffSettings,
-      hardenTaskPrompt: false,
-      includeStrictJsonSerializationCheck: false,
-    });
-    const legacyBatchMeta = cleanBatchMetadata(
-      Object.hasOwn(validLegacyReplay, 'batch') ? validLegacyReplay.batch : batch,
-      Object.hasOwn(validLegacyReplay, 'batchTotal') ? validLegacyReplay.batchTotal : batchTotal,
-    );
-    const legacyItemCount = cleanBatchNumber(
-      Object.hasOwn(validLegacyReplay, 'itemCount') ? validLegacyReplay.itemCount : itemCount,
-    );
-    const legacyStepKeys = durableStepKeys({
-      materializedPrompt: legacyBasePrompt, task, nodeId: context.nodeId || null,
-      ...legacyBatchMeta, itemCount: legacyItemCount,
-      attachmentPaths: keyedAttachmentInputs,
-    });
-    // First use the canonical v1 key, then the exact historical raw key when
-    // this newly generated boundary happens to reproduce it. Older random
-    // prompts cannot usually be reconstructed; the tightly-scoped metadata
-    // fallback below exists only for that legacy replay case.
-    let savedLegacy = await durableStepByLogicalOrRawKey(runId, legacyStepKeys);
-    if (!savedLegacy) {
-      savedLegacy = await uniqueAcceptedLegacyStepByMetadata(runId, {
-        task, ...legacyBatchMeta, itemCount: legacyItemCount,
+  const identity = liveStepIdentity(runId, stepKey);
+  const existingAdmission = identity && liveStepRequests.get(identity);
+  if (existingAdmission) return adoptLiveStep(existingAdmission, context, signal, onHandoffAssigned, comparisonGroup, comparisonRun, onHandoffRoute);
+  const admission = createLiveStepAdmission(identity);
+  let reservedCode = null;
+  let reservedId = null;
+  try {
+    // Read the durable step before choosing a code. Selection and reservation
+    // below are synchronous, so there is no await between checking live claims
+    // and reserving the winner for this new request.
+    const savedCurrent = await durableStepByLogicalOrRawKey(runId, currentStepKeys);
+    const savedStep = savedCurrent?.step || null;
+    if (comparative && savedStep && (savedStep.comparisonGroup !== comparisonGroup || savedStep.comparisonRun !== comparisonRun)) throw comparisonError();
+    if (comparative && Number(savedStep?.comparisonInvalidCount) >= 2) throw comparisonError('INVALID');
+    if (comparative && savedStep?.status === 'accepted' && !comparisonProofValid(savedStep.comparisonProof, comparisonRun)) throw comparisonError();
+    if (savedCurrent?.stepKey) stepKey = savedCurrent.stepKey;
+    let pendingLegacyReplay = null;
+    const validLegacyReplay = legacyReplay && typeof legacyReplay === 'object'
+      && typeof legacyReplay.prompt === 'string'
+      && legacyReplay.responseSchema && typeof legacyReplay.responseSchema === 'object'
+      && !Array.isArray(legacyReplay.responseSchema)
+      && typeof legacyReplay.responseValidator === 'function'
+      ? legacyReplay
+      : null;
+    // Check the current v2 key first. Only when it has no durable entry at all
+    // may an exact v1 alias be consulted; a pending v2 handoff must remain the
+    // user's active work, and a malformed v2 accepted response must be reissued
+    // as v2 rather than silently falling through to a positional contract.
+    if (!savedStep && validLegacyReplay && !(typeof initialResponse === 'string' && initialResponse)) {
+      const legacyBasePrompt = materializeNonApiPrompt({
+        prompt: validLegacyReplay.prompt, cachedPrefix, task,
+        responseSchema: validLegacyReplay.responseSchema, grounding, maxOutputTokens,
+        formulaSeed, requestKind, retryOnTruncation, handoffSettings,
+        hardenTaskPrompt: false,
+        includeStrictJsonSerializationCheck: false,
       });
-    }
-    const legacyStep = savedLegacy?.step;
-    if (legacyStep?.status === 'accepted') {
-      try {
-        const value = validateNonApiAiSubmission({
-          response: legacyStep.response,
+      const legacyBatchMeta = cleanBatchMetadata(
+        Object.hasOwn(validLegacyReplay, 'batch') ? validLegacyReplay.batch : batch,
+        Object.hasOwn(validLegacyReplay, 'batchTotal') ? validLegacyReplay.batchTotal : batchTotal,
+      );
+      const legacyItemCount = cleanBatchNumber(
+        Object.hasOwn(validLegacyReplay, 'itemCount') ? validLegacyReplay.itemCount : itemCount,
+      );
+      const legacyStepKeys = durableStepKeys({
+        materializedPrompt: legacyBasePrompt, task, nodeId: context.nodeId || null,
+        ...legacyBatchMeta, itemCount: legacyItemCount,
+        attachmentPaths: keyedAttachmentInputs,
+      });
+      // First use the canonical v1 key, then the exact historical raw key when
+      // this newly generated boundary happens to reproduce it. Older random
+      // prompts cannot usually be reconstructed; the tightly-scoped metadata
+      // fallback below exists only for that legacy replay case.
+      let savedLegacy = await durableStepByLogicalOrRawKey(runId, legacyStepKeys);
+      if (!savedLegacy) {
+        savedLegacy = await uniqueAcceptedLegacyStepByMetadata(runId, {
+          task, ...legacyBatchMeta, itemCount: legacyItemCount,
+        });
+      }
+      const legacyStep = savedLegacy?.step;
+      if (legacyStep?.status === 'accepted') {
+        try {
+          const value = validateNonApiAiSubmission({
+            response: legacyStep.response,
+            responseSchema: validLegacyReplay.responseSchema,
+            responseValidator: validLegacyReplay.responseValidator,
+            task,
+            // Explicit null, never an omission: a pre-code legacy row has no
+            // code to compare against, and that has to be stated rather than
+            // fall out of a missing argument.
+            expectedHandoffCode: normalizeHandoffCode(legacyStep.handoffCode),
+            requireHandoffCode: legacyStep.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+          });
+          // A validated durable hole was accepted in an earlier process. Count
+          // its explicit unit before this call returns so pending siblings on a
+          // resumed wave show the same accepted-submission truth.
+          commitDurableReplayProgress({ ...displayProgress, itemCount: legacyItemCount }, value, savedLegacy?.stepKey || null);
+          return replayLiveStepAdmission(admission, value, prospectiveRoute);
+        } catch (error) {
+          logger.warn(`[Non-API AI] Ignoring invalid legacy saved response for '${task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+        }
+      }
+      // Pending aliases are restored ONLY when their exact logical/raw key was
+      // found above. The metadata fallback is intentionally accepted-only: a
+      // matching pending row could belong to a different prompt with coincident
+      // batch metadata, and restoring its draft to this request would be unsafe.
+      if (legacyStep?.status === 'pending' && savedLegacy?.stepKey) {
+        pendingLegacyReplay = {
+          step: legacyStep,
+          stepKey: savedLegacy.stepKey,
+          basePrompt: legacyBasePrompt,
+          batchMeta: legacyBatchMeta,
+          itemCount: legacyItemCount,
+          prompt: validLegacyReplay.prompt,
           responseSchema: validLegacyReplay.responseSchema,
           responseValidator: validLegacyReplay.responseValidator,
-          task,
-          // Explicit null, never an omission: a pre-code legacy row has no
-          // code to compare against, and that has to be stated rather than
-          // fall out of a missing argument.
-          expectedHandoffCode: normalizeHandoffCode(legacyStep.handoffCode),
-          requireHandoffCode: legacyStep.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
-        });
-        // A validated durable hole was accepted in an earlier process. Count
-        // its explicit unit before this call returns so pending siblings on a
-        // resumed wave show the same accepted-submission truth.
-        commitDurableReplayProgress({ ...displayProgress, itemCount: legacyItemCount }, value, savedLegacy?.stepKey || null);
-        return value;
-      } catch (error) {
-        logger.warn(`[Non-API AI] Ignoring invalid legacy saved response for '${task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+        };
+        stepKey = savedLegacy.stepKey;
       }
     }
-    // Pending aliases are restored ONLY when their exact logical/raw key was
-    // found above. The metadata fallback is intentionally accepted-only: a
-    // matching pending row could belong to a different prompt with coincident
-    // batch metadata, and restoring its draft to this request would be unsafe.
-    if (legacyStep?.status === 'pending' && savedLegacy?.stepKey) {
-      pendingLegacyReplay = {
-        step: legacyStep,
-        stepKey: savedLegacy.stepKey,
-        basePrompt: legacyBasePrompt,
-        batchMeta: legacyBatchMeta,
-        itemCount: legacyItemCount,
-        prompt: validLegacyReplay.prompt,
-        responseSchema: validLegacyReplay.responseSchema,
-        responseValidator: validLegacyReplay.responseValidator,
-      };
-      stepKey = savedLegacy.stepKey;
+    const effectivePrompt = pendingLegacyReplay?.prompt ?? prompt;
+    const effectiveResponseSchema = pendingLegacyReplay?.responseSchema ?? responseSchema;
+    const effectiveResponseValidator = pendingLegacyReplay?.responseValidator ?? responseValidator;
+    const effectiveBasePrompt = pendingLegacyReplay?.basePrompt ?? basePrompt;
+    const effectiveBatchMeta = pendingLegacyReplay?.batchMeta ?? batchMeta;
+    const effectiveItemCount = pendingLegacyReplay?.itemCount ?? cleanBatchNumber(itemCount);
+    const effectiveSavedStep = pendingLegacyReplay?.step ?? savedStep;
+    // An exact legacy/raw alias can differ from today's logical key. Converge
+    // those callers on the same owner before allocating a code or writing state.
+    const effectiveIdentity = liveStepIdentity(runId, stepKey);
+    if (admission && effectiveIdentity !== identity) {
+      const aliasOwner = liveStepRequests.get(effectiveIdentity);
+      if (aliasOwner && aliasOwner !== admission) {
+        const owner = await aliasOwner.ready;
+        admission.resolve(owner);
+        releaseLiveStepAdmission(admission);
+        return adoptLiveStep(aliasOwner, context, signal, onHandoffAssigned, comparisonGroup, comparisonRun, onHandoffRoute);
+      }
+      admission.keys.add(effectiveIdentity);
+      liveStepRequests.set(effectiveIdentity, admission);
     }
-  }
-  const effectivePrompt = pendingLegacyReplay?.prompt ?? prompt;
-  const effectiveResponseSchema = pendingLegacyReplay?.responseSchema ?? responseSchema;
-  const effectiveResponseValidator = pendingLegacyReplay?.responseValidator ?? responseValidator;
-  const effectiveBasePrompt = pendingLegacyReplay?.basePrompt ?? basePrompt;
-  const effectiveBatchMeta = pendingLegacyReplay?.batchMeta ?? batchMeta;
-  const effectiveItemCount = pendingLegacyReplay?.itemCount ?? cleanBatchNumber(itemCount);
-  const effectiveSavedStep = pendingLegacyReplay?.step ?? savedStep;
-  const savedHandoffCode = normalizeHandoffCode(effectiveSavedStep?.handoffCode);
-  const handoffReservationId = crypto.randomUUID();
-  // A collision fallback selected when this step was first issued must be
-  // reused after restart, even though the conflicting live request is gone.
-  // If it is already live, retain its durable record but issue a fresh unique
-  // code; auto-consuming that saved stamped response would be unsafe.
-  const handoffCode = savedHandoffCode && !handoffCodeIsClaimed(savedHandoffCode)
-    ? savedHandoffCode
-    : deriveHandoffCode({
-      basePrompt: effectiveBasePrompt,
-      task,
-      nodeId: context.nodeId || null,
+    const savedHandoffCode = normalizeHandoffCode(effectiveSavedStep?.handoffCode);
+    const handoffReservationId = crypto.randomUUID();
+    // A collision fallback selected when this step was first issued must be
+    // reused after restart, even though the conflicting live request is gone.
+    // If it is already live, retain its durable record but issue a fresh unique
+    // code; auto-consuming that saved stamped response would be unsafe.
+    const handoffCode = savedHandoffCode && !handoffCodeIsClaimed(savedHandoffCode)
+      ? savedHandoffCode
+      : deriveHandoffCode({
+        basePrompt: effectiveBasePrompt,
+        task,
+        nodeId: context.nodeId || null,
+        batch: effectiveBatchMeta.batch,
+        batchTotal: effectiveBatchMeta.batchTotal,
+        itemCount: effectiveItemCount,
+        attachmentPaths: keyedAttachmentInputs,
+        pendingMap: pendingRequests,
+        reservationMap: handoffCodeReservations,
+        currentReservationId: handoffReservationId,
+      });
+    // JavaScript runs this synchronous reserve without yielding, closing the
+    // choose → pendingRequests registration gap for concurrent handoffs.
+    handoffCodeReservations.set(handoffCode, handoffReservationId);
+    reservedCode = handoffCode;
+    reservedId = handoffReservationId;
+    // Stage 2: Materialize final prompt with handoff header and schema injection.
+    const materializedPrompt = materializeNonApiPrompt({
+      prompt: effectivePrompt, cachedPrefix, task, responseSchema: effectiveResponseSchema, grounding, maxOutputTokens,
+      formulaSeed, requestKind, retryOnTruncation,
+      handoffSettings,
+      handoffCode,
       batch: effectiveBatchMeta.batch,
       batchTotal: effectiveBatchMeta.batchTotal,
-      itemCount: effectiveItemCount,
-      attachmentPaths: keyedAttachmentInputs,
-      pendingMap: pendingRequests,
-      reservationMap: handoffCodeReservations,
-      currentReservationId: handoffReservationId,
+      displayOnlyPromptSuffix,
     });
-  // JavaScript runs this synchronous reserve without yielding, closing the
-  // choose → pendingRequests registration gap for concurrent handoffs.
-  handoffCodeReservations.set(handoffCode, handoffReservationId);
-  // Stage 2: Materialize final prompt with handoff header and schema injection.
-  const materializedPrompt = materializeNonApiPrompt({
-    prompt: effectivePrompt, cachedPrefix, task, responseSchema: effectiveResponseSchema, grounding, maxOutputTokens,
-    formulaSeed, requestKind, retryOnTruncation,
-    handoffSettings,
-    handoffCode,
-    batch: effectiveBatchMeta.batch,
-    batchTotal: effectiveBatchMeta.batchTotal,
-    displayOnlyPromptSuffix,
-  });
-  // A Back action deliberately reissues a previously accepted prompt with its
-  // old response as an editable draft. Never auto-consume that accepted value.
-  if (savedStep?.status === 'accepted' && !(typeof initialResponse === 'string' && initialResponse)) {
-    try {
-      const value = validateNonApiAiSubmission({
-        response: savedStep.response,
-        responseSchema,
-        responseValidator,
-        task,
-        expectedHandoffCode: handoffCode,
-        requireHandoffCode: savedStep.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
-      });
-      commitDurableReplayProgress({ ...displayProgress, itemCount: effectiveItemCount }, value, savedCurrent?.stepKey || stepKey || null);
-      releaseHandoffCodeReservation(handoffCode, handoffReservationId);
-      return value;
-    } catch (error) {
-      logger.warn(`[Non-API AI] Ignoring invalid saved response for '${task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+    // A Back action deliberately reissues a previously accepted prompt with its
+    // old response as an editable draft. Never auto-consume that accepted value.
+    if (savedStep?.status === 'accepted' && !(typeof initialResponse === 'string' && initialResponse)) {
+      try {
+        const value = validateNonApiAiSubmission({
+          response: savedStep.response,
+          responseSchema,
+          responseValidator,
+          task,
+          expectedHandoffCode: handoffCode,
+          requireHandoffCode: savedStep.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+        });
+        commitDurableReplayProgress({ ...displayProgress, itemCount: effectiveItemCount }, value, savedCurrent?.stepKey || stepKey || null);
+        releaseHandoffCodeReservation(handoffCode, handoffReservationId);
+        return replayLiveStepAdmission(admission, value, prospectiveRoute);
+      } catch (error) {
+        logger.warn(`[Non-API AI] Ignoring invalid saved response for '${task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+      }
+      // This accepted step cannot be consumed, so it will be reissued below and
+      // keeps its reservation. A successful return is handled separately.
     }
-    // This accepted step cannot be consumed, so it will be reissued below and
-    // keeps its reservation. A successful return is handled separately.
-  }
 
-  const record = {
-    requestId: crypto.randomUUID(),
-    // Do not project request ids into bridge status. This opaque, per-request
-    // token lets only the dock that received this handoff recognise a bridge
-    // claim, without task- or node-level guessing.
-    bridgeClaimId: crypto.randomUUID(),
-    handoffCode,
-    handoffReservationId,
-    // A pre-enforcement legacy pending alias must remain code-optional when
-    // restored. The same applies to an exact-key pending step created before
-    // enforcement: finding it under today's key must not silently upgrade the
-    // response contract while the user already has that prompt open. Only a
-    // genuinely new step opts into the persisted requirement.
-    handoffCodeVerificationVersion: effectiveSavedStep
-      ? (effectiveSavedStep.handoffCodeVerificationVersion || null)
-      : HANDOFF_CODE_VERIFICATION_VERSION,
-    runId,
-    stepKey,
-    comparisonGroup: comparative ? comparisonGroup : null,
-    comparisonRun: comparative ? comparisonRun : null,
-    comparisonInvalidCount: comparative ? Math.min(2, cleanRetryRejectionCount(effectiveSavedStep?.comparisonInvalidCount)) : 0,
-    // Pending replay must earn fresh trusted bridge provenance again.
-    comparisonProof: null,
-    recoveryMode: context.manualAiRecoveryMode || null,
-    sender,
-    nodeId: context.nodeId || null,
-    channel: typeof context.channel === 'string' ? context.channel : null,
-    ...effectiveBatchMeta,
-    itemCount: effectiveItemCount,
-    itemsDone: cleanProgressCount(itemsDone),
-    itemsTotal: cleanProgressCount(itemsTotal),
-    progressScopeId,
-    progressUnitId,
-    progressUnits,
-    measureProgressUnits: typeof measureProgressUnits === 'function' ? measureProgressUnits : null,
-    queuedWorkForecast: cleanQueuedWorkForecast(queuedWorkForecast, progressScopeId),
-    matchCount: cleanProgressCount(matchCount),
-    measureResponseUnits: typeof measureResponseUnits === 'function' ? measureResponseUnits : null,
-    planItemCount: cleanProgressCount(planItemCount),
-    attemptKind: cleanAttemptKind(attemptKind),
-    rootBatchSize: cleanBatchNumber(rootBatchSize),
-    task,
-    responseSchema: effectiveResponseSchema,
-    responseValidator: typeof effectiveResponseValidator === 'function' ? effectiveResponseValidator : null,
-    // Keep the raw/structured distinction private and closed. The bridge may
-    // use it to choose one of two reviewed wire formats, but arbitrary caller
-    // request-kind strings never reach MCP tools, status, logs, or reports.
-    requestKind: requestKind === 'raw-text' ? 'raw-text' : 'structured-text',
-    grounded: grounding === true,
-    attachmentPaths: normalizedAttachmentPaths,
-    // Main-process closure only. Never persist it or expose paths/bytes through IPC.
-    attachmentReader: typeof attachmentReader === 'function' ? attachmentReader : null,
-    // True only for host-staged private copies: the handoff must never be shown
-    // (initially, replayed, or re-issued) while one of them is missing.
-    hostStagedAttachments: hostStagedAttachments === true && normalizedAttachmentPaths.length > 0,
-    canStepBack: canStepBack === true,
-    stepBackLabel: cleanStepBackLabel(stepBackLabel),
-    initialResponse: typeof initialResponse === 'string' && initialResponse
-      ? initialResponse
-      : (typeof effectiveSavedStep?.draft === 'string' ? effectiveSavedStep.draft : ''),
-    settling: false,
-    validationError: null,
-    validationCode: null,
-    validationDiagnostic: null,
-    // Pending handoffs keep their numbered problems across a relaunch
-    // (re-cleaned, so a hand-edited file cannot
-    // smuggle control characters or an over-long list into a prompt).
-    validationCorrectionDetails: effectiveSavedStep?.status === 'accepted'
-      ? []
-      : cleanCorrection({ correctionDetails: effectiveSavedStep?.validationCorrectionDetails }).lines,
-    // These are restored only from the durable step and are later discarded
-    // for local/manual routes. They carry no prompt or answer content.
-    retryRejectionCount: cleanRetryRejectionCount(effectiveSavedStep?.retryRejectionCount),
-    retryNotBefore: cleanRetryNotBefore(effectiveSavedStep?.retryNotBefore),
-    // Rule-shape digests and the escalation they caused survive a relaunch, so
-    // restarting the app cannot hand a non-converging handoff back to ChatGPT.
-    bridgeRejectionCauses: cleanBridgeRejectionCauses(effectiveSavedStep?.bridgeRejectionCauses),
-    bridgeEscalation: ['rejection_cap', 'worker_restart_cap'].includes(effectiveSavedStep?.bridgeEscalation) ? effectiveSavedStep.bridgeEscalation : null,
-    retryTimer: null,
-    signal,
-    materializedPrompt,
-    resolve: null,
-    reject: null,
-    abortListener: null,
-    lifecycle: null,
-    progressScopeKey: null,
-    progressCandidateToken: null,
-  };
-  // A resumed workflow stages its private attachment copies BEFORE it asks for
-  // anything, and an accepted step replays above without needing them.  If a
-  // handoff that does need one is nevertheless about to be shown while the file
-  // is gone (external cleanup, a stage pruned underneath a long wait), refuse it
-  // here: a prompt that tells the person to attach a file that does not exist is
-  // worse than an explicit failure that Continue can recover from.
-  if (record.hostStagedAttachments && !(await hostStagedAttachmentsPresent(record))) {
-    releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
-    throw hostStagedAttachmentMissingError();
-  }
-  // Immutable before the first renderer delivery/replay.  The dock must never
-  // consult a live bridge status packet to choose its workflow: an unavailable
-  // bridge is a setup state for reviewed text, not a reason to offer a second
-  // manual answer path. A handoff already returned to the person for repeating
-  // one rejected cause stays theirs.
-  record.handoffRoute = isMcpEligibleNonApiAiRecord(record)
-    && !(typeof record.initialResponse === 'string' && record.initialResponse.trim())
-    && !record.bridgeEscalation
-    ? 'mcp'
-    : 'manual';
-  if (comparative && record.handoffRoute !== 'mcp') {
-    releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
-    throw comparisonError();
-  }
-  if (record.handoffRoute !== 'mcp' || !record.runId || !record.stepKey) {
-    record.retryRejectionCount = 0;
-    record.retryNotBefore = null;
-  }
-  // Restored problems need a (generic, memory-only) rejection marker or the
-  // prompt would not render the correction block for the person.
-  if (record.validationCorrectionDetails.length) {
-    record.validationError = 'The previous answer did not pass the application\'s checks. The numbered problems below say what to fix.';
-  }
-  record.lifecycle = createHandoffLifecycle(record);
-  const progressScope = registerProgressRecord(record);
-  // A sibling can arrive after another batch's planned offset. Tell already
-  // visible requests about the newly discovered shared baseline; the current
-  // request will receive that same value in its first delivery below.
-  publishProgressScope(progressScope, record);
-
-  try {
-    await updateDurableStep(record, {
-      status: 'pending', draft: record.initialResponse || '', response: null,
-      retryRejectionCount: record.retryRejectionCount, retryNotBefore: record.retryNotBefore,
-    });
-  } catch (error) {
-    // This request never entered pendingRequests, so settle() cannot own its
-    // terminal receipt. Record the failed initial durable admission directly:
-    // otherwise its issued aggregate/detail row would look permanently pending
-    // after the reservation is released.
-    updateHandoffLifecycle(record, { settled: 'failed' });
-    releaseHandoffLifecycleAggregateWindow(record.lifecycle?.windowId);
-    unregisterProgressRecord(record);
+    const record = {
+      requestId: crypto.randomUUID(),
+      // Do not project request ids into bridge status. This opaque, per-request
+      // token lets only the dock that received this handoff recognise a bridge
+      // claim, without task- or node-level guessing.
+      bridgeClaimId: crypto.randomUUID(),
+      handoffCode,
+      handoffReservationId,
+      // A pre-enforcement legacy pending alias must remain code-optional when
+      // restored. The same applies to an exact-key pending step created before
+      // enforcement: finding it under today's key must not silently upgrade the
+      // response contract while the user already has that prompt open. Only a
+      // genuinely new step opts into the persisted requirement.
+      handoffCodeVerificationVersion: effectiveSavedStep
+        ? (effectiveSavedStep.handoffCodeVerificationVersion || null)
+        : HANDOFF_CODE_VERIFICATION_VERSION,
+      runId,
+      stepKey,
+      comparisonGroup: comparative ? comparisonGroup : null,
+      comparisonRun: comparative ? comparisonRun : null,
+      // Caller-owned timeout notification. This closure never enters durable,
+      // renderer, diagnostic or bridge response projections.
+      onHandoffAssigned: typeof onHandoffAssigned === 'function' ? onHandoffAssigned : null,
+      routeObservers: new Set(typeof onHandoffRoute === 'function' ? [onHandoffRoute] : []),
+      handoffAssigned: false,
+      comparisonInvalidCount: comparative ? Math.min(2, cleanRetryRejectionCount(effectiveSavedStep?.comparisonInvalidCount)) : 0,
+      // Pending replay must earn fresh trusted bridge provenance again.
+      comparisonProof: null,
+      bridgeRequeueCount: 0,
+      recoveryMode: context.manualAiRecoveryMode || null,
+      sender,
+      nodeId: context.nodeId || null,
+      channel: typeof context.channel === 'string' ? context.channel : null,
+      ...effectiveBatchMeta,
+      itemCount: effectiveItemCount,
+      itemsDone: cleanProgressCount(itemsDone),
+      itemsTotal: cleanProgressCount(itemsTotal),
+      progressScopeId,
+      progressUnitId,
+      progressUnits,
+      measureProgressUnits: typeof measureProgressUnits === 'function' ? measureProgressUnits : null,
+      queuedWorkForecast: cleanQueuedWorkForecast(queuedWorkForecast, progressScopeId),
+      matchCount: cleanProgressCount(matchCount),
+      measureResponseUnits: typeof measureResponseUnits === 'function' ? measureResponseUnits : null,
+      planItemCount: cleanProgressCount(planItemCount),
+      attemptKind: cleanAttemptKind(attemptKind),
+      rootBatchSize: cleanBatchNumber(rootBatchSize),
+      task,
+      responseSchema: effectiveResponseSchema,
+      responseValidator: typeof effectiveResponseValidator === 'function' ? effectiveResponseValidator : null,
+      // Keep the raw/structured distinction private and closed. The bridge may
+      // use it to choose one of two reviewed wire formats, but arbitrary caller
+      // request-kind strings never reach MCP tools, status, logs, or reports.
+      requestKind: requestKind === 'raw-text' ? 'raw-text' : 'structured-text',
+      grounded: grounding === true,
+      attachmentPaths: normalizedAttachmentPaths,
+      // Main-process closure only. Never persist it or expose paths/bytes through IPC.
+      attachmentReader: typeof attachmentReader === 'function' ? attachmentReader : null,
+      // True only for host-staged private copies: the handoff must never be shown
+      // (initially, replayed, or re-issued) while one of them is missing.
+      hostStagedAttachments: hostStagedAttachments === true && normalizedAttachmentPaths.length > 0,
+      canStepBack: canStepBack === true,
+      stepBackLabel: cleanStepBackLabel(stepBackLabel),
+      initialResponse: typeof initialResponse === 'string' && initialResponse
+        ? initialResponse
+        : (typeof effectiveSavedStep?.draft === 'string' ? effectiveSavedStep.draft : ''),
+      settling: false,
+      validationError: null,
+      validationCode: null,
+      validationDiagnostic: null,
+      // Pending handoffs keep their numbered problems across a relaunch
+      // (re-cleaned, so a hand-edited file cannot
+      // smuggle control characters or an over-long list into a prompt).
+      validationCorrectionDetails: effectiveSavedStep?.status === 'accepted'
+        ? []
+        : cleanCorrection({ correctionDetails: effectiveSavedStep?.validationCorrectionDetails }).lines,
+      // These are restored only from the durable step and are later discarded
+      // for local/manual routes. They carry no prompt or answer content.
+      retryRejectionCount: cleanRetryRejectionCount(effectiveSavedStep?.retryRejectionCount),
+      retryNotBefore: cleanRetryNotBefore(effectiveSavedStep?.retryNotBefore),
+      // Rule-shape digests and the escalation they caused survive a relaunch, so
+      // restarting the app cannot hand a non-converging handoff back to ChatGPT.
+      bridgeRejectionCauses: cleanBridgeRejectionCauses(effectiveSavedStep?.bridgeRejectionCauses),
+      bridgeEscalation: ['rejection_cap', 'worker_restart_cap'].includes(effectiveSavedStep?.bridgeEscalation) ? effectiveSavedStep.bridgeEscalation : null,
+      retryTimer: null,
+      presentationRetryTimer: null,
+      presentationRetryDelay: 0,
+      rendererStopped: false,
+      rendererUnavailable: context.isHandoffRendererGone,
+      removeRendererListeners: null,
+      signal,
+      liveStepAdmission: admission,
+      adoptedAbortListeners: new Map(),
+      materializedPrompt,
+      resolve: null,
+      reject: null,
+      abortListener: null,
+      lifecycle: null,
+      progressScopeKey: null,
+      progressCandidateToken: null,
+    };
+    // A resumed workflow stages its private attachment copies BEFORE it asks for
+    // anything, and an accepted step replays above without needing them.  If a
+    // handoff that does need one is nevertheless about to be shown while the file
+    // is gone (external cleanup, a stage pruned underneath a long wait), refuse it
+    // here: a prompt that tells the person to attach a file that does not exist is
+    // worse than an explicit failure that Continue can recover from.
+    if (record.hostStagedAttachments && !(await hostStagedAttachmentsPresent(record))) {
+      releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+      throw hostStagedAttachmentMissingError();
+    }
+    // Immutable before the first renderer delivery/replay.  The dock must never
+    // consult a live bridge status packet to choose its workflow: an unavailable
+    // bridge is a setup state for reviewed text, not a reason to offer a second
+    // manual answer path. A handoff already returned to the person for repeating
+    // one rejected cause stays theirs.
+    Object.assign(record, handoffRouteDiagnostic(record, { restoredDraft: !(typeof initialResponse === 'string' && initialResponse) }));
+    publishHandoffRoute(record);
+    if (comparative && record.handoffRoute !== 'mcp') {
+      releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+      throw comparisonError();
+    }
+    if (record.handoffRoute === 'manual' && rendererIsGone(record)) {
+      releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+      throw rendererUnavailableError();
+    }
+    context.retainHandoffRendererLifecycle?.(record.handoffRoute);
+    if (record.handoffRoute !== 'mcp' || !record.runId || !record.stepKey) {
+      record.retryRejectionCount = 0;
+      record.retryNotBefore = null;
+    }
+    // Restored problems need a (generic, memory-only) rejection marker or the
+    // prompt would not render the correction block for the person.
+    if (record.validationCorrectionDetails.length) {
+      record.validationError = 'The previous answer did not pass the application\'s checks. The numbered problems below say what to fix.';
+    }
+    record.lifecycle = createHandoffLifecycle(record);
+    const progressScope = registerProgressRecord(record);
+    // A sibling can arrive after another batch's planned offset. Tell already
+    // visible requests about the newly discovered shared baseline; the current
+    // request will receive that same value in its first delivery below.
     publishProgressScope(progressScope, record);
-    releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+
+    try {
+      await updateDurableStep(record, {
+        status: 'pending', draft: record.initialResponse || '', response: null,
+        retryRejectionCount: record.retryRejectionCount, retryNotBefore: record.retryNotBefore,
+      });
+    } catch (error) {
+      // This request never entered pendingRequests, so settle() cannot own its
+      // terminal receipt. Record the failed initial durable admission directly:
+      // otherwise its issued aggregate/detail row would look permanently pending
+      // after the reservation is released.
+      updateHandoffLifecycle(record, { settled: 'failed' });
+      releaseHandoffLifecycleAggregateWindow(record.lifecycle?.windowId);
+      unregisterProgressRecord(record);
+      publishProgressScope(progressScope, record);
+      releaseHandoffCodeReservation(record.handoffCode, record.handoffReservationId);
+      throw error;
+    }
+    record.resultPromise = new Promise((resolve, reject) => {
+      record.resolve = resolve;
+      record.reject = reject;
+      record.abortListener = () => abortPending(record, signal?.reason || new Error('Operation cancelled'));
+      pendingRequests.set(record.requestId, record);
+      releaseHandoffLifecycleAggregateWindow(record.lifecycle?.windowId);
+      // The durable-step reads/writes above yield to the event loop, so a
+      // cancellation can land between the entry check and this point — and
+      // addEventListener never fires on an already-aborted signal. Without this
+      // re-check the record stays in `pendingRequests` forever: abortNodeTasks has
+      // already dropped its controller, so even the dialog's Cancel finds nothing
+      // left to abort and the invoke never settles.
+      if (signal?.aborted) {
+        abortPending(record, signal.reason || new Error('Operation cancelled'));
+        return;
+      }
+      signal?.addEventListener?.('abort', record.abortListener, { once: true });
+      observeHandoffRenderer(record);
+      if (retryAfterMs(record) > 0) schedulePacedReissue(record, 'initial');
+      else sendRequest(record, 'initial');
+    });
+    admission?.resolve(record);
+    return record.resultPromise;
+  } catch (error) {
+    releaseHandoffCodeReservation(reservedCode, reservedId);
+    releaseLiveStepAdmission(admission);
+    admission?.reject(error);
     throw error;
   }
-  return new Promise((resolve, reject) => {
-    record.resolve = resolve;
-    record.reject = reject;
-    record.abortListener = () => abortPending(record, signal?.reason || new Error('Operation cancelled'));
-    pendingRequests.set(record.requestId, record);
-    releaseHandoffLifecycleAggregateWindow(record.lifecycle?.windowId);
-    // The durable-step reads/writes above yield to the event loop, so a
-    // cancellation can land between the entry check and this point — and
-    // addEventListener never fires on an already-aborted signal. Without this
-    // re-check the record stays in `pendingRequests` forever: abortNodeTasks has
-    // already dropped its controller, so even the dialog's Cancel finds nothing
-    // left to abort and the invoke never settles.
-    if (signal?.aborted) {
-      abortPending(record, signal.reason || new Error('Operation cancelled'));
-      return;
-    }
-    signal?.addEventListener?.('abort', record.abortListener, { once: true });
-    if (retryAfterMs(record) > 0) schedulePacedReissue(record, 'initial');
-    else sendRequest(record, 'initial');
-  });
 }
 
 /** Pure validation seam shared by the IPC submit handler and focused tests. */
@@ -3310,6 +3549,8 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       clearReissueTimer(record);
       record.handoffRoute = 'manual';
       record.bridgeEscalation = 'rejection_cap';
+      record.manualRoutingReason = 'rejection_cap';
+      publishHandoffRoute(record);
       record.retryRejectionCount = 0;
       record.retryNotBefore = null;
       updateHandoffLifecycle(record, { escalated: 'rejection_cap' });
@@ -3378,6 +3619,8 @@ export function returnBridgeHandoffToPerson({ requestId, reason } = {}) {
   clearReissueTimer(record);
   record.handoffRoute = 'manual';
   record.bridgeEscalation = reason;
+  record.manualRoutingReason = reason;
+  publishHandoffRoute(record);
   record.retryRejectionCount = 0;
   record.retryNotBefore = null;
   updateHandoffLifecycle(record, { escalated: reason });
@@ -3440,7 +3683,7 @@ export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence', 'job-taxonomy-classify',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
-  'interview-brief-research', 'interview-brief-assessment',
+  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
   'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const bridgeReleaseOneTasks = new Set(BRIDGE_RELEASE_ONE_TASKS);
@@ -3478,6 +3721,33 @@ export function isMcpEligibleNonApiAiRecord(record) {
   );
 }
 
+// Only these code-owned reasons leave the transport through the observer.
+// In particular, errors, prompts, drafts and attachment paths are never part
+// of routing diagnostics. A missing IPC context still reports the prospective
+// route, before admission fails, so it cannot be mistaken for a manual fallback.
+function handoffRouteDiagnostic(record, { restoredDraft = false } = {}) {
+  let manualRoutingReason = null;
+  if (!isMcpEligibleNonApiAiRecord(record)) {
+    manualRoutingReason = record.attachmentPaths.length ? 'attachment'
+      : !bridgeResponseFormat(record) ? 'unsupported-response-format' : 'unreviewed-task';
+  } else if (record.bridgeEscalation === 'rejection_cap' || record.bridgeEscalation === 'worker_restart_cap') {
+    manualRoutingReason = record.bridgeEscalation;
+  } else if (typeof record.initialResponse === 'string' && record.initialResponse.trim()) {
+    manualRoutingReason = restoredDraft ? 'restored-draft' : 'initial-response';
+  }
+  return { handoffRoute: manualRoutingReason ? 'manual' : 'mcp', manualRoutingReason };
+}
+
+function notifyHandoffRoute(observer, record) {
+  if (typeof observer !== 'function' || !['mcp', 'manual'].includes(record.handoffRoute)) return;
+  try { observer(Object.freeze({ route: record.handoffRoute, manualRoutingReason: record.manualRoutingReason || null })); }
+  catch { /* diagnostics cannot affect transport */ }
+}
+
+function publishHandoffRoute(record) {
+  for (const observer of record.routeObservers || []) notifyHandoffRoute(observer, record);
+}
+
 function bridgeWindowNodeKey(windowId, nodeId) {
   return Number.isInteger(windowId) && typeof nodeId === 'string' && nodeId
     ? `${windowId}\u0000${nodeId}`
@@ -3485,8 +3755,8 @@ function bridgeWindowNodeKey(windowId, nodeId) {
 }
 
 function bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs = null } = {}) {
-  // The window is closing or the workflow was cancelled: the record is about to settle.
-  if (!record.sender || record.sender.isDestroyed?.() || record.signal?.aborted) return 'ending';
+  // A bridge worker owns transport; losing the dock does not end its request.
+  if (!record.sender || record.signal?.aborted) return 'ending';
   if (record.settling) return 'settling';
   if (retryAfterMs(record) > 0) return 'cooldown';
   if (record.attachmentPaths.length > 0
@@ -3731,12 +4001,45 @@ export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTas
   });
 }
 
+// Trusted main-process seam. A prompt read can still be abandoned by a stale
+// source, so notify the caller only after push installs actual worker ownership.
+export function markBridgeableNonApiAiHandoffAssigned({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
+  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : null;
+  if (!record || record.handoffCode !== handoffCode || record.handoffRoute !== 'mcp'
+    || bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs })) return false;
+  return notifyHandoffAssigned(record);
+}
+
 // Trusted main-process seam only. An obsolete bridge cannot safely fall back
 // to a manual answer when it cannot attest to separate conversations.
 export function failBridgeableComparativeHandoff({ requestId, handoffCode } = {}) {
   const record = pendingRequests.get(requestId);
   if (!record?.comparisonGroup || record.handoffCode !== handoffCode) return false;
   abortPending(record, comparisonError());
+  return true;
+}
+
+// Trusted bridge ownership recovery, independent of response validation. Keep
+// the caller's promise, code, correction budget and assignment receipt intact:
+// neither a replacement nor a fresh chat grants another response timeout.
+export function requeueBridgeableNonApiAiHandoff({ requestId, handoffCode, reason } = {}) {
+  const record = pendingRequests.get(requestId);
+  const recoveryCode = BRIDGE_RECOVERY_CODES[reason];
+  if (!record || record.handoffCode !== handoffCode || record.handoffRoute !== 'mcp'
+    || !recoveryCode || record.settling || record.signal?.aborted) return false;
+  record.comparisonProof = null;
+  if (record.bridgeRequeueCount >= BRIDGE_REQUEUE_LIMIT) {
+    const error = Object.assign(new Error('The bridge handoff exhausted its worker recovery budget.'), {
+      code: 'BRIDGE_REQUEUE_EXHAUSTED', recoveryCode,
+    });
+    settle(record, { accepted: false, error: error.code });
+    record.reject(error);
+    return true;
+  }
+  record.bridgeRequeueCount += 1;
+  // No sendRequest here: recovery is a registry event, not another dock
+  // delivery whose transient failure could reject every reserved sibling.
+  emitNonApiAiEvent();
   return true;
 }
 
@@ -3778,7 +4081,9 @@ export function fallbackBridgeAttachmentToManual({ requestId, allowTasks, allowN
   if (!record || record.handoffRoute !== 'mcp' || record.attachmentPaths.length < 1
     || bridgeExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs })) return false;
   record.handoffRoute = 'manual';
-  emitNonApiAiEvent();
+  record.manualRoutingReason = 'attachment';
+  publishHandoffRoute(record);
+  sendRequest(record, 'reissue');
   return true;
 }
 
@@ -3835,13 +4140,13 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   // its same-frame IPC invocation is still valid. Replay only records owned by
   // this exact sender so it never exposes another window's career data.
   // Sending before returning makes the invoke a synchronization point for the
-  // renderer: it subscribes first, then calls this handler. Main-frame reloads
-  // abort their old invocation in ipcUtils instead of replaying it. Map
-  // iteration preserves handoff creation order.
+  // renderer: it subscribes first, then calls this handler. Navigation keeps
+  // admitted handoffs alive, and repeated replays preserve request identity.
+  // Map iteration preserves handoff creation order.
   ipcMain.handle('replay-pending-non-api-ai-requests', async (event) => {
     let count = 0;
     for (const record of pendingRequests.values()) {
-      if (record.sender !== event.sender) continue;
+      if ((record.presentationSender || record.sender) !== event.sender) continue;
       if (sendRequest(record, 'replay')) count += 1;
     }
     return { count };
@@ -3858,7 +4163,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const record = pendingRequests.get(requestId);
     if (!record) return { accepted: false, validationErrors: ['This Non-API AI request is no longer pending.'] };
-    if (event.sender !== record.sender) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
+    if (event.sender !== (record.presentationSender || record.sender)) return { accepted: false, validationErrors: ['This response belongs to a different window.'] };
     if (record.handoffRoute === 'mcp') return { accepted: false, validationErrors: ['This handoff is handled through the Infinite Canvas ChatGPT plugin.'] };
     if (record.settling) return { accepted: false, validationErrors: ['This response is already being submitted.'] };
     // `reason` is internal (the in-process bridge reads it); the renderer contract stays
@@ -3871,7 +4176,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const record = pendingRequests.get(requestId);
     if (!record) return { steppedBack: false, error: 'This Non-API AI request is no longer pending.' };
-    if (event.sender !== record.sender) return { steppedBack: false, error: 'This response belongs to a different window.' };
+    if (event.sender !== (record.presentationSender || record.sender)) return { steppedBack: false, error: 'This response belongs to a different window.' };
     if (record.handoffRoute === 'mcp') return { steppedBack: false, error: 'This handoff is handled through the Infinite Canvas ChatGPT plugin.' };
     if (record.settling) return { steppedBack: false, error: 'This response is already being saved.' };
     if (!record.canStepBack) return { steppedBack: false, error: 'There is no previous handoff step available for this request.' };
@@ -3891,15 +4196,17 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   ipcMain.handle('cancel-non-api-ai-request', async (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
     if (!record) return { cancelled: false };
-    if (event.sender !== record.sender) return { cancelled: false };
+    if (event.sender !== (record.presentationSender || record.sender)) return { cancelled: false };
     // A manual cancellation is a cancellation of the owning job operation, not
     // merely one prompt. In particular, scoring must not mistake it for a
     // recoverable model failure and split/reissue more prompts.
     if (record.nodeId) {
       const acknowledgement = await abortNodeTasksAndWait(
         record.nodeId,
-        record.sender,
+        event.sender,
         cancellationError('Manual AI job cancelled', 'manual-ai-cancelled'),
+        30_000,
+        { manualAiRunIds: [record.runId] },
       );
       // Abort acknowledgement retains every discovered run for a renderer-crash
       // retry. Clearing this prompt's durable transport state is not the
@@ -3924,7 +4231,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   // The bridge list consults manualIntent before both read and submit.
   ipcMain.handle('claim-non-api-ai-manual', (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
-    if (!record || event.sender !== record.sender || record.settling) return { claimed: false, copied: false };
+    if (!record || event.sender !== (record.presentationSender || record.sender) || record.settling) return { claimed: false, copied: false };
     if (record.handoffRoute === 'mcp') return { claimed: false, copied: false, code: 'MCP_ROUTE' };
     const prompt = promptForRetry(record, record.validationError || null).prompt;
     if (typeof prompt !== 'string' || !prompt || typeof clipboard?.writeText !== 'function') {
@@ -3941,7 +4248,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
   ipcMain.handle('update-non-api-ai-draft', async (event, args = {}) => {
     const record = pendingRequests.get(args?.requestId);
     if (!record) return { saved: false, code: 'REQUEST_SETTLED' };
-    if (event.sender !== record.sender) return { saved: false, code: 'REQUEST_OWNER_MISMATCH' };
+    if (event.sender !== (record.presentationSender || record.sender)) return { saved: false, code: 'REQUEST_OWNER_MISMATCH' };
     // An acceptance can still fail its durable write. Preserve the retryable
     // draft until that operation actually settles, rather than treating an
     // in-progress write as proof the response is already safe on disk.
@@ -3986,7 +4293,7 @@ export function registerNonApiAiHandlers({ clipboard = electronPkg.clipboard } =
     const requestId = typeof args.requestId === 'string' ? args.requestId : '';
     const filePath = typeof args.filePath === 'string' ? args.filePath : '';
     const record = pendingRequests.get(requestId);
-    if (!record || event.sender !== record.sender) {
+    if (!record || event.sender !== (record.presentationSender || record.sender)) {
       throw new Error('This attachment belongs to a different or completed Non-API AI request.');
     }
     if (!record.attachmentPaths.includes(filePath)) {

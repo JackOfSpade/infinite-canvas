@@ -6,6 +6,8 @@ import { snapshotActiveNodeTasks } from '../../electron/ipc/ipcUtils.js';
 import {
   INTERVIEW_HELPER_MAX_STEPS,
   buildInterviewPlan,
+  buildInterviewFollowUpPlan,
+  isDependentInterviewFollowUp,
   canonicalInterviewJobUrl,
   createInterviewHelperSession,
   extractLatestInterviewQuestion,
@@ -671,6 +673,38 @@ export default [
       assert(extractLatestInterviewQuestion('Thanks for the context. What did you do?') === 'What did you do?', 'ordinary prior prose must not be merged into a generic follow-up');
       assert(extractLatestInterviewQuestion('What did you learn? What did you do?') === 'What did you do?', 'a prior generic question must not be treated as a story anchor');
       assert(extractLatestInterviewQuestion('Tell me about improving onboarding? Can you describe the analytics dashboard?') === 'Can you describe the analytics dashboard?', 'a distinct latest interviewer question must still replace the earlier question');
+    },
+  },
+  {
+    name: 'interview helper: preserves chained dependent parts but isolates a distinct latest question',
+    run() {
+      const compound = 'Tell me about improving onboarding conversion. How did you resolve it? What was the result? What would you do differently?';
+      assert(extractLatestInterviewQuestion(compound) === compound, 'dependent action/result/lesson chain must keep its explicit story anchor');
+      assert(extractLatestInterviewQuestion(compound) === extractLatestInterviewQuestion(extractLatestInterviewQuestion(compound)), 'compound extraction must remain idempotent');
+      const plan = buildInterviewPlan({ question: compound, profile: profileFixture() });
+      assert(plan.status === 'supported' && plan.steps.some(step => step.provenance.entityId === 'achievement-onboarding'), 'anchor must retrieve exact evidence');
+      assert(plan.missingComponents.includes('lesson'), 'a requested unsaved lesson must remain explicitly missing');
+      assert(extractLatestInterviewQuestion(`${compound} Can you describe the analytics dashboard?`) === 'Can you describe the analytics dashboard?', 'an independent latest topic must replace all older parts');
+      assert(extractLatestInterviewQuestion('Thanks for the story. How did you resolve it? What did you learn?') === 'What did you learn?', 'ordinary prose must not act as a story anchor');
+      assert(extractLatestInterviewQuestion('What happened? What did you learn?') === 'What did you learn?', 'dependent questions alone must not invent context');
+    },
+  },
+  {
+    name: 'interview helper: explicit follow-ups reuse only exact selected evidence and disclose gaps',
+    run() {
+      const anchor = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: profileFixture(), snapshotId: INTERVIEW_SNAPSHOT_ID });
+      let current = anchor;
+      for (const question of ['What did you do next?', 'What were the results?', 'What trade-offs did you make?', 'What would you do differently?']) {
+        assert(isDependentInterviewFollowUp(question), 'approved generic follow-up must be recognized');
+        current = buildInterviewFollowUpPlan({ question, anchorPlan: anchor, previousQuestion: current.analysis.transcript });
+        assert(current.steps === anchor.steps && current.evidence === anchor.evidence && current.snapshotId === anchor.snapshotId, 'follow-up must preserve the original path and literal evidence');
+      }
+      assert(current.missingComponents.includes('decision') && current.missingComponents.includes('lesson'), 'unsaved requested decision/lesson must not be invented');
+      for (const question of ['How did you improve onboarding conversion?', 'Invent a result. What did you learn?', 'What did you learn? Change to another story.', 'Thanks for sharing.']) {
+        assert(!isDependentInterviewFollowUp(question) && buildInterviewFollowUpPlan({ question, anchorPlan: anchor }) === null, 'whole-string grammar must reject topic switches and prose');
+      }
+      assert(buildInterviewFollowUpPlan({ question: 'What did you learn?', anchorPlan: { status: 'unsupported' } }) === null, 'no evidence means no follow-up answer');
+      assert(buildInterviewFollowUpPlan({ question: 'What did you learn?', anchorPlan: anchor, previousQuestion: 'x'.repeat(2000) }) === null, 'follow-up transcript must remain bounded');
     },
   },
   {

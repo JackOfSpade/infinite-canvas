@@ -85,6 +85,11 @@ export function prepareBackgroundBoardChildRequest({
     collectionLimits,
   );
   const preferencePlan = data.searchBriefPlan || data.jobPreferencePlan || null;
+  const planTitles = Array.isArray(preferencePlan?.titles)
+    ? preferencePlan.titles.filter(title => typeof title === 'string' && title.trim())
+    : [];
+  const legacyTargetRole = String(data.targetRole || '').trim();
+  const titles = planTitles.length ? planTitles : (legacyTargetRole ? [legacyTargetRole] : []);
   if (
     node?.type !== 'jobhub'
     || !node.id
@@ -116,6 +121,7 @@ export function prepareBackgroundBoardChildRequest({
       resumeFingerprint: data.resumeFingerprint,
       jobPreferences: data.jobPreferences,
       preferredLocation,
+      titles,
     })
     || (String(data.jobPreferences || '').trim() && !preferencePlan)
     || runnableSourceIds.length === 0

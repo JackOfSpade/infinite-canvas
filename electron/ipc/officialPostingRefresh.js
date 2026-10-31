@@ -147,7 +147,7 @@ export async function refreshOfficialPostingEntries(args, {
       // Failures describe one run: the record carries this recheck's, never an earlier recheck's.
       const { fetchFailures: _earlierFailures, alternatives: _earlierAlternatives, ...priorRecord } = prior || {};
       // Only the judges' own citations ride along on a kept verification, never the generic lead list.
-      const alternatives = (posting.alternatives || []).filter(item => item.title.startsWith('Unconfirmed')
+      const alternatives = (posting.alternatives || []).filter(item => item.title.startsWith('Unconfirmed · cited')
         && canonicalLeadUrl(item.url) !== canonicalLeadUrl(prior?.sourceUrl));
       const officialPosting = retain ? { ...priorRecord, trail,
         ...(alternatives.length ? { alternatives } : {}),

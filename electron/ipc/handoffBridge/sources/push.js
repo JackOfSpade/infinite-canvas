@@ -5,11 +5,12 @@ import {
   BRIDGE_EXCLUSION_REASONS,
   listBridgeableNonApiAiHandoffs,
   readBridgeableNonApiAiHandoff,
+  markBridgeableNonApiAiHandoffAssigned,
   readBridgeableNonApiAiAttachments,
   fallbackBridgeAttachmentToManual,
   returnBridgeHandoffToPerson,
   submitNonApiAiResponseForBridge,
-  failBridgeableComparativeHandoff,
+  requeueBridgeableNonApiAiHandoff,
 } from '../../nonApiAi.js';
 import { snapshotActiveNodeTasks } from '../../ipcUtils.js';
 import { CONSTANTS } from '../constants.js';
@@ -73,8 +74,12 @@ function responseText(value) {
   try { const text = JSON.stringify(value); return typeof text === 'string' ? { ok: true, text } : { ok: false, text: '' }; } catch { return { ok: false, text: '' }; }
 }
 
+function windowFor(windows, windowId) {
+  return typeof windows?.get === 'function' ? windows.get(windowId) : windows?.[windowId];
+}
+
 function currentPath(windows, windowId) {
-  const window = typeof windows?.get === 'function' ? windows.get(windowId) : windows?.[windowId];
+  const window = windowFor(windows, windowId);
   const path = window?.__canvasFilePath;
   return typeof path === 'string' && path.startsWith('/') ? path : null;
 }
@@ -121,7 +126,8 @@ function safeExcluded(value, reasons) {
 }
 
 function hubMatches(entry, selected, windows) {
-  return Boolean(entry && selected && selected.windowId === entry.windowId && selected.nodeId === entry.nodeId && selected.canvasFilePath === currentPath(windows, entry.windowId));
+  return Boolean(entry && selected && selected.windowId === entry.windowId && selected.nodeId === entry.nodeId
+    && (!windowFor(windows, entry.windowId) || selected.canvasFilePath === currentPath(windows, entry.windowId)));
 }
 
 function copySafeRead(view) {
@@ -162,7 +168,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     exclusions: seam.BRIDGE_EXCLUSION_REASONS || BRIDGE_EXCLUSION_REASONS,
     list: seam.list || listBridgeableNonApiAiHandoffs,
     read: seam.read || readBridgeableNonApiAiHandoff,
-    comparativeUnavailable: seam.comparativeUnavailable || failBridgeableComparativeHandoff,
+    assigned: seam.assigned || markBridgeableNonApiAiHandoffAssigned,
+    requeue: seam.requeue || requeueBridgeableNonApiAiHandoff,
     attachments: seam.attachments || readBridgeableNonApiAiAttachments,
     fallbackAttachment: seam.fallbackAttachment || fallbackBridgeAttachmentToManual,
     submit: seam.submit || submitNonApiAiResponseForBridge,
@@ -231,6 +238,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         // groups fall back to a pristine New chat rather than guessing.
         comparisons: new Map(),
         comparisonWaits: new Map(),
+        // Keep isolation fences even when comparison history is evicted. A
+        // recovered B may never return to the conversation that tainted it.
+        recoveryContexts: new Map(),
         // A read starts after an async registry list. Keep its ownership
         // synchronously here before awaiting the prompt so simultaneous pool
         // workers cannot both choose the same otherwise-fresh request.
@@ -369,12 +379,19 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     // it behind would suppress the dock even though ChatGPT can no longer
     // submit it through the selected-hub gate.
     for (const [key, hub] of selected) {
-      if (currentPath(windows, hub.windowId) === hub.canvasFilePath) continue;
+      // Losing a display window does not revoke an already verified push
+      // scope. A live window changing its file remains an authority change.
+      if (!windowFor(windows, hub.windowId) || currentPath(windows, hub.windowId) === hub.canvasFilePath) continue;
       selected.delete(key);
       availableByHub.delete(hub.key);
       releaseServedForHub(hub);
     }
-    for (const [key, hub] of discovered) if (currentPath(windows, hub.windowId) !== hub.canvasFilePath) discovered.delete(key);
+    for (const [key, hub] of discovered) {
+      const remembered = selected.get(selectionKey(hub));
+      if (currentPath(windows, hub.windowId) === hub.canvasFilePath
+        || (!windowFor(windows, hub.windowId) && remembered?.key === hub.key)) continue;
+      discovered.delete(key);
+    }
   }
   function cacheDiscovery(snapshot, { replace = false, exclusionScope = 'none' } = {}) {
     // A selected poll is intentionally incomplete: it has rows only for the
@@ -391,7 +408,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     const claimedIds = activeClaimIds();
     for (const entry of Array.isArray(snapshot?.handoffs) ? snapshot.handoffs : []) {
       if (!allowed.has(entry?.task)) continue;
-      const canvasFilePath = currentPath(windows, entry?.windowId);
+      const remembered = selected.get(selectionKey(entry || {}));
+      const canvasFilePath = currentPath(windows, entry?.windowId)
+        || (!windowFor(windows, entry?.windowId) ? remembered?.canvasFilePath : null);
       if (!canvasFilePath || typeof entry?.nodeId !== 'string' || !entry.nodeId) continue;
       const key = displayKey(canvasFilePath, entry.nodeId);
       if (!key) continue;
@@ -481,6 +500,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     return new Map([...epochs.values()].map(value => [value, new Map([...value.reservations]
       .map(([requestId, reservation]) => [requestId, reservation.nonce]))]));
   }
+  function recoveryCohort() {
+    return new Map([...epochs.values()].map(value => [value, new Map(value.recoveryContexts)]));
+  }
   function liveRequestIds(snapshot) {
     const allowed = enabledTasks();
     const live = new Set((Array.isArray(snapshot?.handoffs) ? snapshot.handoffs : [])
@@ -492,12 +514,17 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     for (const requestId of settlingIds(snapshot)) live.add(requestId);
     return live;
   }
-  function releaseServedAbsentFrom(snapshot, cohort = servedCohort()) {
+  function releaseServedAbsentFrom(snapshot, cohort = servedCohort(), recoveries = recoveryCohort()) {
     // refreshHubs receives the complete, policy-allowed registry rather than
     // a selected-hub projection. A record absent from it has settled, been
     // cancelled, or otherwise become ineligible, so its renderer claim must
     // not survive until the next MCP get or chat rotation.
     const live = liveRequestIds(snapshot);
+    for (const [value, contexts] of recoveries) {
+      for (const [requestId, previous] of contexts) {
+        if (!live.has(requestId) && value.recoveryContexts.get(requestId) === previous) value.recoveryContexts.delete(requestId);
+      }
+    }
     // A newer get can serve work after this list began. Reconcile only the
     // request ids this particular full snapshot was entitled to observe; an
     // older empty list must never erase that newer route or its dock claim.
@@ -525,6 +552,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     const allowedAtStart = enabledTasks();
     const servedAtStart = servedCohort();
     const reservationsAtStart = reservationCohort();
+    const recoveriesAtStart = recoveryCohort();
     let snapshot;
     countDiagnostic('refreshAttempts');
     try { snapshot = await port.list({ allowTasks: allowedAtStart, allowNodeIds: null, allowWindowNodePairs: null }); }
@@ -537,7 +565,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     if ((ownerAtStart && discoveryOwner !== ownerAtStart) || allowedTasksRevision !== allowedRevisionAtStart) return false;
     stampDiagnostic('lastRefresh', true);
     cacheDiscovery(snapshot, { replace: true, exclusionScope: 'all' });
-    releaseServedAbsentFrom(snapshot, servedAtStart);
+    releaseServedAbsentFrom(snapshot, servedAtStart, recoveriesAtStart);
     releaseReservationsAbsentFrom(snapshot, reservationsAtStart);
     discoveryRevision += 1;
     return true;
@@ -567,6 +595,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     if (!stateCurrent(value) || typeof entry?.requestId !== 'string' || !entry.requestId
       || value.served.has(entry.requestId) || value.reservations.has(entry.requestId)) return null;
     const reservation = {
+      requestId: entry.requestId,
+      handoffCode: entry.handoffCode,
       workerId,
       nonce: ++value.reservationNonce,
       bridgeClaimId: typeof entry.bridgeClaimId === 'string' ? entry.bridgeClaimId : null,
@@ -668,6 +698,41 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     const key = handoffCodeGuard.key(canonical);
     const route = value.byCode.get(key);
     if (route?.requestId === requestId && handoffCodeGuard.sameDigest(handoffCodeGuard.digest(canonical), route.codeDigest)) value.byCode.delete(key);
+  }
+  function requeueEntry(value, entry, reason) {
+    if (!entry || !stateCurrent(value) || (value.served.get(entry.requestId) !== entry
+      && value.reservations.get(entry.requestId) !== entry)) return false;
+    // The registry owns the bounded recovery count and the original promise.
+    // A refused recovery (e.g. an answer committing) retains source ownership.
+    let recovered = false;
+    try { recovered = port.requeue({ ...seamArgs(entry), reason }) === true; } catch { return false; }
+    if (!recovered) return false;
+    if (entry.comparisonRun === 'B' && entry.comparisonConversationKey) {
+      const contexts = new Set(value.recoveryContexts.get(entry.requestId));
+      contexts.add(entry.comparisonConversationKey);
+      value.recoveryContexts.set(entry.requestId, contexts);
+    }
+    removeServed(value, entry.requestId);
+    releaseReservation(value, entry.requestId);
+    for (const [workerId, requestId] of value.attachedWorkers) {
+      if (requestId === entry.requestId) value.attachedWorkers.delete(workerId);
+    }
+    // A prior answer's cached verdict is tied to its old conversation. Do not
+    // replay it into the replacement even though the handoff identity stays.
+    for (const key of value.verdicts.keys()) {
+      if (key.startsWith(`${entry.requestId}\u0000`)) value.verdicts.delete(key);
+    }
+    return true;
+  }
+  function requeueWorker({ epoch = 'default', worker = 'default', reason = 'worker-lost' } = {}) {
+    const value = epochs.get(epochKey(epoch));
+    if (!value || !['worker-lost', 'worker-replaced', 'fresh-context-required'].includes(reason)) return 0;
+    const workerId = workerKey(worker);
+    const owned = new Map([...value.served.values(), ...value.reservations.values()]
+      .filter(entry => entry.workerId === workerId).map(entry => [entry.requestId, entry]));
+    let recovered = 0;
+    for (const entry of owned.values()) if (requeueEntry(value, entry, reason)) recovered += 1;
+    return recovered;
   }
   // Hand a served or reserved handoff back to its person on the application's
   // own terms (reason is a closed token). An entry is released here ONLY when
@@ -840,8 +905,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         // A clipboard replacement has no observed conversation. Return only
         // its route to pending; the comparison itself has not been answered
         // or failed, and another observed worker can claim the same attempt.
-        removeServed(value, ownServed.requestId);
-        ownServed = null;
+        if (requeueEntry(value, value.served.get(ownServed.requestId), 'fresh-context-required')) ownServed = null;
       }
       let skippedComparison = false;
       let requiresFreshContext = false;
@@ -867,7 +931,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
         } else value.comparisonWaits.delete(waitKey);
         const knownDifferent = observed && observed.overflow !== true && observed.keys.size > 0
           && !observed.keys.has(comparisonContext.conversationKey);
-        if (comparisonAExposed(value, item.comparisonGroup, comparisonContext.conversationKey)
+        if (value.recoveryContexts.get(item.requestId)?.has(comparisonContext.conversationKey)
+          || comparisonAExposed(value, item.comparisonGroup, comparisonContext.conversationKey)
           || (ownConversation && value.served.get(item.requestId)?.comparisonContaminated === true)
           || (!ownConversation && !knownDifferent && comparisonContext.pristine !== true)) {
           requiresFreshContext = true;
@@ -907,9 +972,12 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       let comparisonProvenance = null;
       if (comparative) {
         const disposition = comparisonDisposition(entry);
-        if (disposition !== 'ready') return result(disposition === 'fresh' ? 'fresh_context_required' : 'waiting', {
-          retryAfterSeconds: 3, remaining: remainingForCandidates(value, candidates, snapshot?.excluded || {}),
-        });
+        if (disposition !== 'ready') {
+          if (disposition === 'fresh' && ownServed) requeueEntry(value, value.served.get(entry.requestId), 'fresh-context-required');
+          return result(disposition === 'fresh' ? 'fresh_context_required' : 'waiting', {
+            retryAfterSeconds: 3, remaining: remainingForCandidates(value, candidates, snapshot?.excluded || {}),
+          });
+        }
         comparisonProvenance = { version: 2, transport: 'bridge', observed: true, comparisonGroup: entry.comparisonGroup,
           comparisonRun: entry.comparisonRun, conversationKey: comparisonContext.conversationKey,
           isolated: entry.comparisonRun === 'B' };
@@ -919,25 +987,28 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       if (!ownServed && !reservation) continue;
       if (reservation && comparisonProvenance) Object.assign(reservation, { comparisonGroup: entry.comparisonGroup,
         comparisonRun: entry.comparisonRun, comparisonConversationKey: comparisonProvenance.conversationKey });
+      const servedAtRead = ownServed ? value.served.get(entry.requestId) : null;
       let view;
       const discoveryRevisionAtRead = discoveryRevision;
       try { view = await port.read({ ...seamArgs(entry), ...(comparisonProvenance ? { comparisonProvenance } : {}) }); }
       catch {
-        releaseReservation(value, entry.requestId, reservation);
+        if (reservation) releaseReservation(value, entry.requestId, reservation);
         if (!stateCurrent(value) || !ownerCurrent(ownerAtStart) || allowedTasksRevision !== allowedRevisionAtPoll) return result('retry');
         if (reservation) continue;
-        removeServed(value, entry.requestId); continue;
+        if (value.served.get(entry.requestId) === servedAtRead) removeServed(value, entry.requestId);
+        continue;
       }
-      if (!stateCurrent(value) || (comparative && comparisonContext.isCurrent() !== true)) { releaseReservation(value, entry.requestId, reservation); return result('retry'); }
-      if (!ownerCurrent(ownerAtStart) || allowedTasksRevision !== allowedRevisionAtPoll) { releaseReservation(value, entry.requestId, reservation); return result('retry'); }
+      if (!stateCurrent(value) || (comparative && comparisonContext.isCurrent() !== true)) { if (reservation) releaseReservation(value, entry.requestId, reservation); return result('retry'); }
+      if (!ownerCurrent(ownerAtStart) || allowedTasksRevision !== allowedRevisionAtPoll) { if (reservation) releaseReservation(value, entry.requestId, reservation); return result('retry'); }
+      if (servedAtRead && value.served.get(entry.requestId) !== servedAtRead) return result('retry');
       if (entry.comparisonRun === 'B' && (reservation?.comparisonContaminated === true
         || (ownServed && value.served.get(entry.requestId)?.comparisonConversationKey === comparisonContext.conversationKey
           && value.served.get(entry.requestId)?.comparisonContaminated === true)
         || comparisonAExposed(value, entry.comparisonGroup, comparisonContext.conversationKey))) {
-        releaseReservation(value, entry.requestId, reservation);
+        requeueEntry(value, reservation || servedAtRead, 'comparison-contaminated');
         return result('fresh_context_required');
       }
-      if (discoveryRevision !== discoveryRevisionAtRead) { releaseReservation(value, entry.requestId, reservation); continue; }
+      if (discoveryRevision !== discoveryRevisionAtRead) { if (reservation) releaseReservation(value, entry.requestId, reservation); continue; }
       if (reservation && !reservationCurrent(value, entry.requestId, reservation)) continue;
       if (!view?.ok) {
         if (reservation) releaseReservation(value, entry.requestId, reservation);
@@ -976,6 +1047,9 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       const canonical = canonicalCode(entry.handoffCode);
       value.served.set(entry.requestId, served);
       value.byCode.set(handoffCodeGuard.key(canonical), { requestId: entry.requestId, codeDigest: handoffCodeGuard.digest(canonical) });
+      if (!ownServed) {
+        try { port.assigned(seamArgs(entry)); } catch { /* assignment observers cannot break delivery */ }
+      }
       value.remaining = remainingForCandidates(value, candidates, snapshot?.excluded || {});
       return result('served', { ...delivered, promptBytes, remaining: value.remaining });
     }
@@ -1062,9 +1136,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       || served.comparisonConversationKey !== comparisonContext.conversationKey))) return result('unknown_handoff');
     if (served.comparisonRun === 'B' && (served.comparisonContaminated === true
       || comparisonAExposed(value, served.comparisonGroup, comparisonContext.conversationKey))) {
-      port.comparativeUnavailable(seamArgs(served));
-      removeServed(value, requestId);
-      return result('superseded');
+      requeueEntry(value, served, 'comparison-contaminated');
+      return result('fresh_context_required');
     }
     if (!hubMatches(served, selected.get(`${served.windowId}\u0000${served.nodeId}`), windows)) {
       removeServed(value, requestId); value.held.set(requestId, 'hub_not_selected'); return result('held', { reason: 'hub_not_selected' });
@@ -1081,15 +1154,17 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     if (cached && Number(now()) - cached.at < VERDICT_TTL_MS) return cached.promise;
     const promise = Promise.resolve().then(() => {
       if (!hubMatches(served, selected.get(`${served.windowId}\u0000${served.nodeId}`), windows)) return { outcome: 'ineligible', exclusion: 'node_not_allowed' };
-      if (served.comparisonGroup && comparisonContext.isCurrent() !== true) return { outcome: 'not_pending' };
+      if (value.served.get(requestId) !== served || (served.comparisonGroup && comparisonContext.isCurrent() !== true)) return { outcome: 'stale_owner' };
       if (served.comparisonRun === 'B' && (served.comparisonContaminated === true
         || comparisonAExposed(value, served.comparisonGroup, comparisonContext.conversationKey))) {
-        port.comparativeUnavailable(seamArgs(served));
-        return { outcome: 'not_pending' };
+        requeueEntry(value, served, 'comparison-contaminated');
+        return { outcome: 'fresh_context_required' };
       }
       return port.submit({ ...seamArgs(served), response: checked.text });
     }).then(verdict => {
-      const decision = mapVerdict(value, served, verdict);
+      const decision = verdict?.outcome === 'fresh_context_required' ? result('fresh_context_required')
+        : verdict?.outcome === 'stale_owner' || (value.served.has(requestId) && value.served.get(requestId) !== served) ? result('superseded')
+          : mapVerdict(value, served, verdict);
       // A completed invalid comparative reply consumes an attempt. Keep
       // concurrent calls coalesced, but a later identical correction must
       // reach the durable one-retry counter rather than replay rejection one.
@@ -1194,7 +1269,7 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
       needsYou: currentRemaining(value).needsYou,
     });
   }
-  return Object.freeze({ enabledTasks, setAllowedTasks, setDiscoveryOwner, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, prepareAttachment, releaseAttachment, get, submit, nextAfterAccept, handBackClaims, closeEpoch, status, setCodeGuard });
+  return Object.freeze({ enabledTasks, setAllowedTasks, setDiscoveryOwner, selectedHubs, selectHub, selectHubKey, unselectHubKey, clearHubs, pruneHubs, refreshHubs, prepareAttachment, releaseAttachment, get, submit, nextAfterAccept, requeueWorker, handBackClaims, closeEpoch, status, setCodeGuard });
 }
 
 export { canonicalCode as normalizePushHandoffCode };

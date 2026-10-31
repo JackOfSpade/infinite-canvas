@@ -23,7 +23,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
   'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'storage-failed', 'failed',
-  'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
+  'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-salary-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
   ...['a', 'b', 'choice'].flatMap(run => ['none', 'uncertain', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
@@ -47,7 +47,8 @@ const DURABILITY_TRAIL_CODES = new Set(['bridge-aborted', 'bridge-timeout', 'bri
 export function boundedOfficialPostingTrail(values) {
   const codes = [...new Set((Array.isArray(values) ? values : []).filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))];
   if (codes.length <= 32) return codes;
-  const durableProof = code => code === 'semantic-match-v1' || code === OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL;
+  // A judge fact split decides which facts a frozen application may take from the record, so it is kept like proof.
+  const durableProof = code => ['semantic-match-v1', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'judge-location-split', 'judge-salary-split'].includes(code);
   const durability = codes.filter(code => DURABILITY_TRAIL_CODES.has(code) || durableProof(code));
   const comparison = codes.filter(code => code.startsWith('comparative-') && !DURABILITY_TRAIL_CODES.has(code));
   const required = [...durability, ...comparison].slice(0, 32);

@@ -1692,6 +1692,11 @@ export function getHandoffBridgeStatus() {
   catch { return bootstrapSnapshot(); }
 }
 
+/** Main-side consumers can re-drain work when workers or pool state change. */
+export function subscribeHandoffBridgeStatus(listener) {
+  return controllerBridge?.subscribe?.(listener) || runtime?.controller?.subscribe?.(listener) || noOp;
+}
+
 export function registerHandoffBridgeHandlers({ ipcMain = electronPkg.ipcMain, deps = {} } = {}) {
   if (registered && typeof ipcMain?.__getInvokeHandler === 'function' && !ipcMain.__getInvokeHandler('handoff-bridge:get-status')) registered = false;
   if (registered) return false;

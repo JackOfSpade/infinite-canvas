@@ -5,6 +5,7 @@ import { officialPostingSemanticScrapedEvidence } from './officialPostingSemanti
 import { OFFICIAL_POSTING_MATCH_TASK } from './officialPostingBridge.js';
 import { collector } from './validationLines.js';
 import { isUnsafeControlCharacter } from './structuredResume.js';
+import { isAggregatorHost, isHostedAtsSurface, normalizedSourceHost } from './officialSourceHosts.js';
 
 // ChatGPT finds, opens and reads the official posting. Two independent judges
 // (run A and run B, isolated conversations) each open the leads themselves and
@@ -102,6 +103,24 @@ export function judgeDescriptionsAgree(left, right) {
   return a.length > 0 && a === b;
 }
 
+/** A shortened snapshot cannot establish a complete description merely because both judges copied it.
+ * Only the actual posting's snapshot matters; a careers page or another lead may be much longer.
+ * A judge who opened the live page can supply text beyond the snapshot instead. */
+function judgeDescriptionBeyondTruncatedSnapshot(answer, { leads, snapshots }) {
+  const postingUrl = judgedPostingUrl(answer);
+  const description = flatPostingText(answer?.description);
+  for (const snapshot of snapshots) {
+    const lead = leads.find(item => item.id === snapshot.id);
+    if (!lead || ![lead.url, snapshot.finalUrl].some(url => url && canonicalLeadUrl(url) === postingUrl)) continue;
+    for (const field of ['description', 'pageText']) {
+      if (!snapshot[`${field}Truncated`]) continue;
+      const shortened = flatPostingText(snapshot[field]);
+      if (!shortened || shortened.includes(description)) return false;
+    }
+  }
+  return true;
+}
+
 export function validateOfficialPostingJudgeResponse(raw, { job, leads }) {
   const supplied = judgeLeads(leads);
   const issues = collector(); let answer = raw;
@@ -188,8 +207,12 @@ export function judgedPostingUrl(answer) {
 }
 
 /** Rank cited posting URLs without treating citations as verified matches. */
-export function rankJudgeCitations({ leads = [], answers = [] } = {}) {
+export function rankJudgeCitations({ leads = [], answers = [], sourceUrls = [] } = {}) {
   const validAnswers = answers.filter(Boolean);
+  // The listing the card was scraped from, or any reposting aggregator, is never a candidate for its official posting,
+  // unless that listing is itself on an employer's job-board tenant.
+  const excluded = new Set(sourceUrls.filter(url => !isHostedAtsSurface(normalizedSourceHost(url))).map(canonicalLeadUrl).filter(Boolean));
+  const eligible = (key, url) => key && url && !excluded.has(key) && !isAggregatorHost(normalizedSourceHost(url));
   const leadOrder = new Map();
   leads.forEach((lead, index) => {
     const key = canonicalLeadUrl(lead?.url);
@@ -199,17 +222,19 @@ export function rankJudgeCitations({ leads = [], answers = [] } = {}) {
   for (const answer of validAnswers) {
     if (answer.choice === 'none' || answer.choice === 'uncertain') continue;
     const key = canonicalLeadUrl(answer.postingUrl);
-    if (!key) continue;
-    if (!groups.has(key)) groups.set(key, { key, url: officialHttpsUrl(answer.postingUrl), votes: 0,
+    const url = officialHttpsUrl(answer.postingUrl);
+    if (!eligible(key, url)) continue;
+    if (!groups.has(key)) groups.set(key, { key, url, votes: 0,
       open: 0, closed: 0, unknown: 0, linked: 0, order: groups.size });
     const group = groups.get(key);
     group.votes += 1;
     group[answer.status === 'open' || answer.status === 'closed' ? answer.status : 'unknown'] += 1;
     if (answer.employerLinked === true) group.linked += 1;
   }
-  return [...groups.values()].sort((a, b) => b.votes - a.votes
+  // Most official first: judges who saw the employer's own site link the page, then citations, then lead order.
+  const cited = [...groups.values()].sort((a, b) => b.linked - a.linked || b.votes - a.votes
     || (leadOrder.get(a.key) ?? Infinity) - (leadOrder.get(b.key) ?? Infinity) || a.order - b.order)
-    .filter(group => group.url).slice(0, 12).map(group => {
+    .map(group => {
       const parts = [`Unconfirmed · cited by ${group.votes} of ${validAnswers.length} judges`];
       if (group.open !== group.votes) {
         if (group.closed === group.votes) parts.push('reported closed');
@@ -220,6 +245,14 @@ export function rankJudgeCitations({ leads = [], answers = [] } = {}) {
       if (group.linked < group.votes) parts.push(`employer link confirmed by ${group.linked} of ${group.votes}`);
       return { url: group.url, title: parts.join(' · ').slice(0, 500) };
     });
+  // Leads the search found but no judge cited still help a manual check: below every citation, posting pages before careers pages.
+  const uncited = leads.map((lead, index) => ({ lead, index, key: canonicalLeadUrl(lead?.url), url: officialHttpsUrl(lead?.url) }))
+    .filter(item => eligible(item.key, item.url) && !groups.has(item.key))
+    .filter((item, index, list) => list.findIndex(other => other.key === item.key) === index)
+    .sort((a, b) => (a.lead.kind === 'posting' ? 0 : 1) - (b.lead.kind === 'posting' ? 0 : 1) || a.index - b.index)
+    .map(item => ({ url: item.url, title: item.lead.kind === 'posting'
+      ? 'Unconfirmed · found by search, not cited by judges' : 'Unconfirmed · careers page found by search, not cited by judges' }));
+  return [...cited, ...uncited].slice(0, 12);
 }
 
 const display = (value, max) => Array.from(String(value ?? '').normalize('NFKC').replace(/[<>]/gu, ''),
@@ -230,7 +263,7 @@ const display = (value, max) => Array.from(String(value ?? '').normalize('NFKC')
  * lead (or the same reported posting page), the same open/closed status, and
  * both judges seeing the employer's own link. Anything else stays retryable.
  */
-export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?.length, textComplete = true, answerA, answerB, now = Date.now, fallback, comparativeTrail,
+export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?.length, textComplete = true, snapshots = [], answerA, answerB, now = Date.now, fallback, comparativeTrail,
   inputHash, extractRoute = () => null, employerEqual = () => false, negativeProofTrail }) {
   const ordered = judgeLeads(leads).slice();
   // A posting a judge found by its own search becomes a lead of its own (shared by URL between the two judges), so both
@@ -276,6 +309,18 @@ export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?
   const status = answerA.status;
   // Open or closed, a page counts as the official posting only when both judges saw the employer's own site link it.
   if (!(answerA.employerLinked && answerB.employerLinked)) return unsettled('source-unproven');
+  // These copied fields become the frozen posting facts alongside its description.
+  // A shared URL cannot authorize one judge's copy when the other reports different words.
+  const copiedAgree = (field, max) => flatPostingText(display(answerA[field], max)) === flatPostingText(display(answerB[field], max));
+  // Title and employer identify the posting: a real difference leaves it unsettled. Two spellings of one legal employer agree.
+  // When the spellings differ, neither judge's copy is stored: only the scraped company name, and only when both copies equal it.
+  const employerCopy = copiedAgree('employer', 120) ? display(answerA.employer, 120)
+    : employerEqual(answerA.employer, job?.company) && employerEqual(answerB.employer, job?.company) ? display(job?.company, 120) : '';
+  if (!copiedAgree('title', 500) || !employerCopy) return unsettled('semantic-uncertain');
+  // Location and pay are facts, not identity: when the copies differ, the agreed page is still the posting, but neither copy
+  // is stored. The split is recorded so a frozen application keeps the scraped listing's value instead of a blank.
+  const locationAgrees = copiedAgree('location', 500); const salaryAgrees = copiedAgree('salary', 500);
+  const factSplits = [...(locationAgrees ? [] : ['judge-location-split']), ...(salaryAgrees ? [] : ['judge-salary-split'])];
   const agreedChoice = choiceA === choiceB ? choiceA
     : [choiceA, choiceB].sort((x, y) => x.localeCompare(y))[0];
   const agreedTrail = choiceA === choiceB ? [] : ['comparative-equivalent', `comparative-choice-${agreedChoice.toLowerCase()}`];
@@ -283,10 +328,11 @@ export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?
   const route = extractRoute(sourceUrl);
   const description = canonicalJudgeDescription(answerA.description);
   // A copy taken from a shortened snapshot is not the whole description, even when both judges copied it identically.
-  const textAgrees = textComplete && status === 'open' && description !== '' && judgeDescriptionsAgree(answerA.description, answerB.description);
+  const textAgrees = textComplete && status === 'open' && description !== '' && judgeDescriptionsAgree(answerA.description, answerB.description)
+    && [answerA, answerB].every(answer => judgeDescriptionBeyondTruncatedSnapshot(answer, { leads: ordered, snapshots }));
   const level = status === 'open' && !textAgrees ? 'L4' : route ? 'L2' : 'L1';
-  const employer = display(answerA.employer, 120);
-  const location = display(answerA.location, 500); const salary = display(answerA.salary, 500);
+  const employer = employerCopy;
+  const location = locationAgrees ? display(answerA.location, 500) : ''; const salary = salaryAgrees ? display(answerA.salary, 500) : '';
   const sourceHash = crypto.createHash('sha256').update(JSON.stringify({ contract: OFFICIAL_POSTING_JUDGE_CONTRACT, sourceUrl, status,
     title: display(answerA.title, 500), employer, location, salary,
     description: description ? crypto.createHash('sha256').update(description).digest('hex') : '' })).digest('hex');
@@ -296,8 +342,8 @@ export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?
     salary: { text: salary, provenance: salary ? 'posted' : 'unknown' },
     sourceUrl, officialApplyUrl: sourceUrl, ...(route ? { ats: route.ats, tenant: route.tenant } : {}),
     fetchedAt: new Date(typeof now === 'function' ? now() : now).toISOString(),
-    trail: [...trail, ...agreedTrail, status === 'closed' ? 'closed' : 'comparative-match'] }, sourceHash);
+    trail: [...trail, ...agreedTrail, ...factSplits, status === 'closed' ? 'closed' : 'comparative-match'] }, sourceHash);
   comparison.accepted = true;
   return { postedBy: employerEqual(employer, job?.company) ? '' : String(job?.company || ''), officialPosting: posting,
-    ...(level === 'L1' || level === 'L2' ? { description } : {}), comparison };
+    ...((level === 'L1' || level === 'L2') && textAgrees ? { description } : {}), comparison };
 }

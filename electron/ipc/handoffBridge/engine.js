@@ -70,7 +70,7 @@ const STATUS_PUSH_TASKS = new Set([
   'job-preference-interpretation', 'job-preference-evaluation',
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
-  'interview-brief-research', 'interview-brief-assessment',
+  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
   'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const SCORING_PUSH_TASKS = new Set([...STATUS_PUSH_TASKS].filter(task => !MARKETPLACE_PUSH_TASKS.has(task)));
@@ -3299,6 +3299,7 @@ export function createHandoffEngine({
   async function framePushSubmit(raw, { successorBudgetMs = 0, generation = sourceGeneration, expectedEpoch = epoch, worker = expectedEpoch } = {}) {
     if ((!scope.scoring && !scope.marketplace) || !epochCurrent(expectedEpoch, generation)) return makeResultBody('retry');
     const decision = raw && typeof raw === 'object' ? raw : { status: 'retry' };
+    if (decision.status === 'fresh_context_required') return framePushGet(decision, generation, expectedEpoch, worker);
     if (decision.status === 'rejected') {
       const body = {
         status: 'rejected',
@@ -4114,10 +4115,11 @@ export function createHandoffEngine({
     return payload;
   }
 
-  // Replace only a quiet worker's session capability.  Keep its ordinal,
-  // aggregate completion count, and lane/push ownership so a fresh chat can
-  // safely re-get the exact outstanding handoff.  The prior key stays in the
-  // ended-key ledger and can never authenticate again.
+  // Replace only a quiet worker's session capability. Keep its ordinal,
+  // aggregate completion count and application lanes. A push source with
+  // requeue support releases its full served/reserved cohort before rotation,
+  // so another live worker can claim the same pending requests. The prior key
+  // stays in the ended-key ledger and can never authenticate again.
   function restartWorker({ linkId, generation, workerOrdinal, failedLaunch = false, observedFailure = false, automatic = false } = {}) {
     if (!epoch?.poolStarted || !Number.isInteger(generation) || generation !== epoch.poolGeneration) return { copied: false, status: 'session_ended' };
     if (typeof linkId !== 'string' || !linkId || !Number.isInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_WORKER_POOL_SIZE) return { copied: false, status: 'session_ended' };
@@ -4142,14 +4144,35 @@ export function createHandoffEngine({
     const countable = automatic === true && failedLaunch !== true
       && workerQuietReason(worker, stamp) !== 'fresh_context_required';
     const owned = countable ? ownedUnansweredHandoffs(worker) : { lanes: [], claims: [] };
+    const requeuesPush = typeof push?.requeueWorker === 'function';
     const cap = CONSTANTS.WORKER_RESTART_CAP;
     const cappedLanes = owned.lanes.filter(lane => (lane.counters?.workerRestarts ?? 0) >= cap);
-    const cappedClaims = owned.claims.filter(id => (handoffRestarts.get(id) ?? 0) >= cap);
+    // Requeue-aware sources own the per-request recovery budget, including
+    // reservations that have not yet made the worker's activeTask roster.
+    const cappedClaims = requeuesPush ? [] : owned.claims.filter(id => (handoffRestarts.get(id) ?? 0) >= cap);
     if (cappedLanes.length > 0 || cappedClaims.length > 0) {
       // Final for this attempt: no credential is minted. The hand-back runs on
       // its own (fire and forget) and fences itself on the epoch/generation.
       void handBackRestartCapped(worker, cappedLanes, cappedClaims, sourceGeneration, epoch).catch(() => undefined);
       return { copied: false, status: 'restart_cap' };
+    }
+    if (requeuesPush) {
+      try {
+        push.requeueWorker({
+          epoch: pushEpochId(), worker: worker.id,
+          reason: worker.freshContextRequired === true ? 'fresh-context-required'
+            : observedFailure === true ? 'worker-lost' : 'worker-replaced',
+        });
+      } catch {
+        // Retain the old capability and its leases if the source could not
+        // release them; a later recovery can retry the same operation.
+        return { copied: false, status: 'retry' };
+      }
+      if (worker.activeTaskKind === 'push') {
+        worker.activeTask = false;
+        worker.activeTaskKind = null;
+        worker.activeTaskSince = null;
+      }
     }
     // The live ledger already contains this digest, but stamp it again before
     // dropping the only credential that could authenticate it.
@@ -4200,7 +4223,7 @@ export function createHandoffEngine({
     for (const lane of owned.lanes) {
       if (lane.counters) lane.counters.workerRestarts = (lane.counters.workerRestarts ?? 0) + 1;
     }
-    for (const id of owned.claims) handoffRestarts.set(id, (handoffRestarts.get(id) ?? 0) + 1);
+    if (!requeuesPush) for (const id of owned.claims) handoffRestarts.set(id, (handoffRestarts.get(id) ?? 0) + 1);
     persistLedger();
     auditEvent('worker_restarted', { worker: workerOrdinal });
     log('worker_restarted', { worker: workerOrdinal });
@@ -5346,13 +5369,16 @@ export function createHandoffEngine({
   if (lanes.some(lane => restoreProbeDue(lane, safeNow(now)))) void probeRestoredLanes().catch(() => undefined);
   loadLedger();
 
-  const releaseObservedWorkerAvailability = registerObservedWorkerAvailability(() => !closed && !paused
-    && (scope.scoring || scope.marketplace) && liveEpochWorkers().some(worker => worker.observedConversation
-      && worker.idleSince == null && worker.freshContextRequired !== true),
+  // Busy observed workers still prove a live pool: a queued comparison must
+  // not spend its absence grace merely because its workers are occupied.
+  const liveObservedWorkerCount = () => !closed && !paused && (scope.scoring || scope.marketplace)
+    ? liveEpochWorkers().filter(worker => worker.observedConversation
+      && worker.idleSince == null && worker.freshContextRequired !== true).length : 0;
+  const releaseObservedWorkerAvailability = registerObservedWorkerAvailability(() => liveObservedWorkerCount() > 0,
   () => !closed && !paused && (scope.scoring || scope.marketplace) && liveEpochWorkers().some(worker =>
     (worker.observedLaunchPending === true || worker.restartPending === true)
       && Number.isFinite(worker.observedLaunchStartedAt)
-      && safeNow(now) - worker.observedLaunchStartedAt < CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS));
+      && safeNow(now) - worker.observedLaunchStartedAt < CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS), liveObservedWorkerCount);
 
   return Object.freeze({
     get,

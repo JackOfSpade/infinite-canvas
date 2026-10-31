@@ -4,12 +4,12 @@ import { collector, templatesFor } from './validationLines.js';
 export const TEXT_CORRECTION_TEMPLATES = templatesFor('text.');
 export const INTERVIEW_CORRECTION_TEMPLATES = templatesFor('interview.');
 /**
- * Read-only application-bundle intake and interview-brief assembly.
+ * Read-only application-bundle intake and separate interview artifacts.
  *
- * This boundary deliberately does not know a canvas path or a career profile.
- * A bundle is captured once into a content-addressed local artifact and the
- * later brief only refers to that opaque artifact plus an approved career
- * snapshot address.  Neither research nor bundle prose can amend career data.
+ * A bundle is captured once into a content-addressed local artifact. Research
+ * and the brief never receive a career profile. A separate third step receives
+ * only approved evidence, and seals candidate answers outside the brief/canvas.
+ * Neither artifact can amend career data.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,7 +18,20 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { handleSafe } from './ipcUtils.js';
 import { callLLMRaw, callLLMText } from './llm.js';
-import { isInterviewHelperNodeId, isInterviewHelperSnapshotId } from './interviewHelper.js';
+import { isInterviewHelperNodeId, isInterviewHelperSnapshotId, loadInterviewHelperCareerSnapshot } from './interviewHelper.js';
+import {
+  buildInterviewAnswerEvidence, INTERVIEW_ANSWER_BANK_SCHEMA, interviewAnswerBankPrompt,
+  validateInterviewAnswerBank, publishInterviewAnswerBank, loadInterviewAnswerBank, answerBankRecordId, pruneInterviewAnswerBindings,
+  inspectInterviewAnswerCards, validateInterviewAnswerDraft, mergeInterviewAnswerCardRepair,
+  interviewAnswerRepairSchema, interviewAnswerRepairPrompt, INTERVIEW_ANSWER_MIN_CARDS,
+  INTERVIEW_REQUIRED_QUESTIONS,
+} from './interviewAnswerBank.js';
+import { deriveInterviewResumeConsistency } from './interviewResumeCoverage.js';
+import { sanitizeInterviewExtensions } from './interviewAnswerExtensions.js';
+import { interviewRequiredFallbackCandidates, interviewWhyFallbackCandidates } from './interviewRequiredFallback.js';
+import { isInterviewWhyQuestion } from './interviewQuestionFit.js';
+import { INTERVIEW_ANSWER_ENTAILMENT_SCHEMA, interviewAnswerEntailmentPrompt,
+  validateInterviewAnswerEntailment, interviewEntailmentCorrection } from './interviewAnswerEntailment.js';
 import { normalizeInterviewPublicUrl } from '../../src/utils/interviewUrlPrivacy.js';
 import { wrapUntrustedText } from './promptSafety.js';
 
@@ -31,6 +44,7 @@ const ARTIFACT_SCHEMA_VERSION = 1;
 // authorize a brief for the live helper window.
 const PREPARED_BRIEF_DIR = 'interview-helper-prepared-briefs';
 const PREPARED_BRIEF_SCHEMA_VERSION = 1;
+const ANSWER_BINDING_DIR = 'interview-helper-answer-bindings';
 const AUDIT_SCHEMA = 'infinite-canvas-generation-audit';
 const AUDIT_VERSION = 1;
 const MAX_JOB_URL_CHARS = 2048;
@@ -185,14 +199,28 @@ const NON_PHONE_NUMBER_SHAPES = [
   /^\d{1,6}\.\d{2}\s*-\s*\d{1,6}\.\d{2}$/u,
 ];
 
-// textContent joins sibling elements with nothing between them, gluing list
-// items and definition rows into run-on words. Join every text node with a
-// space instead; safeString collapses the extra whitespace.
+// Preserve semantic item boundaries without introducing control characters.
+// Inline spans (including PDF-style wrapped text) stay in the same item; role
+// headings, paragraphs and bullets must not become part of one sentence.
 function separatedText(root) {
-  const parts = [];
-  const walker = root.ownerDocument.createTreeWalker(root, 4);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) parts.push(node.data);
-  return parts.join(' ');
+  const blocks = []; let parts = [];
+  const boundary = () => {
+    const value = redactIdentity(parts.join(' '));
+    if (value) blocks.push(value);
+    parts = [];
+  };
+  const blockTags = new Set(['P', 'LI', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION', 'DIV', 'MAIN', 'UL', 'OL', 'DL', 'DT', 'DD', 'BLOCKQUOTE', 'TABLE', 'TR', 'BR']);
+  const visit = node => {
+    if (node.nodeType === 3) { parts.push(node.data); return; }
+    const block = node.nodeType === 1 && blockTags.has(node.tagName);
+    if (block) boundary();
+    for (const child of node.childNodes) visit(child);
+    if (block) boundary();
+  };
+  visit(root); boundary();
+  // Redact each block before joining: safeString deliberately collapses all
+  // whitespace and would otherwise erase this U+2029 paragraph separator.
+  return blocks.join('\u2029');
 }
 
 function redactIdentity(text) {
@@ -213,7 +241,7 @@ function extractApplicationPositioning(html) {
       // Remove the common semantic markers before deriving this narrow text
       // projection; regex redaction below catches residual email/phone text.
       content.querySelectorAll('header, address, h1, [data-ic-contact], .contact, .identity, script, style, template, noscript').forEach(node => node.remove());
-      positions[kind] = redactIdentity(`${positions[kind]} ${separatedText(content)}`).slice(0, MAX_PROJECTION_CHARS / 2);
+      positions[kind] = [positions[kind], separatedText(content)].filter(Boolean).join('\u2029').slice(0, MAX_PROJECTION_CHARS / 2);
     }
     // Older exported bundles predate panel markers. Their text remains useful
     // application positioning, but is deliberately labeled resume rather than
@@ -221,7 +249,7 @@ function extractApplicationPositioning(html) {
     if (!positions.resume && !positions.coverLetter) {
       const content = dom.window.document.querySelector('main')?.cloneNode(true);
       content?.querySelectorAll?.('script, style, template, noscript, header, address, h1, [data-ic-contact], .contact, .identity').forEach(node => node.remove());
-      positions.resume = redactIdentity(content ? separatedText(content) : '');
+      positions.resume = (content ? separatedText(content) : '').slice(0, MAX_PROJECTION_CHARS / 2);
     }
     return positions;
   } finally { dom.window.close(); }
@@ -870,12 +898,423 @@ export async function buildInterviewBrief({ nodeId, snapshotId, canonicalJobUrl,
   return { brief: validateInterviewBriefAssessment(response, { rawResearch, bundle, snapshotId, canonicalJobUrl, bundleArtifactId }) };
 }
 
+/** A separate, career-aware third handoff. Research keeps its no-candidate contract. */
+export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonicalJobUrl, bundleArtifactId, signal, userDataPath,
+  loadBundle = loadPrivateInterviewPreparationBundle, loadSnapshot = loadInterviewHelperCareerSnapshot, callText = callLLMText,
+  onValidationRound } = {}) {
+  throwIfAborted(signal);
+  if (!isPublishedInterviewBrief(brief) || brief.inputs.careerSnapshotId !== snapshotId
+    || brief.inputs.jobUrlSha256 !== sha256(canonicalJobUrl) || brief.inputs.applicationArtifactId !== bundleArtifactId) throw new Error('Interview answer inputs changed.');
+  const bundle = await loadBundle({ artifactId: bundleArtifactId, userDataPath });
+  throwIfAborted(signal);
+  const snapshot = await loadSnapshot({ snapshotId, userDataPath });
+  throwIfAborted(signal);
+  if (!bundle || !snapshot || snapshot.snapshotId !== snapshotId
+    || sha256(stable(bundle.digests)) !== brief.inputs.applicationArtifactDigest) throw new Error('Interview answer inputs are unavailable.');
+  const context = { snapshot, brief, bundle, canonicalJobUrl, bundleArtifactId };
+  const evidence = buildInterviewAnswerEvidence(context);
+  const basePrompt = interviewAnswerBankPrompt({ brief, bundle, evidence });
+  const draft = await callText(basePrompt, {
+    signal, task: 'interview-answer-bank', responseSchema: INTERVIEW_ANSWER_BANK_SCHEMA,
+    responseValidator: value => validateInterviewAnswerDraft(value, undefined, { requireExtensions: true }), hints: { itemCount: 16 },
+  });
+  throwIfAborted(signal);
+  let cards = validateInterviewAnswerDraft(draft, undefined, { requireExtensions: true }).cards;
+  const approved = new Map();
+  // Reuse only exact claims that passed semantic review against these sealed
+  // evidence IDs. A rejected proposition never becomes a host fallback.
+  const claimKey = claim => stable({ text: claim?.text, evidenceIds: claim?.evidenceIds });
+  const approvedClaims = new Map(); const rejectedClaims = new Set();
+  const approvedExtensions = new Set(); const rejectedExtensions = new Set();
+  const priorBullets = new Map();
+  const recordReview = (candidate, verdicts) => {
+    for (const verdict of verdicts) {
+      const match = /^cards\[(\d+)\]\.(headline|example|(bullets|extensions)\[(\d+)\])$/u.exec(verdict.path);
+      const card = candidate.cards[Number(match[1])];
+      const value = match[3] ? card[match[3]][Number(match[4])] : card[match[2]];
+      const { stage: _stage, ...claim } = value;
+      const key = claimKey(claim);
+      // Optional claims never become replacement memorized claims in the
+      // required-card fallback, and their rejection cannot reject that card.
+      if (match[3] === 'extensions') {
+        if (!verdict.entailed) { rejectedExtensions.add(key); approvedExtensions.delete(key); }
+        else if (!rejectedExtensions.has(key)) approvedExtensions.add(key);
+        continue;
+      }
+      if (!verdict.entailed) { rejectedClaims.add(key); approvedClaims.delete(key); }
+      else if (!rejectedClaims.has(key)) approvedClaims.set(key, structuredClone(claim));
+    }
+  };
+  const dropRejectedExtensions = (candidate, verdicts) => {
+    const rejected = new Map();
+    for (const verdict of verdicts.filter(item => !item.entailed)) {
+      const match = /^cards\[(\d+)\]\.extensions\[(\d+)\]$/u.exec(verdict.path);
+      if (!match) continue;
+      const indices = rejected.get(Number(match[1])) || new Set();
+      indices.add(Number(match[2])); rejected.set(Number(match[1]), indices);
+    }
+    for (const [index, card] of candidate.cards.entries()) {
+      if (!Object.hasOwn(card, 'extensions')) continue;
+      const indices = rejected.get(index);
+      // Resolve duplicate optional details only after negative semantic
+      // verdicts are removed, so a false proposition cannot displace a safe
+      // sibling with a different evidence binding.
+      const extensions = card.extensions.filter((_, point) => !indices?.has(point));
+      card.extensions = sanitizeInterviewExtensions({ ...card, extensions }, evidence);
+    }
+  };
+  const withFallbackExtensions = (candidate, original, reviewedOnly = false) => {
+    if (!Object.hasOwn(original, 'extensions')) return candidate;
+    const proposed = (Array.isArray(original.extensions) ? original.extensions : [])
+      .filter(point => !rejectedExtensions.has(claimKey(point)) && (!reviewedOnly || approvedExtensions.has(claimKey(point))));
+    const extensions = sanitizeInterviewExtensions({ ...candidate, extensions: proposed }, evidence, { compareSiblingDetails: reviewedOnly });
+    return { ...candidate, extensions };
+  };
+  const lockedIds = new Set();
+  const fallbackExtensionReviews = [];
+  let failures = [];
+  const diagnosticCards = (values, issues) => values.flatMap(card => {
+    const own = issues.filter(issue => issue.cardId === card.id);
+    return own.length ? [{ id: card.id, question: card.question,
+      issueCodes: [...new Set(own.map(issue => issue.rule))], issues: own.map(({ path, rule }) => ({ path, rule })) }] : [];
+  });
+  const report = async (phase, round, values, issues, droppedCards = []) => {
+    const failingCards = diagnosticCards(values, issues);
+    await onValidationRound?.({ phase, round, survivingCardCount: values.length - failingCards.length,
+      failingCards, droppedCards,
+      ...(fallbackExtensionReviews.length ? { fallbackExtensionReviews } : {}) });
+  };
+  const byEvidenceId = new Map(evidence.map(item => [item.id, item]));
+  const recoverQuote = value => {
+    // The host owns the evidence toggle. Restore a full source from an existing
+    // bijective ID binding, never infer an ID from a model's quote or wording.
+    // All speech is subsequently checked against that entire original source.
+    if (!value || !Array.isArray(value.evidenceIds) || !Array.isArray(value.quotes)
+      || value.evidenceIds.length !== value.quotes.length || new Set(value.evidenceIds).size !== value.evidenceIds.length
+      || new Set(value.quotes.map(quote => quote?.evidenceId)).size !== value.quotes.length
+      || value.quotes.some(quote => !quote || !value.evidenceIds.includes(quote.evidenceId) || !byEvidenceId.has(quote.evidenceId))) return value;
+    return { ...value, quotes: value.quotes.map(quote => ({ ...quote, quote: byEvidenceId.get(quote.evidenceId).text })) };
+  };
+  const hydrateExtension = point => {
+    // The compact handoff binds claims by content-addressed IDs. Only the host
+    // adds exact source text; unknown IDs and extra/malformed fields still fail
+    // the ordinary per-point validator. Fully cited replay data stays checked.
+    if (!exactObject(point, ['id', 'text', 'evidenceIds']) || !Array.isArray(point.evidenceIds)
+      || !point.evidenceIds.every(id => byEvidenceId.has(id))) return point;
+    return { ...point, quotes: point.evidenceIds.map(evidenceId => ({ evidenceId, quote: byEvidenceId.get(evidenceId).text })) };
+  };
+  const recoverResumeConsistency = values => values.map(card => {
+    let consistency;
+    try {
+      consistency = deriveInterviewResumeConsistency([card.headline, ...(Array.isArray(card.bullets) ? card.bullets : []), card.example],
+        evidence.filter(item => item.kind === 'career'), bundle.applicationPositioning?.resume);
+    } catch { /* Malformed speech is diagnosed below; résumé coverage stays false. */ }
+    if (consistency && /[\p{Cc}\p{Cf}]/u.test(consistency.resumeQuote)) consistency = null;
+    return { ...card, consistency: consistency || { consistentWithResume: false, resumeQuote: '' } };
+  });
+  const recoverDraft = values => recoverResumeConsistency(values.map(card => {
+    if (lockedIds.has(card.id)) return card;
+    const recovered = { ...card, headline: recoverQuote(card.headline),
+      bullets: Array.isArray(card.bullets) ? card.bullets.map(recoverQuote) : card.bullets, example: recoverQuote(card.example),
+      ...(Object.hasOwn(card, 'extensions') ? { extensions: Array.isArray(card.extensions) ? card.extensions.map(hydrateExtension) : [] } : {}) };
+    return { ...recovered, ...(Object.hasOwn(card, 'extensions') ? { extensions: sanitizeInterviewExtensions(recovered, evidence, { compareSiblingDetails: false })
+      .filter(point => !rejectedExtensions.has(claimKey(point))) } : {}) };
+  }));
+  // Claim failures are accepted as internal draft data. Only this host loop
+  // requests repairs, so the transport cannot rewrite previously passing cards.
+  // Every retained claim still needs both mechanical and semantic approval.
+  for (let round = 0; round <= 2; round++) {
+    throwIfAborted(signal);
+    cards = recoverDraft(cards);
+    for (const card of cards) {
+      const history = priorBullets.get(card.id) || new Map();
+      for (const [index, bullet] of (Array.isArray(card.bullets) ? card.bullets : []).entries()) {
+        history.set(`${index}:${claimKey(bullet)}`, { index, bullet: structuredClone(bullet) });
+      }
+      priorBullets.set(card.id, history);
+    }
+    let inspected = inspectInterviewAnswerCards(cards, context, { lockedIds });
+    // Missing behavioral breadth is an evidence warning, never permission to
+    // add facts. The same factual and semantic guards still apply after this.
+    const thinIds = new Set(inspected.failures.filter(issue => issue.rule === 'INTERVIEW_ANSWER_QUESTION_FIT')
+      .map(issue => cards[issue.cardIndex]?.id));
+    if (thinIds.size) {
+      cards = cards.map(card => thinIds.has(card.id) ? { ...card, thinEvidence: true } : card);
+      inspected = inspectInterviewAnswerCards(cards, context, { lockedIds });
+    }
+    failures = inspected.failures.map(failure => ({ ...failure, cardId: cards[failure.cardIndex]?.id }));
+    const invalid = new Set(failures.map(failure => failure.cardId));
+    const pending = cards.filter(card => !invalid.has(card.id) && approved.get(card.id) !== stable(card));
+    if (pending.length) {
+      const candidate = { cards: pending, evidence };
+      const judge = value => validateInterviewAnswerEntailment(value, candidate);
+      const review = await callText(interviewAnswerEntailmentPrompt(candidate), {
+        signal, task: 'interview-answer-bank', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
+        responseValidator: judge, hints: { itemCount: pending.length * 5 },
+      });
+      throwIfAborted(signal);
+      const verdicts = judge(review);
+      recordReview(candidate, verdicts);
+      const correction = interviewEntailmentCorrection(verdicts, candidate);
+      if (correction && !correction.claimIssues?.length) throw correction;
+      dropRejectedExtensions(candidate, verdicts);
+      for (const issue of correction?.claimIssues || []) {
+        if (issue.path.includes('.extensions[')) continue;
+        const pendingIndex = Number(/^cards\[(\d+)\]/u.exec(issue.path)[1]);
+        const card = pending[pendingIndex];
+        const cardIndex = cards.findIndex(item => item.id === card.id);
+        failures.push({ ...issue, cardId: card.id, cardIndex,
+          path: issue.path.replace(/^cards\[\d+\]/u, `cards[${cardIndex}]`) });
+        invalid.add(card.id);
+      }
+      for (const card of pending) if (!invalid.has(card.id)) approved.set(card.id, stable(card));
+    }
+    for (const card of cards) if (!invalid.has(card.id)) lockedIds.add(card.id);
+    await report('validation', round, cards, failures);
+    if (!failures.length) {
+      const bank = validateInterviewAnswerBank({ cards }, context);
+      await report('final', round, cards, []);
+      return { bank };
+    }
+    if (round === 2) break;
+    const targets = cards.filter(card => invalid.has(card.id));
+    try {
+      const response = await callText(interviewAnswerRepairPrompt({ cards: targets, failures, evidence, brief, bundle,
+        lockedCards: cards.filter(card => lockedIds.has(card.id)) }), {
+        signal, task: 'interview-answer-bank', responseSchema: interviewAnswerRepairSchema(targets),
+        responseValidator: value => validateInterviewAnswerDraft(value, targets, { requireExtensions: true }), hints: { itemCount: targets.length },
+      });
+      throwIfAborted(signal);
+      cards = mergeInterviewAnswerCardRepair(cards, response, targets);
+    } catch (error) {
+      throwIfAborted(signal);
+      // An exhausted malformed repair leaves the requested cards failing.
+      // It cannot discard the already approved part of the bank or reset the
+      // bounded round budget. Transport/provider failures still surface.
+      if (error?.code !== 'VALIDATION_FAILED') throw error;
+    }
+  }
+  const omitted = new Set(failures.map(failure => failure.cardId));
+  const validatedClaims = [...approvedClaims.values()];
+  const whyFallbackCandidates = card => {
+    const permitted = claim => claim && !rejectedClaims.has(claimKey(claim));
+    // Do not let a known-false own reason consume the bounded candidate pool
+    // before a separately reviewed reason for this question can be considered.
+    return interviewWhyFallbackCandidates({ ...card,
+      headline: permitted(card.headline) ? card.headline : undefined,
+      bullets: (Array.isArray(card.bullets) ? card.bullets : []).filter(permitted),
+      example: permitted(card.example) ? card.example : undefined,
+    }, context, validatedClaims);
+  };
+  // A repair can accidentally repeat a locked card's bullet. Restore an
+  // earlier approved detail from this same card rather than discarding safe
+  // new headline/example wording. Never invent or paraphrase a replacement.
+  const priorDetailRecovery = new Map();
+  for (const card of cards.filter(card => omitted.has(card.id))) {
+    const own = failures.filter(issue => issue.cardId === card.id);
+    if (!own.length || own.some(issue => issue.rule !== 'INTERVIEW_ANSWER_BULLET_DUPLICATE')) continue;
+    const indices = [...new Set(own.map(issue => Number(/\.bullets\[(\d+)\]/u.exec(issue.path)?.[1])))];
+    let candidate = card;
+    for (const index of indices) {
+      const earlier = [...(priorBullets.get(card.id)?.values() || [])].sort((a, b) => Number(b.index === index) - Number(a.index === index));
+      for (const { bullet } of earlier) {
+        if (!approvedClaims.has(claimKey(bullet))) continue;
+        const attempt = { ...candidate, bullets: candidate.bullets.map((value, at) => at === index ? bullet : value) };
+        const issues = inspectInterviewAnswerCards([...cards.filter(value => lockedIds.has(value.id)), attempt], context, { lockedIds }).failures;
+        // Other duplicate positions may still need restoring, but this one
+        // must be fully safe and no new issue may be introduced.
+        if (issues.every(issue => issue.rule === 'INTERVIEW_ANSWER_BULLET_DUPLICATE'
+          && !issue.path.endsWith(`.bullets[${index}]`))) { candidate = attempt; break; }
+      }
+    }
+    if (candidate !== card && !inspectInterviewAnswerCards([...cards.filter(value => lockedIds.has(value.id)), candidate], context, { lockedIds }).failures.length) {
+      priorDetailRecovery.set(card.id, candidate);
+    }
+  }
+  // First use already reviewed propositions. Narrowing only removes claims;
+  // the mechanical validator rechecks the new question/format and citations.
+  const replacements = new Map();
+  const extensionsAwaitingReview = new Map();
+  for (const card of cards.filter(card => omitted.has(card.id))) {
+    const candidates = INTERVIEW_REQUIRED_QUESTIONS.includes(card.question)
+      ? interviewRequiredFallbackCandidates(card, context, { validatedClaims, validatedOnly: true })
+      : whyFallbackCandidates(card);
+    const supported = candidates.find(candidate => [candidate.headline, ...candidate.bullets, candidate.example]
+      .every(claim => approvedClaims.has(claimKey(claim))));
+    if (supported) {
+      const candidate = withFallbackExtensions(supported, card);
+      if (candidate.extensions?.some(point => !approvedExtensions.has(claimKey(point)))) {
+        // A mechanically failing draft never reached semantic review. Its
+        // narrowed answer is safe, but optional points still need the final
+        // fallback handoff before any of them can be sealed.
+        extensionsAwaitingReview.set(card.id, candidate);
+      } else {
+        replacements.set(card.id, withFallbackExtensions(supported, card, true)); omitted.delete(card.id);
+      }
+    }
+  }
+  cards = recoverResumeConsistency(cards.map(card => replacements.get(card.id) || card));
+  // Required questions survive with fewer verified claims. Inspect candidate
+  // fallbacks with every ordinary truth guard, then review them together in a
+  // single semantic handoff. No third writing/repair round is permitted.
+  const fallbackTargets = cards.filter(card => omitted.has(card.id)
+    && (INTERVIEW_REQUIRED_QUESTIONS.includes(card.question) || isInterviewWhyQuestion(card.question) || priorDetailRecovery.has(card.id)));
+  if (fallbackTargets.length) {
+    // Review already-supported replacements first so the bounded candidate
+    // batch cannot crowd out their previously unreviewed optional material.
+    const fallbackCards = [...extensionsAwaitingReview.values(), ...fallbackTargets.filter(card => !extensionsAwaitingReview.has(card.id))
+      .flatMap(card => (INTERVIEW_REQUIRED_QUESTIONS.includes(card.question)
+      ? interviewRequiredFallbackCandidates(card, context)
+      : (priorDetailRecovery.has(card.id) ? [priorDetailRecovery.get(card.id)]
+        : whyFallbackCandidates(card).slice(0, 1)))
+      .map(candidate => withFallbackExtensions(candidate, card)))]
+      .filter(card => [card.headline, ...card.bullets, card.example].every(claim => !rejectedClaims.has(claimKey(claim)))).slice(0, 20);
+    if (fallbackCards.length) {
+      const candidate = { cards: fallbackCards, evidence };
+      const judge = value => validateInterviewAnswerEntailment(value, candidate);
+      const review = await callText(interviewAnswerEntailmentPrompt(candidate), {
+        signal, task: 'interview-answer-bank', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
+        responseValidator: judge, hints: { itemCount: fallbackCards.length * 2 },
+      });
+      throwIfAborted(signal);
+      const verdicts = judge(review);
+      recordReview(candidate, verdicts);
+      const correction = interviewEntailmentCorrection(verdicts, candidate);
+      const submittedExtensionCounts = fallbackCards.map(card => card.extensions?.length || 0);
+      dropRejectedExtensions(candidate, verdicts);
+      fallbackCards.forEach((card, index) => {
+        if (!submittedExtensionCounts[index]) return;
+        fallbackExtensionReviews.push({ cardId: card.id, submittedCount: submittedExtensionCounts[index],
+          rejectedCount: verdicts.filter(verdict => !verdict.entailed && verdict.path.startsWith(`cards[${index}].extensions[`)).length,
+          retainedCount: card.extensions.length, unreviewedDroppedCount: 0 });
+      });
+      for (const issue of correction?.claimIssues || []) {
+        if (issue.path.includes('.extensions[')) continue;
+        const index = Number(/^cards\[(\d+)\]/u.exec(issue.path)[1]);
+        const card = fallbackCards[index];
+        const cardIndex = cards.findIndex(value => value.id === card.id);
+        failures.push({ ...issue, cardId: card.id, cardIndex,
+          path: issue.path.replace(/^cards\[\d+\]/u, `cards[${cardIndex}]`) });
+      }
+      const rejected = new Set(verdicts.filter(verdict => !verdict.entailed && !verdict.path.includes('.extensions[')).map(verdict => Number(/^cards\[(\d+)\]/u.exec(verdict.path)[1])));
+      fallbackCards.forEach((card, index) => {
+        if (!rejected.has(index) && !replacements.has(card.id)
+          && [card.headline, ...card.bullets, card.example].every(claim => !rejectedClaims.has(claimKey(claim)))) replacements.set(card.id, card);
+      });
+      cards = recoverResumeConsistency(cards.map(card => replacements.get(card.id) || card));
+      for (const id of replacements.keys()) omitted.delete(id);
+    }
+    const unsafe = fallbackTargets.filter(card => omitted.has(card.id) && INTERVIEW_REQUIRED_QUESTIONS.includes(card.question));
+    if (unsafe.length) {
+      await report('fallback', 2, cards, failures.filter(issue => omitted.has(issue.cardId)));
+      await report('final', 2, cards, failures.filter(issue => omitted.has(issue.cardId)), diagnosticCards(cards, failures.filter(issue => omitted.has(issue.cardId))));
+      throw validationFailure({
+      stage: 'interview-answer-bank', reason: 'required-answer', ruleIds: ['INTERVIEW_ANSWER_REQUIRED_SAFE_CLAIM'],
+      details: [`No supported narrow claim survived for required questions: ${JSON.stringify(unsafe.map(card => card.question))}.`],
+      message: 'A required interview answer could not be grounded safely.',
+      });
+    }
+  }
+  failures = failures.filter(issue => omitted.has(issue.cardId));
+  await report('fallback', 2, cards, failures);
+  const droppedCards = diagnosticCards(cards, failures);
+  const droppedQuestions = cards.filter(card => omitted.has(card.id)).map(card => card.question);
+  cards = cards.filter(card => !omitted.has(card.id));
+  let finalIssues = [];
+  // Recheck coverage and all remaining bank constraints before sealing.
+  while (cards.length >= INTERVIEW_ANSWER_MIN_CARDS) {
+    throwIfAborted(signal);
+    const remaining = inspectInterviewAnswerCards(cards, context).failures;
+    finalIssues = remaining.map(issue => ({ ...issue, cardId: cards[issue.cardIndex]?.id }));
+    if (!remaining.length) {
+      const bank = validateInterviewAnswerBank({ cards }, context, { droppedQuestions });
+      await report('final', 2, cards, [], droppedCards);
+      return { bank };
+    }
+    const invalid = new Set(remaining.map(failure => failure.cardIndex));
+    if (invalid.has(null)) break;
+    if (cards.some((card, index) => invalid.has(index) && INTERVIEW_REQUIRED_QUESTIONS.includes(card.question))) break;
+    droppedCards.push(...diagnosticCards(cards, remaining.map(issue => ({ ...issue, cardId: cards[issue.cardIndex]?.id }))));
+    droppedQuestions.push(...cards.filter((_, index) => invalid.has(index)).map(card => card.question));
+    cards = cards.filter((_, index) => !invalid.has(index));
+    finalIssues = [];
+  }
+  await report('final', 2, cards, finalIssues, droppedCards);
+  throw validationFailure({ stage: 'interview-answer-bank', reason: 'answer-floor',
+    details: [`Only ${cards.length} valid cards survived two repair rounds; at least ${INTERVIEW_ANSWER_MIN_CARDS} are required. Dropped questions: ${JSON.stringify(droppedQuestions)}.`],
+    ruleIds: ['INTERVIEW_ANSWER_CARD_FLOOR'], message: 'Fewer than eight valid prepared interview answers survived.' });
+}
+
+// This private lookup is only an index into the separately content-addressed
+// answer store. It grants no authority: the bank's complete input bindings and
+// exact evidence are revalidated on every load. No answer prose enters a brief
+// or the canvas, and legacy briefs simply have no index.
+async function readAnswerBinding({ brief, userDataPath }) {
+  if (!isPublishedInterviewBrief(brief) || typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) return null;
+  try {
+    const parent = await checkedDirectory(userDataPath);
+    const directory = await checkedDirectory(path.join(parent.real, ANSWER_BINDING_DIR));
+    if (directory.real !== path.join(parent.real, ANSWER_BINDING_DIR) || (directory.identity.mode & 0o077) !== 0) return null;
+    const opened = await openBoundFile(directory, `${brief.briefId}.json`, 2048);
+    if ((opened.opened.mode & 0o077) !== 0) { await opened.handle.close(); return null; }
+    const { text } = await readOpened(opened, 'utf8');
+    const binding = JSON.parse(text);
+    return exactObject(binding, ['version', 'briefId', 'answerBankRecordId']) && binding.version === 1
+      && binding.briefId === brief.briefId && ID_RE.test(binding.answerBankRecordId) ? binding : null;
+  } catch { return null; }
+}
+
+export async function loadInterviewPreparedAnswerBank({ brief, briefRecordId, userDataPath, snapshot,
+  loadSnapshot = loadInterviewHelperCareerSnapshot } = {}) {
+  const sealed = await loadInterviewPreparedBrief({ brief, briefRecordId, userDataPath });
+  if (!sealed) return null;
+  const binding = await readAnswerBinding({ brief: sealed, userDataPath });
+  if (!binding) return null;
+  const bundle = await loadPrivateInterviewPreparationBundle({ artifactId: sealed.inputs.applicationArtifactId, userDataPath });
+  const pinned = snapshot || await loadSnapshot({ snapshotId: sealed.inputs.careerSnapshotId, userDataPath });
+  if (!bundle || !pinned || pinned.snapshotId !== sealed.inputs.careerSnapshotId) return null;
+  return loadInterviewAnswerBank({ answerBankRecordId: binding.answerBankRecordId, userDataPath,
+    snapshot: pinned, brief: sealed, bundle });
+}
+
+export async function publishInterviewPreparedAnswers({ bank, brief, userDataPath, signal, loadSnapshot = loadInterviewHelperCareerSnapshot } = {}) {
+  throwIfAborted(signal);
+  if (!isPublishedInterviewBrief(brief) || bank?.inputs?.briefId !== brief.briefId) throw new Error('Invalid interview answer binding.');
+  const published = await publishInterviewAnswerBank({ bank, userDataPath, signal });
+  throwIfAborted(signal);
+  const snapshot = await loadSnapshot({ snapshotId: brief.inputs.careerSnapshotId, userDataPath });
+  throwIfAborted(signal);
+  const bundle = await loadPrivateInterviewPreparationBundle({ artifactId: brief.inputs.applicationArtifactId, userDataPath });
+  const verified = await loadInterviewAnswerBank({ answerBankRecordId: published.answerBankRecordId, userDataPath, snapshot, brief, bundle });
+  if (!snapshot || !bundle || !verified) throw new Error('Interview answer sources changed before publication.');
+  throwIfAborted(signal);
+  const root = await privateStoreRoot(userDataPath, ANSWER_BINDING_DIR, 'answer binding store');
+  const directory = await checkedDirectory(root);
+  if ((directory.identity.mode & 0o077) !== 0) throw new Error('Unsafe answer binding store.');
+  const target = path.join(root, `${brief.briefId}.json`);
+  const tmp = path.join(root, `.${brief.briefId}.${crypto.randomBytes(8).toString('hex')}.tmp`);
+  try {
+    await fs.promises.writeFile(tmp, JSON.stringify({ version: 1, briefId: brief.briefId, answerBankRecordId: published.answerBankRecordId }), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    throwIfAborted(signal);
+    await ensureDirectoryStill(directory);
+    // A successful explicit Prepare replaces the lookup, including a stale or
+    // corrupt older lookup. Candidate content remains immutable by its hash.
+    await fs.promises.rename(tmp, target);
+    const reloaded = await loadInterviewPreparedAnswerBank({ brief, userDataPath, snapshot });
+    throwIfAborted(signal);
+    if (!reloaded || answerBankRecordId(reloaded) !== published.answerBankRecordId) throw new Error('Interview answers could not be sealed safely.');
+    await pruneInterviewAnswerBindings({ userDataPath, briefId: brief.briefId });
+    return { answerBankAvailable: true, answerCardCount: reloaded.cards.length };
+  } finally { await fs.promises.unlink(tmp).catch(() => undefined); }
+}
+
 async function defaultPicker() {
   const selected = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   return selected.canceled ? '' : selected.filePaths?.[0] || '';
 }
-/** Register picker-backed intake, opaque artifact reload, and two-stage research. */
-export function registerInterviewPreparationHandlers({ appInstance = app, registerHandler = handleSafe, picker = defaultPicker, captureBundle = captureInterviewPreparationBundle, loadBundle = loadInterviewPreparationBundle, buildBrief = buildInterviewBrief, publishBrief = publishInterviewPreparedBrief } = {}) {
+/** Register intake, sealed research and separately sealed prepared answers. */
+export function registerInterviewPreparationHandlers({ appInstance = app, registerHandler = handleSafe, picker = defaultPicker, captureBundle = captureInterviewPreparationBundle, loadBundle = loadInterviewPreparationBundle, buildBrief = buildInterviewBrief, publishBrief = publishInterviewPreparedBrief,
+  buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank } = {}) {
   if (!appInstance || typeof appInstance.getPath !== 'function' || typeof registerHandler !== 'function') throw new TypeError('Interview preparation IPC registration is unavailable.');
   registerHandler('select-interview-preparation-bundle', async (_event, args, signal) => {
     validateSelectionArgs(args); throwIfAborted(signal);
@@ -897,7 +1336,8 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       || brief.inputs.jobUrlSha256 !== sha256(args.canonicalJobUrl)
       || brief.inputs.applicationArtifactId !== args.bundleArtifactId
       || brief.inputs.applicationArtifactDigest !== args.bundleArtifactDigest) return { brief: null };
-    return { brief };
+    const bank = await loadAnswers({ brief, briefRecordId: args.briefRecordId, userDataPath: appInstance.getPath('userData') });
+    return { brief, answerBankAvailable: !!bank, answerCardCount: bank?.cards.length || 0 };
   }, { validateArgs: validateInterviewPreparedBriefLoadArgs });
   registerHandler('build-interview-brief', async (_event, args, signal) => {
     validateInterviewBriefRequestArgs(args);
@@ -908,7 +1348,13 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       throwIfAborted(signal);
       if (!published || !isPublishedInterviewBrief(published.brief) || !ID_RE.test(published.briefRecordId)
         || interviewPreparedBriefRecordId(published.brief) !== published.briefRecordId) throw new Error('The interview brief could not be prepared safely.');
-      return { brief: published.brief, briefRecordId: published.briefRecordId };
+      const answers = await buildAnswers({ ...args, brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
+      throwIfAborted(signal);
+      const answerSummary = await publishAnswers({ bank: answers?.bank, brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
+      throwIfAborted(signal);
+      if (answerSummary?.answerBankAvailable !== true || !Number.isInteger(answerSummary.answerCardCount)
+        || answerSummary.answerCardCount < INTERVIEW_ANSWER_MIN_CARDS || answerSummary.answerCardCount > 20) throw new Error('The interview answers could not be prepared safely.');
+      return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary };
     }
     catch (error) { if (signal?.aborted) throw error; throw new Error('The interview brief could not be prepared safely.'); }
   }, { validateArgs: validateInterviewBriefRequestArgs });

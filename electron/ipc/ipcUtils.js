@@ -17,23 +17,36 @@ export function getCurrentIpcRequestContext() {
   return ipcRequestContext.getStore() || null;
 }
 
+// Host-owned companion workflows bind handoffs to their canvas owner rather
+// than giving the restricted child a general AI bridge.
+export function runWithIpcRequestContext(context, callback) {
+  return ipcRequestContext.run(context || null, callback);
+}
+
 // Test seam for exercising main-process helpers that rely on the same request
 // context as handleSafe, without registering a real Electron IPC handler.
 export function __runWithIpcRequestContextForTests(context, callback) {
-  return ipcRequestContext.run(context || null, callback);
+  return runWithIpcRequestContext(context, callback);
 }
 
 // ── Node Task Registry ──────────────────────────────────────────────────────
 // WebContents -> Map<nodeId, Map<AbortController, { registeredAt, channel }>>.
-// Node IDs are unique only inside one canvas. Keying this registry globally by
-// nodeId made deleting `node-1` in one window abort `node-1` work in every other
-// open canvas. Sender ownership keeps cancellation local while still letting
-// diagnostics take an app-wide snapshot.
+// Node IDs are unique only inside one canvas. Keep ordinary cancellation local
+// to its sender; retained MCP invocations can also be found by node and logical
+// run after a replacement renderer takes ownership.
 const nodeTasks = new Map();
 // File exports/imports can own durable transactions without a canvas node id.
 // Track every invoke by sender as well, so quit can drain those transactions
 // before destroying their renderer. Diagnostics keep using the node-only map.
 const senderTasks = new Map();
+// Once an invocation admits a handoff, its prompt/answer owner lives in main.
+// A reload can re-present that handoff; MCP also serves it without a renderer.
+// Retain this policy for the whole invocation, including gaps between steps.
+const senderTaskRendererLifecycle = new WeakMap();
+// Startup can dispatch dozens of invokes against one WebContents before any
+// settles. Share its lifecycle subscriptions instead of adding four listeners
+// per invoke; controllers still retain independent handoff/cancellation state.
+const senderLifecycleSubscriptions = new WeakMap();
 const taskRegistrySenders = new WeakSet();
 const quitPausedSenders = new WeakSet();
 const QUIT_PAUSE_WORK_CHANNELS = new Set([
@@ -138,15 +151,27 @@ function ensureSenderRegistryCleanup(sender) {
   taskRegistrySenders.add(sender);
   sender.once('destroyed', () => {
     for (const ac of senderTasks.get(sender)?.keys() || []) {
-      if (!ac.signal.aborted) ac.abort(new Error('Sender destroyed'));
+      if (senderTaskRendererLifecycle.get(ac)?.mcp) continue;
+      if (!ac.signal.aborted) ac.abort(Object.assign(new Error('Sender destroyed'), { code: 'IPC_SENDER_DESTROYED' }));
     }
     // A handler is expected to settle cooperatively, but a broken dependency
     // can ignore AbortSignal forever. Do not retain the destroyed WebContents
     // in diagnostics/registry state while waiting for that detached promise.
-    nodeTasks.delete(sender);
-    senderTasks.delete(sender);
-    quitPausedSenders.delete(sender);
-    acknowledgedManualAiRunIds.delete(sender);
+    // MCP work still has a live main-process owner. Keep it cancellable and
+    // drainable until the handler settles instead of detaching its registry.
+    const byNode = nodeTasks.get(sender);
+    for (const [nodeId, tasks] of byNode || []) {
+      for (const ac of tasks.keys()) if (!senderTaskRendererLifecycle.get(ac)?.mcp) tasks.delete(ac);
+      if (tasks.size === 0) byNode.delete(nodeId);
+    }
+    if (byNode?.size === 0) nodeTasks.delete(sender);
+    const bySender = senderTasks.get(sender);
+    for (const ac of bySender?.keys() || []) if (!senderTaskRendererLifecycle.get(ac)?.mcp) bySender.delete(ac);
+    if (!bySender?.size) {
+      senderTasks.delete(sender);
+      quitPausedSenders.delete(sender);
+      acknowledgedManualAiRunIds.delete(sender);
+    }
   });
 }
 
@@ -282,37 +307,57 @@ export function nodeCancellationError(cause = null) {
   return cancellationError('Node deleted', cause);
 }
 
-/**
- * Cancel all active background tasks for a specific node.
- */
-export function abortNodeTasks(nodeId, sender = null, reason = nodeCancellationError()) {
-  const owners = sender ? [[sender, senderTaskMap(sender)]] : [...nodeTasks.entries()];
-  for (const [owner, tasks] of owners) {
-    const set = tasks?.get(nodeId);
-    if (!set) continue;
-    logger.info(`[IPC] Aborting ${set.size} tasks for sender ${owner?.id ?? '?'} node ${nodeId}`);
-    for (const ac of set.keys()) {
-      ac.abort(reason);
+function nodeTaskCancellationEntries(nodeId, sender, { manualAiRunIds = [] } = {}) {
+  const local = [...(senderTaskMap(sender)?.get(nodeId)?.entries() || [])];
+  const runIds = new Set(normalizedManualAiRunIds(manualAiRunIds));
+  for (const [, meta] of local) if (meta.manualAiRunId) runIds.add(meta.manualAiRunId);
+  for (const runId of acknowledgedManualAiRunIds.get(sender)?.get(nodeId) || []) runIds.add(runId);
+  const entries = [];
+  for (const [owner, tasks] of nodeTasks) {
+    for (const [controller, meta] of tasks.get(nodeId) || []) {
+      if (sender && owner !== sender) {
+        const lifecycle = senderTaskRendererLifecycle.get(controller);
+        if (!lifecycle?.mcp || !meta.manualAiRunId) continue;
+        // An adopted run has the same identity in both invocations. Without
+        // one (deletion before auto-resume), only a handoff whose old dock is
+        // gone can be cancelled across senders. A live canvas with a coincident
+        // node id and a different run must retain its own work.
+        if (runIds.size > 0 ? !runIds.has(meta.manualAiRunId) : !(lifecycle.gone || lifecycle.navigating || owner.isDestroyed?.())) continue;
+      }
+      entries.push({ owner, controller, meta });
     }
   }
+  return entries;
+}
+
+function abortNodeTaskEntries(nodeId, entries, reason) {
+  const counts = new Map();
+  for (const { owner } of entries) counts.set(owner, (counts.get(owner) || 0) + 1);
+  for (const [owner, count] of counts) logger.info(`[IPC] Aborting ${count} tasks for sender ${owner?.id ?? '?'} node ${nodeId}`);
+  for (const { controller } of entries) controller.abort(reason);
+}
+
+/** Cancel local node work and the same retained MCP run across renderers. */
+export function abortNodeTasks(nodeId, sender = null, reason = nodeCancellationError(), options = {}) {
+  abortNodeTaskEntries(nodeId, nodeTaskCancellationEntries(nodeId, sender, options), reason);
 }
 
 /**
- * Abort one sender's node-scoped handlers and wait until their `handleSafe`
- * finally blocks have run. The bounded wait reports failure rather than claiming
- * cancellation completed while a non-cooperative handler is still draining.
+ * Abort node-scoped handlers, including retained MCP owners reached from a new
+ * sender, and wait until their `handleSafe` finally blocks have run. The bounded
+ * wait reports failure while a non-cooperative handler is still draining.
  */
 export async function abortNodeTasksAndWait(
   nodeId,
   sender,
   reason = nodeCancellationError(),
   timeoutMs = 30_000,
+  options = {},
 ) {
-  const tasks = senderTaskMap(sender);
-  const entries = [...(tasks?.get(nodeId)?.entries() || [])];
-  const controllers = entries.map(([controller]) => controller);
+  const entries = nodeTaskCancellationEntries(nodeId, sender, options);
+  const controllers = entries.map(({ controller }) => controller);
   const activeManualAiRunIds = [...new Set(
-    entries.map(([, meta]) => meta?.manualAiRunId).filter(Boolean),
+    entries.map(({ meta }) => meta?.manualAiRunId).filter(Boolean),
   )];
   // Retain before firing AbortSignal. A cooperative handler can unregister in
   // the same turn; later retries must still recover these ids even after that
@@ -325,7 +370,7 @@ export async function abortNodeTasksAndWait(
   const settlements = controllers
     .map(controller => nodeTaskSettlements.get(controller)?.settled)
     .filter(Boolean);
-  abortNodeTasks(nodeId, sender, reason);
+  abortNodeTaskEntries(nodeId, entries, reason);
   if (settlements.length === 0) {
     return { abortedCount: controllers.length, settled: true, manualAiRunIds };
   }
@@ -385,47 +430,101 @@ export function snapshotActiveNodeTasks(senderId = null) {
   return out;
 }
 
+/** Subscribe active invokes through one set of listeners per WebContents. */
+function subscribeSenderLifecycle(sender, ac) {
+  let subscription = senderLifecycleSubscriptions.get(sender);
+  if (subscription) {
+    subscription.controllers.add(ac);
+    return subscription;
+  }
+  const controllers = new Set([ac]);
+  const forEachController = callback => {
+    for (const controller of [...controllers]) {
+      const lifecycle = senderTaskRendererLifecycle.get(controller);
+      if (lifecycle) callback(controller, lifecycle);
+    }
+  };
+  const onSenderDestroyed = () => {
+    forEachController((controller, lifecycle) => {
+      lifecycle.gone = true;
+      if (!lifecycle.mcp) controller.abort(Object.assign(new Error('Sender destroyed'), { code: 'IPC_SENDER_DESTROYED' }));
+    });
+  };
+  const onRendererGone = () => {
+    forEachController((controller, lifecycle) => {
+      lifecycle.gone = true;
+      if (!lifecycle.mcp) controller.abort(Object.assign(new Error('Renderer stopped'), { code: 'IPC_RENDERER_STOPPED' }));
+    });
+  };
+  const onRendererReady = () => {
+    forEachController((_controller, lifecycle) => { lifecycle.gone = false; lifecycle.navigating = false; });
+  };
+  // Generic invokes still lose their continuation on main-frame navigation.
+  // Admitted handoffs remain main-owned and replay into the replacement dock;
+  // navigation is presentation loss, not cancellation of those requests.
+  const onMainFrameNavigation = (_event, _url, isInPlace, isMainFrame) => {
+    if (!isMainFrame || isInPlace) return;
+    forEachController((controller, lifecycle) => {
+      lifecycle.navigating = true;
+      if (!lifecycle.handoff) controller.abort(Object.assign(new Error('Renderer navigated'), { code: 'IPC_RENDERER_NAVIGATED' }));
+    });
+  };
+
+  subscription = {
+    controllers,
+    detach: () => {
+      sender.removeListener?.('destroyed', onSenderDestroyed);
+      sender.removeListener?.('render-process-gone', onRendererGone);
+      sender.removeListener?.('dom-ready', onRendererReady);
+      sender.removeListener?.('did-start-navigation', onMainFrameNavigation);
+    },
+  };
+  senderLifecycleSubscriptions.set(sender, subscription);
+  sender.once('destroyed', onSenderDestroyed);
+  sender.on?.('render-process-gone', onRendererGone);
+  sender.on?.('dom-ready', onRendererReady);
+  sender.on?.('did-start-navigation', onMainFrameNavigation);
+  return subscription;
+}
+
 /**
  * Creates an AbortController tied to the IPC event sender's lifecycle.
  * If the sender window is destroyed (e.g., closed by the user), the signal aborts.
  * Optionally aborts after a timeout.
- * 
+ *
  * @param {Electron.IpcMainInvokeEvent} event - The IPC event
  * @param {number} timeoutMs - Optional timeout in milliseconds
  * @returns {{ ac: AbortController, signal: AbortSignal, cleanup: Function }}
  */
 function createSenderAbortController(event, timeoutMs = 0) {
   const ac = new AbortController();
-  const onSenderDestroyed = () => ac.abort(new Error('Sender destroyed'));
-  const onRendererGone = () => ac.abort(new Error('Renderer stopped'));
-  // A renderer reload replaces its IPC world but keeps the same WebContents.
-  // Without this listener, an invoke already waiting on a manual-AI paste is
-  // orphaned forever: the old renderer cannot receive its result and the new
-  // renderer no longer owns the invoke continuation. Only a genuine main-frame
-  // navigation tears down that continuation; in-page navigation must not
-  // cancel active work.
-  const onMainFrameNavigation = (_event, _url, isInPlace, isMainFrame) => {
-    if (isMainFrame && !isInPlace) ac.abort(new Error('Renderer navigated'));
+  const rendererLifecycle = { handoff: false, mcp: false, gone: false, navigating: false };
+  senderTaskRendererLifecycle.set(ac, rendererLifecycle);
+  const subscription = subscribeSenderLifecycle(event.sender, ac);
+  const retainHandoffRendererLifecycle = route => {
+    if (!['manual', 'mcp'].includes(route)) return;
+    rendererLifecycle.handoff = true;
+    if (route === 'mcp') rendererLifecycle.mcp = true;
   };
-  
-  event.sender.once('destroyed', onSenderDestroyed);
-  event.sender.once('render-process-gone', onRendererGone);
-  event.sender.on?.('did-start-navigation', onMainFrameNavigation);
 
   let timeoutId = null;
   if (timeoutMs > 0) {
-    timeoutId = setTimeout(() => ac.abort(new Error('Timeout')), timeoutMs);
+    timeoutId = setTimeout(() => ac.abort(Object.assign(new Error('Timeout'), { code: 'IPC_REQUEST_TIMEOUT' })), timeoutMs);
   }
 
   return {
     ac,
     signal: ac.signal,
+    retainHandoffRendererLifecycle,
+    isRendererIndependent: () => rendererLifecycle.mcp,
+    isHandoffRendererGone: () => Boolean(event.sender.isDestroyed?.() || rendererLifecycle.gone),
     cleanup: () => {
+      senderTaskRendererLifecycle.delete(ac);
       if (timeoutId) clearTimeout(timeoutId);
-      event.sender.removeListener?.('did-start-navigation', onMainFrameNavigation);
-      event.sender.removeListener?.('render-process-gone', onRendererGone);
-      if (!event.sender.isDestroyed()) {
-        event.sender.removeListener('destroyed', onSenderDestroyed);
+      subscription.controllers.delete(ac);
+      if (subscription.controllers.size === 0) {
+        subscription.detach();
+        senderLifecycleSubscriptions.delete(event.sender);
       }
     }
   };
@@ -512,7 +611,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
     if (quitPausedSenders.has(event.sender) && QUIT_PAUSE_WORK_CHANNELS.has(channel)) {
       return { success: false, pausedForQuit: true, errorCode: 'APP_QUIT_PAUSED', error: 'App paused for quit' };
     }
-    const { ac, signal, cleanup } = createSenderAbortController(event, timeoutMs);
+    const { ac, signal, cleanup, retainHandoffRendererLifecycle, isRendererIndependent, isHandoffRendererGone } = createSenderAbortController(event, timeoutMs);
     let nodeId = null;
     let additionalNodeIds = [];
     let senderTaskRegistered = false;
@@ -565,6 +664,8 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
           abortController: ac,
           nodeId: nodeId || null,
           channel,
+          retainHandoffRendererLifecycle,
+          isHandoffRendererGone,
           livenessEvidence: new Map(),
           livenessRules,
           // A renderer-created id spanning every manual AI step in one logical
@@ -590,10 +691,10 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
         : null;
       
       // Guard: Window may have been closed during await
-      if (event.sender.isDestroyed()) return { success: false, error: 'Window closed' };
+      if (event.sender.isDestroyed() && !isRendererIndependent()) return { success: false, error: 'Window closed', errorCode: ipcErrorCode(signal.reason) || 'IPC_SENDER_DESTROYED' };
       // A cooperative handler may finish just after its cancellation signal
       // fired. Do not report that detached work as successful.
-      if (signal.aborted) return { success: false, error: abortErrorMessage(signal), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
+      if (signal.aborted) return { success: false, error: abortErrorMessage(signal), errorCode: ipcErrorCode(signal.reason), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
       
       return {
         success: true,
@@ -602,7 +703,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
       };
     } catch (e) {
       if (signal.aborted) {
-        return { success: false, error: abortErrorMessage(signal, e), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
+        return { success: false, error: abortErrorMessage(signal, e), errorCode: ipcErrorCode(signal.reason), ...(options.reportCancellation === true ? { cancelled: true } : {}) };
       }
       const failureStack = compactErrorStack(e);
       logger.error(`[${channel}] failed:`, e?.message || String(e), ...(failureStack ? [`stack: ${failureStack}`] : []));

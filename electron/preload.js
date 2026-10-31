@@ -337,8 +337,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onChromeLaunchDismissed: createListener('browser-chrome-launch-dismissed'),
 
   // ── Lifecycle Control ────────────────────────────────────────────────────
-  cancelNodeTask: (nodeId, cause = null) => ipcRenderer.send('cancel-node-task', nodeId, cause),
-  cancelNodeTaskAndWait: (nodeId, cause = null) => ipcRenderer.invoke('cancel-node-task-and-wait', { nodeId, cause }),
+  cancelNodeTask: (nodeId, cause = null, manualAiRunIds = []) => ipcRenderer.send('cancel-node-task', nodeId, cause, manualAiRunIds),
+  cancelNodeTaskAndWait: (nodeId, cause = null, manualAiRunIds = []) => ipcRenderer.invoke('cancel-node-task-and-wait', {
+    nodeId, cause, manualAiRunIds: typeof manualAiRunIds === 'string' ? [manualAiRunIds] : manualAiRunIds,
+  }),
 
   // ── ChatGPT handoff bridge ──────────────────────────────────────────────
   // This closed surface mirrors contracts.js: 27 invoke channels, one

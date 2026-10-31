@@ -701,6 +701,8 @@ export default [
         await Promise.all([
           fs.promises.mkdir(path.join(userData, 'interview-helper-artifacts'), { recursive: true }),
           fs.promises.mkdir(path.join(userData, 'interview-helper-prepared-briefs'), { recursive: true }),
+          fs.promises.mkdir(path.join(userData, 'interview-helper-answer-banks'), { recursive: true }),
+          fs.promises.mkdir(path.join(userData, 'interview-helper-answer-bindings'), { recursive: true }),
           fs.promises.mkdir(path.join(userData, 'career-input-staging'), { recursive: true }),
           fs.promises.mkdir(path.join(userData, 'career-snapshot-store'), { recursive: true }),
           fs.promises.mkdir(path.join(userData, 'renderer-workspace-write-journal'), { recursive: true }),
@@ -719,6 +721,8 @@ export default [
           path.dirname(path.dirname(userData)),
           path.join(userData, 'interview-helper-artifacts'),
           path.join(userData, 'interview-helper-prepared-briefs'),
+          path.join(userData, 'interview-helper-answer-banks'),
+          path.join(userData, 'interview-helper-answer-bindings'),
           path.join(userData, 'career-input-staging'),
           path.join(userData, 'career-snapshot-store'),
           path.join(userData, 'renderer-workspace-write-journal'),
@@ -793,7 +797,7 @@ export default [
       const foldedUserData = path.join(foldedRoot, 'host-user-data');
       const originalGetPath = electronPkg.app.getPath;
       try {
-        const stores = ['interview-helper-artifacts', 'interview-helper-prepared-briefs'];
+        const stores = ['interview-helper-artifacts', 'interview-helper-prepared-briefs', 'interview-helper-answer-banks', 'interview-helper-answer-bindings'];
         for (const store of stores) {
           const storeDir = path.join(userData, store);
           await fs.promises.mkdir(storeDir, { recursive: true });
@@ -1305,6 +1309,8 @@ export default [
         const stores = [
           'interview-helper-artifacts',
           'interview-helper-prepared-briefs',
+          'interview-helper-answer-banks',
+          'interview-helper-answer-bindings',
           'career-input-staging',
           'career-snapshot-store',
           'local-file-protocol-transcodes',

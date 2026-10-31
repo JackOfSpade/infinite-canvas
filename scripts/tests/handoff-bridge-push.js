@@ -120,9 +120,10 @@ function comparativeFixture({ firstRun = 'A', beforeRead = null, submit = null, 
   const a = { ...entry, requestId: 'comparison-a', task: 'job-official-posting-match', comparisonGroup: COMPARISON_GROUP, comparisonRun: 'A' };
   const b = { ...a, requestId: 'comparison-b', handoffCode: 'HANDOFF-GHJKLM', comparisonRun: 'B' };
   let pending = [firstRun === 'A' ? a : b];
-  const reads = [], submits = [], unavailable = [];
+  const reads = [], submits = [], unavailable = [], requeues = [];
   const push = createPushSource({ seam: {
     comparativeUnavailable: args => { unavailable.push(args); return true; },
+    requeue: args => { requeues.push(args); return true; },
     list: async () => ({ handoffs: pending, excluded: {}, pending: pending.length }),
     read: async args => {
       reads.push(args);
@@ -138,7 +139,7 @@ function comparativeFixture({ firstRun = 'A', beforeRead = null, submit = null, 
     },
   }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), activeNodeTasks: () => [], graceMs: 0, pollMs: 0, now });
   assert(push.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
-  return { push, reads, submits, unavailable, a, b, setPending: value => { pending = value; } };
+  return { push, reads, submits, unavailable, requeues, a, b, setPending: value => { pending = value; } };
 }
 const comparisonContext = (character, pristine = false, isCurrent = () => true) => ({ conversationKey: character.repeat(64), observed: true, pristine, isCurrent });
 let observedChatOrdinal = 0;
@@ -156,6 +157,193 @@ const comparativeEngine = push => createHandoffEngine({ sources: { push, applica
 } }, scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
 
 export default [
+  ...['success', 'throw'].flatMap(oldReadResult => ['reserved', 'served'].map(replacementState => ({
+    name: `comparative push: stale ${oldReadResult} reread cannot erase or contaminate ${replacementState} replacement ownership`,
+    run: async () => {
+      const oldStarted = deferred(); const oldHeld = deferred();
+      const replacementStarted = deferred(); const replacementHeld = deferred();
+      let holdOld = false;
+      const { push, a, b, requeues } = comparativeFixture({ beforeRead: async args => {
+        const key = args.comparisonProvenance.conversationKey;
+        if (holdOld && key === '2'.repeat(64)) {
+          oldStarted.resolve(); await oldHeld.promise;
+          if (oldReadResult === 'throw') throw new Error('Synthetic obsolete prompt read failure');
+        }
+        if (replacementState === 'reserved' && key === '3'.repeat(64)) {
+          replacementStarted.resolve(); await replacementHeld.promise;
+        }
+      } });
+      const submit = (worker, character, code) => push.submit({ epoch: 'stale-reread', worker,
+        comparisonContext: comparisonContext(character, true), handoffCode: code,
+        response: JSON.stringify({ handoffCode: code, answer: 'valid' }) });
+      await push.get({ epoch: 'stale-reread', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      await submit('worker-1', '1', a.handoffCode);
+      await push.get({ epoch: 'stale-reread', worker: 'worker-2', comparisonContext: comparisonContext('2') });
+      holdOld = true;
+      const stale = push.get({ epoch: 'stale-reread', worker: 'worker-2', comparisonContext: comparisonContext('2') });
+      await oldStarted.promise;
+      await submit('worker-2', '2', a.handoffCode);
+      assert((await submit('worker-2', '2', b.handoffCode)).status === 'fresh_context_required' && requeues.length === 1);
+      const replacement = push.get({ epoch: 'stale-reread', worker: 'worker-3', comparisonContext: comparisonContext('3', true) });
+      if (replacementState === 'reserved') await replacementStarted.promise;
+      else assert((await replacement).status === 'served');
+      oldHeld.resolve();
+      const obsolete = await stale;
+      assert(obsolete.status !== 'served' && !Object.hasOwn(obsolete, 'prompt'), 'an obsolete reread never delivers its old prompt again');
+      const claims = push.status('stale-reread').claimWorkers;
+      assert(claims.length === 1 && claims[0].workerOrdinal === 3 && requeues.length === 1,
+        'old read completion neither drops the new lease nor consumes its fresh-context retry budget');
+      replacementHeld.resolve();
+      assert((await replacement).status === 'served');
+      assert((await submit('worker-3', '3', b.handoffCode)).status === 'accepted', 'the replacement still completes B with its own isolated proof');
+    },
+  }))),
+  ...[false, true].map(existingFence => ({
+    name: `comparative push: stale empty discovery cannot erase a ${existingFence ? 'newly extended' : 'new'} B recovery-context fence`,
+    run: async () => {
+      const fullRead = deferred(); const fullHeld = deferred();
+      const b = { ...entry, requestId: 'refresh-recovery-b', task: 'job-official-posting-match',
+        comparisonGroup: COMPARISON_GROUP, comparisonRun: 'B' };
+      let pending = [b]; let holdFull = false; const requeues = [];
+      const push = createPushSource({ seam: {
+        list: async args => {
+          if (holdFull && args.allowNodeIds === null) {
+            fullRead.resolve(); await fullHeld.promise;
+            return { handoffs: [], excluded: {} };
+          }
+          return { handoffs: pending, excluded: {} };
+        },
+        read: async args => ({ ok: true, handoffCode: args.handoffCode, task: b.task, prompt: 'Synthetic fresh-context B' }),
+        requeue: args => { requeues.push(args); return true; },
+        submit: async () => { pending = []; return { outcome: 'accepted' }; },
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), graceMs: 0, pollMs: 0 });
+      assert(push.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
+      const get = character => push.get({ epoch: 'refresh-recovery', worker: 'worker-2', comparisonContext: comparisonContext(character, true) });
+      if (existingFence) {
+        assert((await get('1')).status === 'served');
+        assert(push.requeueWorker({ epoch: 'refresh-recovery', worker: 'worker-2', reason: 'fresh-context-required' }) === 1);
+      }
+      assert((await get('2')).status === 'served');
+      holdFull = true;
+      const refresh = push.refreshHubs(); await fullRead.promise;
+      assert(push.requeueWorker({ epoch: 'refresh-recovery', worker: 'worker-2', reason: 'worker-replaced' }) === 1);
+      fullHeld.resolve();
+      assert(await refresh, 'the stale full discovery completes after the new recovery fence exists');
+      assert((await get('2')).status === 'fresh_context_required',
+        'even a purported pristine observation of the recovered conversation cannot receive B again');
+      if (existingFence) assert((await get('1')).status === 'fresh_context_required', 'extending the fence retains its earlier banned conversation');
+      assert(requeues.length === (existingFence ? 2 : 1), 'checking a barred conversation never consumes another retry');
+      const fresh = await push.get({ epoch: 'refresh-recovery', worker: 'worker-3', comparisonContext: comparisonContext('3', true) });
+      assert(fresh.status === 'served' && fresh.handoffCode === b.handoffCode);
+      assert((await push.submit({ epoch: 'refresh-recovery', worker: 'worker-3', comparisonContext: comparisonContext('3', true),
+        handoffCode: b.handoffCode, response: JSON.stringify({ handoffCode: b.handoffCode, answer: 'valid' }) })).status === 'accepted');
+    },
+  })),
+  ...['worker-lost', 'worker-replaced'].map(reason => ({
+    name: `handoff bridge: push: simultaneous reserved comparative reads survive ${reason} and complete with their original identities`,
+    run: async () => {
+      const held = deferred(); const reading = [];
+      const pending = Array.from({ length: 5 }, (_, index) => ({ ...entry,
+        requestId: `reserved-comparison-${index}`, bridgeClaimId: `reserved-claim-${index}`,
+        handoffCode: `HANDOFF-AAAAA${'BCDEF'[index]}`, task: 'job-official-posting-match',
+        comparisonGroup: index.toString(16).padStart(64, '0'), comparisonRun: 'A' }));
+      const original = pending.map(item => `${item.requestId}:${item.handoffCode}`);
+      const requeues = []; const completed = []; let hold = true; let oldCurrent = true;
+      const push = createPushSource({ seam: {
+        list: async () => ({ handoffs: pending, excluded: {} }),
+        read: async args => {
+          if (hold) { reading.push(args); await held.promise; }
+          return { ok: true, handoffCode: args.handoffCode, task: 'job-official-posting-match', prompt: 'Synthetic reserved comparison' };
+        },
+        requeue: args => { requeues.push(args); return true; },
+        submit: async args => {
+          completed.push(`${args.requestId}:${args.handoffCode}`);
+          pending.splice(pending.findIndex(item => item.requestId === args.requestId), 1);
+          return { outcome: 'accepted' };
+        },
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]), graceMs: 0, pollMs: 0 });
+      assert(push.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' }));
+      const oldReads = pending.map((_, index) => push.get({ epoch: 'reserved-recovery', worker: `worker-${index + 1}`,
+        comparisonContext: comparisonContext(String(index + 1), true, () => oldCurrent) }));
+      for (let turn = 0; turn < 100 && reading.length < original.length; turn++) await Promise.resolve();
+      assert(reading.length === original.length, 'every comparative request is reserved before worker recovery');
+      oldCurrent = false;
+      for (let index = 0; index < original.length; index++) {
+        assert(push.requeueWorker({ epoch: 'reserved-recovery', worker: `worker-${index + 1}`, reason }) === 1,
+          'each lost reservation is released synchronously in the same turn');
+      }
+      assert(requeues.length === original.length && requeues.every(item => item.reason === reason), 'recovery reaches every affected identity');
+      hold = false;
+      for (let index = 0; index < original.length; index++) {
+        const served = await push.get({ epoch: 'reserved-recovery', worker: 'worker-6', comparisonContext: comparisonContext('9', true) });
+        assert(served.status === 'served', 'the new live worker can claim each recovered request');
+        assert((await push.submit({ epoch: 'reserved-recovery', worker: 'worker-6', comparisonContext: comparisonContext('9', true),
+          handoffCode: served.handoffCode, response: JSON.stringify({ handoffCode: served.handoffCode, answer: 'valid' }) })).status === 'accepted');
+      }
+      held.resolve();
+      assert((await Promise.all(oldReads)).every(item => item.status === 'retry'), 'late reads from dead conversations cannot claim new ownership');
+      assert(completed.length === original.length && original.every(item => completed.includes(item)), 'all original request and handoff identities complete');
+    },
+  })),
+  {
+    name: 'comparative push: contaminated B requeues once and completes in a fresh conversation',
+    run: async () => {
+      const { push, a, b, requeues, submits, unavailable } = comparativeFixture();
+      await push.get({ epoch: 'recover-b', worker: 'worker-1', comparisonContext: comparisonContext('1') });
+      await push.submit({ epoch: 'recover-b', worker: 'worker-1', comparisonContext: comparisonContext('1'), handoffCode: a.handoffCode,
+        response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      await push.get({ epoch: 'recover-b', worker: 'worker-2', comparisonContext: comparisonContext('2') });
+      await push.submit({ epoch: 'recover-b', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: a.handoffCode,
+        response: JSON.stringify({ handoffCode: a.handoffCode, answer: 'A' }) });
+      const contaminated = await push.submit({ epoch: 'recover-b', worker: 'worker-2', comparisonContext: comparisonContext('2'), handoffCode: b.handoffCode,
+        response: JSON.stringify({ handoffCode: b.handoffCode, answer: 'B' }) });
+      assert(contaminated.status === 'fresh_context_required' && requeues.length === 1
+        && requeues[0].requestId === b.requestId && requeues[0].reason === 'comparison-contaminated', 'contamination releases B without rejecting its answer');
+      assert(submits.length === 1 && unavailable.length === 0, 'contaminated B never consumes a validation attempt or the terminal unavailable seam');
+      assert((await push.get({ epoch: 'recover-b', worker: 'worker-2', comparisonContext: comparisonContext('2') })).status === 'fresh_context_required');
+      const fresh = await push.get({ epoch: 'recover-b', worker: 'worker-3', comparisonContext: comparisonContext('3', true) });
+      assert(fresh.status === 'served' && fresh.handoffCode === b.handoffCode, 'a new conversation receives the same B request');
+      assert((await push.submit({ epoch: 'recover-b', worker: 'worker-3', comparisonContext: comparisonContext('3', true), handoffCode: b.handoffCode,
+        response: JSON.stringify({ handoffCode: b.handoffCode, answer: 'B' }) })).status === 'accepted');
+    },
+  },
+  {
+    name: 'handoff bridge: push: assignment notification follows a successful claim and skips reads abandoned by scope changes',
+    run: async () => {
+      const pendingRead = deferred(); const reading = deferred(); const assigned = [];
+      let delayRead = true; let failRead = false; let source;
+      source = createPushSource({ seam: {
+        list: async () => ({ handoffs: [entry], excluded: {} }),
+        read: async item => {
+          if (delayRead) { reading.resolve(); await pendingRead.promise; }
+          if (failRead) return { ok: false, reason: 'not_pending' };
+          return { ok: true, requestId: item.requestId, handoffCode: item.handoffCode, task: entry.task, prompt: 'Synthetic assignment prompt', attempt: 1 };
+        },
+        assigned: args => {
+          assert(source.status('assignment-test').served === 1, 'worker ownership is installed before notification');
+          assigned.push(args);
+        },
+      }, windows: new Map([[71, { __canvasFilePath: '/tmp/ada.canvas' }]]) });
+      source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: 'node-ada' });
+      source.setAllowedTasks(new Set(['job-scoring']));
+      const stale = source.get({ epoch: 'assignment-test' });
+      await reading.promise;
+      assert(assigned.length === 0, 'an in-flight prompt read is not an assignment');
+      source.setAllowedTasks(new Set(['price-synthesis']));
+      pendingRead.resolve();
+      assert((await stale).status === 'retry' && assigned.length === 0, 'an abandoned read never starts the caller timer');
+      delayRead = false;
+      source.setAllowedTasks(new Set(['job-scoring']));
+      failRead = true;
+      assert((await source.get({ epoch: 'assignment-test' })).status !== 'served' && assigned.length === 0, 'failed reads never notify assignment');
+      failRead = false;
+      assert((await source.get({ epoch: 'assignment-test' })).status === 'served' && assigned.length === 1, 'successful delivery notifies its caller');
+      assert((await source.get({ epoch: 'assignment-test' })).status === 'served' && assigned.length === 1, 're-reading an owned claim never restarts the timer');
+      assert(assigned[0].requestId === entry.requestId && assigned[0].handoffCode === CODE
+        && assigned[0].allowTasks.has('job-scoring') && assigned[0].allowNodeIds.has('node-ada')
+        && assigned[0].allowWindowNodePairs.has('71\u0000node-ada'), 'notification uses the exact ownership-checked seam arguments');
+    },
+  },
   {
     name: 'Amendment 9 item 3: a delayed re-copy starts a fresh bounded observed-launch window',
     run: async () => {
@@ -309,6 +497,29 @@ export default [
         assert(reads.length === 0, 'clipboard credentials reveal no comparative prompt, even when minted by New or different workers');
         await engine.close();
       }
+    },
+  },
+  {
+    name: 'comparative engine: trusted observed worker counts exclude unobserved slots and include busy workers',
+    run: async () => {
+      const { push, a, b, setPending } = comparativeFixture();
+      setPending([a, b]);
+      const engine = comparativeEngine(push);
+      try {
+        await engine.newChat({ linkId: LINK });
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 2 });
+        const one = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        const two = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 2 });
+        assert(!hasLiveObservedWorker(), 'planned or copied worker slots do not prove a live observed conversation');
+        observeWorker(engine, one);
+        assert(hasLiveObservedWorker() && !hasLiveObservedWorker(2), 'one observed worker proves only sequential capacity');
+        observeWorker(engine, two);
+        assert(hasLiveObservedWorker(2), 'both observed conversations prove parallel capacity');
+        assert((await engine.get({ session: one.sessionCode, linkId: LINK })).handoffCode === a.handoffCode);
+        assert((await engine.get({ session: two.sessionCode, linkId: LINK })).handoffCode === b.handoffCode);
+        assert(hasLiveObservedWorker(2), 'workers serving requests remain live while another comparison waits');
+      } finally { await engine.close(); }
+      assert(!hasLiveObservedWorker(), 'closing the engine retires its count provider');
     },
   },
   {
@@ -1233,12 +1444,58 @@ export default [
     assert(source.status('exact-claim').claimed.length === 0, 'chat rotation clears the renderer claim instead of leaving the dock suppressed');
   } },
   { name: 'handoff bridge: push: stale canvas paths release the served claim', run: async () => {
-    const { source, windows } = makeSource();
-    await source.get({ epoch: 'save-as-claim' });
-    windows.get(71).__canvasFilePath = '/tmp/after-save-as.canvas';
-    const status = source.status('save-as-claim');
-    assert(status.claimed.length === 0 && status.served === 0,
-      'Save As prunes the now-unservable hub and returns this exact handoff to normal paste controls');
+    for (const canvasFilePath of ['/tmp/after-save-as.canvas', null]) {
+      const { source, windows } = makeSource();
+      await source.get({ epoch: 'save-as-claim' });
+      windows.get(71).__canvasFilePath = canvasFilePath;
+      const status = source.status('save-as-claim');
+      assert(status.claimed.length === 0 && status.served === 0 && status.selectedHubs.length === 0,
+        'a live window changing or clearing its file prunes the now-unservable hub');
+    }
+  } },
+  { name: 'handoff bridge: push: losing a display window preserves only its previously selected exact hub for worker completion', run: async () => {
+    for (const claimBeforeLoss of [false, true]) {
+      const sibling = { ...entry, requestId: 'detached-unselected', nodeId: 'unselected-node',
+        bridgeClaimId: '33333333-3333-4333-8333-333333333333', handoffCode: 'HANDOFF-BCDEFG' };
+      const entries = [entry]; let submitted = 0;
+      const { source, windows } = makeSource({ entries, autoSelectHubs: true, submit: async args => {
+        assert(args.requestId === entry.requestId && args.allowNodeIds.size === 1 && args.allowNodeIds.has(entry.nodeId)
+          && args.allowWindowNodePairs.size === 1 && args.allowWindowNodePairs.has(`${entry.windowId}\u0000${entry.nodeId}`),
+        'a detached worker submit retains the exact previously verified main-process hub scope');
+        submitted += 1; return { outcome: 'accepted', accepted: true };
+      } });
+      const get = () => source.get({ epoch: 'display-lost', worker: 'worker-1' });
+      if (claimBeforeLoss) assert((await get()).status === 'served');
+      windows.delete(71);
+      entries.push(sibling);
+      assert(await source.refreshHubs(), 'registry discovery still succeeds without the display window');
+      const pending = source.status('display-lost');
+      assert(pending.selectedHubs.length === 1 && pending.discovered.length === 1
+        && pending.discovered[0].pending === 1, 'only the already selected exact window/node hub is remembered');
+      assert(!source.selectHub({ windowId: 71, canvasFilePath: '/tmp/ada.canvas', nodeId: sibling.nodeId })
+        && !source.selectHubKey(testHubKey('/tmp/ada.canvas', sibling.nodeId)), 'a missing window cannot authorize a new detached hub');
+      const first = await get(); const replay = await get();
+      assert(first.status === 'served' && replay.status === 'served' && first.handoffCode === CODE
+        && replay.handoffCode === CODE && source.status('display-lost').claimed.length === 1,
+      'the original worker can read or re-read its exact pending claim after the window disappears');
+      assert((await source.submit({ epoch: 'display-lost', worker: 'worker-1', handoffCode: CODE, response: VALID_RESPONSE })).status === 'accepted'
+        && submitted === 1 && source.status('display-lost').claimed.length === 0, 'the worker completes through its original push route');
+    }
+  } },
+  { name: 'handoff bridge: push: explicit scope removal revokes a remembered closed-window hub', run: async () => {
+    for (const clear of [false, true]) {
+      const { source, windows } = makeSource({ autoSelectHubs: true });
+      assert((await source.get({ epoch: 'detached-opt-out' })).status === 'served');
+      windows.delete(71);
+      assert(source.status('detached-opt-out').claimed.length === 1);
+      if (clear) source.clearHubs({ windowId: 71 });
+      else assert(source.unselectHubKey(testHubKey('/tmp/ada.canvas', entry.nodeId)));
+      assert(await source.refreshHubs());
+      const status = source.status('detached-opt-out');
+      assert(status.selectedHubs.length === 0 && status.claimed.length === 0 && status.discovered.length === 0,
+        'removing scope also removes the only remembered authority for a closed window');
+      assert((await source.get({ epoch: 'detached-opt-out' })).status !== 'served', 'discovery cannot silently restore detached scope');
+    }
   } },
   { name: 'handoff bridge: push: a full registry refresh releases a settled served claim', run: async () => {
     const entries = [entry];

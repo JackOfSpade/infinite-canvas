@@ -177,7 +177,7 @@ export const CODE_DEFINITIONS = {
 
   OFFDISC: {
     label: 'Official Posting Discovery',
-    description: 'Process-local latest lookup per source input: discovered candidates, eligible sources, fixed source-rejection reasons and comparison counts. Distinguishes no research leads from candidates rejected before comparison. Included automatically in FULL; no listing text, URLs or source/proof hashes.',
+    description: 'Process-local latest lookup per source input: discovered candidates, eligible sources, fixed source-rejection reasons and comparison counts; ChatGPT finder and judge calls, final unsettled reason codes and snapshot read/failure/truncation counts. Distinguishes no research leads from candidates rejected before comparison. Included automatically in FULL; no listing text, URLs or source/proof hashes.',
     logFilter: line => /official[- ]?posting|job-official-posting|OfficialPosting/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },

@@ -67,7 +67,7 @@ const TASK_IDS = new Set([
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence', 'job-taxonomy-classify',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
   'price-synthesis-batch', 'resume-parse',
-  'interview-brief-research', 'interview-brief-assessment',
+  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
   'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'worker_restart_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);

@@ -51,7 +51,7 @@ function hostFailure(error) {
 /** One host-owned run cache and scheduler. A caller signal cancels only its
  * subscription; the factory's run signal owns the shared network requests. */
 export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting, signal: parentSignal, now = Date.now, sleep = delay,
-  upgradeSameHostRedirects = fetch === fetchOfficialPosting } = {}) {
+  upgradeSameHostRedirects = fetch === fetchOfficialPosting, cacheFailures = true, hostBreaker = true } = {}) {
   const controller = new AbortController(); const signal = controller.signal;
   const abortRun = () => controller.abort(parentSignal?.reason);
   if (parentSignal?.aborted) abortRun(); else parentSignal?.addEventListener('abort', abortRun, { once: true });
@@ -90,7 +90,9 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
       const outcome = state.outcomes.get(state.nextOutcome); state.outcomes.delete(state.nextOutcome++);
       if (!outcome) state.failures = 0;
       else if (hostFailure(outcome)) state.failures += 1;
-      if (state.failures >= 3 && !state.tripped) { state.tripped = true; stats.breakerTrips += 1; }
+      // Long-lived snapshot lookups may keep pacing a temporarily unhealthy
+      // shared ATS host without excluding all of its later recovered rows.
+      if (hostBreaker && state.failures >= 3 && !state.tripped) { state.tripped = true; stats.breakerTrips += 1; }
     }
     pump();
   };
@@ -194,7 +196,17 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
       const final = result?.url || result?.sourceUrl;
       if (final) { try { const alias = cacheKey(officialPostingFetchUrl(final).href); if (!cached(alias)) cache.set(alias, entry); } catch { /* The transport owns result validation. */ } }
       return recorded;
-    }, error => { entry.failure = error; entry.expiresAt = clock() + OFFICIAL_FETCH_NEGATIVE_CACHE_MS; throw error; });
+    }, error => {
+      entry.failure = error;
+      if (cacheFailures) entry.expiresAt = clock() + OFFICIAL_FETCH_NEGATIVE_CACHE_MS;
+      else {
+        // Current subscribers share the same transfer, but a later snapshot
+        // must be able to observe a page that has recovered. Redirect aliases
+        // cannot retain that transfer's rejected promise either.
+        for (const [alias, cachedEntry] of cache) if (cachedEntry === entry) cache.delete(alias);
+      }
+      throw error;
+    });
     // A row may detach before a shared operation settles. Its eventual
     // rejection still belongs to the cache, never the unhandled-rejection queue.
     void entry.promise.catch(() => {});

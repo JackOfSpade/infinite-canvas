@@ -87,6 +87,8 @@ const KNOWN_TASKS = new Set([
   // state by accident.
   'interview-brief-research',
   'interview-brief-assessment',
+  'interview-answer-bank',
+  'interview-live-match',
   // The fallback bucket resolveTask() lands on for an unmapped/absent task.
   // It is a real member here so that passing task:'default' explicitly is not
   // itself reported as "unmapped"; getKnownTaskIds() filters it back out
@@ -178,6 +180,8 @@ const TASK_MAX_TOKENS = {
   'job-query-generation':      4096,  // 3 query arrays — small JSON, thinking-heavy
   'interview-brief-research':  6144,
   'interview-brief-assessment': 4096,
+  'interview-answer-bank':     16384,
+  'interview-live-match':      80,
   // Whole-record scoring needs room for the complete professional-gap audit.
   // Four fresh jobs reserve 1,600 + 4*2,800 = 12,800 tokens. A one-job evidence
   // phase can separately name its requirement workload for output guidance.
@@ -441,6 +445,8 @@ export async function callLLMText(prompt, opts = {}) {
     initialResponse: manualHandoff.initialResponse,
     comparisonGroup: manualHandoff.comparisonGroup,
     comparisonRun: manualHandoff.comparisonRun,
+    onHandoffAssigned: manualHandoff.onAssigned,
+    onHandoffRoute: manualHandoff.onRoute,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -489,6 +495,8 @@ export async function callLLMRaw(prompt, opts = {}) {
     initialResponse: manualHandoff.initialResponse,
     comparisonGroup: manualHandoff.comparisonGroup,
     comparisonRun: manualHandoff.comparisonRun,
+    onHandoffAssigned: manualHandoff.onAssigned,
+    onHandoffRoute: manualHandoff.onRoute,
   });
   if (meta) meta.model = 'non-api-ai';
   return result;
@@ -725,6 +733,9 @@ function normalizeOpts(opts) {
       initialResponse: typeof suppliedManualHandoff.initialResponse === 'string' ? suppliedManualHandoff.initialResponse : '',
       comparisonGroup: suppliedManualHandoff.comparisonGroup,
       comparisonRun: suppliedManualHandoff.comparisonRun,
+      // Main-process callback only; never materialized into the prompt or IPC.
+      onAssigned: typeof suppliedManualHandoff.onAssigned === 'function' ? suppliedManualHandoff.onAssigned : null,
+      onRoute: typeof suppliedManualHandoff.onRoute === 'function' ? suppliedManualHandoff.onRoute : null,
     };
     const legacyReplay = opts.legacyReplay && typeof opts.legacyReplay === 'object'
       && typeof opts.legacyReplay.prompt === 'string'

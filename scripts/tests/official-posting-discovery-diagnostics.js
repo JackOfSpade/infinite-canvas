@@ -5,6 +5,8 @@ import {
   buildOfficialPostingDiscoveryMarkdown,
   finalizeOfficialPostingDiscovery,
   getOfficialPostingDiscoveryDiagnosticsSnapshot,
+  officialPostingHandoffFailureCause,
+  officialPostingHandoffFailureCode,
   officialPostingRenderFailureReason,
   recordOfficialPostingDiscovery,
   recordOfficialPostingSemanticDiscovery,
@@ -88,7 +90,7 @@ export default [
         })), true);
         const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
         const row = snapshot.observations[0];
-        assert.deepEqual(Object.keys(row).sort(), ['at', 'candidateCount', 'comparisonRuns', 'eligibleCount', 'input', 'outcome', 'rejected', 'renderStats', 'semanticSettled', 'settled', 'stage']);
+        assert.deepEqual(Object.keys(row).sort(), ['at', 'candidateCount', 'chatStats', 'comparisonRuns', 'eligibleCount', 'failureCodes', 'input', 'outcome', 'rejected', 'renderStats', 'resolutionReasons', 'semanticSettled', 'settled', 'stage']);
         assert.match(row.input, /^[a-f0-9]{16}$/);
         assert.notEqual(row.input, semanticHash.slice(0, 16), 'correlation does not expose a semantic proof-hash prefix');
         assert.equal(row.candidateCount, null); assert.equal(row.eligibleCount, null);
@@ -104,6 +106,73 @@ export default [
         assert.equal(recordOfficialPostingDiscovery(null, observation()), false);
         assert.equal(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations.length, 1);
         assert.doesNotThrow(() => recordOfficialPostingDiscovery(job(9), null));
+      });
+    },
+  },
+  {
+    name: 'Official discovery chat counts retain only bounded fixed metadata and isolate returned snapshots',
+    run() {
+      isolated(() => {
+        recordOfficialPostingDiscovery(job(), observation({ outcome: 'link-only',
+          resolutionReasons: ['source-unproven', 'source-unproven', 'PRIVATE_ERROR', 'https://private.example.test/PRIVATE_ID', 'comparative-match'], chatStats: {
+          finderCalls: 1, judgeRounds: 2, judgeCalls: 5, snapshotReads: -1,
+          snapshotFailures: Number.MAX_SAFE_INTEGER, truncatedSnapshots: 'PRIVATE_COUNT',
+          sourceUrl: 'https://private.example.test/PRIVATE_ID', error: 'PRIVATE_ERROR',
+        } }));
+        const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
+        assert.deepEqual(snapshot.observations[0].chatStats, { finderCalls: 1, judgeRounds: 2, judgeCalls: 5,
+          snapshotReads: null, snapshotFailures: 1_000_000_000, truncatedSnapshots: null });
+        assert.deepEqual(snapshot.observations[0].resolutionReasons, ['source-unproven']);
+        snapshot.observations[0].resolutionReasons.push('PRIVATE_MUTATION');
+        assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].resolutionReasons, ['source-unproven']);
+        snapshot.observations[0].chatStats.finderCalls = 99;
+        assert.equal(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].chatStats.finderCalls, 1);
+        const markdown = buildOfficialPostingDiscoveryMarkdown();
+        assert.match(markdown, /Chat discovery: finder calls 1 · judge rounds 2 · judge calls 5/);
+        assert.match(markdown, /outcome link-only/);
+        assert.match(markdown, /source eligibility rejections not assessed/);
+        assert.match(markdown, /Chat resolution reasons: source-unproven/);
+        assert.match(markdown, /not transport-owned correction attempts/);
+        for (const text of [JSON.stringify(getOfficialPostingDiscoveryDiagnosticsSnapshot()), markdown]) {
+          assert.equal(text.includes('PRIVATE_'), false);
+          assert.equal(text.includes('private.example.test'), false);
+        }
+      });
+    },
+  },
+  {
+    name: 'Official discovery distinguishes handoff infrastructure and validation with closed error classes',
+    run() {
+      isolated(() => {
+        for (const [code, expected] of [
+          ['BRIDGE_WORKER_LOST', 'worker-lost'], ['BRIDGE_WORKER_REPLACED', 'worker-replaced'],
+          ['BRIDGE_COMPARISON_CONTAMINATED', 'comparison-contaminated'], ['BRIDGE_FRESH_CONTEXT_REQUIRED', 'fresh-context-required'],
+          ['BRIDGE_REQUEUE_EXHAUSTED', 'requeue-exhausted'], ['BRIDGE_RENDERER_UNAVAILABLE', 'renderer-unavailable'],
+          ['IPC_SENDER_DESTROYED', 'sender-destroyed'], ['IPC_RENDERER_STOPPED', 'renderer-stopped'],
+          ['IPC_RENDERER_NAVIGATED', 'renderer-navigated'], ['IPC_REQUEST_TIMEOUT', 'request-timeout'],
+          ['OFFICIAL_POSTING_COMPARATIVE_INVALID', 'comparative-invalid'], ['bridge-aborted', 'bridge-aborted'],
+        ]) {
+          const error = Object.assign(new Error('PRIVATE_PROMPT_AND_ERROR'), { code });
+          assert.equal(officialPostingHandoffFailureCode(error), expected);
+          const controller = new AbortController(); controller.abort(error);
+          assert.equal(officialPostingHandoffFailureCode(new Error('PRIVATE_WRAPPER'), controller.signal), expected);
+        }
+        assert.equal(officialPostingHandoffFailureCode(new TypeError('PRIVATE_DETAILS')), 'type-error');
+        assert.equal(officialPostingHandoffFailureCode(new SyntaxError('PRIVATE_DETAILS')), 'syntax-error');
+        assert.equal(officialPostingHandoffFailureCode({ code: 'PRIVATE_CODE', name: 'PRIVATE_NAME' }), 'unexpected-error');
+        assert.equal(officialPostingHandoffFailureCode({ name: '__proto__' }), 'unexpected-error');
+        assert.equal(officialPostingHandoffFailureCause({ recoveryCode: 'BRIDGE_WORKER_LOST' }), 'worker-lost');
+        assert.equal(officialPostingHandoffFailureCause({ recoveryCode: 'PRIVATE_CAUSE' }), null);
+        recordOfficialPostingDiscovery(job(), observation({ failureCodes: ['worker-lost', 'comparative-invalid', 'worker-lost',
+          'PRIVATE_PROMPT', new Error('PRIVATE_ERROR')], chatStats: { judgeCalls: 3 } }));
+        const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
+        assert.deepEqual(snapshot.observations[0].failureCodes, ['worker-lost', 'comparative-invalid']);
+        snapshot.observations[0].failureCodes.push('PRIVATE_MUTATION');
+        assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].failureCodes, ['worker-lost', 'comparative-invalid']);
+        assert.match(buildOfficialPostingDiscoveryMarkdown(), /Handoff failure classes: worker-lost, comparative-invalid/);
+        for (const text of [JSON.stringify(getOfficialPostingDiscoveryDiagnosticsSnapshot()), buildOfficialPostingDiscoveryMarkdown()]) {
+          assert.equal(text.includes('PRIVATE_'), false);
+        }
       });
     },
   },

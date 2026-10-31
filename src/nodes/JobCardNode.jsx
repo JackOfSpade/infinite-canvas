@@ -1670,7 +1670,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {postingDisplay.statusLabel && <div className="text-amber-300/70 text-[10px] mt-0.5" title={postingDisplay.statusDetail || undefined}>{postingDisplay.statusLabel}</div>}
           {postingDisplay.candidateLinks.length > 0 && (
             <div className="mt-1 min-w-0" onPointerDown={(e) => e.stopPropagation()}>
-              <div className="text-white/50 text-[10px]">Judges split · unconfirmed links (best first)</div>
+              <div className="text-white/50 text-[10px]">Not confirmed · candidate links (most official first)</div>
               {postingDisplay.candidateLinks.map((link) => {
                 const url = new URL(link.url);
                 return <button

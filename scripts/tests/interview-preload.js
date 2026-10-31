@@ -65,6 +65,27 @@ const DIRECT_FORWARDING = [
 
 const tests = [
   {
+    name: 'interview preload: direct prepared-card choice forwards only a bounded card ID through the child bridge',
+    run: async () => {
+      const childPreloadPath = fileURLToPath(new URL('../../electron/interviewWindowPreload.js', import.meta.url));
+      const invocations = []; let api;
+      vm.runInNewContext(fs.readFileSync(childPreloadPath, 'utf8'), {
+        require: specifier => {
+          assert.equal(specifier, 'electron');
+          return { contextBridge: { exposeInMainWorld: (name, value) => { assert.equal(name, 'interviewAPI'); api = value; } },
+            ipcRenderer: { invoke: (...args) => { invocations.push(args); return Promise.resolve(true); } } };
+        },
+      }, { filename: childPreloadPath });
+      assert.equal(await api.selectPreparedCard('saved-card_1'), true);
+      assert.deepEqual(invocations, [['interview-window:select-prepared-card', 'saved-card_1']]);
+      for (const invalid of [null, { id: 'saved-card_1' }, '', 'x'.repeat(65), '../saved-card_1', 'saved card']) {
+        await assert.rejects(api.selectPreparedCard(invalid), /prepared answer ID is invalid/u);
+      }
+      assert.equal(invocations.length, 1, 'invalid IDs cannot cross the preload boundary');
+      assert.equal(api.electronAPI, undefined, 'the narrow child bridge exposes no canvas authority');
+    },
+  },
+  {
     name: 'interview preload: exposes the reviewed renderer methods without a raw brief builder',
     run() {
       const { api } = loadPreloadBridge();

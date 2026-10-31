@@ -5,6 +5,16 @@ import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingF
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle.js';
 import { EventLogger } from '../utils/EventLogger.js';
 
+// Navigation removes a Board's React instance while retaining its node in the
+// canvas stack. Only callers with live whole-canvas access may keep that work
+// running; a missing/deleted owner or a different file still ends ownership.
+function retainedBoardOwner(options, canvasFilePath = options.canvasFilePath, nodeId = options.nodeId) {
+  if (typeof options.getCurrentFile !== 'function' || options.getCurrentFile() !== canvasFilePath
+    || isJobWorkflowDeletionPending(nodeId)) return false;
+  const owner = options.getNode(nodeId);
+  return owner?.type === 'jobboard' && !owner.data?.locked;
+}
+
 /** Board-owned metadata work has its own lifetime; it never creates an application. */
 export function useBoardOfficialPostingRefresh(options) {
   const latest = useRef(options);
@@ -48,7 +58,11 @@ export function useBoardOfficialPostingRefresh(options) {
   }, []);
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; void cancel().catch(() => {}); };
+    return () => {
+      mounted.current = false;
+      const run = runRef.current;
+      if (!retainedBoardOwner(latest.current, run?.canvasFilePath, run?.nodeId)) void cancel().catch(() => {});
+    };
   }, [cancel]);
 
   const start = useCallback(async () => {
@@ -59,14 +73,15 @@ export function useBoardOfficialPostingRefresh(options) {
       return;
     }
     const manualAiRunId = `official-posting:board:${globalThis.crypto.randomUUID()}`;
-    const run = { nodeId, manualAiRunId, cancelled: false };
+    const run = { nodeId, canvasFilePath, manualAiRunId, cancelled: false };
     const boardClaim = beginOfficialPostingPreparation({ canvasFilePath, nodeId, purpose: 'lookup', owner: 'board-refresh', cancel });
     if (!boardClaim) return;
     runRef.current = run;
     settlementRef.current = run;
     const claims = [boardClaim]; let lease = null; let unsubscribe = null;
-    const inScope = () => mounted.current && !run.cancelled
+    const inScope = () => (mounted.current || retainedBoardOwner(latest.current, canvasFilePath, nodeId)) && !run.cancelled
       && latest.current.canvasFilePath === canvasFilePath && latest.current.nodeId === nodeId
+      && (typeof latest.current.getCurrentFile !== 'function' || latest.current.getCurrentFile() === canvasFilePath)
       && !isJobWorkflowDeletionPending(nodeId) && !!getNode(nodeId) && !getNode(nodeId)?.data?.locked;
     const active = () => runRef.current === run && inScope();
     try {
@@ -89,13 +104,13 @@ export function useBoardOfficialPostingRefresh(options) {
         addToast({ title: 'No available job cards', description: 'Unlock the cards or finish their current lookups, then retry.', type: 'info' });
         return;
       }
-      setProgress({ completed: 0, total: snapshots.length });
+      if (mounted.current) setProgress({ completed: 0, total: snapshots.length });
       const current = () => active() && getScopeKey() === scopeKey;
       let batchBase = 0;
       unsubscribe = window.electronAPI.onOfficialPostingRefreshProgress?.(event => {
         if (!current() || event?.nodeId !== nodeId || event.manualAiRunId !== manualAiRunId) return;
         const completed = Number.isSafeInteger(event.completed) ? Math.max(0, event.completed) : 0;
-        setProgress({ completed: Math.min(snapshots.length, batchBase + completed), total: snapshots.length });
+        if (mounted.current) setProgress({ completed: Math.min(snapshots.length, batchBase + completed), total: snapshots.length });
       });
       const result = await refreshBoardOfficialPostingJobs(snapshots.map(item => item.job), {
         nodeId, manualAiRunId, force: true, cardIds: snapshots.map(item => item.id), cancelled: () => !current(),
@@ -104,7 +119,7 @@ export function useBoardOfficialPostingRefresh(options) {
           batchBase += args.entries.length;
           return response;
         },
-        onProgress: value => { if (current()) setProgress(value); },
+        onProgress: value => { if (current() && mounted.current) setProgress(value); },
       });
       if (!current()) return;
       for (const [index, snapshot] of snapshots.entries()) {

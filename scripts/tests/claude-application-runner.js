@@ -188,6 +188,204 @@ function scriptedApi(stages, { rejectFirst = false } = {}) {
 
 export default [
   {
+    name: 'claude runner driver: returned handoffs are offered to the host read with fresh-context metadata intact',
+    async run() {
+      const first = withFresh({ revision: 1, handoffCode: 'one', stage: 'convert', prompt: 'First conversion.' }, true, 'first-context');
+      const next = withFresh({ revision: 2, handoffCode: 'two', stage: 'pick', prompt: 'Rank verified pages.',
+        pageImages: [{ candidateId: 'synthetic', document: 'resume', mimeType: 'image/png', data: 'c3ludGhldGlj' }] }, true, 'next-context');
+      let revision = 1;
+      let reads = 0;
+      let reused = 0;
+      const calls = [];
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: async args => {
+            reads++;
+            if (revision === 1) { assert.equal(args.reuseHandoff, undefined); return { handoff: first }; }
+            assert.equal(args.reuseHandoff, next, 'the exact host-owned record reaches the authoritative read');
+            assert.equal(args.reuseHandoff.revision, revision);
+            assert.equal(args.reuseHandoff.freshContextRequired, true);
+            assert.equal(args.reuseHandoff.freshContextKey, 'next-context');
+            assert.equal(Object.keys(args.reuseHandoff).includes('freshContextKey'), false);
+            reused++;
+            return { handoff: args.reuseHandoff };
+          },
+          submitHandoff: async () => {
+            if (revision === 1) { revision = 2; return { accepted: true, completed: false, localJob: { revision }, handoff: next }; }
+            return { accepted: true, completed: true };
+          },
+        },
+        stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        runStage: async args => { calls.push(args); return { text: '{}' }; },
+      });
+      try {
+        runner.ensure({ jobId: 'returned-handoff', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['returned-handoff'])['returned-handoff']?.status === 'done', 'reused handoff done');
+        assert.equal(reads, 2, 'every stage still passes through a current host read');
+        assert.equal(reused, 1);
+        assert.deepEqual(calls.map(call => call.text), [first.prompt, next.prompt]);
+        assert.equal(calls[1].pageImages, next.pageImages);
+        assert.notEqual(calls[0].sessionId, calls[1].sessionId, 'reuse preserves the required independent context');
+      } finally { await runner.shutdown(); }
+    },
+  },
+  {
+    name: 'claude runner driver: a changed host revision supersedes the returned handoff before another provider call',
+    async run() {
+      const stale = { revision: 2, handoffCode: 'stale', stage: 'convert', prompt: 'Stale conversion.' };
+      const fresh = { revision: 3, handoffCode: 'fresh', stage: 'convert', prompt: 'Current conversion.' };
+      let reads = 0;
+      let submits = 0;
+      const texts = [];
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: async args => {
+            reads++;
+            if (reads === 1) return { handoff: { revision: 1, handoffCode: 'first', stage: 'convert', prompt: 'First conversion.' } };
+            assert.equal(args.reuseHandoff, stale);
+            assert.notEqual(args.reuseHandoff.revision, fresh.revision);
+            return { handoff: fresh }; // The authoritative host rejects the obsolete reuse candidate.
+          },
+          submitHandoff: async args => {
+            submits++;
+            if (submits === 1) return { accepted: true, completed: false, localJob: { revision: 2 }, handoff: stale };
+            assert.equal(args.handoffCode, fresh.handoffCode);
+            return { accepted: true, completed: true };
+          },
+        },
+        stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        runStage: async ({ text }) => { texts.push(text); return { text: '{}' }; },
+      });
+      try {
+        runner.ensure({ jobId: 'stale-returned-handoff', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['stale-returned-handoff'])['stale-returned-handoff']?.status === 'done', 'fresh revision done');
+        assert.deepEqual(texts, ['First conversion.', fresh.prompt]);
+        assert.equal(reads, 2);
+      } finally { await runner.shutdown(); }
+    },
+  },
+  {
+    name: 'claude runner driver: host-only render retry can offer its next handoff without another provider repair',
+    async run() {
+      const next = { revision: 2, handoffCode: 'after-render', stage: 'convert', prompt: 'Next conversion.' };
+      let reads = 0;
+      let renders = 0;
+      let providerCalls = 0;
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: async args => {
+            if (reads++ === 0) return { handoff: { handoffCode: 'held', stage: 'convert', prompt: 'Held content.', renderHold: {} } };
+            assert.equal(args.reuseHandoff, next);
+            return { handoff: next };
+          },
+          submitHandoff: async args => {
+            if (args.renderRetry) { renders++; return { accepted: true, completed: false, localJob: { revision: 2 }, handoff: next }; }
+            assert.equal(args.handoffCode, next.handoffCode);
+            return { accepted: true, completed: true };
+          },
+        },
+        stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        runStage: async () => { providerCalls++; return { text: '{}' }; },
+      });
+      try {
+        runner.ensure({ jobId: 'returned-render-handoff', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['returned-render-handoff'])['returned-render-handoff']?.status === 'done', 'render retry done');
+        assert.equal(renders, 1);
+        assert.equal(providerCalls, 1, 'the held content is retried solely by the host');
+      } finally { await runner.shutdown(); }
+    },
+  },
+  {
+    name: 'claude runner run log: queued success and failure retain injected-clock queue and wall timings',
+    async run() {
+      for (const fails of [false, true]) {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-queue-timing-'));
+        const logFile = path.join(dir, 'runs.jsonl');
+        let clock = 1000;
+        let releaseFirst;
+        const firstFinished = new Promise(resolve => { releaseFirst = resolve; });
+        let firstStarted = false;
+        const runner = createClaudeApplicationRunner({
+          api: {
+            getHandoff: async ({ jobId }) => ({ handoff: { handoffCode: jobId, stage: 'convert', prompt: jobId } }),
+            submitHandoff: async () => ({ accepted: true, completed: true }),
+          },
+          concurrency: 1, now: () => clock, stateFile: path.join(dir, 'state.json'),
+          logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+          runStage: async ({ text, onThinkingSummary }) => {
+            if (text === 'first') {
+              firstStarted = true;
+              await firstFinished;
+            } else {
+              clock = 1300;
+              await onThinkingSummary({ text: 'Synthetic conversion summary.', model: 'claude-sonnet-5-5', thinkingDisplay: 'summarized' });
+              if (fails) throw new ClaudeRunnerError('CLAUDE_ERROR', 'Synthetic provider failure.');
+            }
+            return { text: '{}', model: 'claude-sonnet-5-5', durationMs: 7 };
+          },
+        });
+        try {
+          runner.ensure({ jobId: 'first', canvasFilePath: '/c.canvas' });
+          await waitFor(() => firstStarted, 'first provider started');
+          runner.ensure({ jobId: 'queued', canvasFilePath: '/c.canvas' });
+          await waitFor(() => runner.status(['queued']).queued?.activity === 'waiting', 'queued provider waiting');
+          assert.equal(readRunLog(logFile).some(row => row.jobId === 'queued'), false, 'started remains after semaphore admission');
+          clock = 1250;
+          releaseFirst();
+          await waitFor(() => runner.status(['first']).first?.status === 'done', 'first done');
+          await waitFor(() => runner.status(['queued']).queued?.status === (fails ? 'failed' : 'done'), 'queued terminal');
+          await runner.shutdown();
+          const rows = readRunLog(logFile);
+          const queued = rows.filter(row => row.jobId === 'queued');
+          assert.deepEqual(queued.map(row => row.event), fails
+            ? ['started', 'thinking-summary', 'failed'] : ['started', 'thinking-summary', 'response', 'submission']);
+          for (const row of queued) {
+            assert.equal(row.queuedAt, new Date(1000).toISOString());
+            assert.equal(row.queueWaitMs, 250);
+          }
+          const terminal = queued.find(row => row.event === (fails ? 'failed' : 'response'));
+          assert.equal(terminal.wallMs, 300, 'wall time includes queue wait and local provider work');
+          if (!fails) assert.equal(terminal.durationMs, 7, 'provider-reported duration remains separate');
+          const first = rows.filter(row => row.jobId === 'first');
+          assert(first.every(row => row.queueWaitMs === 0 && row.queuedAt === new Date(1000).toISOString()));
+          assert.equal(first.find(row => row.event === 'response').wallMs, 250);
+        } finally {
+          releaseFirst();
+          await runner.shutdown();
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    },
+  },
+  {
+    name: 'claude runner run log: injected clock corrections cannot produce negative queue or wall timings',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-clock-timing-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      let clock = 1000;
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: async () => ({ handoff: { handoffCode: 'clock', stage: 'convert', prompt: 'Synthetic conversion.' } }),
+          submitHandoff: async () => ({ accepted: true, completed: true }),
+        },
+        now: () => clock, notify: state => { if (state.activity === 'waiting') clock = 900; },
+        stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async () => { clock = 800; return { text: '{}' }; },
+      });
+      try {
+        runner.ensure({ jobId: 'clock', canvasFilePath: '/c.canvas' });
+        await waitFor(() => runner.status(['clock']).clock?.status === 'done', 'clock done');
+        await runner.shutdown();
+        const rows = readRunLog(logFile);
+        assert(rows.every(row => row.queueWaitMs === 0 && row.queuedAt === new Date(1000).toISOString()));
+        assert.equal(rows.find(row => row.event === 'response').wallMs, 0);
+      } finally {
+        await runner.shutdown();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'claude runner progress: a queued sibling cannot hide active work or reset its action clock',
     async run() {
       let clock = 1000, releaseFirst, firstStarted = false;

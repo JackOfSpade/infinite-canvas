@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.antigravity.infinitecanvas.interview-audio</string>
+  <key>CFBundleName</key><string>Interview Audio Helper</string>
+  <key>CFBundleDisplayName</key><string>Interview Audio Helper</string>
+  <key>CFBundleExecutable</key><string>interview-audio-helper</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSScreenCaptureUsageDescription</key><string>Read call audio locally for Interview Helper. No screen frames or microphone audio are captured.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>Transcribe system output locally for Interview Helper without changing playback or capturing your microphone.</string>
+</dict></plist>

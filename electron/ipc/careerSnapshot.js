@@ -5409,7 +5409,8 @@ async function trustedExistingDirectory(directory, label) {
   return { stat, real };
 }
 
-async function trustedSnapshotStorageDirectory(root, { create = false } = {}) {
+async function trustedSnapshotStorageDirectory(root, { create = false, readOnly = false } = {}) {
+  if (readOnly && create) throw new TypeError('Read-only career snapshot storage cannot create directories.');
   if (typeof root !== 'string' || !root.trim() || !path.isAbsolute(root)) throw new TypeError('An absolute private career snapshot root is required.');
   const lexicalRoot = path.resolve(root);
   const parent = path.dirname(lexicalRoot);
@@ -5430,7 +5431,7 @@ async function trustedSnapshotStorageDirectory(root, { create = false } = {}) {
   if (!trustedRoot) return null;
   const expectedRoot = path.join(trustedParent.real, name);
   if (trustedRoot.real !== expectedRoot) throw unsafeStorageError('Career snapshot storage root resolved outside its verified private parent.');
-  await fs.promises.chmod(trustedRoot.real, 0o700);
+  if (!readOnly) await fs.promises.chmod(trustedRoot.real, 0o700);
   const trustedSnapshots = await trustedExistingDirectory(path.join(trustedRoot.real, SNAPSHOT_DIR), 'Career snapshot directory');
   if (!trustedSnapshots && create) {
     const directory = path.join(trustedRoot.real, SNAPSHOT_DIR);
@@ -5443,7 +5444,7 @@ async function trustedSnapshotStorageDirectory(root, { create = false } = {}) {
   if (!snapshotDirectory) return null;
   const expectedDirectory = path.join(trustedRoot.real, SNAPSHOT_DIR);
   if (snapshotDirectory.real !== expectedDirectory) throw unsafeStorageError('Career snapshot directory resolved outside its verified private root.');
-  await fs.promises.chmod(snapshotDirectory.real, 0o700);
+  if (!readOnly) await fs.promises.chmod(snapshotDirectory.real, 0o700);
   return snapshotDirectory.real;
 }
 
@@ -5556,9 +5557,9 @@ export async function writeCareerSnapshotAtomically(root, snapshot) {
 }
 
 /** Read only a complete approved snapshot whose id, contract, and profile still validate. */
-async function readCareerSnapshotWithContract(root, snapshotId, { allowHistoricalContract = false } = {}) {
+async function readCareerSnapshotWithContract(root, snapshotId, { allowHistoricalContract = false, readOnly = false } = {}) {
   assertSnapshotId(snapshotId);
-  const directory = await trustedSnapshotStorageDirectory(root);
+  const directory = await trustedSnapshotStorageDirectory(root, { readOnly });
   if (!directory) return null;
   let parsed;
   try {
@@ -5664,7 +5665,9 @@ export async function readCareerSnapshot(root, snapshotId) {
  * This deliberately keeps the current schema and semantic validator in force;
  * future schema-version changes must retain versioned validators here before
  * they can claim to recover earlier cards. New-search cache reads stay strict.
+ * Offline readers can opt out of the normal directory-permission hardening
+ * with readOnly:true while retaining every trusted-path and approval check.
  */
-export async function readPinnedCareerSnapshot(root, snapshotId) {
-  return readCareerSnapshotWithContract(root, snapshotId, { allowHistoricalContract: true });
+export async function readPinnedCareerSnapshot(root, snapshotId, { readOnly = false } = {}) {
+  return readCareerSnapshotWithContract(root, snapshotId, { allowHistoricalContract: true, readOnly });
 }

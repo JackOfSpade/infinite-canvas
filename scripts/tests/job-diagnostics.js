@@ -89,6 +89,86 @@ import { collectOfficialPostingReport } from '../../src/utils/officialPostingRep
 import { buildOfficialPostingSnapshot } from '../../electron/ipc/bugReport/officialPostingSnapshot.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { createHash } from 'node:crypto';
+import { EventEmitter } from 'node:events';
+import { runInNewContext } from 'node:vm';
+import { transformSync } from 'esbuild';
+import { createDraftWriteBarrier } from '../../electron/utils/draftWriteBarrier.js';
+import { abortNodeTasks, getCurrentIpcRequestContext, handleSafe } from '../../electron/ipc/ipcUtils.js';
+import { registerNetworkHandlers } from '../../electron/ipc/network.js';
+
+async function assertRendererCancellationCause() {
+  // Exercise the exposed preload API and real main-process task registry.
+  // Optional run IDs must not invalidate the legacy (nodeId, cause) contract.
+  const preload = transformSync(fs.readFileSync(path.resolve('electron/preload.js'), 'utf8'), { format: 'cjs' }).code;
+  for (const method of ['cancelNodeTask', 'cancelNodeTaskAndWait']) {
+    for (const scope of ['local', 'adopted', 'exact-string', 'exact-list', 'orphan']) {
+      const nodeId = `cancel-cause-${method}-${scope}`;
+      const runId = `${nodeId}-run`;
+      const channel = `test-${nodeId}`;
+      const event = () => {
+        const sender = new EventEmitter();
+        sender.isDestroyed = () => false;
+        return { sender };
+      };
+      const original = event(); const replacement = event(); const unrelated = event();
+      const signals = new Map();
+      handleSafe(channel, async (event, _args, signal) => {
+        signals.set(event.sender, signal);
+        getCurrentIpcRequestContext().retainHandoffRendererLifecycle('mcp');
+        await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        return {};
+      });
+      const invoke = electronPkg.ipcMain.__getInvokeHandler(channel);
+      const pending = [invoke(scope === 'local' ? replacement : original, { nodeId, manualAiRunId: runId })];
+      if (scope === 'adopted') pending.push(invoke(replacement, { nodeId, manualAiRunId: runId }));
+      pending.push(invoke(unrelated, { nodeId, manualAiRunId: `${runId}-unrelated` }));
+      const listeners = new Map(); const handlers = new Map();
+      registerNetworkHandlers({
+        ipcMainInstance: { on: (name, fn) => listeners.set(name, fn), handle: (name, fn) => handlers.set(name, fn) },
+        registerHandler() {},
+      });
+      try {
+        let api;
+        runInNewContext(preload, { require: name => {
+          if (name === './utils/draftWriteBarrier.js') return { createDraftWriteBarrier };
+          assert(name === 'electron', `unexpected preload dependency: ${name}`);
+          return {
+            contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } },
+            ipcRenderer: {
+              send: (name, ...args) => listeners.get(name)(replacement, ...args),
+              invoke: (name, ...args) => handlers.get(name)(replacement, ...args),
+            },
+          };
+        } });
+        if (scope === 'orphan') original.sender.emit('did-start-navigation', {}, 'file:///reloaded.html', false, true);
+        const runArgs = scope === 'exact-string' ? [runId] : scope === 'exact-list' ? [[runId]] : [];
+        const cause = method === 'cancelNodeTask' ? 'user-reset' : 'board-cleared';
+        const acknowledgement = await api[method](nodeId, cause, ...runArgs);
+        const targets = scope === 'local' ? [replacement] : scope === 'adopted' ? [original, replacement] : [original];
+        for (const target of targets) {
+          const signal = signals.get(target.sender);
+          assert(signal.aborted && signal.reason?.name === 'AbortError'
+            && signal.reason.message === 'Node deleted' && signal.reason.cancelCause === cause,
+          `${method}/${scope}: the renderer cause reaches abortNodeTasks alongside the exact sentinel`);
+        }
+        assert(!signals.get(unrelated.sender).aborted,
+          `${method}/${scope}: a live canvas with the same node and a different run stays active`);
+        const results = await Promise.all(pending.slice(0, -1));
+        assert(results.every(result => result.success === false && result.error === 'Node deleted'),
+          `${method}/${scope}: cancellation preserves the caller-visible sentinel`);
+        if (method === 'cancelNodeTaskAndWait') {
+          assert(acknowledgement.settled && acknowledgement.abortedCount === targets.length
+            && acknowledgement.manualAiRunIds.includes(runId),
+          `${method}/${scope}: acknowledgement drains all matched owners and retains their run identity`);
+        }
+      } finally {
+        abortNodeTasks(nodeId);
+        await Promise.allSettled(pending);
+        electronPkg.ipcMain.removeHandler(channel);
+      }
+    }
+  }
+}
 
 export default [
   {
@@ -15662,7 +15742,7 @@ export default [
   },
   {
     name: 'an aborted search reports its inputs and the real cancel cause',
-    run: () => {
+    run: async () => {
       const telemetry = getJobsTelemetry();
       const saved = {
         nodeId: telemetry.nodeId, windowId: telemetry.windowId, search: telemetry.search,
@@ -15738,16 +15818,12 @@ export default [
         Object.assign(telemetry, saved);
       }
 
-      // Source pins: the cause must be produced by the renderer and resolved to
-      // a label by the backend, or the report falls back to the shared sentinel.
-      const preload = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
-      const network = fs.readFileSync(path.resolve('electron/ipc/network.js'), 'utf8');
+      await assertRendererCancellationCause();
+      // The backend must resolve the cause to a label rather than reporting
+      // the shared sentinel as if every cancellation were a deleted node.
       const ipcUtilsSource = fs.readFileSync(path.resolve('electron/ipc/ipcUtils.js'), 'utf8');
       const jobsSource = fs.readFileSync(path.resolve('electron/ipc/jobs.js'), 'utf8');
       const jobSearchSource = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-      assert(preload.includes("cancelNodeTask: (nodeId, cause = null) => ipcRenderer.send('cancel-node-task', nodeId, cause)")
-        && network.includes('abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause))'),
-        'the renderer-supplied cancel cause reaches abortNodeTasks');
       assert(ipcUtilsSource.includes("Object.assign(new Error(message), { name: 'AbortError' })")
         && ipcUtilsSource.includes("return cancellationError('Node deleted', cause);"),
         'the cancel sentinel keeps its load-bearing message while identifying itself as an abort');

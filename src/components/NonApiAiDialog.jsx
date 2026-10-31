@@ -852,10 +852,12 @@ export function NonApiAiDialog() {
   useEffect(() => {
     const api = window.electronAPI;
     if (!api?.onNonApiAiRequest || !api?.onNonApiAiSettled) return undefined;
+    const receivedRequestIds = new Set();
 
     const removeRequest = (payload) => {
       const requestId = typeof payload === 'string' ? payload : payload?.requestId;
       if (!requestId) return;
+      receivedRequestIds.delete(requestId);
       const currentRequests = requestsRef.current;
       const selection = selectionAfterHandoffSettlement({
         queue: currentRequests,
@@ -925,6 +927,8 @@ export function NonApiAiDialog() {
 
     const receiveRequest = (incoming) => {
       if (!incoming?.requestId || typeof incoming.prompt !== 'string') return;
+      const firstPresentation = !receivedRequestIds.has(incoming.requestId);
+      receivedRequestIds.add(incoming.requestId);
       const successor = awaitingSuccessorRef.current;
       if (isWorkflowSuccessor(successor, incoming)) {
         // The workflow issued this only after the selected prompt settled.
@@ -979,10 +983,9 @@ export function NonApiAiDialog() {
             ? { ...previous, [incoming.requestId]: incoming.initialResponse }
             : previous
         ));
-        // A non-empty initial response is emitted only by a genuine rewind.
-        // Bring that reissued predecessor to the front even if unrelated
-        // handoffs are also queued in the global dialog.
-        setSelectedRequestId(incoming.requestId);
+        // A new rewind comes to the front. Replaying an existing draft must
+        // preserve the person's current selection as well as their edits.
+        if (firstPresentation) setSelectedRequestId(incoming.requestId);
       }
       if (validationError) {
         setErrors(previous => ({ ...previous, [incoming.requestId]: validationError }));
@@ -999,15 +1002,34 @@ export function NonApiAiDialog() {
     // This closes both races: a job can issue its first request from a sibling
     // mount effect, and this app-level dialog can remount while the same
     // renderer frame remains live. `receiveRequest` de-duplicates replays by
-    // request id. A true renderer navigation cancels its job in the main
-    // process rather than preserving a prompt with no response UI.
+    // request id. The dock only presents MCP requests: losing or remounting
+    // this listener cannot cancel work being served by a bridge worker.
     const unsubscribeRequest = api.onNonApiAiRequest(receiveRequest);
     const unsubscribeSettled = api.onNonApiAiSettled(removeRequest);
-    void api.replayPendingNonApiAiRequests?.().catch(() => {
-      // The ordinary live IPC listeners still work if an older main process
-      // does not yet provide replay support.
-    });
+    let disposed = false;
+    let replayInFlight = false;
+    const replayPending = () => {
+      if (disposed || replayInFlight || typeof api.replayPendingNonApiAiRequests !== 'function') return;
+      replayInFlight = true;
+      void Promise.resolve().then(() => {
+        if (!disposed) return api.replayPendingNonApiAiRequests();
+      }).catch(() => {
+        // Live listeners remain active. Returning to the renderer retries a
+        // missed presentation without changing any request's worker ownership.
+      }).finally(() => { replayInFlight = false; });
+    };
+    const replayWhenVisible = () => {
+      if (document.visibilityState === 'visible') replayPending();
+    };
+    window.addEventListener('focus', replayPending);
+    window.addEventListener('pageshow', replayPending);
+    document.addEventListener('visibilitychange', replayWhenVisible);
+    replayPending();
     return () => {
+      disposed = true;
+      window.removeEventListener('focus', replayPending);
+      window.removeEventListener('pageshow', replayPending);
+      document.removeEventListener('visibilitychange', replayWhenVisible);
       unsubscribeRequest?.();
       unsubscribeSettled?.();
     };

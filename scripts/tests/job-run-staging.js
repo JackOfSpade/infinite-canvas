@@ -2019,14 +2019,15 @@ export default [
         && renderer.includes('Failed to save preference-filtered USAJobs snapshot')
         && renderer.includes("'preference-filtered'"),
       'append scoring must merge into and generation-fence an explicit live base (never report a dropped no-base append), while all-filtered late sources retain preference recovery state, disposition, and funnel volume');
-      assert(renderer.includes('const activeTargetRole = String(laneTurnData.targetRole || \'\').trim()')
+      assert(renderer.includes('const legacyTargetRole = String(laneTurnData.targetRole || \'\').trim()')
+        && renderer.includes("const activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation).length ? '' : legacyTargetRole;")
         && renderer.includes('targetRole: (refreshData.activeTargetRole ?? refreshData.targetRole ?? \'\').trim()')
         && renderer.includes('continuationData.pendingTargetRole')
         && renderer.includes('?? continuationData.activeTargetRole')
         && renderer.includes('?? continuationData.targetRole')
         && preferences.includes('const identity = identityJob(job);')
         && preferences.includes('listingIdentity: listingIdentityForAudit(identity)'),
-      'a run freezes Target role with its preferences across late and paused paths, and each emitted audit carries a bounded listing identity');
+      'a run freezes the effective Target role after structured-plan precedence across late and paused paths, and each emitted audit carries a bounded listing identity');
       return { appendCandidateGate: true, listingAwareAudits: true, frozenTargetRole: true };
     },
   },
@@ -3670,11 +3671,12 @@ export default [
       const deriveBody = search.slice(deriveStart, deriveEnd);
       assert(deriveBody.includes('Array.isArray(preferencePlan?.titles)') && deriveBody.includes('preferencePlan.titles.filter'),
         'deriveSearchTitles must read its titles from preferencePlan.titles — i.e. the locked plan — not any other source');
-      // A legacy targetRole (unmigrated canvas only) still wins outright,
-      // reproducing the old single-role search exactly — there is no more
-      // titleSource-aware branch gating this on the plan's origin.
-      assert(deriveBody.includes("if (role) return [role];"),
-        'deriveSearchTitles must let a legacy targetRole win outright over the locked plan’s titles');
+      // A structured locked plan supersedes any retained legacy targetRole;
+      // only canvases without usable plan titles retain the literal fallback.
+      assert(deriveBody.includes('if (titles.length) return titles;')
+        && deriveBody.includes('return role ? [role] : [];')
+        && deriveBody.indexOf('if (titles.length) return titles;') < deriveBody.indexOf('const role ='),
+        'deriveSearchTitles must prefer structured locked titles and reserve legacy targetRole for the no-plan fallback');
       // The deleted deterministic gate functions must not have resurfaced —
       // this is the core of what this round of fixes replaced with the AI
       // role screen (screenJobRolesByTitle, main process).

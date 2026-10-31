@@ -632,6 +632,7 @@ export default [
         resumeFingerprint,
         jobPreferences,
         preferredLocation,
+        titles: ['Backend Engineer'],
       });
       const node = {
         id: 'snapshot-bound-child',
@@ -671,6 +672,10 @@ export default [
           }) === null,
         'a retained query bundle, role plan, canonical location, and unattended Board request must become unusable when its career snapshot id changes',
       );
+      assert(prepareBackgroundBoardChildRequest({
+        node: { ...node, data: { ...node.data, searchBriefPlan: { titles: ['Backend Engineer', 'Synthetic Replacement Role'] } } },
+        boardNodeId: 'board', boardRunId: 'run', startedAt: Date.now(), canvasFilePath: '/tmp/snapshot-bound.json',
+      }) === null, 'an unattended scan must reject queries retained for a different resolved title list even under the same career snapshot and brief');
       const renderer = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       assert(renderer.includes('roleLockMatchesBrief(laneTurnData, pinnedCareerSnapshotId)')
         && renderer.includes('queryCareerSnapshotId: pinnedCareerSnapshotId')

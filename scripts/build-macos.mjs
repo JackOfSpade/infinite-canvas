@@ -13,6 +13,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { buildInterviewAudioHelper } from './build-interview-audio-helper.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 export const PACKAGING_LOCK_DIRECTORY = '.packaging-build.lock';
@@ -479,6 +480,7 @@ export function buildMacApplication(projectDir = process.cwd()) {
   const { identity } = readConfiguredMacSigningConfig(projectDir);
   assertMacSigningPrerequisites({ identity });
 
+  buildInterviewAudioHelper({ projectDir, identity });
   compileApplication(projectDir);
   const releaseDir = path.join(projectDir, 'release');
   const before = snapshotMacApplications(releaseDir);

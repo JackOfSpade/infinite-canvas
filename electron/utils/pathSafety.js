@@ -203,6 +203,8 @@ const SENSITIVE_EXACT_PATHS = new Set(['/users/shared', '/volumes']);
 const SENSITIVE_APP_PRIVATE_STORE_COMPONENTS = [
   'interview-helper-artifacts',
   'interview-helper-prepared-briefs',
+  'interview-helper-answer-banks',
+  'interview-helper-answer-bindings',
   // Host-owned career inputs/snapshots contain the same source material that
   // Interview Helper consumes. They must not become renderer-readable merely
   // because a canvas supplies a userData-looking absolute pathname.

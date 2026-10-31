@@ -15,12 +15,14 @@ const TITLE_FETCH_TIMEOUT_MS = 3000;
 
 export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance = ipcMain, registerHandler = handleSafe } = {}) {
   // Add direct listener for node task cancellation
-  ipcMainInstance.on('cancel-node-task', (event, nodeId, cause = null) => {
+  ipcMainInstance.on('cancel-node-task', (event, nodeId, cause = null, manualAiRunIds = []) => {
     // `cause` is the renderer's own account of WHY (Reset / cleared files /
     // board clear / node deleted). Without it the main process could only see
     // the generic sentinel and reported every user Reset as "Node deleted".
     if (nodeId) {
-      abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause));
+      abortNodeTasks(nodeId, event.sender, nodeCancellationError(cause), {
+        manualAiRunIds: typeof manualAiRunIds === 'string' ? [manualAiRunIds] : manualAiRunIds,
+      });
       // This direct route is dispatched only after the canvas has committed a
       // deletion. Keep companion-window retirement on that committed boundary:
       // transactional cancellation probes may still be rolled back.
@@ -32,9 +34,11 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
   // aborted handler has reached its own finally/sidecar-cleanup boundary before
   // the shared queue lane is released. This handler is deliberately not wrapped
   // in handleSafe, otherwise it would register—and abort—itself under `nodeId`.
-  ipcMainInstance.handle('cancel-node-task-and-wait', async (event, { nodeId, cause = null } = {}) => {
+  ipcMainInstance.handle('cancel-node-task-and-wait', async (event, { nodeId, cause = null, manualAiRunId = null, manualAiRunIds = [] } = {}) => {
     if (!nodeId) return { abortedCount: 0, settled: true };
-    return abortNodeTasksAndWait(nodeId, event.sender, nodeCancellationError(cause));
+    return abortNodeTasksAndWait(nodeId, event.sender, nodeCancellationError(cause), 30_000, {
+      manualAiRunIds: [manualAiRunId, ...(Array.isArray(manualAiRunIds) ? manualAiRunIds : [])],
+    });
   });
 
   registerHandler('fetch-url-title', async (event, url, signal) => {

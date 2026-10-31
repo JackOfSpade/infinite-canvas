@@ -132,7 +132,7 @@ export function Probe({ options, capture }) {
 
 export default [
   {
-    name: 'Retained verified rechecks carry new citations except their own source URL',
+    name: 'Retained verified rechecks carry new judge citations except their own source URL, never uncited search leads',
     async run() {
       const { refreshOfficialPostingEntries } = await import('../../electron/ipc/officialPostingRefresh.js');
       const { officialPostingAliases } = await import('../../electron/ipc/officialPostingStore.js');
@@ -141,7 +141,8 @@ export default [
       const priorCitation = { url: `${prior.sourceUrl}/`, title: 'Unconfirmed · cited by 2 of 4 judges' };
       const otherCitation = { url: 'https://careers.example.test/new-role', title: 'Unconfirmed · cited by 2 of 4 judges' };
       const genericLead = { url: 'https://careers.example.test/lead', title: 'Synthetic Employer posting lead' };
-      for (const alternatives of [[priorCitation, otherCitation, genericLead], [priorCitation, genericLead], []]) {
+      const searchLead = { url: 'https://careers.example.test/search', title: 'Unconfirmed · found by search, not cited by judges' };
+      for (const alternatives of [[priorCitation, otherCitation, genericLead, searchLead], [priorCitation, genericLead, searchLead], []]) {
         const result = await refreshOfficialPostingEntries({ nodeId: 'board', manualAiRunId: 'official-posting:retained',
           entries: [{ cardId: 'card', job: source }] }, {
           store: { find: async () => ({ aliases: officialPostingAliases(source), officialPosting: prior }) },
@@ -264,7 +265,7 @@ export default [
     },
   },
   {
-    name: 'Board refresh results survive real React node state and global canvas navigation updates',
+    name: 'Board refresh survives nested canvas unmounts and applies worker results to retained global node state',
     async run() {
       const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'board-refresh-canvas-state-'));
       let bundle;
@@ -275,7 +276,7 @@ import React, { useRef, useState } from ${JSON.stringify(path.resolve('node_modu
 import { ReactFlowProvider, useNodesState } from ${JSON.stringify(path.resolve('node_modules/@xyflow/react/dist/esm/index.js'))};
 import { useBoardOfficialPostingRefresh } from ${JSON.stringify(path.resolve('src/hooks/useBoardOfficialPostingRefresh.js'))};
 import { useCanvasNavigation } from ${JSON.stringify(path.resolve('src/hooks/useCanvasNavigation.js'))};
-export function Probe(props) { return <ReactFlowProvider><CanvasProbe {...props} /></ReactFlowProvider>; }
+export function Probe(props) { return <ReactFlowProvider initialNodes={props.initialNodes}><CanvasProbe {...props} /></ReactFlowProvider>; }
 function CanvasProbe({ initialNodes, capture, addToast }) {
   const [nodes, setNodes] = useNodesState(initialNodes);
   const [edges, setEdges] = useState([]);
@@ -284,36 +285,55 @@ function CanvasProbe({ initialNodes, capture, addToast }) {
   currentNodes.current = nodes;
   const navigation = useCanvasNavigation({ nodes, edges, drawings, setNodes, setEdges, setDrawings,
     clearHistory() {}, animationDuration: 0 });
+  capture({ nodes, navigation });
+  return nodes.some(node => node.id === 'board') ? <BoardProbe navigation={navigation} capture={capture} addToast={addToast} /> : <span>Nested canvas</span>;
+}
+function BoardProbe({ navigation, capture, addToast }) {
   const handle = useBoardOfficialPostingRefresh({ nodeId: 'board', canvasFilePath: '/synthetic/workspace.canvas',
-    getNode: id => currentNodes.current.find(node => node.id === id), getNodes: () => currentNodes.current,
+    getCurrentFile: () => '/synthetic/workspace.canvas',
+    getNode: id => navigation.enumerateAllNodes().find(node => node.id === id), getNodes: navigation.enumerateAllNodes,
     updateGlobal: navigation.updateNodeDataGlobally,
     moduleRunQueue: { acquireModuleRun: async () => ({ release() {} }), cancelQueuedRunsForNode() {} },
     addToast, canStart: () => true, getScopeKey: () => 'source-run-one' });
-  capture({ nodes, handle });
+  capture({ handle });
   return <span>{handle.refreshing ? 'working' : 'idle'}</span>;
 }
 `);
         bundle = await bundleComponent(entry);
         const { React, act, createRoot, Probe } = bundle.module;
         await withDom(window => withConsoleCollector(async consoleEntries => {
-          let reply; let latest; let operation;
+          let reply; let latest = {}; let operation; let cancellations = 0;
           const toasts = [];
           window.electronAPI = { refreshOfficialPostings: args => new Promise(resolve => { reply = () => resolve(response(args.entries)); }),
-            completeNonApiAiRun: async () => {}, cancelNodeTaskAndWait: async () => ({ settled: true }) };
+            completeNonApiAiRun: async () => {}, cancelNodeTaskAndWait: async () => { cancellations += 1; return { settled: true }; } };
           const initialNodes = [{ id: 'board', type: 'jobboard', data: { hubState: 'done' } },
-            ...Array.from({ length: 6 }, (_, index) => card({ ...job(index), hubId: 'board' }, `card-${index}`))];
+            ...Array.from({ length: 6 }, (_, index) => card({ ...job(index), hubId: 'board' }, `card-${index}`)),
+            { id: 'nested', type: 'group', data: { title: 'Nested', canvasData: { nodes: [], edges: [], drawings: [] } } }]
+            .map(node => ({ ...node, position: { x: 0, y: 0 } }));
           const root = createRoot(window.document.getElementById('root'));
           try {
             await act(async () => root.render(React.createElement(React.StrictMode, null,
-              React.createElement(Probe, { initialNodes, capture: value => { latest = value; }, addToast: value => toasts.push(value) }))));
+              React.createElement(Probe, { initialNodes, capture: value => { latest = { ...latest, ...value }; }, addToast: value => toasts.push(value) }))));
             await act(async () => { operation = latest.handle.start(); await Promise.resolve(); });
+            await act(async () => { latest.navigation.diveIn('nested'); await new Promise(resolve => setTimeout(resolve, 30)); });
+            assert.equal(latest.navigation.depth, 1); assert.equal(latest.nodes.length, 0);
+            assert.equal(cancellations, 0, 'dive-in retains worker transport and refresh ownership');
+            await act(async () => { latest.navigation.diveOut(); await new Promise(resolve => setTimeout(resolve, 30)); });
+            assert.equal(latest.navigation.depth, 0);
+            assert.equal(latest.handle.refreshing, true, 'a remounted Board observes the original retained refresh');
+            await act(async () => { latest.navigation.diveIn('nested'); await new Promise(resolve => setTimeout(resolve, 30)); });
+            assert.equal(latest.navigation.depth, 1); assert.equal(cancellations, 0);
             await act(async () => { reply(); await operation; });
-            assert.equal(latest.handle.runRef.current, null);
+            assert.equal(cancellations, 0, 'worker completion while the Board is hidden does not cancel its request');
+            const retained = latest.navigation.enumerateAllNodes();
             for (let index = 0; index < 6; index++) {
-              const refreshed = latest.nodes.find(node => node.id === `card-${index}`);
+              const refreshed = retained.find(node => node.id === `card-${index}`);
               assert.deepEqual(refreshed.data.officialPosting, posting(index));
               assert.equal(refreshed.data.snippet, initialNodes[index + 1].data.snippet);
             }
+            await act(async () => { latest.navigation.diveOut(); await new Promise(resolve => setTimeout(resolve, 30)); });
+            assert.equal(latest.navigation.depth, 0); assert.equal(latest.handle.refreshing, false);
+            assert.equal(latest.nodes.find(node => node.id === 'card-0').data.officialPosting.sourceUrl, posting(0).sourceUrl);
             assert.equal(toasts.at(-1).type, 'success');
           } finally { await act(async () => root.unmount()); }
           assert.deepEqual(consoleEntries, [], 'real canvas state must settle without React warnings');
@@ -377,6 +397,25 @@ function CanvasProbe({ initialNodes, capture, addToast }) {
           await probe.start(); await change(probe); await probe.complete();
           assert.equal(probe.updates.length, 0); assert.equal(probe.retired.length, 1);
           assert.equal(probe.leases[0].released, true);
+        });
+      }
+    },
+  },
+  {
+    name: 'Board refresh background ownership still cancels when its node is removed or its canvas file is replaced',
+    async run() {
+      for (const removeOwner of [true, false]) {
+        await withRefreshHook(async probe => {
+          let currentFile = '/synthetic/workspace.canvas';
+          await probe.render({ getCurrentFile: () => currentFile });
+          await probe.start();
+          if (removeOwner) probe.nodes.splice(probe.nodes.findIndex(node => node.id === 'board'), 1);
+          else currentFile = '/synthetic/replacement.canvas';
+          await probe.hide();
+          await probe.complete();
+          assert.equal(probe.cancellations.length, 1, 'only a globally retained same-file owner can outlive unmount');
+          assert.equal(probe.updates.length, 0); assert.equal(probe.leases[0].released, true);
+          assert.equal(probe.probePreparation('/synthetic/workspace.canvas', 'board'), null);
         });
       }
     },

@@ -4,7 +4,8 @@ import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
 import { getRecentLogs } from '../../electron/logger.js';
 import { createPendingGlobalQuitDeferral } from '../../electron/utils/quitDeferral.js';
-import { beginSenderQuitPause, drainSenderNodeTasksForQuit, isAppQuitPauseReason, releaseSenderQuitPause } from '../../electron/ipc/ipcUtils.js';
+import { beginSenderQuitPause, drainSenderNodeTasksForQuit, getCurrentIpcRequestContext, isAppQuitPauseReason, releaseSenderQuitPause } from '../../electron/ipc/ipcUtils.js';
+import { registerNetworkHandlers } from '../../electron/ipc/network.js';
 import {
   initialCanvasWindowSpec,
   openOrFocusCanvasWindow,
@@ -67,6 +68,82 @@ const waitFor = async (predicate, description, timeoutMs = 3000) => {
 };
 
 export default [
+  { name: 'IPC safe handler: sequential invokes do not accumulate sender lifecycle listeners', async run() {
+    const channel = 'test-sequential-sender-listeners';
+    const event = senderEvent();
+    const lifecycleEvents = ['destroyed', 'render-process-gone', 'dom-ready', 'did-start-navigation'];
+    const counts = () => lifecycleEvents.map(name => event.sender.listenerCount(name));
+    handleSafe(channel, async () => ({ finished: true }), {
+      validateArgs(args) { if (args.reject) throw new Error('Rejected test invocation'); },
+    });
+    const invoke = electronPkg.ipcMain.__getInvokeHandler(channel);
+    try {
+      await invoke(event, {});
+      const baseline = counts();
+      assert(JSON.stringify(baseline) === JSON.stringify([1, 0, 0, 0]),
+        'only the sender registry destruction listener remains after settlement');
+      for (let index = 0; index < 100; index += 1) {
+        const reject = index % 2 === 1;
+        const result = await invoke(event, { reject });
+        assert(result.success === !reject, 'successful invokes and pre-registration failures both settle');
+        assert(JSON.stringify(counts()) === JSON.stringify(baseline),
+          `invoke ${index + 1} must restore the sender listener baseline`);
+      }
+    } finally {
+      electronPkg.ipcMain.removeHandler(channel);
+      event.sender.emit('destroyed');
+    }
+  } },
+  { name: 'IPC safe handler: concurrent invokes share sender listeners and preserve independent lifecycle policies', async run() {
+    const channel = 'test-concurrent-sender-listeners';
+    const event = senderEvent(); const other = senderEvent();
+    let destroyed = false; event.sender.isDestroyed = () => destroyed;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const signals = []; let otherSignal;
+    handleSafe(channel, async (currentEvent, args, signal) => {
+      if (currentEvent.sender === event.sender) signals[args.index] = signal;
+      else otherSignal = signal;
+      if (args.route) getCurrentIpcRequestContext().retainHandoffRendererLifecycle(args.route);
+      await gate;
+      return { finished: true };
+    });
+    const invoke = electronPkg.ipcMain.__getInvokeHandler(channel);
+    const routes = [null, 'manual', 'mcp'];
+    const pending = Array.from({ length: 64 }, (_, index) => invoke(event, { index, route: routes[index % 3] }));
+    const otherPending = invoke(other, {});
+    try {
+      await waitFor(() => signals.length === 64 && !!otherSignal, 'all concurrent lifecycle owners');
+      assert(event.sender.listenerCount('destroyed') === 2,
+        'all active invokes share one destruction listener beside the one sender-registry listener');
+      for (const name of ['render-process-gone', 'dom-ready', 'did-start-navigation']) {
+        assert(event.sender.listenerCount(name) === 1, `${name} is subscribed once for all 64 invokes`);
+      }
+      event.sender.emit('did-start-navigation', {}, 'file:///reloaded.html', false, true);
+      assert(signals.every((signal, index) => signal.aborted === (index % 3 === 0)),
+        'navigation cancels only the generic owners in the shared dispatcher');
+      event.sender.emit('render-process-gone', {}, { reason: 'crashed' });
+      assert(signals.every((signal, index) => signal.aborted === (index % 3 !== 2)),
+        'process loss also cancels manual owners while MCP work remains main-owned');
+      destroyed = true; event.sender.emit('destroyed');
+      assert(!otherSignal.aborted, 'lifecycle dispatch stays scoped to its sender');
+      release();
+      const results = await Promise.all(pending);
+      assert(results.every((result, index) => index % 3 === 2
+        ? result.success === true
+        : result.success === false && result.errorCode === (index % 3 === 0 ? 'IPC_RENDERER_NAVIGATED' : 'IPC_RENDERER_STOPPED')),
+      'each concurrent invoke keeps its own cancellation code and retained MCP settlement');
+      assert((await otherPending).success === true, 'another sender settles normally');
+      for (const name of ['destroyed', 'render-process-gone', 'dom-ready', 'did-start-navigation']) {
+        assert(event.sender.listenerCount(name) === 0, `${name} detaches once all destroyed-sender invokes settle`);
+      }
+    } finally {
+      release();
+      await Promise.allSettled([...pending, otherPending]);
+      electronPkg.ipcMain.removeHandler(channel);
+      other.sender.emit('destroyed');
+    }
+  } },
   { name: 'renderer recovery: only a confirmed dead renderer can skip the editor quit fence', run() {
     assert(hasStoppedRenderer({ isDestroyed: () => false, webContents: { isCrashed: () => true } }));
     assert(!hasStoppedRenderer({ isDestroyed: () => false, webContents: { isCrashed: () => false } }));
@@ -89,6 +166,197 @@ export default [
     assert(observedSignal.aborted && observedSignal.reason.message === 'Renderer stopped');
     assert(event.sender.listenerCount('render-process-gone') === 0);
     electronPkg.ipcMain.removeHandler('test-renderer-crash-abort');
+  } },
+  { name: 'IPC handoff lifecycle: manual navigation retains its owner while a stopped transport still aborts with its code', async run() {
+    for (const route of [null, 'manual']) {
+      const event = senderEvent();
+      const channel = `test-handoff-lifecycle-${route || 'generic'}`;
+      let observedSignal;
+      handleSafe(channel, async (_event, _args, signal) => {
+        observedSignal = signal;
+        if (route) getCurrentIpcRequestContext().retainHandoffRendererLifecycle(route);
+        await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+        return { finished: true };
+      });
+      const pending = electronPkg.ipcMain.__getInvokeHandler(channel)(event, {});
+      await waitFor(() => !!observedSignal, 'handoff lifecycle signal');
+      event.sender.emit('did-start-navigation', {}, 'file:///reloaded.html', false, true);
+      assert(observedSignal.aborted === !route, 'only a generic invoke loses its owner on navigation');
+      if (route) event.sender.emit('render-process-gone', {}, { reason: 'crashed' });
+      const result = await pending;
+      assert(result.success === false && result.errorCode === (route ? 'IPC_RENDERER_STOPPED' : 'IPC_RENDERER_NAVIGATED'),
+        'actual transport loss and generic navigation preserve their specific cancellation codes');
+      assert(event.sender.listenerCount('did-start-navigation') === 0
+        && event.sender.listenerCount('render-process-gone') === 0,
+      'every lifecycle listener is cleaned up after the invoke settles');
+      electronPkg.ipcMain.removeHandler(channel);
+    }
+  } },
+  { name: 'IPC handoff lifecycle: MCP survives navigation, stopped process and destroyed dock while remaining cancellable', async run() {
+    const event = senderEvent();
+    let destroyed = false;
+    event.sender.isDestroyed = () => destroyed;
+    let observedSignal; let observedContext;
+    handleSafe('test-mcp-retained-lifecycle', async (_event, _args, signal) => {
+      observedSignal = signal;
+      const context = getCurrentIpcRequestContext();
+      observedContext = context;
+      context.retainHandoffRendererLifecycle('mcp');
+      await Promise.resolve();
+      context.retainHandoffRendererLifecycle('manual');
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      return { finished: true };
+    });
+    const pending = electronPkg.ipcMain.__getInvokeHandler('test-mcp-retained-lifecycle')(event, { nodeId: 'retained-mcp-node' });
+    await waitFor(() => !!observedSignal, 'MCP lifecycle signal');
+    event.sender.emit('did-start-navigation', {}, 'file:///reloaded.html', false, true);
+    event.sender.emit('render-process-gone', {}, { reason: 'crashed' });
+    assert(observedContext.isHandoffRendererGone(), 'confirmed process loss is recorded between handoff steps');
+    event.sender.emit('dom-ready');
+    assert(!observedContext.isHandoffRendererGone(), 'a ready renderer clears the confirmed process-loss state');
+    event.sender.emit('render-process-gone', {}, { reason: 'crashed' });
+    assert(observedContext.isHandoffRendererGone(), 'a later process loss remains observable after recovery');
+    destroyed = true;
+    event.sender.emit('destroyed');
+    assert(!observedSignal.aborted && snapshotActiveNodeTasks(event.sender.id)[0]?.taskCount === 1,
+      'MCP owns the invocation after presentation loss and stays registered through follow-on steps');
+    abortNodeTasks('retained-mcp-node', event.sender);
+    assert(observedSignal.aborted && observedSignal.reason.message === 'Node deleted',
+      'explicit node cancellation still reaches retained work after renderer destruction');
+    await pending;
+    assert(snapshotActiveNodeTasks(event.sender.id).length === 0,
+      'the main-owned registry row is released by the normal finally block');
+    electronPkg.ipcMain.removeHandler('test-mcp-retained-lifecycle');
+  } },
+  { name: 'IPC handoff lifecycle: retained MCP work finishes its main-owned settlement after renderer destruction', async run() {
+    const event = senderEvent();
+    let destroyed = false;
+    event.sender.isDestroyed = () => destroyed;
+    let observedSignal; let release; let persisted = false;
+    handleSafe('test-mcp-retained-settlement', async (_event, _args, signal) => {
+      observedSignal = signal;
+      getCurrentIpcRequestContext().retainHandoffRendererLifecycle('mcp');
+      await new Promise(resolve => { release = resolve; });
+      return { finished: true };
+    }, { beforeReply: async () => { persisted = true; } });
+    const pending = electronPkg.ipcMain.__getInvokeHandler('test-mcp-retained-settlement')(event, { nodeId: 'settling-mcp-node' });
+    await waitFor(() => !!release, 'MCP settlement gate');
+    destroyed = true;
+    event.sender.emit('destroyed');
+    release();
+    const result = await pending;
+    assert(result.success === true && result.finished === true
+      && !observedSignal.aborted && persisted && snapshotActiveNodeTasks(event.sender.id).length === 0,
+      'renderer loss never cancels main-owned completion or its durability barrier');
+    electronPkg.ipcMain.removeHandler('test-mcp-retained-settlement');
+  } },
+  { name: 'IPC handoff cancellation: a new sender deletes orphaned MCP work without cancelling another live canvas', async run() {
+    const channel = 'test-mcp-orphan-cancellation'; const nodeId = 'orphan-cancel-node';
+    const original = senderEvent(); const replacement = senderEvent(); const other = senderEvent();
+    const signals = new Map(); let destroyed = false;
+    original.sender.isDestroyed = () => destroyed;
+    handleSafe(channel, async (event, _args, signal) => {
+      signals.set(event.sender, signal);
+      getCurrentIpcRequestContext().retainHandoffRendererLifecycle('mcp');
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      return { finished: true };
+    });
+    const handler = electronPkg.ipcMain.__getInvokeHandler(channel);
+    const orphaned = handler(original, { nodeId, manualAiRunId: 'orphan-cancel-run' });
+    const unrelated = handler(other, { nodeId, manualAiRunId: 'other-canvas-cancel-run' });
+    const listeners = new Map();
+    registerNetworkHandlers({
+      ipcMainInstance: { on: (name, fn) => listeners.set(name, fn), handle() {} },
+      registerHandler() {},
+    });
+    try {
+      await waitFor(() => signals.size === 2, 'both MCP invocation owners');
+      original.sender.emit('did-start-navigation', {}, 'file:///reloaded.html', false, true);
+      destroyed = true; original.sender.emit('destroyed');
+      assert(!signals.get(original.sender).aborted, 'the orphan survives its old renderer');
+      listeners.get('cancel-node-task')(replacement, nodeId, 'node-deleted');
+      const result = await orphaned;
+      assert(result.success === false && result.error === 'Node deleted'
+        && signals.get(original.sender).reason.cancelCause === 'node-deleted',
+      'the new sender must deliver the deletion sentinel to the orphaned main-owned invocation');
+      assert(!signals.get(other.sender).aborted, 'a live canvas with the same node id and a different run remains active');
+    } finally {
+      abortNodeTasks(nodeId);
+      await Promise.allSettled([orphaned, unrelated]);
+      electronPkg.ipcMain.removeHandler(channel);
+    }
+  } },
+  { name: 'IPC handoff cancellation: new-sender acknowledgement drains every same-run owner and retains its cleanup id', async run() {
+    const channel = 'test-mcp-adopted-cancellation'; const nodeId = 'adopted-cancel-node';
+    const original = senderEvent(); const replacement = senderEvent(); const other = senderEvent();
+    const signals = new Map(); let releaseCleanup;
+    const cleanupGate = new Promise(resolve => { releaseCleanup = resolve; });
+    handleSafe(channel, async (event, _args, signal) => {
+      signals.set(event.sender, signal);
+      getCurrentIpcRequestContext().retainHandoffRendererLifecycle('mcp');
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      if (event.sender === original.sender) await cleanupGate;
+      return { finished: true };
+    });
+    const handler = electronPkg.ipcMain.__getInvokeHandler(channel);
+    const first = handler(original, { nodeId, manualAiRunId: 'adopted-cancel-run' });
+    const adopted = handler(replacement, { nodeId, manualAiRunId: 'adopted-cancel-run' });
+    const unrelated = handler(other, { nodeId, manualAiRunId: 'unrelated-adopted-cancel-run' });
+    let acknowledged = false;
+    try {
+      await waitFor(() => signals.size === 3, 'adopted MCP invocation owners');
+      const cancelling = abortNodeTasksAndWait(nodeId, replacement.sender, undefined, 1_000)
+        .then(result => { acknowledged = true; return result; });
+      assert(signals.get(original.sender).aborted && signals.get(replacement.sender).aborted
+        && !signals.get(other.sender).aborted, 'node and run identity reaches both live owners without crossing into a different run');
+      await Promise.resolve();
+      assert(!acknowledged, 'the acknowledgement also waits for the old sender cleanup boundary');
+      releaseCleanup();
+      const result = await cancelling;
+      const [firstResult, adoptedResult] = await Promise.all([first, adopted]);
+      assert(result.settled && result.abortedCount === 2
+        && result.manualAiRunIds.includes('adopted-cancel-run')
+        && firstResult.error === 'Node deleted' && adoptedResult.error === 'Node deleted',
+      'both invocation owners settle consistently and the replacement retains the durable cleanup id');
+      const retry = await abortNodeTasksAndWait(nodeId, replacement.sender);
+      assert(retry.manualAiRunIds.includes('adopted-cancel-run'), 'a renderer retry retains the cross-sender acknowledgement after registry cleanup');
+    } finally {
+      releaseCleanup(); abortNodeTasks(nodeId);
+      await Promise.allSettled([first, adopted, unrelated]);
+      electronPkg.ipcMain.removeHandler(channel);
+    }
+  } },
+  { name: 'IPC handoff cancellation: explicit run identity reaches an old owner before replacement auto-resume', async run() {
+    const channel = 'test-mcp-explicit-run-cancellation'; const nodeId = 'explicit-cancel-node';
+    const original = senderEvent(); const replacement = senderEvent(); const other = senderEvent();
+    const signals = new Map();
+    handleSafe(channel, async (event, _args, signal) => {
+      signals.set(event.sender, signal);
+      getCurrentIpcRequestContext().retainHandoffRendererLifecycle('mcp');
+      await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+      return { finished: true };
+    });
+    const handler = electronPkg.ipcMain.__getInvokeHandler(channel);
+    const pending = handler(original, { nodeId, manualAiRunId: 'explicit-cancel-run' });
+    const unrelated = handler(other, { nodeId, manualAiRunId: 'unrelated-explicit-cancel-run' });
+    const handlers = new Map();
+    registerNetworkHandlers({
+      ipcMainInstance: { on() {}, handle: (name, fn) => handlers.set(name, fn) },
+      registerHandler() {},
+    });
+    try {
+      await waitFor(() => signals.size === 2, 'explicit-run MCP invocation owners');
+      const result = await handlers.get('cancel-node-task-and-wait')(replacement,
+        { nodeId, cause: 'board-cleared', manualAiRunId: 'explicit-cancel-run' });
+      assert(result.settled && result.abortedCount === 1 && (await pending).error === 'Node deleted'
+        && signals.get(original.sender).reason.cancelCause === 'board-cleared'
+        && !signals.get(other.sender).aborted,
+      'a clear/Cancel request can identify the exact retained run without adopting or cancelling a coincident node elsewhere');
+    } finally {
+      abortNodeTasks(nodeId);
+      await Promise.allSettled([pending, unrelated]);
+      electronPkg.ipcMain.removeHandler(channel);
+    }
   } },
   { name: 'renderer recovery: crash receipts are bounded, restart-readable and contain no private crash text', run() {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'renderer-crash-'));

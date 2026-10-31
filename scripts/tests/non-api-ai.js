@@ -1,9 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { rejects } from 'node:assert/strict';
-import { flushNonApiAiPersistence } from '../../electron/ipc/nonApiAi.js';
+import { fallbackBridgeAttachmentToManual, flushNonApiAiPersistence } from '../../electron/ipc/nonApiAi.js';
 import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMRaw, callLLMText, callLLMVision, createHostStagedVisionCaller, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
-import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments, readBridgeableNonApiAiHandoff, listBridgeableNonApiAiHandoffs } from '../../electron/ipc/nonApiAi.js';
+import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments, readBridgeableNonApiAiHandoff, markBridgeableNonApiAiHandoffAssigned, listBridgeableNonApiAiHandoffs, returnBridgeHandoffToPerson, requeueBridgeableNonApiAiHandoff } from '../../electron/ipc/nonApiAi.js';
+import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
+import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiHandoffLifecycleAggregateCountForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, getNonApiAiHandoffLifecycleSnapshot, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError, submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
@@ -28,10 +30,10 @@ const MARKETPLACE_AND_WORKSPACE_TASKS = [
 
 const COMPARATIVE_TASK = 'job-official-posting-match';
 const COMPARATIVE_GROUP = 'c'.repeat(64);
-async function comparativeTransportFixture(label) {
+async function comparativeTransportFixture(label, onAssigned = null) {
   ipcMain.__clearInvokeHandlers();
   registerNonApiAiHandlers();
-  const sent = [];
+  const sent = []; const failures = [];
   const sender = new EventEmitter();
   sender.id = 945;
   sender.isDestroyed = () => false;
@@ -39,13 +41,17 @@ async function comparativeTransportFixture(label) {
   const runId = `comparative-${label}-${process.pid}-${Date.now()}`;
   handleSafe('comparative-transport-test', async (_event, args, signal) => {
     try {
-      return { answer: await callLLMText(`SYNTHETIC comparative run ${args.run}`, { signal, task: COMPARATIVE_TASK,
+      return { answer: await callLLMText(`SYNTHETIC comparative run ${args.run}${args.slot == null ? '' : ` row ${args.slot}`}`, { signal, task: COMPARATIVE_TASK,
         hints: { itemCount: 1, optionCount: args.optionCount || 2 },
-        manualHandoff: { comparisonGroup: COMPARATIVE_GROUP, comparisonRun: args.run },
+        manualHandoff: { comparisonGroup: COMPARATIVE_GROUP, comparisonRun: args.run, ...(onAssigned ? { onAssigned } : {}) },
         responseSchema: { type: 'object', additionalProperties: false, required: ['answer'], properties: { answer: { type: 'string', enum: ['valid'] } } } }) };
-    } catch (error) { return { failureCode: error.code || null }; }
+    } catch (error) {
+      const failure = { failureCode: error.code || null, recoveryCode: error.recoveryCode || null };
+      failures.push(failure);
+      return failure;
+    }
   });
-  const invoke = run => ipcMain.__getInvokeHandler('comparative-transport-test')({ sender }, { nodeId: 'comparative-node', manualAiRunId: runId, run });
+  const invoke = (run, slot) => ipcMain.__getInvokeHandler('comparative-transport-test')({ sender }, { nodeId: 'comparative-node', manualAiRunId: runId, run, ...(slot == null ? {} : { slot }) });
   const waitRequest = async (after = 0) => {
     for (let attempt = 0; attempt < 200; attempt++) {
       const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
@@ -60,10 +66,273 @@ async function comparativeTransportFixture(label) {
       conversationKey: character.repeat(64), isolated } });
   const submit = (request, answer = 'valid') => submitNonApiAiResponseForBridge({ ...bridgeArgs(request), response: JSON.stringify({ handoffCode: request.handoffCode, answer }) });
   const cleanup = () => ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
-  return { sent, sender, runId, invoke, waitRequest, bridgeArgs, read, submit, cleanup };
+  return { sent, failures, sender, runId, invoke, waitRequest, bridgeArgs, read, submit, cleanup };
 }
 
 export default [
+  ...['delivery-failed', 'renderer-stopped', 'renderer-destroyed', 'navigation', 'repeated-remount'].map(cause => ({
+    name: `comparative transport: simultaneous ${cause} preserves five pending comparisons for worker completion`,
+    run: async () => {
+      const f = await comparativeTransportFixture(`batch-${cause}`);
+      const owners = Array.from({ length: 5 }, (_, slot) => f.invoke('A', slot));
+      let requests;
+      for (let turn = 0; turn < 200; turn++) {
+        requests = f.sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+        if (requests.length === owners.length) break;
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert(requests.length === owners.length, 'the entire batch is pending before one shared lifecycle event');
+      let completed = 0;
+      owners.forEach(owner => { void owner.then(() => { completed++; }); });
+      const windows = new Map([[f.sender.id, { __canvasFilePath: '/tmp/comparative-display.canvas' }]]);
+      const push = createPushSource({ codeGuard: createHandoffCodeGuard(), hubKey: () => 'd'.repeat(64),
+        windows, graceMs: 0, pollMs: 0 });
+      assert(push.selectHub({ windowId: f.sender.id, canvasFilePath: '/tmp/comparative-display.canvas', nodeId: 'comparative-node' }));
+      const comparisonContext = { conversationKey: '7'.repeat(64), observed: true, pristine: true, isCurrent: () => true };
+      let served = await push.get({ epoch: 'display', worker: 'worker-1', comparisonContext });
+      assert(served.status === 'served', 'a worker already owns one sibling before presentation is interrupted');
+      if (cause === 'delivery-failed') {
+        f.sender.send = () => { throw new Error('Synthetic renderer delivery failed'); };
+        const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender: f.sender });
+        assert(replay.count === 0, 'one replay pass synchronously encounters every failed delivery');
+      } else if (cause === 'renderer-stopped') {
+        f.sender.emit('render-process-gone');
+      } else if (cause === 'renderer-destroyed') {
+        f.sender.isDestroyed = () => true;
+        f.sender.emit('destroyed');
+        windows.delete(f.sender.id);
+      } else if (cause === 'navigation') {
+        f.sender.emit('did-start-navigation', {}, 'file:///canvas/index.html', false, true);
+      } else {
+        const replay = ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests');
+        assert((await replay({ sender: f.sender })).count === 5 && (await replay({ sender: f.sender })).count === 5,
+          'minimize/remount replay remains idempotent for every pending request');
+      }
+      await new Promise(resolve => setImmediate(resolve));
+      const pending = listBridgeableNonApiAiHandoffs({ allowTasks: new Set([COMPARATIVE_TASK]) }).handoffs;
+      assert(completed === 0 && f.failures.length === 0 && requests.every(request => pending.some(item =>
+        item.requestId === request.requestId && item.handoffCode === request.handoffCode)),
+      'all five original promises and handoff identities survive the same failed presentation pass');
+      for (let index = 0; index < owners.length; index++) {
+        if (index) served = await push.get({ epoch: 'display', worker: 'worker-1', comparisonContext });
+        assert(served.status === 'served');
+        assert((await push.submit({ epoch: 'display', worker: 'worker-1', comparisonContext, handoffCode: served.handoffCode,
+          response: JSON.stringify({ handoffCode: served.handoffCode, answer: 'valid' }) })).status === 'accepted');
+      }
+      assert((await Promise.all(owners)).every(item => item.answer?.answer === 'valid') && f.failures.length === 0,
+        'the worker completes every original comparison, including the preexisting claim');
+      await f.cleanup();
+    },
+  })),
+  {
+    name: 'comparative transport: simultaneous reserved handoffs requeue without settling and complete on a new worker',
+    run: async () => {
+      let assigned = 0;
+      const f = await comparativeTransportFixture('reserved-recovery', () => { assigned++; });
+      const owners = Array.from({ length: 5 }, (_, slot) => f.invoke('A', slot));
+      let requests;
+      for (let turn = 0; turn < 200; turn++) {
+        requests = f.sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+        if (requests.length === owners.length) break;
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      assert(requests.length === owners.length, 'all original comparative invocations are pending together');
+      let release; const held = new Promise(resolve => { release = resolve; });
+      let hold = true; let oldCurrent = true; const reads = [];
+      const push = createPushSource({ codeGuard: createHandoffCodeGuard(), hubKey: () => 'd'.repeat(64),
+        windows: new Map([[f.sender.id, { __canvasFilePath: '/tmp/comparative-recovery.canvas' }]]), graceMs: 0, pollMs: 0,
+        seam: { read: async args => {
+          const view = readBridgeableNonApiAiHandoff(args);
+          if (hold) { reads.push(args); await held; }
+          return view;
+        } },
+      });
+      assert(push.selectHub({ windowId: f.sender.id, canvasFilePath: '/tmp/comparative-recovery.canvas', nodeId: 'comparative-node' }));
+      const context = (digit, isCurrent = () => true) => ({ conversationKey: digit.repeat(64), observed: true, pristine: true, isCurrent });
+      const oldReads = requests.map((_, index) => push.get({ epoch: 'recovery', worker: `worker-${index + 1}`,
+        comparisonContext: context(String(index + 1), () => oldCurrent) }));
+      for (let turn = 0; turn < 100 && reads.length < requests.length; turn++) await Promise.resolve();
+      assert(reads.length === requests.length && assigned === 0, 'held reads reserve every request without starting response timers');
+      oldCurrent = false;
+      requests.forEach((_, index) => assert(push.requeueWorker({ epoch: 'recovery', worker: `worker-${index + 1}`, reason: 'worker-lost' }) === 1));
+      assert(assigned === 0, 'requeue cannot start an unassigned response timer');
+      const stillPending = listBridgeableNonApiAiHandoffs({ allowTasks: new Set([COMPARATIVE_TASK]) }).handoffs;
+      assert(requests.every(request => stillPending.some(item => item.requestId === request.requestId && item.handoffCode === request.handoffCode)),
+        'all pending registry promises retain their original request and handoff identities');
+      hold = false;
+      for (let index = 0; index < requests.length; index++) {
+        const next = await push.get({ epoch: 'recovery', worker: 'worker-6', comparisonContext: context('9') });
+        assert(next.status === 'served');
+        assert((await push.submit({ epoch: 'recovery', worker: 'worker-6', comparisonContext: context('9'), handoffCode: next.handoffCode,
+          response: JSON.stringify({ handoffCode: next.handoffCode, answer: 'valid' }) })).status === 'accepted');
+      }
+      release();
+      assert((await Promise.all(oldReads)).every(item => item.status === 'retry'), 'late old reads cannot reclaim ownership');
+      assert((await Promise.all(owners)).every(item => item.answer?.answer === 'valid'), 'all original promises complete successfully');
+      assert(assigned === requests.length, 'each response timer starts exactly once on the replacement worker');
+      await f.cleanup();
+    },
+  },
+  {
+    name: 'comparative transport: two requeues preserve identity and assignment, while the third fails with its recovery code',
+    run: async () => {
+      let assigned = 0;
+      const f = await comparativeTransportFixture('bounded-recovery', () => { assigned++; });
+      const owner = f.invoke('A'); const request = await f.waitRequest(); const args = f.bridgeArgs(request);
+      assert(f.read(request, 'A').ok && markBridgeableNonApiAiHandoffAssigned(args) && assigned === 1);
+      for (const [index, reason] of ['worker-lost', 'worker-replaced'].entries()) {
+        assert(requeueBridgeableNonApiAiHandoff({ ...args, reason }), 'an infrastructure retry keeps its owner promise pending');
+        const pending = listBridgeableNonApiAiHandoffs({ allowTasks: new Set([COMPARATIVE_TASK]) }).handoffs.find(item => item.requestId === request.requestId);
+        assert(pending?.handoffCode === request.handoffCode && f.read(request, 'A', false, String(index + 3)).ok);
+        assert(markBridgeableNonApiAiHandoffAssigned(args) && assigned === 1, 'replacement assignment does not reset or restart the response budget');
+      }
+      assert(requeueBridgeableNonApiAiHandoff({ ...args, reason: 'fresh-context-required' }));
+      const result = await owner;
+      assert(result.failureCode === 'BRIDGE_REQUEUE_EXHAUSTED' && result.recoveryCode === 'BRIDGE_FRESH_CONTEXT_REQUIRED',
+        'retry exhaustion remains distinct from validation and preserves its last infrastructure cause');
+      assert(!requeueBridgeableNonApiAiHandoff({ ...args, reason: 'worker-lost' }), 'a terminal handoff cannot resurrect');
+      await f.cleanup();
+    },
+  },
+  {
+    name: 'comparative transport: cancellation after requeue prevents another assignment or requeue',
+    run: async () => {
+      let assigned = 0;
+      const f = await comparativeTransportFixture('cancelled-recovery', () => { assigned++; });
+      const owner = f.invoke('B'); const request = await f.waitRequest(); const args = f.bridgeArgs(request);
+      assert(f.read(request, 'B').ok && requeueBridgeableNonApiAiHandoff({ ...args, reason: 'comparison-contaminated' }));
+      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: f.sender }, { requestId: request.requestId });
+      await owner;
+      assert(!requeueBridgeableNonApiAiHandoff({ ...args, reason: 'worker-replaced' })
+        && !markBridgeableNonApiAiHandoffAssigned(args) && assigned === 0, 'cancellation wins without starting the unassigned timer');
+      await f.cleanup();
+    },
+  },
+  {
+    name: 'comparative transport: worker recovery does not erase genuine invalid-response attempts',
+    run: async () => {
+      const f = await comparativeTransportFixture('invalid-after-recovery');
+      const owner = f.invoke('A'); const request = await f.waitRequest();
+      assert(f.read(request, 'A').ok && (await f.submit(request, 'invalid')).outcome === 'rejected');
+      assert(requeueBridgeableNonApiAiHandoff({ ...f.bridgeArgs(request), reason: 'worker-replaced' }));
+      assert(f.read(request, 'A', false, '3').ok, 'replacement earns fresh bridge proof for the same request');
+      assert((await f.submit(request, 'invalid')).accepted === false);
+      assert((await owner).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_INVALID',
+        'a second genuinely invalid answer still ends the comparative run after worker recovery');
+      await f.cleanup();
+    },
+  },
+  {
+    name: 'non-API AI: manual delivery and escalation start assignment once, while failed delivery never does',
+    run: async () => {
+      const failures = [];
+      for (const mode of ['initial-draft', 'ineligible-task', 'bridge-escalation', 'failed-delivery']) {
+        ipcMain.__clearInvokeHandlers();
+        registerNonApiAiHandlers();
+        const sent = []; let assigned = 0;
+        let destroyed = false;
+        const sender = new EventEmitter();
+        sender.id = 958;
+        sender.isDestroyed = () => destroyed;
+        sender.send = (channel, payload) => {
+          if (mode === 'failed-delivery' && channel === 'non-api-ai-request') {
+            destroyed = true;
+            throw new Error('Synthetic closed window');
+          }
+          sent.push({ channel, payload });
+        };
+        handleSafe('non-api-manual-assignment-test', async (_event, _args, signal) => {
+          try {
+            return await callLLMText('Synthetic manual assignment test', {
+              signal, task: mode === 'ineligible-task' ? 'vision-product-analysis' : 'job-scoring',
+              responseSchema: { type: 'object', properties: { answer: { type: 'string' } } },
+              manualHandoff: {
+                initialResponse: mode === 'initial-draft' || mode === 'failed-delivery' ? 'Synthetic draft' : '',
+                onAssigned: () => { assigned += 1; throw new Error('Synthetic observer failure'); },
+              },
+            });
+          } catch { return { cancelled: true }; }
+        });
+        const owner = ipcMain.__getInvokeHandler('non-api-manual-assignment-test')({ sender }, { nodeId: 'manual-assignment-node' });
+        try {
+          if (mode === 'failed-delivery') {
+            await owner;
+            if (assigned !== 0) failures.push(`${mode}: failed presentation started assignment`);
+            continue;
+          }
+          for (let attempt = 0; attempt < 200 && !sent.some(item => item.channel === 'non-api-ai-request'); attempt += 1) {
+            await new Promise(resolve => setTimeout(resolve, 5));
+          }
+          const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+          assert(request, 'the synthetic prompt must reach its originating dock');
+          if (mode === 'bridge-escalation') {
+            assert(assigned === 0, 'presenting an MCP request waits for a worker claim');
+            assert(returnBridgeHandoffToPerson({ requestId: request.requestId, reason: 'worker_restart_cap' }), 'an unclaimed MCP request can return to the person');
+          }
+          if (assigned !== 1) failures.push(`${mode}: manual presentation did not start assignment`);
+          await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
+          await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
+          if (assigned !== 1) failures.push(`${mode}: replay changed the one-shot assignment count`);
+          assert(!JSON.stringify(sent).includes('onAssigned') && !JSON.stringify(sent).includes('onHandoffAssigned'), 'assignment closures stay in the main process');
+        } finally {
+          const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+          if (request) await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+          await owner;
+        }
+      }
+      assert(failures.length === 0, failures.join('; '));
+    },
+  },
+  {
+    name: 'non-API AI: assignment callback stays private, fires once on claim, and cannot survive cancellation',
+    run: async () => {
+      for (const raw of [true, false]) {
+        ipcMain.__clearInvokeHandlers();
+        registerNonApiAiHandlers();
+        const sent = []; let assigned = 0;
+        const sender = new EventEmitter();
+        sender.id = raw ? 956 : 957;
+        sender.isDestroyed = () => false;
+        sender.send = (channel, payload) => sent.push({ channel, payload });
+        const task = raw ? 'job-official-posting-research' : 'job-scoring';
+        handleSafe('non-api-assignment-test', async (_event, _args, signal) => {
+          try {
+            return await (raw ? callLLMRaw : callLLMText)('Synthetic assignment test', {
+              signal, task, grounding: raw,
+              ...(raw ? { responseValidator: text => text } : { responseSchema: { type: 'object', properties: { answer: { type: 'string' } } } }),
+              manualHandoff: { onAssigned: () => { assigned += 1; throw new Error('Synthetic observer failure'); } },
+            });
+          } catch { return { cancelled: true }; }
+        });
+        const invoke = () => ipcMain.__getInvokeHandler('non-api-assignment-test')({ sender }, { nodeId: 'assignment-node' });
+        const waitRequest = async after => {
+          for (let attempt = 0; attempt < 200; attempt += 1) {
+            const requests = sent.filter(item => item.channel === 'non-api-ai-request');
+            if (requests.length > after) return requests.at(-1).payload;
+            await new Promise(resolve => setTimeout(resolve, 5));
+          }
+          throw new Error('Synthetic assignment request was not emitted');
+        };
+        const argsFor = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, allowTasks: new Set([task]), allowNodeIds: new Set(['assignment-node']) });
+        const owner = invoke(); const request = await waitRequest(0); const args = argsFor(request);
+        assert(assigned === 0 && readBridgeableNonApiAiHandoff(args).ok, 'pending registration and prompt read do not assign a worker');
+        assert(assigned === 0, 'the timer still has not started after a prompt read');
+        assert(!markBridgeableNonApiAiHandoffAssigned({ ...args, handoffCode: 'HANDOFF-INVALID' })
+          && !markBridgeableNonApiAiHandoffAssigned({ ...args, allowTasks: new Set() })
+          && !markBridgeableNonApiAiHandoffAssigned({ ...args, allowNodeIds: new Set(['another-node']) }), 'claim notification retains code, task and node fences');
+        assert(markBridgeableNonApiAiHandoffAssigned(args) && markBridgeableNonApiAiHandoffAssigned(args)
+          && assigned === 1, 'a successful claim notifies exactly once even if the observer throws or the worker re-reads');
+        assert(!JSON.stringify(sent).includes('onAssigned') && !JSON.stringify(sent).includes('onHandoffAssigned'), 'assignment closures never reach renderer payloads');
+        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+        await owner;
+        assert(!markBridgeableNonApiAiHandoffAssigned(args) && assigned === 1, 'a settled claim cannot notify again');
+        const nextOwner = invoke(); const next = await waitRequest(1);
+        await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: next.requestId });
+        await nextOwner;
+        assert(!markBridgeableNonApiAiHandoffAssigned(argsFor(next)) && assigned === 1, 'cancellation drops a callback before any worker claims it');
+      }
+    },
+  },
   {
     name: 'comparative transport: both runs require bridge proof and durable accepted replay issues no new handoffs',
     run: async () => {
@@ -126,7 +395,7 @@ export default [
       assert(f.read(first, 'A').ok);
       const rejected = await f.submit(first, 'invalid');
       assert(rejected.outcome === 'rejected' && rejected.attempt === 2, 'the first invalid answer gets one ordinary correction');
-      f.sender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      await abortNodeTasksAndWait('comparative-node', f.sender);
       await owner;
       await __reloadDurableStateForTests();
       const before = f.sent.filter(item => item.channel === 'non-api-ai-request').length;
@@ -383,7 +652,7 @@ export default [
         'the preload bridge exposes a sender-owned pending-handoff replay seam');
       const requestListener = dialogSource.indexOf('api.onNonApiAiRequest(receiveRequest)');
       const settledListener = dialogSource.indexOf('api.onNonApiAiSettled(removeRequest)');
-      const replay = dialogSource.indexOf('api.replayPendingNonApiAiRequests?.()');
+      const replay = dialogSource.indexOf('\n    replayPending();');
       assert(requestListener >= 0 && settledListener > requestListener && replay > settledListener,
         'both live handoff listeners are installed before the dialog asks main to replay pending prompts');
       const selectorStart = dialogSource.indexOf('<nav aria-label="Pending AI handoff batches"');
@@ -2427,10 +2696,11 @@ export default [
         && pendingSummary.other === 0
         && pendingSummary.acceptedOnly === false,
       'the recovery settlement probe distinguishes a partly accepted workflow from one safe to retire');
-      firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      firstSender.emit('render-process-gone', {}, { reason: 'crashed' });
       const interrupted = await firstRun;
-      assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
-        'the original process-local continuation is allowed to terminate after its checkpoint is durable');
+      assert(interrupted.success === false && interrupted.error === 'Renderer stopped'
+        && interrupted.errorCode === 'IPC_RENDERER_STOPPED',
+      'a genuinely stopped manual transport terminates after its checkpoint is durable');
 
       const resumedSent = [];
       const resumedSender = new EventEmitter();
@@ -2516,10 +2786,11 @@ export default [
         { requestId: request.requestId, response: `draft-${request.batch}` },
       )));
       const originalByBatch = new Map(firstRequests.map(request => [request.batch, request]));
-      firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      firstSender.emit('render-process-gone', {}, { reason: 'crashed' });
       const interrupted = await firstRun;
-      assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
-        'the ten-wide workflow checkpoints cleanly when its renderer restarts');
+      assert(interrupted.success === false && interrupted.error === 'Renderer stopped'
+        && interrupted.errorCode === 'IPC_RENDERER_STOPPED',
+      'the ten-wide manual workflow checkpoints cleanly when its renderer process stops');
 
       const resumedSent = [];
       const resumedSender = makeSender(804, resumedSent);
@@ -2860,10 +3131,11 @@ export default [
       await ipcMain.__getInvokeHandler('update-non-api-ai-draft')(
         { sender: firstSender }, { requestId: seedRequest.requestId, response: '{"assessments":[{"index":0,"matches":[]}]}' },
       );
-      firstSender.emit('did-start-navigation', {}, 'file:///restart.html', false, true);
+      firstSender.emit('render-process-gone', {}, { reason: 'crashed' });
       const interrupted = await seed;
-      assert(interrupted.success === false && interrupted.error === 'Renderer navigated',
-        'the original pending v1 request is interrupted only after its draft is checkpointed');
+      assert(interrupted.success === false && interrupted.error === 'Renderer stopped'
+        && interrupted.errorCode === 'IPC_RENDERER_STOPPED',
+      'a stopped manual renderer interrupts the pending v1 request after its draft is checkpointed');
 
       const resumedSent = [];
       const resumedSender = new EventEmitter();
@@ -4218,7 +4490,7 @@ export default [
     },
   },
   {
-    name: 'non-API AI: main-frame navigation aborts its orphaned handoff instead of leaking it across reload',
+    name: 'non-API AI: main-frame navigation replays and completes the same pending manual handoff',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
@@ -4239,46 +4511,175 @@ export default [
       assert(sent.some(item => item.channel === 'non-api-ai-request'),
         'the handoff is pending before the renderer navigation begins');
       sender.emit('did-start-navigation', {}, 'file:///canvas/index.html', false, true);
+      let settled = false;
+      void run.then(() => { settled = true; });
+      await new Promise(resolve => setImmediate(resolve));
+      const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
+      const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      assert(!settled && replay.count === 1 && requests.length === 2
+        && requests[0].requestId === requests[1].requestId
+        && requests[0].handoffCode === requests[1].handoffCode
+        && !sent.some(item => item.channel === 'non-api-ai-settled'),
+      'a replacement dock presents the same live manual request without cancelling its owner');
+      await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender }, {
+        requestId: requests[0].requestId,
+        response: JSON.stringify({ handoffCode: requests[0].handoffCode, result: 'continued' }),
+      });
       const result = await run;
-      assert(result.success === false && result.error === 'Renderer navigated'
-        && sent.some(item => item.channel === 'non-api-ai-settled' && item.payload?.cancelled),
-      'a real main-frame reload aborts the old invoke and settles its handoff instead of retaining an unreachable promise');
-      return { error: result.error };
+      assert(result.success === true && result.result.result === 'continued',
+        'the original invocation completes when the remounted dock supplies its answer');
+      return { replayed: replay.count };
     },
   },
   {
-    name: 'non-API AI: a sender closing during delivery settles instead of leaking a pending request',
+    name: 'non-API AI: a mixed manual and MCP invocation loses only the manual transport when its renderer stops',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 974;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const schema = { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } };
+      handleSafe('non-api-mixed-renderer-loss-test', async (_event, _args, signal) => ({
+        answers: await Promise.allSettled([
+          requestNonApiAi({ prompt: 'Synthetic manual transport', task: 'test-manual-mixed-loss', signal, responseSchema: schema }),
+          requestNonApiAi({ prompt: 'Synthetic MCP transport', task: 'job-scoring', signal, responseSchema: schema }),
+        ]).then(results => results.map(result => result.status === 'fulfilled'
+          ? { answer: result.value.answer }
+          : { errorCode: result.reason.code })),
+      }));
+      const owner = ipcMain.__getInvokeHandler('non-api-mixed-renderer-loss-test')({ sender }, { nodeId: 'mixed-renderer-loss' });
+      for (let turn = 0; turn < 100 && sent.filter(item => item.channel === 'non-api-ai-request').length < 2; turn++) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const requests = sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
+      assert(requests.length === 2, 'both routes are pending in the same invocation before renderer loss');
+      const mcp = requests.find(request => request.mcpEligible === true);
+      sender.emit('render-process-gone', {}, { reason: 'crashed' });
+      const remaining = listBridgeableNonApiAiHandoffs({ allowTasks: new Set(['job-scoring']) });
+      assert(remaining.pending === 1 && remaining.handoffs[0]?.requestId === mcp.requestId,
+        'the actual manual transport ends while the worker keeps the original MCP request');
+      const submitted = await submitNonApiAiResponseForBridge({ requestId: mcp.requestId, handoffCode: mcp.handoffCode,
+        allowTasks: new Set(['job-scoring']), response: JSON.stringify({ handoffCode: mcp.handoffCode, answer: 'worker-completed' }) });
+      const result = await owner;
+      assert(submitted.accepted && result.success === true
+        && result.answers[0].errorCode === 'IPC_RENDERER_STOPPED' && result.answers[1].answer === 'worker-completed',
+      'manual loss never aborts the shared MCP owner signal or prevents its worker result');
+      assert(sender.listenerCount('dom-ready') === 0 && sender.listenerCount('render-process-gone') === 0,
+        'both routes release renderer observers after settlement');
+    },
+  },
+  ...[false, true].map(recovered => ({
+    name: `non-API AI: a follow-on manual handoff ${recovered ? 'uses a recovered renderer' : 'rejects a stopped renderer'} after MCP completion`,
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 975;
+      sender.isDestroyed = () => false;
+      sender.getOSProcessId = () => 0;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const schema = { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } };
+      handleSafe('non-api-follow-on-renderer-loss-test', async (_event, _args, signal) => {
+        const worker = await requestNonApiAi({ prompt: 'Synthetic first MCP step', task: 'job-scoring', signal, responseSchema: schema });
+        try {
+          const manual = await requestNonApiAi({ prompt: 'Synthetic following manual step', task: 'test-manual-follow-on', signal, responseSchema: schema });
+          return { worker, manual };
+        } catch (error) { return { worker, errorCode: error.code }; }
+      });
+      const owner = ipcMain.__getInvokeHandler('non-api-follow-on-renderer-loss-test')({ sender }, { nodeId: 'follow-on-renderer-loss' });
+      for (let turn = 0; turn < 100 && !sent.some(item => item.channel === 'non-api-ai-request'); turn++) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const mcp = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(mcp, 'the first MCP step is live even when the renderer temporarily reports no process id');
+      sender.emit('render-process-gone', {}, { reason: 'crashed' });
+      if (recovered) sender.emit('dom-ready');
+      await submitNonApiAiResponseForBridge({ requestId: mcp.requestId, handoffCode: mcp.handoffCode,
+        allowTasks: new Set(['job-scoring']), response: JSON.stringify({ handoffCode: mcp.handoffCode, answer: 'worker-completed' }) });
+      if (recovered) {
+        for (let turn = 0; turn < 100 && !sent.some(item => item.channel === 'non-api-ai-request' && item.payload?.mcpEligible === false); turn++) {
+          await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        const manual = sent.find(item => item.channel === 'non-api-ai-request' && item.payload?.mcpEligible === false)?.payload;
+        assert(manual, 'dom-ready clears confirmed process loss before the next manual step is admitted');
+        await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender }, { requestId: manual.requestId,
+          response: JSON.stringify({ handoffCode: manual.handoffCode, answer: 'manual-completed' }) });
+      }
+      const result = await owner;
+      assert(result.success === true && result.worker.answer === 'worker-completed'
+        && (recovered ? result.manual?.answer === 'manual-completed' : result.errorCode === 'BRIDGE_RENDERER_UNAVAILABLE'),
+      'late manual admission uses current confirmed renderer state without cancelling completed MCP work');
+      assert(!listBridgeableNonApiAiHandoffs({ allowTasks: new Set(['job-scoring']) }).pending,
+        'neither a rejected late manual admission nor a completed manual step leaves a pending record');
+    },
+  })),
+  {
+    name: 'non-API AI: attachment fallback to manual rejects after its MCP renderer has actually stopped',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 976;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      handleSafe('non-api-fallback-renderer-loss-test', async (_event, _args, signal) => ({
+        answer: await requestNonApiAi({ prompt: 'Synthetic attachment transport', task: 'vision-product-analysis', signal,
+          attachmentPaths: ['/tmp/synthetic-handoff-fallback.png'], attachmentReader: async () => new Uint8Array([1, 2, 3]),
+          responseSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } } }),
+      }));
+      const owner = ipcMain.__getInvokeHandler('non-api-fallback-renderer-loss-test')({ sender }, { nodeId: 'fallback-renderer-loss' });
+      for (let turn = 0; turn < 100 && !sent.some(item => item.channel === 'non-api-ai-request'); turn++) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request?.mcpEligible === true, 'the attachment begins with live MCP transport');
+      sender.emit('render-process-gone', {}, { reason: 'crashed' });
+      const fallback = fallbackBridgeAttachmentToManual({ requestId: request.requestId, allowTasks: new Set(['vision-product-analysis']) });
+      const result = await owner;
+      assert(fallback && result.success === false && result.errorCode === 'BRIDGE_RENDERER_UNAVAILABLE'
+        && !listBridgeableNonApiAiHandoffs({ allowTasks: new Set(['vision-product-analysis']) }).pending,
+      'manual fallback has no transport after confirmed renderer loss and settles with its infrastructure code');
+    },
+  },
+  {
+    name: 'non-API AI: a manual sender destroyed during delivery rejects with the renderer code',
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      let destroyed = false;
       const sender = {
-        id: 707, isDestroyed: () => false, once: () => {}, removeListener: () => {},
-        send: () => { throw new Error('WebContents is closing'); },
+        id: 707, isDestroyed: () => destroyed, once: () => {}, removeListener: () => {},
+        send: () => { destroyed = true; throw new Error('WebContents is closing'); },
       };
       handleSafe('non-api-delivery-race-test', async (_event, _args, signal) => ({
         result: await callLLMText('Return a result.', {
-          signal, task: 'job-scoring', responseSchema: {
+          signal, task: 'test-manual-delivery', responseSchema: {
             type: 'object', required: ['result'], properties: { result: { type: 'string' } },
           },
         }),
       }));
       const result = await ipcMain.__getInvokeHandler('non-api-delivery-race-test')({ sender }, { nodeId: 'node-delivery-race' });
       const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')({ sender });
-      assert(result.success === false && result.error.includes('Originating window closed before the Non-API AI request could be shown.')
+      assert(result.success === false && result.errorCode === 'BRIDGE_RENDERER_UNAVAILABLE'
         && replay.count === 0,
       'a `.send()` close race removes the request and rejects its owning handler rather than retaining an unreachable handoff');
       return { replayed: replay.count };
     },
   },
   {
-    name: 'non-API AI: a failed validation-retry delivery also settles its unreachable handoff',
+    name: 'non-API AI: manual validation-retry delivery rejects only with a confirmed destroyed renderer',
     run: async () => {
       ipcMain.__clearInvokeHandlers();
       registerNonApiAiHandlers();
       const sent = [];
       let failDelivery = false;
       const sender = {
-        id: 708, isDestroyed: () => false, once: () => {}, removeListener: () => {},
+        id: 708, isDestroyed: () => failDelivery, once: () => {}, removeListener: () => {},
         send: (channel, payload) => {
           if (failDelivery) throw new Error('WebContents is closing');
           sent.push({ channel, payload });
@@ -4300,12 +4701,93 @@ export default [
       const result = await run;
       const replay = await ipcMain.__getInvokeHandler('replay-pending-non-api-ai-requests')?.({ sender });
       assert(submit.accepted === false
-        && result.success === false && result.error.includes('Originating window closed before the Non-API AI request could be shown.')
+        && result.success === false && result.errorCode === 'BRIDGE_RENDERER_UNAVAILABLE'
         && replay?.count === 0,
       'a correction re-emit that loses its renderer tears down the same request instead of retaining it forever');
       return { replayed: replay.count };
     },
   },
+  ...['manual', 'mcp'].map(route => ({
+    name: `non-API AI: renderer loss during durable admission preserves only ${route === 'mcp' ? 'worker' : 'confirmed manual failure'} semantics`,
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sender = new EventEmitter();
+      sender.id = 971;
+      sender.isDestroyed = () => false;
+      sender.send = () => {};
+      let operationSignal;
+      handleSafe('non-api-admission-loss-test', async (_event, _args, signal) => {
+        operationSignal = signal;
+        const pending = requestNonApiAi({ prompt: 'Synthetic admission loss', signal,
+          task: route === 'mcp' ? 'job-scoring' : 'test-manual-admission',
+          responseSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } } });
+        sender.emit('render-process-gone');
+        return { answer: await pending };
+      });
+      const owner = ipcMain.__getInvokeHandler('non-api-admission-loss-test')({ sender }, { nodeId: 'admission-loss' });
+      await new Promise(resolve => setImmediate(resolve));
+      if (route === 'manual') {
+        const result = await owner;
+        assert(result.success === false && result.errorCode === 'IPC_RENDERER_STOPPED',
+          'confirmed renderer process loss during manual admission keeps its infrastructure code');
+      } else {
+        const entry = listBridgeableNonApiAiHandoffs({ allowTasks: new Set(['job-scoring']) }).handoffs.find(item => item.windowId === sender.id);
+        assert(entry && !operationSignal.aborted, 'the worker handoff is admitted even when its first dock presentation cannot be delivered');
+        const args = { requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks: new Set(['job-scoring']) };
+        assert(readBridgeableNonApiAiHandoff(args).ok);
+        assert((await submitNonApiAiResponseForBridge({ ...args,
+          response: JSON.stringify({ handoffCode: entry.handoffCode, answer: 'valid' }) })).accepted);
+        assert((await owner).answer?.answer === 'valid', 'the original admission promise completes through worker transport');
+      }
+    },
+  })),
+  ...['manual', 'mcp'].map(route => ({
+    name: `non-API AI: transient ${route} delivery retries presentation and preserves the original promise`,
+    run: async () => {
+      ipcMain.__clearInvokeHandlers();
+      registerNonApiAiHandlers();
+      const sent = [];
+      let failDelivery = true;
+      let completed = false;
+      let assigned = 0;
+      let attempts = 0;
+      const sender = new EventEmitter();
+      sender.id = 970;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => {
+        if (channel === 'non-api-ai-request') {
+          attempts++;
+          if (failDelivery) throw new Error('Synthetic transient renderer unavailable');
+        }
+        sent.push({ channel, payload });
+      };
+      handleSafe('non-api-presentation-retry-test', async (_event, _args, signal) => ({
+        answer: await requestNonApiAi({ prompt: 'Synthetic presentation retry', signal,
+          task: route === 'mcp' ? 'job-scoring' : 'test-manual-presentation',
+          onHandoffAssigned: () => { assigned++; },
+          responseSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } } }),
+      }));
+      const owner = ipcMain.__getInvokeHandler('non-api-presentation-retry-test')({ sender }, { nodeId: 'presentation-retry' });
+      void owner.then(() => { completed = true; });
+      await new Promise(resolve => setImmediate(resolve));
+      assert(attempts === 1 && !completed && assigned === 0, 'a transient initial send failure neither rejects nor assigns');
+      failDelivery = false;
+      for (let turn = 0; turn < 200 && !sent.some(item => item.channel === 'non-api-ai-request'); turn++) {
+        await new Promise(resolve => setTimeout(resolve, 5));
+      }
+      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
+      assert(request && attempts === 2 && !completed, 'the automatic retry presents the same pending handoff once the sender recovers');
+      assert(assigned === (route === 'manual' ? 1 : 0), 'only actual manual presentation starts assignment');
+      const response = JSON.stringify({ handoffCode: request.handoffCode, answer: 'valid' });
+      const result = route === 'mcp'
+        ? await submitNonApiAiResponseForBridge({ requestId: request.requestId, handoffCode: request.handoffCode,
+          allowTasks: new Set(['job-scoring']), response })
+        : await ipcMain.__getInvokeHandler('submit-non-api-ai-response')({ sender }, { requestId: request.requestId, response });
+      assert(result.accepted && (await owner).answer?.answer === 'valid', 'the original owner completes after presentation recovery');
+      assert(!sender.listenerCount('dom-ready'), 'settlement cleans up presentation recovery listeners');
+    },
+  })),
   {
     name: 'non-API AI: the manual handoff queue is ordered by batch, not by arrival',
     run: () => {

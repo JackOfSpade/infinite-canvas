@@ -33,9 +33,18 @@
       "target": "dir",
       "identity": "AI Chalkboard Local Code Signing",
       "forceCodeSigning": true,
+      "hardenedRuntime": true,
+      "extraResources": [
+        {
+          "from": "native/interview-audio/build/Interview Audio Helper.app",
+          "to": "interview-audio/Interview Audio Helper.app"
+        }
+      ],
       "timestamp": "none",
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "Open and check ChatGPT worker chats in Google Chrome."
+        "NSAppleEventsUsageDescription": "Open and check ChatGPT worker chats in Google Chrome.",
+        "NSAudioCaptureUsageDescription": "Transcribe interview call output on this Mac without capturing your microphone or changing playback.",
+        "NSScreenCaptureUsageDescription": "Read interview call system audio locally. No screen frames or microphone audio are captured by Interview Helper."
       }
     },
     "directories": {

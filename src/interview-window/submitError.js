@@ -6,7 +6,13 @@ export const INVALID_QUESTION_MESSAGE = 'Enter a short interview question (up to
 export const SESSION_ENDED_MESSAGE = 'This interview session has ended. Close this window and launch it again from the Interview Helper.';
 export const EVIDENCE_UNAVAILABLE_MESSAGE = 'The saved career evidence is unavailable or has changed. Try again, or launch this window again from the Interview Helper.';
 export const SUBMIT_FAILED_MESSAGE = 'The question could not be checked. Try again, or launch this window again from the Interview Helper.';
+export function interviewIgnoredMessage(result) {
+  return typeof result?.message === 'string' && result.message.trim() ? result.message.trim()
+    : 'This question could not be answered. Your draft is saved. Add detail or choose a prepared question.';
+}
 const REASONS = Object.freeze([
+  ['Interview follow-up is invalid.', 'Ask about this example (for example, “What did you learn?”), or choose Next question for a new topic.'],
+  ['Interview example is not available.', 'Choose a saved example before asking a follow-up.'],
   ['Interview question is invalid.', INVALID_QUESTION_MESSAGE],
   ['Interview question must be a bounded string.', INVALID_QUESTION_MESSAGE],
   ['Interview session is not available.', SESSION_ENDED_MESSAGE],

@@ -280,7 +280,7 @@ export default [
       const firstRun = ipcMain.__getInvokeHandler('career-recovery-stale-1')({ sender: senderA }, { nodeId: 'career-node', manualAiRunId: runId });
       await waitForRequests(sentA, 1);
       await ipcMain.__getInvokeHandler('flush-non-api-ai-persistence')({ sender: senderA });
-      senderA.emit('did-start-navigation', {}, 'file:///relaunch.html', false, true);
+      senderA.emit('render-process-gone', {}, { reason: 'crashed' });
       await firstRun;
 
       await __reloadDurableStateForTests();

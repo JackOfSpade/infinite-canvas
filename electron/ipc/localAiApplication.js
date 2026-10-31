@@ -23,7 +23,7 @@ import electronPkg from 'electron';
 import { handleSafe } from './ipcUtils.js';
 import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath } from './canvasRecoveryPaths.js';
 import { EMPTY_JOB_LISTING_BODY_NOTE, formatOriginalJobListingMarkdown, normaliseJobPostingVariants, ORIGINAL_JOB_LISTING_BODY_HEADING } from './applicationBundle.js';
-import { assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, neutralizeHighlightTextEmphasis, sanitizeDocumentMainHtml } from './resumeHtml.js';
+import { ATS_SAFE_PDF_FONT_TOKENS, assertCandidateDashPunctuation, buildCoverLetterDocument, buildResumeDocument, getDesignSystemDir, neutralizeHighlightTextEmphasis, sanitizeDocumentMainHtml } from './resumeHtml.js';
 import { renderPdf as productionRenderPdf, applyDualPdf, renderedPageLayoutIssues } from './resumeRender.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, GENERATION_AUDIT_VERSION, RESUME_BULLET_CHARACTER_BUDGET, RESUME_BULLET_OPENING_VARIETY_RULE, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, getApplicationTelemetry, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, normalizeCoverLetterParagraphs, recordApplicationTelemetry, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, resumeTypeAreaUtilization, targetPageCountForJob, withUnregisteredApplicationWorkspacePruneClaim } from './jobApplication.js';
@@ -77,8 +77,26 @@ import { normalizeListingAudit } from './listingLivenessProbe.js';
 import { assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit } from './applicationV2Limits.js';
 import { writeVerifyLengthBudgets } from './applicationV2LengthBudget.js';
 import { applicationV2PagePng } from './applicationV2PageImages.js';
+import { applicationV2RenderKey, createApplicationV2RenderCache } from './applicationV2RenderCache.js';
+import { applicationV2RendererVersion } from './applicationV2RendererVersion.js';
+import { createApplicationV2HandoffReuse } from './applicationV2HandoffReuse.js';
+const applicationV2RenderCache = createApplicationV2RenderCache();
+const applicationV2HandoffReuse = createApplicationV2HandoffReuse();
+let applicationV2RendererVersionImpl = applicationV2RendererVersion;
+let applicationV2RenderTestEpoch = 0;
+export function __setApplicationV2RendererVersionForTests(impl) {
+  applicationV2RendererVersionImpl = typeof impl === 'function' ? impl : applicationV2RendererVersion;
+  applicationV2RenderCache.clear(); applicationV2RenderTestEpoch += 1;
+}
+function currentApplicationV2RendererVersion() {
+  try { return applicationV2RendererVersionImpl({ designDir: getDesignSystemDir(), fontContract: ATS_SAFE_PDF_FONT_TOKENS }); }
+  catch { return null; } // An unavailable fingerprint must use the normal uncached render-fault path.
+}
+export function __resetApplicationV2RenderCacheForTests() { applicationV2RenderCache.clear(); }
+export function __applicationV2RenderCacheStatsForTests() { return applicationV2RenderCache.stats(); }
 let applicationV2PagePngImpl = applicationV2PagePng;
 export function __setApplicationV2PagePngForTests(impl) {
+  applicationV2RenderCache.clear(); applicationV2RenderTestEpoch += 1;
   applicationV2PagePngImpl = typeof impl === 'function' ? impl : applicationV2PagePng;
 }
 import { MAX_REQUIREMENTS_REEPOCHS, requirementsAdjudicationBindings, requirementsAuditCapReached, requirementsBindingErrors, requirementsAuditCapTerminal, requirementsSingletonBinding } from './applicationRequirementsAuditPolicy.js';
@@ -125,6 +143,7 @@ const hydratedCareerAuthorityByJobId = new Map();
 // it in finally.
 let renderPdf = productionRenderPdf;
 export function __setLocalAiRenderPdfForTests(renderer) {
+  applicationV2RenderCache.clear(); applicationV2RenderTestEpoch += 1;
   renderPdf = typeof renderer === 'function' ? renderer : productionRenderPdf;
 }
 
@@ -5047,7 +5066,16 @@ async function writeVerifyFrozenContext(input, state) {
     evidencePlan: { evidence: [...hydrated.catalog, ...listingEvidence], requirements } };
 }
 
+function writeVerifyHandoffBinding(jobId, input, state) {
+  return { jobId, canvasRoot: path.resolve(input.canvasRoot), revision: state.revision,
+    stage: state.stage, handoffCode: state.handoffCode, baseHashes: state.baseHashes,
+    input, writeVerify: state.writeVerify, authority: state.authorityStore?.state,
+    selectedRoleIds: state.selectedRoleIds,
+    ...(state.stage === 'pick' ? { rendererVersion: currentApplicationV2RendererVersion(), rendererTestEpoch: applicationV2RenderTestEpoch } : {}) };
+}
+
 async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] }) {
+  const reuseBinding = writeVerifyHandoffBinding(jobId, input, state);
   const context = await writeVerifyFrozenContext(input, state);
   const envelope = { protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId, stage: state.stage,
     handoffCode: state.handoffCode, baseHashes: state.baseHashes };
@@ -5058,7 +5086,7 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
     targetCompany: input.job?.company || '',
     envelope, corrections, droppedFindings: state.stage === 'write' ? droppedCandidateFindings(state.writeVerify) : [] });
   assertApplicationV2PromptLimit(prompt);
-  const record = { ...envelope, prompt, draft: '', progress: applicationWorkflowProgress(input, state) };
+  const record = { ...envelope, revision: state.revision, prompt, draft: '', progress: applicationWorkflowProgress(input, state) };
   if (state.stage === 'pick') {
     const ids = state.writeVerify.elimination?.activeIds || acceptedWriteVerifyCandidates(state.writeVerify).map(row => row.id);
     record.pageImages = [];
@@ -5093,15 +5121,26 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
     content: { prompt, ...(record.pageImages ? (corrections.length
       ? { pageImageSha256: record.pageImages.map(image => crypto.createHash('sha256').update(image.data).digest('hex')) }
       : { pageImages: record.pageImages }) : {}) } });
-  return record;
+  return applicationV2HandoffReuse.remember(record, reuseBinding);
 }
 
-async function writeVerifyRenderPhase({ html, letter, input, renderState, render = async () => {
-  const resumeFit = await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [], docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
-    trustedRenderedRoleDates: trustedRoleDatesForDashGate(selectedSourceRoles(renderState, input)) });
-  const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
-  return { resumeFit, letterFit };
-} }) {
+async function writeVerifyRenderPhase({ html, letter, input, renderState, render }) {
+  const injected = typeof render === 'function' || renderPdf !== productionRenderPdf;
+  const trustedRenderedRoleDates = input && renderState
+    ? trustedRoleDatesForDashGate(selectedSourceRoles(renderState, input)) : null;
+  if (typeof render !== 'function') render = async () => {
+    const resumeFit = await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [], docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
+      trustedRenderedRoleDates });
+    const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
+    return { resumeFit, letterFit };
+  };
+  const key = !injected ? applicationV2RenderKey({ html, letter, variantAttrs: applicationVariantAttrsForJob(input.job),
+    trustedRenderedRoleDates, targetPageCount: 1,
+    rendererVersion: currentApplicationV2RendererVersion() }) : null;
+  return applicationV2RenderCache.getOrRender(key, () => measureWriteVerifyRenderPhase(render));
+}
+
+async function measureWriteVerifyRenderPhase(render) {
   const result = await renderDocumentsWithHostRetry(render);
   const { resumeFit, letterFit, transient, punctuation, hostRenders } = result;
   if (punctuation.length) return { kind: 'host-fault', hostFault: { message: `Application v2 stopped: the ${punctuation[0].document === 'resume' ? 'résumé' : 'cover letter'} text the host assembled contains forbidden punctuation that no rewrite can change (${punctuation[0].detail.slice(0, 160)}). Edit the career data or posting company name it comes from.` }, hostRenders };
@@ -7684,7 +7723,7 @@ export async function getLocalApplicationHandoff(args = {}) {
   }
 }
 
-async function readLocalApplicationHandoff({ jobId, canvasFilePath } = {}) {
+async function readLocalApplicationHandoff({ jobId, canvasFilePath, reuseHandoff } = {}) {
   const snapshot = await withLocalAiJobMutationLock(jobId, async () => {
     const loaded = await recoverRequirementsAuditHandoff(await getPasteApplicationState(jobId, canvasFilePath), canvasFilePath);
     const { root, dir, input } = loaded;
@@ -7732,7 +7771,20 @@ async function readLocalApplicationHandoff({ jobId, canvasFilePath } = {}) {
     // the one call site that omits `corrections` — a dialog reopen, per
     // resolvePasteCorrections' own header, is the one round that may need its
     // disk fallback.
-    const record = await pasteHandoffRecord({ jobId, input, state, draft, root, dir });
+    // Frozen inputs and all recovery checks above always run. Only a current,
+    // unmodified host-created handoff may skip prompt and page-image assembly.
+    const reuseBinding = isWriteVerifyJob(input) ? writeVerifyHandoffBinding(jobId, input, state) : null;
+    const reused = reuseBinding && (state.stage !== 'pick' || reuseBinding.rendererVersion)
+      ? applicationV2HandoffReuse.match(reuseHandoff, reuseBinding) : null;
+    if (reused) {
+      // The normal builder reads every frozen requirement receipt. Retain that
+      // byte/symlink verification even when no prompt or image needs rebuilding.
+      const epoch = await authorityRequirementsEpoch(state.authorityStore, input);
+      for await (const page of state.authorityStore.iterateReceiptPages(epoch.requirementsStream)) {
+        if (!Array.isArray(page.records)) throw new Error('Application v2 requires verified requirements receipts.');
+      }
+    }
+    const record = reused || await pasteHandoffRecord({ jobId, input, state, draft, root, dir });
     const hold = isWriteVerifyJob(input) ? await readWriteVerifyRenderHold(dir, state) : null;
     if (hold) record.renderHold = { stage: hold.stage, revision: hold.revision, faults: hold.faults.map(({ document, code }) => ({ document, code })), hostRenders: hold.hostRenders, heldAt: hold.heldAt };
     return { handoff: record, localJob: { id: jobId, status: manifest.status, mode: 'paste', revision: state.revision, logCount: state.logCount || 0, folder: dir } };
@@ -10169,8 +10221,10 @@ function applyPreparedOfficialPosting(scrapedJob, prepared = null) {
     const freshTextFacts = !rejectedText && ['L1', 'L2', 'L3'].includes(posting.level);
     return {
       ...(posting.title?.trim() ? { title: posting.title } : {}),
-      ...(freshTextFacts || posting.location?.display?.trim() ? { location: posting.location?.display || '' } : {}),
-      ...(freshTextFacts || currentPostedPay
+      // A fact the two judges copied differently was not stored; the scraped listing's value stands rather than a blank.
+      ...((freshTextFacts && !posting.trail?.includes('judge-location-split')) || posting.location?.display?.trim()
+        ? { location: posting.location?.display || '' } : {}),
+      ...((freshTextFacts && !posting.trail?.includes('judge-salary-split')) || currentPostedPay
         ? { salary: currentPostedPay, salaryProvenance: currentPostedPay ? 'posted' : 'unknown' } : {}),
     };
   };

@@ -453,7 +453,7 @@ const QUEUE_PUSH_TASKS = new Set([
   'job-preference-interpretation', 'job-preference-evaluation',
   'job-preference-research-assessment', 'job-preference-research-batch-assessment',
   'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
-  'interview-brief-research', 'interview-brief-assessment',
+  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
   'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
 ]);
 const QUEUE_PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];

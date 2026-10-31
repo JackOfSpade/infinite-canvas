@@ -1,0 +1,2684 @@
+{
+  "provenance": "Sanitized replay of saved live-v5 003 full draft and sparse 005/007 repairs, with 004/006 entailment verdicts. Synthetic employers, role titles, dates, places, technologies, products, quantities and domains consistently replace private subjects. Speech grammar, unsupported predicates, quote excerpts, per-card citation relationships and repair shrinkage are preserved. Only cited sources are retained. No private stores are accessed by this fixture. Dedicated extensions are explicitly synthetic additions for the extension-generation regression; they are not recorded worker output or a fresh model evaluation.",
+  "roles": [
+    {
+      "id": "role-1",
+      "title": "Systems Developer",
+      "employer": "Juniper Supply Cooperative",
+      "startDate": "May 2021",
+      "endDate": "June 2024"
+    },
+    {
+      "id": "role-2",
+      "title": "Data Developer",
+      "employer": "Alder Records Workshop",
+      "startDate": "October 2020",
+      "endDate": "January 2021"
+    },
+    {
+      "id": "role-3",
+      "title": "Systems Developer",
+      "employer": "Cobalt Dispatch Studio",
+      "startDate": "December 2019",
+      "endDate": "March 2020"
+    }
+  ],
+  "sources": [
+    {
+      "key": "source-01",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+    },
+    {
+      "key": "source-02",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+    },
+    {
+      "key": "source-03",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+    },
+    {
+      "key": "source-04",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+    },
+    {
+      "key": "source-05",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+    },
+    {
+      "key": "source-06",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+    },
+    {
+      "key": "source-07",
+      "kind": "career",
+      "entityType": "achievement",
+      "roleId": "role-3",
+      "text": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+    },
+    {
+      "key": "source-08",
+      "kind": "career",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+    },
+    {
+      "key": "source-09",
+      "kind": "research",
+      "entityType": "research",
+      "roleId": null,
+      "text": "PlusPass combines utility and self-expression.",
+      "researchType": "company"
+    },
+    {
+      "key": "source-10",
+      "kind": "research",
+      "entityType": "research",
+      "roleId": null,
+      "text": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience.",
+      "researchType": "role"
+    }
+  ],
+  "resume": "Experience\u2029Systems Developer \u00b7 Juniper Supply Cooperative\u2029May 2021 \u2013 June 2024 \u00b7 Harborview, Example Province\u2029Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose.\u2029Replaced the records platform's dues-tracking tool for the accounts department with live on-page previews, a better UI and automation that cut manual clicks needed to generate a report.\u2029With another engineer, migrated in-house inventory and equipment systems with all historical data to a third-party platform over about 4 months, without interrupting day-to-day operations.\u2029Data Developer \u00b7 Alder Records Workshop\u2029October 2020 \u2013 January 2021 \u00b7 Stonebridge, Example Province\u2029Built RPC APIs in Quartz to provide controlled access to a local warehouse database.\u2029Built Quartz ETL pipelines that ran scanned warehouse documents through ICR and loaded the extracted data into a local database.\u2029Systems Developer \u00b7 Cobalt Dispatch Studio\u2029December 2019 \u2013 March 2020 \u00b7 Northfield, Example Province",
+  "responses": [
+    {
+      "recordedStep": "003",
+      "cards": [
+        {
+          "id": "intro",
+          "question": "Tell me about yourself.",
+          "variants": [
+            "Walk me through your background."
+          ],
+          "headline": {
+            "text": "I last worked as a Systems Developer at Juniper Supply Cooperative.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Earlier, I worked as a Data Developer at Alder Records Workshop.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "This role interests me because the posting emphasizes Preact and Quartz backend development.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "At Alder Records Workshop, I built RPC APIs in Quartz to provide controlled access to the local warehouse database.",
+            "evidenceIds": [
+              "source-05"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-05",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Systems Developer \u00b7 Juniper Supply Cooperative\nMay 2021 \u2013 June 2024 \u00b7 Harborview, Example Province\nData Developer \u00b7 Alder Records Workshop\nOctober 2020 \u2013 January 2021 \u00b7 Stonebridge, Example Province\nBuilt RPC APIs in Quartz to provide controlled access to a local warehouse database."
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "intro-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "id": "intro-cron",
+              "text": "I maintained cron jobs syncing daily CWA data releases through APIs into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "relevant-experience",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "Which experience is most relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built a full-stack web app as a hub for internal tools.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built RPC APIs in Quartz for controlled access to a local warehouse database.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built Quartz ETL pipelines that loaded extracted warehouse document data into a local database.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The internal tools hub used Preact for the frontend and Marlow for the backend.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose.\nBuilt RPC APIs in Quartz to provide controlled access to a local warehouse database.\nBuilt Quartz ETL pipelines that ran scanned warehouse documents through ICR and loaded the extracted data into a local database."
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "relevant-experience-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "id": "relevant-experience-cron",
+              "text": "I maintained cron jobs syncing daily CWA data releases through APIs into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "why-role",
+          "question": "Why are you interested in this role?",
+          "variants": [
+            "What interests you about this position?"
+          ],
+          "headline": {
+            "text": "This role interests me because it covers full-stack product engineering across web, TabletOS, and PocketOS.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built an internal tools hub with a Preact frontend and Marlow backend.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "At Alder Records Workshop, I built Quartz RPC APIs for a local warehouse database.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I also built Quartz ETL pipelines that ran scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose.\nData Developer \u00b7 Alder Records Workshop\nOctober 2020 \u2013 January 2021 \u00b7 Stonebridge, Example Province\nBuilt RPC APIs in Quartz to provide controlled access to a local warehouse database.\nBuilt Quartz ETL pipelines that ran scanned warehouse documents through ICR and loaded the extracted data into a local database."
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "why-role-research",
+              "text": "The posting emphasizes experimentation and performance while protecting the free-user experience.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+                }
+              ]
+            },
+            {
+              "id": "why-role-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "why-company",
+          "question": "Why are you interested in this company?",
+          "variants": [
+            "Why do you want to work here?"
+          ],
+          "headline": {
+            "text": "This company interests me because PlusPass combines utility and self-expression.",
+            "evidenceIds": [
+              "source-09"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-09",
+                "quote": "PlusPass combines utility and self-expression."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I replaced the accounts department's dues-tracking tool with live on-page previews and a better UI.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The dues-tracking tool included automation that cut the manual clicks needed to generate a report.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "why-company-research",
+              "text": "The posting emphasizes experimentation and performance while protecting the free-user experience.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+                }
+              ]
+            },
+            {
+              "id": "why-company-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "project",
+          "question": "Walk me through a project.",
+          "variants": [
+            "Tell me about a project you worked on."
+          ],
+          "headline": {
+            "text": "I built the cooperative's internal tools hub from scratch for more customization.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The hub's dues-tracking tool gave the accounts department live on-page previews.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I containerized the hub with Container Compose for deployment on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I designed the hub's UI and backend for scalability to support future internal tools.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "project-automation",
+              "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "project-oldtool",
+              "text": "The hub's dues-tracking tool replaced a primitive tool requiring a downloaded file to view results.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "process",
+          "question": "Tell me about improving a process.",
+          "variants": [
+            "Describe a process improvement."
+          ],
+          "headline": {
+            "text": "I replaced dues tracking that required downloading a file to view results.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The replacement dues-tracking tool provided live on-page previews for the accounts department.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The dues-tracking tool ran on an internal tools hub with a Preact frontend and Marlow backend.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "process-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "process-scale",
+              "text": "I designed the hub's UI and backend for scalability to support future internal tools.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "result",
+          "question": "Tell me about a result from your work.",
+          "variants": [
+            "What outcome can you describe?"
+          ],
+          "headline": {
+            "text": "We migrated the cooperative's in-house systems while day-to-day operations continued without interruption.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The other engineer and I migrated all historical data over about 4 months.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The in-house systems stayed in service until the new platform was fully set up for all operators.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "We implemented the integrations, data migration workflows, automation, validation, and operational tooling required for the transition.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "result-automation",
+              "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "result-cost",
+              "text": "In self-funded personal projects, matching tasks to cheaper capable models keeps quality high while controlling spend.",
+              "evidenceIds": [
+                "source-08"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-08",
+                  "quote": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "adapt-change",
+          "question": "How do you adapt to change?",
+          "variants": [
+            "Tell me about a change in direction."
+          ],
+          "headline": {
+            "text": "We migrated in-house inventory and equipment systems to a third-party platform.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The cooperative made the move to eliminate the ongoing cost of maintaining in-house systems.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "We implemented data migration workflows and validation over about 4 months.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "adapt-change-agentic",
+              "text": "I adopted agentic coding tools in day-to-day development as soon as the cooperative allowed them.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "id": "adapt-change-balanced",
+              "text": "I kept traditional development where it fit better.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "decision",
+          "question": "Walk me through a decision.",
+          "variants": [
+            "Describe a tradeoff you considered."
+          ],
+          "headline": {
+            "text": "I adopted AI-assisted coding tools while keeping traditional development where it fit better.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I adopted agentic coding tools as soon as the cooperative allowed them.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Using both approaches built a practical sense of each approach's strengths, limitations, and tradeoffs.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "In my self-funded personal projects, frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "decision-ownership",
+              "text": "I built internal tools the cooperative wanted to own rather than rent from third-party platforms.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "decision-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "learned",
+          "question": "Tell me about something you learned.",
+          "variants": [
+            "What did you learn from that experience?"
+          ],
+          "headline": {
+            "text": "I developed a practical sense of AI-assisted and traditional development tradeoffs.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I used AI-assisted and agentic coding tools in day-to-day development after cooperative permission.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I kept traditional development for work where traditional development fit better.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "In my self-funded personal projects, using the most capable models for simple tasks costs more without improving quality.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "learned-personal",
+              "text": "In self-funded personal projects, I delegate bounded implementation tasks to cheaper models.",
+              "evidenceIds": [
+                "source-08"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-08",
+                  "quote": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "id": "learned-ownership",
+              "text": "I built internal tools the cooperative wanted to own rather than rent from third-party platforms.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "strengths",
+          "question": "What strengths would you bring?",
+          "variants": [
+            "Which strengths are relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built full-stack internal tools with Preact and Marlow at Juniper Supply Cooperative.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built Quartz RPC APIs to provide controlled access to warehouse data.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I maintained cron jobs that synced the CWA's daily releases into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The dues-tracking tool I built included live on-page previews and automation that cut manual report-generation clicks.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "strengths-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "strengths-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "additional-experience",
+          "question": "What would you like us to know about your experience?",
+          "variants": [
+            "Is there another example you would like to discuss?"
+          ],
+          "headline": {
+            "text": "I built Quartz pipelines that extracted data from scanned warehouse documents.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The warehouse document pipelines ran typed and handwritten documents through ICR.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The ETL pipelines loaded the extracted warehouse data into a local database.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "additional-experience-api",
+              "text": "I built Quartz RPC APIs to provide controlled access to the local warehouse database.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "id": "additional-experience-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "recordedStep": "005",
+      "cards": [
+        {
+          "id": "intro",
+          "question": "Tell me about yourself.",
+          "variants": [
+            "Walk me through your background."
+          ],
+          "headline": {
+            "text": "I built RPC APIs in Quartz to provide controlled access to a local warehouse database.",
+            "evidenceIds": [
+              "source-05"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-05",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [],
+          "example": {
+            "text": "I built RPC APIs in Quartz to provide controlled access to a local warehouse database.",
+            "evidenceIds": [
+              "source-05"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-05",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built RPC APIs in Quartz to provide controlled access to a local warehouse database."
+          },
+          "thinEvidence": true,
+          "extensions": [
+            {
+              "id": "intro-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "id": "intro-cron",
+              "text": "I maintained cron jobs syncing daily CWA data releases through APIs into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "relevant-experience",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "Which experience is most relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built a full-stack web app as a hub for internal tools.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built RPC APIs in Quartz for controlled access to a local warehouse database.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built Quartz ETL pipelines that loaded extracted warehouse document data into a local database.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The internal tools hub used Preact for the frontend and Marlow for the backend.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose.\nBuilt RPC APIs in Quartz to provide controlled access to a local warehouse database.\nBuilt Quartz ETL pipelines that ran scanned warehouse documents through ICR and loaded the extracted data into a local database."
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "relevant-experience-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "id": "relevant-experience-cron",
+              "text": "I maintained cron jobs syncing daily CWA data releases through APIs into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "why-role",
+          "question": "Why are you interested in this role?",
+          "variants": [
+            "What interests you about this position?"
+          ],
+          "headline": {
+            "text": "This role interests me because the posting emphasizes Preact/Preact Native and Quartz backend development.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built an internal tools hub with a Preact frontend and Marlow backend.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "At Alder Records Workshop, I built Quartz RPC APIs for a local warehouse database.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I also built Quartz ETL pipelines that ran scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose.\nData Developer \u00b7 Alder Records Workshop\nBuilt RPC APIs in Quartz to provide controlled access to a local warehouse database.\nBuilt Quartz ETL pipelines that ran scanned warehouse documents through ICR and loaded the extracted data into a local database."
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "why-role-research",
+              "text": "The posting emphasizes experimentation and performance while protecting the free-user experience.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+                }
+              ]
+            },
+            {
+              "id": "why-role-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "why-company",
+          "question": "Why are you interested in this company?",
+          "variants": [
+            "Why do you want to work here?"
+          ],
+          "headline": {
+            "text": "This company interests me because PlusPass combines utility and self-expression.",
+            "evidenceIds": [
+              "source-09"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-09",
+                "quote": "PlusPass combines utility and self-expression."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I replaced the accounts department's dues-tracking tool with live on-page previews and a better UI.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "why-company-research",
+              "text": "The posting emphasizes experimentation and performance while protecting the free-user experience.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Full-stack product engineering for PlusPass, Gallery, Sponsoring, and user identity across web, TabletOS, and PocketOS. The posting emphasizes Preact/Preact Native, Quartz backend development, end-to-end ownership, experimentation, and performance while protecting the free-user experience."
+                }
+              ]
+            },
+            {
+              "id": "why-company-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "project",
+          "question": "Walk me through a project.",
+          "variants": [
+            "Tell me about a project you worked on."
+          ],
+          "headline": {
+            "text": "I built a full-stack web app from scratch as an internal tools hub.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [],
+          "example": {
+            "text": "I built a full-stack web app from scratch as an internal tools hub.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose."
+          },
+          "thinEvidence": true,
+          "extensions": [
+            {
+              "id": "project-automation",
+              "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "project-oldtool",
+              "text": "The hub's dues-tracking tool replaced a primitive tool requiring a downloaded file to view results.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "process",
+          "question": "Tell me about improving a process.",
+          "variants": [
+            "Describe a process improvement."
+          ],
+          "headline": {
+            "text": "I built dues tracking with automation that cut manual clicks needed to generate a report.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The records platform's dues-tracking tool required downloading a file to view results.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built the internal tools hub with a Preact frontend and Marlow backend.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "process-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "process-scale",
+              "text": "I designed the hub's UI and backend for scalability to support future internal tools.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "adapt-change",
+          "question": "How do you adapt to change?",
+          "variants": [
+            "Tell me about a change in direction."
+          ],
+          "headline": {
+            "text": "We migrated in-house inventory and equipment systems to a third-party platform.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Day-to-day operations continued without interruption during the transition to the third-party platform.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "We implemented integrations, automation, validation, and operational tooling the transition required.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "With the other engineer, we migrated all historical data over about 4 months.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "adapt-change-agentic",
+              "text": "I adopted agentic coding tools in day-to-day development as soon as the cooperative allowed them.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "id": "adapt-change-balanced",
+              "text": "I kept traditional development where it fit better.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "learned",
+          "question": "Tell me about something you learned.",
+          "variants": [
+            "What did you learn from that experience?"
+          ],
+          "headline": {
+            "text": "I built a practical sense of AI-assisted and traditional development strengths, limitations, and tradeoffs.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I kept traditional development for work where traditional development fit better.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true,
+          "extensions": [
+            {
+              "id": "learned-personal",
+              "text": "In self-funded personal projects, I delegate bounded implementation tasks to cheaper models.",
+              "evidenceIds": [
+                "source-08"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-08",
+                  "quote": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "id": "learned-ownership",
+              "text": "I built internal tools the cooperative wanted to own rather than rent from third-party platforms.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "strengths",
+          "question": "What strengths would you bring?",
+          "variants": [
+            "Which strengths are relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built full-stack internal tools with Preact and Marlow at Juniper Supply Cooperative.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built Quartz RPC APIs to provide controlled access to warehouse data.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I maintained cron jobs that synced the CWA's daily releases into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "strengths-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "strengths-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "recordedStep": "007",
+      "cards": [
+        {
+          "id": "relevant-experience",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "Which experience is most relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built a full-stack web app from scratch as a hub for internal tools.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization."
+              }
+            ]
+          },
+          "bullets": [],
+          "example": {
+            "text": "I built a full-stack web app from scratch as a hub for internal tools.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose."
+          },
+          "thinEvidence": true,
+          "extensions": [
+            {
+              "id": "relevant-experience-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "id": "relevant-experience-cron",
+              "text": "I maintained cron jobs syncing daily CWA data releases through APIs into a local database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "process",
+          "question": "Tell me about improving a process.",
+          "variants": [
+            "Describe a process improvement."
+          ],
+          "headline": {
+            "text": "I improved dues tracking by replacing the records platform's tool with previews and automation.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The records platform's dues-tracking tool required downloading a file to view results.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The accounts department used the replacement, which offered a better UI and more customization.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The automation cut the manual clicks needed to generate a report.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "process-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "process-scale",
+              "text": "I designed the hub's UI and backend for scalability to support future internal tools.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "adapt-change",
+          "question": "How do you adapt to change?",
+          "variants": [
+            "Tell me about a change in direction."
+          ],
+          "headline": {
+            "text": "We migrated in-house inventory and equipment systems to a third-party platform.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The in-house systems stayed in service until the new platform was fully set up for all operators.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "We implemented integrations, automation, validation, and operational tooling the transition required.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "With the other engineer, we migrated all historical data over about 4 months.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "adapt-change-agentic",
+              "text": "I adopted agentic coding tools in day-to-day development as soon as the cooperative allowed them.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "id": "adapt-change-balanced",
+              "text": "I kept traditional development where it fit better.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "learned",
+          "question": "Tell me about something you learned.",
+          "variants": [
+            "What did you learn from that experience?"
+          ],
+          "headline": {
+            "text": "I built a practical sense of AI-assisted and traditional development strengths, limitations, and tradeoffs.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I adopted AI-assisted and agentic coding tools in day-to-day development.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I kept traditional development for work where traditional development fit better.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I adopted those tools as soon as the cooperative allowed them.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "learned-personal",
+              "text": "In self-funded personal projects, I delegate bounded implementation tasks to cheaper models.",
+              "evidenceIds": [
+                "source-08"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-08",
+                  "quote": "In personal projects (self-funded), I use ToolBridge where tools need it and delegate work across models by cost: frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks. Using the most capable models for simple tasks costs more without improving quality, so matching each task to the cheapest model that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "id": "learned-ownership",
+              "text": "I built internal tools the cooperative wanted to own rather than rent from third-party platforms.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "strengths",
+          "question": "What strengths would you bring?",
+          "variants": [
+            "Which strengths are relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built a full-stack web app as a hub for internal tools.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built Quartz RPC APIs to provide controlled access to a local warehouse database.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built Quartz ETL pipelines that loaded extracted warehouse document data into a local database.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+            "evidenceIds": [
+              "source-01"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-01",
+                "quote": "One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built a full-stack web app from scratch as a hub for internal tools, with a Preact frontend, a Marlow backend, ProxyBox and Container Compose.\nBuilt RPC APIs in Quartz to provide controlled access to a local warehouse database.\nBuilt Quartz ETL pipelines that ran scanned warehouse documents through ICR and loaded the extracted data into a local database.\nReplaced the records platform's dues-tracking tool for the accounts department with live on-page previews, a better UI and automation that cut manual clicks needed to generate a report."
+          },
+          "thinEvidence": false,
+          "extensions": [
+            {
+              "id": "strengths-container",
+              "text": "I containerized the hub with Container Compose so it can be deployed on any VM configuration.",
+              "evidenceIds": [
+                "source-01"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-01",
+                  "quote": "Built a full-stack web app from scratch to serve as a hub for internal tools the cooperative wanted to own rather than rent from third-party platforms, since owning the code allowed more customization. One tool on the hub was dues tracking, used by the accounts department; it replaced the relatively primitive dues-tracking tool built into the cooperative's core records platform, a third-party SaaS (that tool required downloading a file to view results and had no dynamic on-page preview), with a better UI, live on-page previews, more customization, and automation that cut the manual clicks needed to generate a report. More internal tools were planned to migrate onto the hub from third-party platforms. Containerized with Container Compose so it can be deployed on any VM configuration. Designed for scalability in both the UI and the backend to support those future tools. Tech used: Preact (frontend), Marlow (backend), ProxyBox, Container Compose."
+                }
+              ]
+            },
+            {
+              "id": "strengths-dashboard",
+              "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "recordedReviews": [
+    {
+      "recordedStep": "004",
+      "text": "We migrated the cooperative's in-house systems while day-to-day operations continued without interruption.",
+      "evidenceIds": [
+        "source-03"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "The other engineer and I migrated all historical data over about 4 months.",
+      "evidenceIds": [
+        "source-03"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "The in-house systems stayed in service until the new platform was fully set up for all operators.",
+      "evidenceIds": [
+        "source-03"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "We implemented the integrations, data migration workflows, automation, validation, and operational tooling required for the transition.",
+      "evidenceIds": [
+        "source-03"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "I adopted AI-assisted coding tools while keeping traditional development where it fit better.",
+      "evidenceIds": [
+        "source-02"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "I adopted agentic coding tools as soon as the cooperative allowed them.",
+      "evidenceIds": [
+        "source-02"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "Using both approaches built a practical sense of each approach's strengths, limitations, and tradeoffs.",
+      "evidenceIds": [
+        "source-02"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "In my self-funded personal projects, frontier models handle architecture, integration, and final review, while cheaper models take bounded implementation tasks.",
+      "evidenceIds": [
+        "source-08"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "I built Quartz pipelines that extracted data from scanned warehouse documents.",
+      "evidenceIds": [
+        "source-04"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "The warehouse document pipelines ran typed and handwritten documents through ICR.",
+      "evidenceIds": [
+        "source-04"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "The ETL pipelines loaded the extracted warehouse data into a local database.",
+      "evidenceIds": [
+        "source-04"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "004",
+      "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+      "evidenceIds": [
+        "source-06"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built RPC APIs in Quartz to provide controlled access to a local warehouse database.",
+      "evidenceIds": [
+        "source-05"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built RPC APIs in Quartz to provide controlled access to a local warehouse database.",
+      "evidenceIds": [
+        "source-05"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "This role interests me because the posting emphasizes Preact/Preact Native and Quartz backend development.",
+      "evidenceIds": [
+        "source-10"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built an internal tools hub with a Preact frontend and Marlow backend.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "At Alder Records Workshop, I built Quartz RPC APIs for a local warehouse database.",
+      "evidenceIds": [
+        "source-05"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I also built Quartz ETL pipelines that ran scanned warehouse documents through ICR.",
+      "evidenceIds": [
+        "source-04"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "This company interests me because PlusPass combines utility and self-expression.",
+      "evidenceIds": [
+        "source-09"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I replaced the accounts department's dues-tracking tool with live on-page previews and a better UI.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built Plotly dashboards for supervisors and management to analyze aggregate client data.",
+      "evidenceIds": [
+        "source-06"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built a full-stack web app from scratch as an internal tools hub.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built a full-stack web app from scratch as an internal tools hub.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built full-stack internal tools with Preact and Marlow at Juniper Supply Cooperative.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": false,
+      "reason": "NEW_FACT"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I built Quartz RPC APIs to provide controlled access to warehouse data.",
+      "evidenceIds": [
+        "source-05"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "I maintained cron jobs that synced the CWA's daily releases into a local database.",
+      "evidenceIds": [
+        "source-07"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    },
+    {
+      "recordedStep": "006",
+      "text": "Dues-tracking automation cut the manual clicks needed to generate a report.",
+      "evidenceIds": [
+        "source-01"
+      ],
+      "entailed": true,
+      "reason": "SUPPORTED"
+    }
+  ],
+  "originalOutcomes": {
+    "survivingByRound": [
+      3,
+      7,
+      7
+    ],
+    "finalDropped": [
+      "relevant-experience",
+      "process",
+      "adapt-change",
+      "learned",
+      "strengths"
+    ]
+  }
+}

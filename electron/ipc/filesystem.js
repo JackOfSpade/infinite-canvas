@@ -199,6 +199,8 @@ const MAX_OS_DELETE_PROTECTION_PATH_LENGTH = 4096;
 const RENDERER_PRIVATE_STORE_DIRECTORY_NAMES = Object.freeze([
   'interview-helper-artifacts',
   'interview-helper-prepared-briefs',
+  'interview-helper-answer-banks',
+  'interview-helper-answer-bindings',
   'career-input-staging',
   'career-snapshot-store',
   'renderer-workspace-write-journal',

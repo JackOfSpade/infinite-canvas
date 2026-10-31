@@ -1138,11 +1138,12 @@ export default [
             skillsOnlyQueries: [],
           },
           queryCacheKey: JSON.stringify({
-            strategyVersion: 7,
+            strategyVersion: 9,
             careerSnapshotId,
             resumeFingerprint: profileFingerprint,
             jobPreferences: preferences,
             preferredLocation,
+            titles: ['Software Engineer'],
           }),
           preferredLocation,
           canonicalLocation: preferredLocation,

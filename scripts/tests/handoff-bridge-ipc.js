@@ -1,6 +1,6 @@
 import { assert } from './testHelpers.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
-import { observedChatContext } from '../../electron/ipc/handoffBridge/observedChatContext.js';
+import { getBridgeLauncherAvailability, observedChatContext } from '../../electron/ipc/handoffBridge/observedChatContext.js';
 import { IPC_CHANNELS, IPC_EVENTS, PUBLISH_JOBS_EXAMPLE } from '../../electron/ipc/handoffBridge/contracts.js';
 import { registerHandoffBridgeUi } from '../../electron/ipc/handoffBridge/ui.js';
 import { createHandoffBridgeTray } from '../../electron/ipc/handoffBridge/tray.js';
@@ -54,6 +54,123 @@ function setup({ windows = null, getCanvasWindows = null, controller = {}, dialo
 const invoke = (h, channel, payload) => h.ipc.handlers.get(channel)(h.event, payload);
 
 export default [
+  { name: 'handoff bridge: ipc: auto-launch preference without a launcher supplies no availability or pending evidence', run: () => {
+    const before = getBridgeLauncherAvailability();
+    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+      chat: { state: 'working', pool: { active: false, workers: [] } } };
+    const h = setup({ controller: { snapshot: () => snapshot } });
+    try {
+      h.api.publishStatus(snapshot);
+      assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before),
+        'a true preference cannot manufacture a missing launcher, a pending launch or launch capacity');
+    } finally { h.api.dispose(); }
+    assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before), 'disposal removes the launcher provider');
+  } },
+  { name: 'handoff bridge: ipc: serialized launches and delayed retries keep pending evidence without inflating active launches', async run() {
+    const before = getBridgeLauncherAvailability(); const clock = fakeClock(); const launches = [];
+    const workers = Array.from({ length: 3 }, (_unused, index) => ({ ordinal: index + 1, state: 'ready', firstCallAt: null }));
+    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+      chat: { pool: { active: true, generation: 91, workerCount: workers.length, workers } } };
+    const h = setup({ now: clock.now, timers: clock.timers,
+      controller: {
+        snapshot: () => snapshot,
+        copyWorkerStarter: async ({ workerOrdinal }) => ({ copied: true, sessionCode: String(workerOrdinal + 1).repeat(26) }),
+        beginObservedChat: async () => true, cancelObservedChat: async () => true,
+        abandonWorkerStarter: async () => true,
+      },
+      chatLauncher: { owns: () => false, close: async () => true,
+        launch: () => { const pending = deferred(); launches.push(pending); return pending.promise; } },
+    });
+    try {
+      h.api.publishStatus(snapshot);
+      for (let index = 0; index < workers.length; index += 1) {
+        await settle(60);
+        const current = getBridgeLauncherAvailability();
+        assert(launches.length === index + 1 && current.inProgress === before.inProgress + 1,
+          'queued sibling launches never count as simultaneously active browser launches');
+        assert(current.available && current.pending, 'the serialized launch queue remains available and pending');
+        launches[index].resolve({ ok: false, reason: 'tab_open_failed' });
+      }
+      await settle(80);
+      assert(getBridgeLauncherAvailability().inProgress === before.inProgress && getBridgeLauncherAvailability().pending,
+        'retry backoff remains pending even with no active browser launch');
+      clock.advance(14_999); await settle(20);
+      assert(launches.length === workers.length && getBridgeLauncherAvailability().pending,
+        'the whole delayed retry interval protects queued work');
+      snapshot.serving = 'paused'; snapshot.pauseCause = 'user';
+      assert(getBridgeLauncherAvailability().available === before.available && getBridgeLauncherAvailability().pending === before.pending,
+        'a manual pause disables queued retries as service evidence');
+      snapshot.serving = 'live'; snapshot.pauseCause = null;
+      clock.advance(15_000); await settle(80);
+      assert(launches.length === workers.length + 1
+        && getBridgeLauncherAvailability().inProgress === before.inProgress + 1 && getBridgeLauncherAvailability().pending,
+      'expired retry timers rejoin the same serialized launch queue');
+      snapshot.serving = 'paused'; snapshot.pauseCause = 'user';
+      launches.at(-1).resolve({ ok: false, reason: 'tab_open_failed' }); await settle(80);
+    } finally {
+      h.api.dispose();
+      for (const pending of launches) pending.resolve({ ok: false, reason: 'tab_open_failed' });
+      await settle(80);
+    }
+    assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before), 'stopping and disposing clears launch evidence and retry timers');
+  } },
+  { name: 'handoff bridge: ipc: a usage-limit pause makes queued launch attempts unavailable until explicitly retried', async run() {
+    const before = getBridgeLauncherAvailability(); const clock = fakeClock(); let launches = 0;
+    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+      chat: { pool: { active: true, generation: 92, workerCount: 2,
+        workers: [1, 2].map(ordinal => ({ ordinal, state: 'ready', firstCallAt: null })) } } };
+    const h = setup({ now: clock.now, timers: clock.timers, launchPresentationTimeoutMs: 0,
+      controller: {
+        snapshot: () => snapshot,
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26) }),
+        beginObservedChat: async () => true, confirmObservedChat: async () => true,
+      },
+      chatLauncher: { owns: () => false, close: async () => true,
+        launch: async () => { launches += 1; return { ok: true, chatId: 'synthetic-usage-limit-chat' }; },
+        diagnose: async () => ({ reason: 'usage_limit' }),
+      },
+    });
+    try {
+      h.api.publishStatus(snapshot); await settle(100);
+      assert(launches === 1, 'an account limit stops later serialized launches');
+      assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before),
+        'a paused launcher supplies neither available, active nor pending evidence after its current attempt settles');
+    } finally { h.api.dispose(); }
+    assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before), 'the paused provider is removed on disposal');
+  } },
+  { name: 'handoff bridge: ipc: exhausted automatic launch retries become unavailable instead of implying future service', async run() {
+    const clock = fakeClock(); let launches = 0;
+    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+      chat: { pool: { active: true, generation: 93, workerCount: 1,
+        workers: [{ ordinal: 1, state: 'ready', firstCallAt: null }] } } };
+    const h = setup({ now: clock.now, timers: clock.timers,
+      controller: {
+        snapshot: () => snapshot,
+        copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26) }),
+        beginObservedChat: async () => true, cancelObservedChat: async () => true,
+        abandonWorkerStarter: async () => true,
+      },
+      chatLauncher: { owns: () => false, close: async () => true,
+        launch: async () => { launches += 1; return { ok: false, reason: 'tab_open_failed' }; },
+      },
+    });
+    try {
+      h.api.publishStatus(snapshot); await settle(100);
+      for (const retryAt of [15_000, 60_000, 150_000]) {
+        assert(getBridgeLauncherAvailability().available && getBridgeLauncherAvailability().pending,
+          'an outstanding automatic retry remains a viable future launch');
+        clock.advance(retryAt); await settle(100);
+      }
+      assert(launches === 4, 'the initial launch and all three automatic retries were attempted');
+      h.api.publishStatus(snapshot); await settle(40);
+      assert(launches === 4, 'another status publication cannot turn an exhausted attempt into a new automatic launch');
+      // Other suites can leave providers whose state progresses between
+      // microtasks. Compare this provider's removal at the same settled point.
+      const exhausted = getBridgeLauncherAvailability(); h.api.dispose();
+      assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(exhausted),
+        'once every retry is exhausted removing this provider changes no available, pending or active launch evidence');
+    } finally { h.api.dispose(); }
+  } },
   { name: 'handoff bridge: ipc: contract exposes exactly 30 invokes, one publish send and four events', run: () => {
     const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 31 && new Set(channelValues).size === 31, 'IPC channel names must be closed and unique');
     assert(IPC_CHANNELS.PUBLISH_JOBS === 'handoff-bridge:publish-jobs' && channelValues.filter(channel => channel !== IPC_CHANNELS.PUBLISH_JOBS).length === 30, 'publish-jobs is sole send-only channel');

@@ -244,6 +244,98 @@ async function assertV2FreshChatTrace(steps, createEngine = createHandoffEngine)
 
 const tests = [
   {
+    name: 'handoff bridge: replacement requeues the entire push cohort for served, lost and fresh-context workers',
+    run: async () => {
+      for (const [status, reason] of [['served', 'worker-replaced'], ['waiting', 'worker-lost'], ['fresh_context_required', 'fresh-context-required']]) {
+        const clock = createFakeClock(); const requeues = []; const handBacks = [];
+        const claims = Array.from({ length: 5 }, (_, index) => `reserved-comparison-${index}`);
+        const push = {
+          refreshHubs: async () => true,
+          status: () => ({ claimed: claims, claimWorkers: claims.map(claimId => ({ claimId, workerOrdinal: 1 })),
+            discovered: [{ tasks: [{ task: 'job-official-posting-match', pending: claims.length }] }], working: claims.length }),
+          get: async () => ({ status, handoffCode: 'PUSH-REQUEUE-COHORT', task: 'job-official-posting-match',
+            prompt: 'Synthetic comparison prompt.', remaining: { ready: 0, working: claims.length, needsYou: 0 } }),
+          submit: async () => ({ status: 'unknown_handoff' }), closeEpoch() {},
+          requeueWorker: args => { requeues.push({ ...args, claims: [...claims] }); return claims.length; },
+          handBackClaims: args => { handBacks.push(args); return 1; },
+        };
+        const engine = createHandoffEngine({ sources: { application: source().api, push },
+          scope: { applications: false, scoring: true, marketplace: false }, now: clock.now, timers: clock, holdMs: 0 });
+        try {
+          const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+          let starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+          const cycles = status === 'served' ? CONSTANTS.WORKER_RESTART_CAP + 1 : 1;
+          for (let index = 0; index < cycles; index += 1) {
+            const oldSession = starter.sessionCode;
+            await engine.get({ session: oldSession, linkId: LINK });
+            clock.advance(status === 'waiting' ? CONSTANTS.OBSERVED_FAILURE_SILENCE_MS : CONSTANTS.STALL_NOTICE_MS);
+            starter = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1,
+              automatic: true, observedFailure: status === 'waiting' });
+            assert(starter.copied === true, `${status}: the push source owns the recovery cap`);
+            assert((await engine.get({ session: oldSession, linkId: LINK })).status === 'session_ended', `${status}: the old worker is retired`);
+            assert(engine.snapshot().chat.pool.workers[0]?.state === 'ready', `${status}: released push ownership leaves the replacement ready`);
+          }
+          assert(requeues.length === cycles && requeues.every(call => call.worker === 'worker-1'
+            && call.epoch != null && call.reason === reason && call.claims.length === 5),
+          `${status}: replacement delegates the full served/reserved cohort, even without activeTask`);
+          assert(handBacks.length === 0, `${status}: the legacy push restart cap must not terminate requeue-aware requests`);
+        } finally { await engine.close(); }
+      }
+    },
+  },
+  {
+    name: 'handoff bridge: contaminated push submit stops the conversation and permits immediate fresh replacement',
+    run: async () => {
+      const requeues = [];
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-official-posting-match', pending: 1 }] }], working: 1 }),
+        get: async () => ({ status: 'served', handoffCode: 'PUSH-CONTAMINATED-B', task: 'job-official-posting-match',
+          prompt: 'Synthetic comparison prompt.', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        submit: async () => ({ status: 'fresh_context_required', remaining: { ready: 1, working: 0, needsYou: 0 } }),
+        requeueWorker: args => { requeues.push(args); return 0; }, closeEpoch() {},
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false }, holdMs: 0 });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        const served = await engine.get({ session: starter.sessionCode, linkId: LINK });
+        const result = await engine.submit({ session: starter.sessionCode, linkId: LINK,
+          handoffCode: served.handoffCode, response: 'Synthetic answer '.repeat(8) });
+        assert(result.status === 'session_full' && engine.snapshot().chat.pool.workers[0]?.quietReason === 'fresh_context_required',
+          'a contaminated answer needs a new conversation without consuming validation retries');
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'session_full', 'the contaminated chat cannot immediately reclaim B');
+        const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1, automatic: true });
+        assert(replacement.copied && requeues.length === 1 && requeues[0].reason === 'fresh-context-required', 'fresh replacement requires no silence deadline');
+      } finally { await engine.close(); }
+    },
+  },
+  {
+    name: 'handoff bridge: a failed source requeue retains the current worker capability and ownership',
+    run: async () => {
+      const clock = createFakeClock(); let requeues = 0;
+      const push = {
+        refreshHubs: async () => true,
+        status: () => ({ discovered: [{ tasks: [{ task: 'job-scoring', pending: 1 }] }], working: 1 }),
+        get: async () => ({ status: 'served', handoffCode: 'PUSH-REQUEUE-RETRY', task: 'job-scoring',
+          prompt: 'Synthetic comparison prompt.', remaining: { ready: 0, working: 1, needsYou: 0 } }),
+        submit: async () => ({ status: 'unknown_handoff' }), closeEpoch() {},
+        requeueWorker: () => { requeues += 1; throw new Error('Synthetic source failure'); },
+      };
+      const engine = createHandoffEngine({ sources: { application: source().api, push },
+        scope: { applications: false, scoring: true, marketplace: false }, now: clock.now, timers: clock, holdMs: 0 });
+      try {
+        const pool = await engine.startWorkerPool({ linkId: LINK, requestedWorkers: 1 });
+        const starter = engine.copyWorkerStarter({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        await engine.get({ session: starter.sessionCode, linkId: LINK }); clock.advance(CONSTANTS.STALL_NOTICE_MS);
+        const replacement = engine.restartWorker({ linkId: LINK, generation: pool.generation, workerOrdinal: 1 });
+        assert(!replacement.copied && replacement.status === 'retry' && requeues === 1, 'a failed requeue does not rotate the credential');
+        assert((await engine.get({ session: starter.sessionCode, linkId: LINK })).status === 'served', 'the existing owner can still recover its handoff');
+      } finally { await engine.close(); }
+    },
+  },
+  {
     name: 'Amendment 8 item 5: a fresh-context stop records idle and claims while clearing active work',
     run: async () => {
       const enginePath = path.resolve('electron/ipc/handoffBridge/engine.js');

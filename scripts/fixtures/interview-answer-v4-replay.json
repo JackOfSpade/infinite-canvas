@@ -1,0 +1,17 @@
+{
+  "provenance": "Synthetic substitutions preserving the 003/005/007 v4 intro repair failure shapes; no candidate or posting facts.",
+  "initial": {
+    "headline": "I last worked as Product Manager at Aster Labs, maintaining the deployment system.",
+    "earlier": "Earlier, I built a reporting dashboard at Birch Works for the support team."
+  },
+  "dateRepair": {
+    "headline": "I maintained the deployment system at Aster Labs in 2026.",
+    "expectedRules": ["INTERVIEW_ANSWER_NUMBER", "INTERVIEW_ANSWER_QUANTITY"]
+  },
+  "finalRepair": {
+    "headline": "Previously, I maintained the deployment system at Aster Labs and created a deployment guide.",
+    "earlier": "Earlier, I built a reporting dashboard at Birch Works for the support team."
+  },
+  "whyCareerHeadline": "I maintained the deployment system and created a deployment guide for staff.",
+  "whyResearchHeadline": "This role interests me because Cedar serves research teams with a shared library."
+}

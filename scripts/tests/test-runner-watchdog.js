@@ -10,6 +10,29 @@ function assert(condition, message) {
 
 export default [
   {
+    name: 'test runner: positional filenames select only registered suites',
+    run() {
+      const child = spawnSync(process.execPath, ['--import', stubPath, runnerPath, 'scripts/tests/base64.js'], {
+        encoding: 'utf8', timeout: 10_000, env: { ...process.env, TEST_RUNNER_SELFTEST: '' },
+      });
+      const output = `${child.stdout || ''}\n${child.stderr || ''}`;
+      assert(child.status === 0, `selected suite must pass: ${output}`);
+      assert(output.includes('(1 groups)') && output.includes('PASS base64.js ('), `must run only the selected suite: ${output}`);
+      assert(!output.includes('PASS interview-'), `must not run unrelated suites: ${output}`);
+    },
+  },
+  {
+    name: 'test runner: unknown positional filenames fail before running suites',
+    run() {
+      const child = spawnSync(process.execPath, ['--import', stubPath, runnerPath, 'missing-suite.js'], {
+        encoding: 'utf8', timeout: 10_000, env: { ...process.env, TEST_RUNNER_SELFTEST: '' },
+      });
+      const output = `${child.stdout || ''}\n${child.stderr || ''}`;
+      assert(child.status === 1 && output.includes('Unknown test file(s): missing-suite.js'), `unknown suite must fail closed: ${output}`);
+      assert(!output.includes('Deterministic smoke tests'), `unknown suite must not start the full run: ${output}`);
+    },
+  },
+  {
     name: 'test runner: watchdog fails a suspended test and completes the summary',
     run() {
       const child = spawnSync(process.execPath, ['--import', stubPath, runnerPath], {

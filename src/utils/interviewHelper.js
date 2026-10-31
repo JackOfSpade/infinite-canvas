@@ -397,6 +397,38 @@ function isBehavioralConceptException(candidate, sharedTerms, questionTerms) {
   return [...questionConcepts].some(concept => behavioralConceptHits(cueTerms).has(concept));
 }
 
+function employerScope(transcript, input) {
+  const roles = arrayValue(profileFrom(input)?.roles);
+  let scope = null;
+  // An explicit employer is a factual anchor, not extra lexical decoration.
+  // Keep this grammar narrow: generic "at scale/work/the time" is not an
+  // employer. A name at the end of a clause must resolve to a saved role.
+  const references = [...String(transcript || '').matchAll(/\bat\s+([\p{L}\p{N}][\p{L}\p{N} &.'’–-]*?)(?=[,;?!]|\s+(?:and|but|when|where|while|during)\b|$)/giu)];
+  for (const reference of references) {
+    const name = reference[1].trim().replace(/[.]+$/u, '').toLocaleLowerCase();
+    if (/^(?:work|scale|first|last|present|once|least|most|the time|that time|this point|that point|a high level|the start|the end)$/u.test(name)) continue;
+    const matchingRoles = roles.filter(role => stringValue(role.employer).toLocaleLowerCase() === name);
+    if (!matchingRoles.length) return new Set();
+    const ids = new Set(matchingRoles.map(role => role.id));
+    scope = scope === null ? ids : new Set([...scope].filter(id => ids.has(id)));
+  }
+  if (scope !== null && roles.some(role => {
+    if (scope.has(role.id) || !stringValue(role.employer)) return false;
+    const employer = role.employer.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    return new RegExp(`(?<![\\p{L}\\p{N}])${employer}(?![\\p{L}\\p{N}])`, 'iu').test(transcript);
+  })) return new Set();
+  return scope;
+}
+
+function literalQuestionConstraints(transcript, cue) {
+  const numericAnchors = String(transcript || '').match(/(?<![\p{L}\p{N}])\d+(?:[.,]\d+)?%?(?![\p{L}\p{N}])/gu) || [];
+  const cueNumbers = new Set(String(cue || '').match(/(?<![\p{L}\p{N}])\d+(?:[.,]\d+)?%?(?![\p{L}\p{N}])/gu) || []);
+  if (numericAnchors.some(number => !cueNumbers.has(number))) return false;
+  const negations = String(transcript || '').toLocaleLowerCase().match(/\b(?:not|never|without|no)\b|\b\p{L}+n['’]t\b/gu) || [];
+  const cueNegations = new Set(String(cue || '').toLocaleLowerCase().match(/\b(?:not|never|without|no)\b|\b\p{L}+n['’]t\b/gu) || []);
+  return negations.every(negation => cueNegations.has(negation));
+}
+
 /** Rank exact career evidence. Category/intent is explanatory only and never scores a match. */
 export function rankInterviewEvidence(question, input) {
   const analysis = typeof question === 'object' && Array.isArray(question?.terms) ? question : analyzeInterviewQuestion(question);
@@ -404,8 +436,18 @@ export function rankInterviewEvidence(question, input) {
   const questionSet = new Set(questionTerms);
   const questionPhrases = new Set(adjacentPhrases(questionTerms));
   const questionConcepts = conceptHits(questionTerms);
+  const roleScope = employerScope(analysis.transcript, input);
+  const employerTerms = new Set(arrayValue(profileFrom(input)?.roles)
+    .filter(role => roleScope?.has(role.id)).flatMap(role => interviewHelperTerms(role.employer)));
+  const scopedTopicTerms = questionTerms.filter(term => !employerTerms.has(term)
+    && !['handle', 'explain', 'describe', 'discuss', 'walk', 'give', 'share'].includes(term));
 
   return Object.freeze(extractInterviewProfileEvidence(input)
+    .filter(candidate => (roleScope === null || roleScope.has(candidate.roleId))
+      // Naming the requested employer is not itself evidence for a conflict,
+      // result, or technical story at that employer.
+      && (roleScope === null || !scopedTopicTerms.length || candidate.matchingTerms.some(term => scopedTopicTerms.includes(term)))
+      && literalQuestionConstraints(analysis.transcript, candidate.cue))
     .map((candidate) => {
       const sharedTerms = candidate.matchingTerms.filter(term => questionSet.has(term));
       const sharedPhrases = candidate.matchingPhrases.filter(phrase => questionPhrases.has(phrase));
@@ -599,9 +641,11 @@ export function createInterviewHelperSession() {
   return Object.freeze({ activePlan: null, locked: false });
 }
 
-function isGenericInterviewFollowUp(value) {
+export function isDependentInterviewFollowUp(value) {
   const sentence = stringValue(value).toLocaleLowerCase().replace(/[.!?]+$/gu, '');
-  return /^(?:what did you do|what happened|what was (?:the )?outcome|what did you learn)$/u.test(sentence);
+  // A finite grammar preserves an explicit story anchor without borrowing
+  // terms from a distinct interviewer question or ordinary transcript prose.
+  return /^(?:what did you do(?: next)?|what happened(?: next)?|what (?:was|were) (?:the |your )?(?:outcome|result|results|impact)|what did you learn(?: from (?:it|that|this))?|how did you (?:resolve|handle|approach|do) (?:it|that|this)|why did (?:it|that|this) matter|what (?:trade-?offs?|decisions?) did you make|what would you do differently)$/u.test(sentence);
 }
 
 function latestQuestionWithDependentFollowUp(text) {
@@ -609,21 +653,36 @@ function latestQuestionWithDependentFollowUp(text) {
   const priorBoundary = boundaries.at(-1);
   const latestStart = priorBoundary ? priorBoundary.index + priorBoundary[0].length : 0;
   const latest = stringValue(text.slice(latestStart));
-  if (!priorBoundary || !isGenericInterviewFollowUp(latest)) return latest || null;
+  if (!priorBoundary || !isDependentInterviewFollowUp(latest)) return latest || null;
 
-  const anchorBoundary = boundaries.at(-2);
-  const anchorStart = anchorBoundary ? anchorBoundary.index + anchorBoundary[0].length : 0;
-  const anchor = stringValue(text.slice(anchorStart, priorBoundary.index + 1));
-  // A generic action/result/lesson prompt has no reliable retrieval terms of
-  // its own. Preserve a directly adjacent story prompt, but never pull in
-  // ordinary preceding prose or a prior generic question from a transcript.
-  return isLikelyInterviewQuestion(anchor) && !isGenericInterviewFollowUp(anchor)
-    ? stringValue(text.slice(anchorStart)) || null
-    : latest || null;
+  // Retain a chain of dependent parts only when it ends at a directly
+  // adjacent question-shaped story anchor. A new independent question still
+  // supersedes all earlier turns, and prose breaks the chain.
+  for (let index = boundaries.length - 1; index >= 0; index -= 1) {
+    const start = index > 0 ? boundaries[index - 1].index + boundaries[index - 1][0].length : 0;
+    const candidate = stringValue(text.slice(start, boundaries[index].index + 1));
+    if (isDependentInterviewFollowUp(candidate)) continue;
+    return isLikelyInterviewQuestion(candidate) ? stringValue(text.slice(start)) || null : latest || null;
+  }
+  return latest || null;
+}
+
+/** Continue one explicitly selected story without selecting or authoring new claims. */
+export function buildInterviewFollowUpPlan({ question, anchorPlan, previousQuestion = anchorPlan?.analysis?.transcript } = {}) {
+  if (!isDependentInterviewFollowUp(question) || anchorPlan?.status !== 'supported' || !anchorPlan.steps?.length) return null;
+  const combined = `${stringValue(previousQuestion)} ${stringValue(question)}`;
+  if (!combined || combined.length > 2000) return null;
+  const analysis = analyzeInterviewQuestion(combined);
+  return freezeDeep({
+    ...anchorPlan, analysis,
+    message: 'Continue the same saved example. Use only the details below; do not invent missing parts.',
+    missingComponents: missingComponentsFor(analysis, anchorPlan.steps.map(step => ({ documentedComponents: documentedComponentsFor(step.cue) }))),
+  });
 }
 
 /**
- * Returns the last completed question in a pasted transcript. A tightly scoped
+ * Returns the latest question in a pasted transcript, including a question-like
+ * tail whose punctuation was omitted. A tightly scoped
  * generic follow-up may retain its immediately preceding question-shaped story
  * prompt. When ASR omitted punctuation, accept only a single question-shaped
  * utterance; ordinary prose is deliberately ignored instead of being treated
@@ -639,7 +698,24 @@ export function extractLatestInterviewQuestion(transcript) {
     : transcript);
   if (!text) return null;
   const questionEnd = text.lastIndexOf('?');
-  if (questionEnd >= 0) return latestQuestionWithDependentFollowUp(text.slice(0, questionEnd + 1));
+  if (questionEnd >= 0) {
+    // ASR often punctuates an earlier question but leaves the latest request
+    // unfinished. Do not confidently answer that earlier question just because
+    // it owns the last question mark. Instructions and ordinary prose may
+    // precede or follow the new request, so inspect each trailing sentence.
+    const tail = stringValue(text.slice(questionEnd + 1).replace(/[\s.!]+$/u, ''));
+    const sentences = tail.split(/(?<=[.!])\s+/u);
+    for (let index = sentences.length - 1; index >= 0; index -= 1) {
+      const candidate = stringValue(sentences[index]
+        .replace(/^(?:(?:and|also|then|next)\b[\s,;:]*)+/iu, '')
+        .replace(/[\s.!]+$/u, ''));
+      if (!isLikelyInterviewQuestion(candidate)) continue;
+      // Preserve only the existing narrow dependent-follow-up grammar; a
+      // distinct salary/notice/topic request must supersede the older card.
+      return latestQuestionWithDependentFollowUp([text.slice(0, questionEnd + 1), ...sentences.slice(0, index), candidate].join(' '));
+    }
+    return latestQuestionWithDependentFollowUp(text.slice(0, questionEnd + 1));
+  }
   // Treat an ASR utterance ending in a period like an unpunctuated utterance
   // only when its final sentence itself has an unmistakable question shape.
   // This keeps direct inputs such as “Describe ….” usable while ordinary
@@ -653,8 +729,9 @@ export function extractLatestInterviewQuestion(transcript) {
 }
 
 export function isLikelyInterviewQuestion(value) {
-  const text = stringValue(value).toLocaleLowerCase();
-  return /^(?:tell me about|describe|walk me through|give me an example|how (?:do|did|have|would|can|could)|what |why |when |where |which |can you|could you|have you|do you|did you|would you|are you|is there)\b/u.test(text);
+  const text = stringValue(value).toLocaleLowerCase()
+    .replace(/^(?:please\s+)?(?:briefly\s+)?(?=(?:tell me|describe|walk me|explain|give me|share)\b)/u, '');
+  return /^(?:tell me|describe|walk me|give me an example|how|what|why|when|where|which|who|can you|could you|have you|do you|did you|would you|are you|is there|salary|notice)\b/u.test(text);
 }
 
 /**

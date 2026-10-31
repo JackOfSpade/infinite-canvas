@@ -1,6 +1,7 @@
 import application_bundle_links from './tests/application-bundle-links.js';
 import application_unit_patches from './tests/application-unit-patches.js';
 import application_render_faults from './tests/application-render-faults.js';
+import application_v2_render_reuse from './tests/application-v2-render-reuse.js';
 import application_rule_tally from './tests/application-rule-tally.js';
 import job_artifact_hardening from './tests/job-artifact-hardening.js';
 import job_backend_hardening from './tests/job-backend-hardening.js';
@@ -60,6 +61,7 @@ import official_posting_extractors from './tests/official-posting-extractors.js'
 import official_posting_resolver from './tests/official-posting-resolver.js';
 import official_posting_ground_truth_fixes from './tests/official-posting-ground-truth-fixes.js';
 import official_posting_chat_engine from './tests/official-posting-chat-engine.js';
+import official_posting_handoff_context from './tests/official-posting-handoff-context.js';
 import official_posting_resilience from './tests/official-posting-resilience.js';
 import official_posting_r1_parsing from './tests/official-posting-r1-parsing.js';
 import official_posting_r1_legacy_binding from './tests/official-posting-r1-legacy-binding.js';
@@ -157,6 +159,9 @@ import career_incremental_compilation from './tests/career-incremental-compilati
 import career_clean_layer from './tests/career-clean-layer.js';
 import career_profile_edits from './tests/career-profile-edits.js';
 import non_api_ai from './tests/non-api-ai.js';
+import non_api_ai_adoption from './tests/non-api-ai-adoption.js';
+import non_api_ai_cross_run from './tests/non-api-ai-cross-run.js';
+import non_api_ai_route_diagnostics from './tests/non-api-ai-route-diagnostics.js';
 import job_workflow_documentation from './tests/job-workflow-documentation.js';
 import job_run_staging from './tests/job-run-staging.js';
 import job_autoresume_recovery from './tests/job-autoresume-recovery.js';
@@ -223,9 +228,37 @@ import interview_helper_privacy from './tests/interview-helper-privacy.js';
 import interview_helper_render from './tests/interview-helper-render.js';
 import interview_private_store_filesystem from './tests/interview-private-store-filesystem.js';
 import interview_preparation from './tests/interview-preparation.js';
+import interview_live_prepare_harness from './tests/interview-live-prepare-harness.js';
+import interview_snapshot_readonly from './tests/interview-snapshot-readonly.js';
+import interview_answer_bank from './tests/interview-answer-bank.js';
+import interview_answer_preparation from './tests/interview-answer-preparation.js';
+import interview_answer_live from './tests/interview-answer-live.js';
+import interview_ai_matcher from './tests/interview-ai-matcher.js';
+import interview_ai_window from './tests/interview-ai-window.js';
+import interview_speculative_matcher from './tests/interview-speculative-matcher.js';
+import interview_speculative_pool from './tests/interview-speculative-pool.js';
+import interview_speculative_replay from './tests/interview-speculative-replay.js';
+import interview_answer_extensions from './tests/interview-answer-extensions.js';
+import interview_answer_sections_render from './tests/interview-answer-sections-render.js';
+import interview_prepared_picker_render from './tests/interview-prepared-picker-render.js';
+import interview_answer_entailment from './tests/interview-answer-entailment.js';
+import interview_spoken_claims from './tests/interview-spoken-claims.js';
+import interview_question_fit from './tests/interview-question-fit.js';
+import interview_resume_coverage from './tests/interview-resume-coverage.js';
+import interview_required_fallback from './tests/interview-required-fallback.js';
+import interview_spoken_replay from './tests/interview-spoken-replay.js';
+import interview_v5_replay from './tests/interview-v5-replay.js';
+import interview_matching_regressions from './tests/interview-matching-regressions.js';
+import interview_match_benchmark from './tests/interview-match-benchmark.js';
 import interview_preload from './tests/interview-preload.js';
 import interview_window from './tests/interview-window.js';
 import interview_window_render from './tests/interview-window-render.js';
+import interview_window_e2e from './tests/interview-window-e2e.js';
+import interview_call_audio from './tests/interview-call-audio.js';
+import interview_call_audio_render from './tests/interview-call-audio-render.js';
+import interview_call_question_detector from './tests/interview-call-question-detector.js';
+import interview_call_audio_debug from './tests/interview-call-audio-debug.js';
+import interview_call_speech_replay from './tests/interview-call-speech-replay.js';
 import career_recovery_resume from './tests/career-recovery-resume.js';
 import adaptability_skills from './tests/adaptability-skills.js';
 import adaptability_metrics from './tests/adaptability-metrics.js';
@@ -322,6 +355,7 @@ const testGroups = [
   ['official-posting-resolver.js', official_posting_resolver],
   ['official-posting-ground-truth-fixes.js', official_posting_ground_truth_fixes],
   ['official-posting-chat-engine.js', official_posting_chat_engine],
+  ['official-posting-handoff-context.js', official_posting_handoff_context],
   ['official-posting-resilience.js', official_posting_resilience],
   ['official-posting-r1-parsing.js', official_posting_r1_parsing],
   ['official-posting-r1-legacy-binding.js', official_posting_r1_legacy_binding],
@@ -378,6 +412,7 @@ const testGroups = [
   ['application-unit-patches.js', application_unit_patches],
   ['application-rule-tally.js', application_rule_tally],
   ['application-render-faults.js', application_render_faults],
+  ['application-v2-render-reuse.js', application_v2_render_reuse],
   ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],
   ['claude-application-runner.js', claude_application_runner],
   ['claude-application-sdk-stage.js', claude_application_sdk_stage],
@@ -423,6 +458,9 @@ const testGroups = [
   ['career-clean-layer.js', career_clean_layer],
   ['career-profile-edits.js', career_profile_edits],
   ['non-api-ai.js', non_api_ai],
+  ['non-api-ai-adoption.js', non_api_ai_adoption],
+  ['non-api-ai-cross-run.js', non_api_ai_cross_run],
+  ['non-api-ai-route-diagnostics.js', non_api_ai_route_diagnostics],
   ['job-workflow-documentation.js', job_workflow_documentation],
   ['job-run-staging.js', job_run_staging],
   ['job-autoresume-recovery.js', job_autoresume_recovery],
@@ -489,9 +527,37 @@ const testGroups = [
   ['interview-helper-render.js', interview_helper_render],
   ['interview-private-store-filesystem.js', interview_private_store_filesystem],
   ['interview-preparation.js', interview_preparation],
+  ['interview-live-prepare-harness.js', interview_live_prepare_harness],
+  ['interview-snapshot-readonly.js', interview_snapshot_readonly],
+  ['interview-answer-bank.js', interview_answer_bank],
+  ['interview-answer-preparation.js', interview_answer_preparation],
+  ['interview-answer-live.js', interview_answer_live],
+  ['interview-ai-matcher.js', interview_ai_matcher],
+  ['interview-ai-window.js', interview_ai_window],
+  ['interview-speculative-matcher.js', interview_speculative_matcher],
+  ['interview-speculative-pool.js', interview_speculative_pool],
+  ['interview-speculative-replay.js', interview_speculative_replay],
+  ['interview-answer-extensions.js', interview_answer_extensions],
+  ['interview-answer-sections-render.js', interview_answer_sections_render],
+  ['interview-prepared-picker-render.js', interview_prepared_picker_render],
+  ['interview-answer-entailment.js', interview_answer_entailment],
+  ['interview-spoken-claims.js', interview_spoken_claims],
+  ['interview-question-fit.js', interview_question_fit],
+  ['interview-resume-coverage.js', interview_resume_coverage],
+  ['interview-required-fallback.js', interview_required_fallback],
+  ['interview-spoken-replay.js', interview_spoken_replay],
+  ['interview-v5-replay.js', interview_v5_replay],
+  ['interview-matching-regressions.js', interview_matching_regressions],
+  ['interview-match-benchmark.js', interview_match_benchmark],
   ['interview-preload.js', interview_preload],
   ['interview-window.js', interview_window],
   ['interview-window-render.js', interview_window_render],
+  ['interview-window-e2e.js', interview_window_e2e],
+  ['interview-call-audio.js', interview_call_audio],
+  ['interview-call-audio-render.js', interview_call_audio_render],
+  ['interview-call-question-detector.js', interview_call_question_detector],
+  ['interview-call-audio-debug.js', interview_call_audio_debug],
+  ['interview-call-speech-replay.js', interview_call_speech_replay],
   ['career-recovery-resume.js', career_recovery_resume],
   ['adaptability-skills.js', adaptability_skills],
   ['adaptability-metrics.js', adaptability_metrics],
@@ -556,6 +622,15 @@ function watchdogFixtureGroups() {
       { name: 'test runner watchdog fixture: continues after timeout', run: () => ({ continued: true }) },
     ],
   ]];
+}
+
+function selectedTestGroups(groups) {
+  const requested = process.argv.slice(2).map(file => file.split(/[\\/]/u).pop());
+  if (!requested.length) return groups;
+  const known = new Set(groups.map(([file]) => file));
+  const unknown = requested.filter(file => !known.has(file));
+  if (unknown.length) throw new Error(`Unknown test file(s): ${unknown.join(', ')}`);
+  return groups.filter(([file]) => requested.includes(file));
 }
 
 function validateTestRegistry(groups) {
@@ -641,7 +716,7 @@ async function run() {
   // selected in a child process. The fixture should not weaken registration
   // coverage for the normal unit suite.
   validateTestRegistry(testGroups);
-  const groups = watchdogFixtureGroups();
+  const groups = selectedTestGroups(watchdogFixtureGroups());
   const verbose = process.env.TEST_VERBOSE === '1';
   const timeoutMs = readTestTimeoutMs();
 

@@ -360,7 +360,10 @@ export default [
         await fs.promises.unlink(recordPath);
 
         const handlers = new Map();
-        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), buildBrief: async () => ({ brief: sealedBrief }) });
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), buildBrief: async () => ({ brief: sealedBrief }),
+          // This case isolates brief publication. Separate answer-bank tests
+          // exercise the third handoff, grounding and real sealed store.
+          buildAnswers: async () => ({ bank: {} }), publishAnswers: async () => ({ answerBankAvailable: true, answerCardCount: 16 }) });
         const reply = await handlers.get('build-interview-brief')({}, { nodeId: 'node-1', snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: bundle.artifactId, manualAiRunId: 'run-prepared-brief' });
         assert(reply?.briefRecordId === interviewPreparedBriefRecordId(sealedBrief) && (await loadInterviewPreparedBrief({ briefRecordId: reply.briefRecordId, brief: reply.brief, userDataPath: root })), 'the build handler must publish and reload the sealed record before returning success');
         return { recordId: published.briefRecordId.slice(0, 12) };
@@ -569,9 +572,10 @@ export default [
         await fs.promises.writeFile(path.join(bundle, 'Original Job Listing.md'), '# Engineer\nToronto\n');
         const artifact = await captureInterviewPreparationBundle({ directory: bundle, userDataPath: root });
         const { assessmentPrompt } = await promptsFor(artifact, root);
-        assert(assessmentPrompt.includes('Cut latency 40%. Built API.') && assessmentPrompt.includes('Languages TypeScript') && assessmentPrompt.includes('2021 \u2013 2024 Cut latency'), 'adjacent list items, definition rows and dates must be separated');
+        const readable = assessmentPrompt.replace(/\u2029/gu, ' ');
+        assert(readable.includes('Cut latency 40%. Built API.') && readable.includes('Languages TypeScript') && readable.includes('2021 \u2013 2024 Cut latency'), 'adjacent list items, definition rows and dates must be separated');
         assert(!/%\.Built|LanguagesTypeScript|2024Cut/u.test(assessmentPrompt), 'no adjacent elements may be glued into run-on words');
-        assert(assessmentPrompt.includes('Hello there') && !assessmentPrompt.includes('Hellothere'), 'cover letter paragraphs must be separated');
+        assert(readable.includes('Hello there') && !assessmentPrompt.includes('Hellothere'), 'cover letter paragraphs must be separated');
         const positioning = { resume: 'Cut latency 40%. Built API.', coverLetter: 'Hello there' };
         const context = { rawResearch: 'Acme. Source: https://acme.test/news Published 2026-01-01', bundle: { artifactId: artifact.artifactId, digests: { applicationHtml: 'c'.repeat(64) }, job: { title: 'Engineer', company: 'Acme', location: 'Toronto' }, listingText: 'Engineer', applicationPositioning: positioning }, snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: artifact.artifactId, createdAt: '2026-10-08T00:00:00.000Z' };
         const value = briefValue();

@@ -838,19 +838,23 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // let the later settlement replace the other cascade. Keep the active run
   // token in a ref so the admission check takes effect within this call stack.
   const combineRunRef = useRef(null);
+  const refreshNodes = nav?.enumerateAllNodes || getNodes;
+  const refreshEdges = nav?.enumerateAllEdges || getEdges;
+  const refreshNode = nodeId => refreshNodes().find(node => node.id === nodeId);
   const { runRef: officialPostingRefreshRunRef, refreshing: officialPostingRefreshing,
     progress: officialPostingProgress, start: refreshOfficialPostings, cancel: cancelOfficialPostingRefresh } = useBoardOfficialPostingRefresh({
-    nodeId: id, canvasFilePath, getNode, getNodes, updateGlobal, moduleRunQueue, addToast,
+    nodeId: id, canvasFilePath, getNode: refreshNode, getNodes: refreshNodes,
+    getCurrentFile: nav?.getCurrentFile, updateGlobal, moduleRunQueue, addToast,
     canStart: () => {
-      const live = getNode(id)?.data;
+      const live = refreshNode(id)?.data;
       return !!live && live.hubState === 'done' && !live.locked && !live.boardCancellation
         && !hasPendingManualAiRetirement(live) && !combineRunRef.current && !scanRunRef.current
         && !scanPreflightRef.current && !cancellationInFlightRef.current && !combineRecoveryTokenClaimRef.current
         && !live.boardScanResume && !isBoardCombineManualAiRunId(live.manualAiResume?.runId);
     },
     getScopeKey: () => {
-      const inputs = liveCombineInputs(id, getNodes(), getEdges());
-      return JSON.stringify([getNode(id)?.data?.combineSignature, boardInputSignature(inputs.completed, inputs.all),
+      const inputs = liveCombineInputs(id, refreshNodes(), refreshEdges());
+      return JSON.stringify([refreshNode(id)?.data?.combineSignature, boardInputSignature(inputs.completed, inputs.all),
         inputs.completed.map(combineSourceRunEntry)]);
     },
   });
@@ -2370,6 +2374,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       EventLogger.log(`[JobBoard] Unmount cleanup deferred to pending relocation transaction id=${id}`);
       return;
     }
+    if ((officialPostingRefreshRunRef.current || getOfficialPostingPreparation(canvasFilePath, id)?.owner === 'board-refresh')
+      && nav?.getCurrentFile?.() === canvasFilePath
+      && nav?.enumerateAllNodes?.().some(node => node.id === id && node.type === 'jobboard')) {
+      EventLogger.log(`[JobBoard] Unmount keeps official-posting refresh on retained canvas id=${id}`);
+      return;
+    }
     const planAtUnmount = getNode(id)?.data?.boardScanResume || data.boardScanResume || null;
     const cancellationIntentPromise = persistBoardCancellationIntent('board-unmounted');
     // Start the exact child cancellation in this unmount turn, while the
@@ -2435,7 +2445,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     ));
     if (ownTreeOnThisLevel) clearBoardChildren();
     else EventLogger.log(`[JobBoard] unmount cascade skipped: Board tree not on this level id=${id}`);
-  }, [getNodes,cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, data.boardScanResume, epoch, getNode, id, moduleRunQueue, persistBoardCancellationIntent, updateGlobal]);
+  }, [getNodes,cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, data.boardScanResume, epoch, getNode, id, moduleRunQueue, persistBoardCancellationIntent, updateGlobal, officialPostingRefreshRunRef, canvasFilePath, nav]);
 
   useUnmountEffect(cleanupBoard);
 

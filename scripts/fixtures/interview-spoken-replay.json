@@ -1,0 +1,3280 @@
+{
+  "description": "Synthetic replay of four recorded worker answer-bank drafts. Organization, product, place, date, quantity, technology and subject details are substituted consistently; claim grammar, ownership qualifiers, card questions and issue-producing words are retained. No private stores are read by this fixture. Step 007 was cancelled without a response; 008 and 009 were absent. Final 005/006 synthetic drafts are calibrated for standalone speech and nonredundant detail, using separately cited same-role evidence. The single-deliverable introduction is retained as a thin leadership example instead.",
+  "sources": [
+    {
+      "key": "source-01",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+    },
+    {
+      "key": "source-02",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+    },
+    {
+      "key": "source-03",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+    },
+    {
+      "key": "source-04",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+    },
+    {
+      "key": "source-05",
+      "entityType": "achievement",
+      "roleId": "role-1",
+      "text": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+    },
+    {
+      "key": "source-06",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+    },
+    {
+      "key": "source-07",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+    },
+    {
+      "key": "source-08",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+    },
+    {
+      "key": "source-09",
+      "entityType": "achievement",
+      "roleId": "role-2",
+      "text": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+    },
+    {
+      "key": "source-10",
+      "entityType": "achievement",
+      "roleId": "role-3",
+      "text": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+    },
+    {
+      "key": "source-11",
+      "entityType": "achievement",
+      "roleId": "role-3",
+      "text": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+    },
+    {
+      "key": "source-12",
+      "entityType": "project",
+      "roleId": "role-1",
+      "text": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+    },
+    {
+      "key": "source-13",
+      "entityType": "project",
+      "roleId": "role-1",
+      "text": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+    },
+    {
+      "key": "source-14",
+      "entityType": "project",
+      "roleId": "role-1",
+      "text": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+    },
+    {
+      "key": "source-15",
+      "entityType": "project",
+      "roleId": "role-2",
+      "text": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+    },
+    {
+      "key": "source-16",
+      "entityType": "project",
+      "roleId": "role-2",
+      "text": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+    },
+    {
+      "key": "source-17",
+      "entityType": "project",
+      "roleId": "role-2",
+      "text": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+    },
+    {
+      "key": "source-18",
+      "entityType": "project",
+      "roleId": "role-2",
+      "text": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+    },
+    {
+      "key": "source-19",
+      "entityType": "project",
+      "roleId": "role-3",
+      "text": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+    },
+    {
+      "key": "source-20",
+      "entityType": "project",
+      "roleId": "role-3",
+      "text": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+    },
+    {
+      "key": "source-21",
+      "entityType": "project",
+      "roleId": null,
+      "text": "Workshop Atlas - Identifies an item from photos, runs a pricing analysis to suggest a price range from quick-sell to max-profit, and drafts a listing. Pricing is grounded in real comparable listings: it gathers recent sold and active listings for the same item from major resale marketplaces and estimates fair market value from those comps. It also actively monitors your listings across platforms and flags anything that needs your attention (e.g., a potential buyer sending a message about the item)."
+    },
+    {
+      "key": "source-22",
+      "entityType": "project",
+      "roleId": null,
+      "text": "Paper Garden - A spatial productivity app built on a pannable, zoomable Preact Flow canvas where you arrange cards, URLs, audio, and diagrams as free-form nodes. With optional sketching, history, a overview, keyboard/IJKL navigation, and offline storage, it works like a mind-map system for exploring ideas in depth. Built as a SampleOS desktop app with Electra and Preact."
+    },
+    {
+      "key": "source-23",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "Fairhaven"
+    },
+    {
+      "key": "source-24",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "Context: Juniper Supply Cooperative serves about 9000 members across 18 depots with 1050 operators. I was one of two systems developers reporting to a manager."
+    },
+    {
+      "key": "source-25",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "Context: I was one of two developers on the records team."
+    },
+    {
+      "key": "source-26",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "Context: I was one of four developers on the dispatch team."
+    },
+    {
+      "key": "source-27",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "- 2016 \u2013 December 2017: After graduating, took additional courses to decide whether to pursue a diploma in data processing; decided not to."
+    },
+    {
+      "key": "source-28",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "March 2018 to October 2018 and January 2019 to May 2019: Seeking work."
+    },
+    {
+      "key": "source-29",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "June 2022 onward: Building volunteer prototypes full-time."
+    },
+    {
+      "key": "source-30",
+      "entityType": "otherEvidence",
+      "roleId": null,
+      "text": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+    }
+  ],
+  "resume": "Built RPC APIs in Quartz to provide controlled access to a local warehouse database.",
+  "responses": [
+    {
+      "recordedStep": "003",
+      "cards": [
+        {
+          "id": "replay-003-01",
+          "question": "Describe your approach to leadership.",
+          "variants": [
+            "Tell me about leading a team."
+          ],
+          "headline": {
+            "text": "I maintained cron jobs syncing the CWA's daily data releases into our local database.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The cron jobs synced the daily releases through the CWA's APIs.",
+              "evidenceIds": [
+                "source-20"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-20",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The data included DOCKs so routing could steer around active warnings.",
+              "evidenceIds": [
+                "source-20"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-20",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I maintained the jobs that synced DOCKs into our local database.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-02",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "Which experience is most relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built Quartz ETL pipelines that loaded extracted warehouse document data into a local database.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The pipelines ingested scanned warehouse documents, both typed and handwritten.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The pipelines ran those scanned documents through ICR to extract data.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built pipelines that loaded ICR-extracted data from handwritten warehouse documents into a local database.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-03",
+          "question": "Walk me through a project.",
+          "variants": [
+            "Tell me about a project you worked on."
+          ],
+          "headline": {
+            "text": "I built some Quartz integrations solo and co-built others with the other engineer.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The integrations connected the cooperative's core records platform with other third-party SaaS platforms.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "A large number of integrations ran as scheduled and on-demand jobs.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The third-party platforms either consumed the core records platform's data or produced data that we ingested.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-04",
+          "question": "Describe a challenge you faced.",
+          "variants": [
+            "Describe a difficult problem."
+          ],
+          "headline": {
+            "text": "The other engineer and I migrated historical data while in-house systems stayed in service.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The other engineer and I implemented integrations, data migration workflows, automation, validation, and operational tooling.",
+              "evidenceIds": [
+                "source-14"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-14",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The in-house systems stayed in service until the new platform was fully set up for all operators.",
+              "evidenceIds": [
+                "source-14"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-14",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I migrated the inventory/repair-planning and equipment check-in/check-out systems over about 4 months.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-05",
+          "question": "How do you prioritize your work?",
+          "variants": [
+            "How do you decide what to work on first?"
+          ],
+          "headline": {
+            "text": "I delegate volunteer prototype work across workers by cost and each task's requirements.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Larger workers handle architecture, integration, and final review in my volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Smaller workers take bounded implementation tasks in those group-funded volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "In my group-funded volunteer prototypes, I use MTP where tools need it.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-003-06",
+          "question": "How do you collaborate with others?",
+          "variants": [
+            "Describe your approach to teamwork."
+          ],
+          "headline": {
+            "text": "The other engineer and I improved the in-house inventory system I inherited.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The other engineer and I added role-restricted access for internal operators.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The system was later retired in favor of a third-party platform.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I used Preact and ScriptType for the inherited inventory system's improvements.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-07",
+          "question": "Walk me through a technical problem.",
+          "variants": [
+            "How do you approach technical challenges?"
+          ],
+          "headline": {
+            "text": "I built RPC APIs in Quartz to provide controlled access to a local warehouse database.",
+            "evidenceIds": [
+              "source-07"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-07",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The RPC APIs provided controlled access to the warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I used Quartz to build those RPC APIs.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "My RPC API work provided controlled access to a local warehouse database.",
+            "evidenceIds": [
+              "source-07"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-07",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": true,
+            "resumeQuote": "Built RPC APIs in Quartz to provide controlled access to a local warehouse database."
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-003-08",
+          "question": "Walk me through a decision.",
+          "variants": [
+            "Describe a tradeoff you considered."
+          ],
+          "headline": {
+            "text": "I evaluated third-party products by assessing downsides, tradeoffs, opportunity cost, and budget-fitting strategies.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I recommended buying licenses only for active users on a rotating basis rather than for all operators.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I presented the final product evaluation analysis to management.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I evaluated Orion Ledger as an interactive front end for internal documentation.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-09",
+          "question": "Tell me about something you learned.",
+          "variants": [
+            "How has your experience shaped your approach?"
+          ],
+          "headline": {
+            "text": "I developed a practical sense of AI-assisted and traditional development's strengths, limitations, and tradeoffs.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I adopted AI-assisted and agentic coding tools as soon as the cooperative allowed them.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I kept traditional development where it fit better in day-to-day development.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I used AI-assisted coding tools in day-to-day development at the cooperative.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-10",
+          "question": "What strengths would you bring?",
+          "variants": [
+            "Which strengths are relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built Paper Garden as a SampleOS desktop app with Electra and Preact.",
+            "evidenceIds": [
+              "source-22"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-22",
+                "quote": "Paper Garden - A spatial productivity app built on a pannable, zoomable Preact Flow canvas where you arrange cards, URLs, audio, and diagrams as free-form nodes. With optional sketching, history, a overview, keyboard/IJKL navigation, and offline storage, it works like a mind-map system for exploring ideas in depth. Built as a SampleOS desktop app with Electra and Preact."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The app has a pannable, zoomable Preact Flow canvas with free-form nodes.",
+              "evidenceIds": [
+                "source-22"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-22",
+                  "quote": "Paper Garden - A spatial productivity app built on a pannable, zoomable Preact Flow canvas where you arrange cards, URLs, audio, and diagrams as free-form nodes. With optional sketching, history, a overview, keyboard/IJKL navigation, and offline storage, it works like a mind-map system for exploring ideas in depth. Built as a SampleOS desktop app with Electra and Preact."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "It includes optional sketching, history, a overview, keyboard/IJKL navigation, and offline storage.",
+              "evidenceIds": [
+                "source-22"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-22",
+                  "quote": "Paper Garden - A spatial productivity app built on a pannable, zoomable Preact Flow canvas where you arrange cards, URLs, audio, and diagrams as free-form nodes. With optional sketching, history, a overview, keyboard/IJKL navigation, and offline storage, it works like a mind-map system for exploring ideas in depth. Built as a SampleOS desktop app with Electra and Preact."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "Paper Garden lets you arrange cards, URLs, audio, and diagrams as free-form nodes.",
+            "evidenceIds": [
+              "source-22"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-22",
+                "quote": "Paper Garden - A spatial productivity app built on a pannable, zoomable Preact Flow canvas where you arrange cards, URLs, audio, and diagrams as free-form nodes. With optional sketching, history, a overview, keyboard/IJKL navigation, and offline storage, it works like a mind-map system for exploring ideas in depth. Built as a SampleOS desktop app with Electra and Preact."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-003-11",
+          "question": "Tell me about a result from your work.",
+          "variants": [
+            "What outcome can you describe?"
+          ],
+          "headline": {
+            "text": "I implemented a modified B* algorithm that shipped in the company's ferry planning app.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The team had already chosen the algorithm before I joined.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "My work was implementing the algorithm correctly and testing it.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The modified B* algorithm accounts for the curvature of the Globe for ferry route optimization.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-003-12",
+          "question": "How do you understand customer needs?",
+          "variants": [
+            "How do you approach discovery?"
+          ],
+          "headline": {
+            "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+            "evidenceIds": [
+              "source-18"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-18",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The Plotly dashboards were for analyzing aggregate client data.",
+              "evidenceIds": [
+                "source-18"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-18",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Supervisors and management had separate dashboards for that analysis.",
+              "evidenceIds": [
+                "source-18"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-18",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built a Plotly dashboard for supervisors to analyze aggregate client data.",
+            "evidenceIds": [
+              "source-18"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-18",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        }
+      ]
+    },
+    {
+      "recordedStep": "004",
+      "cards": [
+        {
+          "id": "replay-004-01",
+          "question": "Describe your approach to leadership.",
+          "variants": [
+            "Tell me about leading a team."
+          ],
+          "headline": {
+            "text": "I evaluated third-party products, assessed tradeoffs, and presented analysis to management.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I requested quotes and analyzed cost before full-scale product adoption.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I recommended buying licenses only for active users on a rotating basis.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I evaluated Orion Ledger as an interactive front end for internal documentation.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-02",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "Which experience is most relevant to this role?"
+          ],
+          "headline": {
+            "text": "I built RPC APIs in Quartz for controlled warehouse database access.",
+            "evidenceIds": [
+              "source-07"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-07",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built RPC APIs for the local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The RPC APIs provided controlled access to that database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I used Quartz for the local warehouse database's RPC APIs.",
+            "evidenceIds": [
+              "source-07"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-07",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-03",
+          "question": "Walk me through a project.",
+          "variants": [
+            "Tell me about a project you worked on."
+          ],
+          "headline": {
+            "text": "I built Quartz ETL pipelines that processed scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The pipelines ingested scanned warehouse documents, both typed and handwritten.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The pipelines loaded the extracted data into a local database.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built the ETL pipelines in Quartz.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-04",
+          "question": "Describe a challenge you faced.",
+          "variants": [
+            "Describe a difficult problem."
+          ],
+          "headline": {
+            "text": "I migrated systems with the other engineer while in-house systems stayed in service.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "We implemented integrations, data migration workflows, automation, validation, and operational tooling over about 4 months.",
+              "evidenceIds": [
+                "source-14"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-14",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The in-house systems stayed in service until the new platform was fully set up for all operators.",
+              "evidenceIds": [
+                "source-14"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-14",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I migrated all historical data from the inventory/repair-planning and equipment check-in/check-out systems.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-004-05",
+          "question": "How do you collaborate with others?",
+          "variants": [
+            "Describe your approach to teamwork."
+          ],
+          "headline": {
+            "text": "I built some integrations solo and co-built others with the other engineer.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The integrations ran as a mix of scheduled and on-demand jobs.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The cooperative's core records platform served as its system of record.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The Quartz integrations connected the cooperative's core records platform and other third-party SaaS platforms.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-06",
+          "question": "Walk me through a decision.",
+          "variants": [
+            "Describe a tradeoff you considered."
+          ],
+          "headline": {
+            "text": "I match each task to the cheapest worker that does it well.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "In my group-funded volunteer prototypes, larger workers handle architecture, integration, and final review.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Smaller workers take bounded implementation tasks in those volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I use MTP in volunteer prototypes where tools need it.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-07",
+          "question": "Tell me about improving a process.",
+          "variants": [
+            "Describe a process improvement."
+          ],
+          "headline": {
+            "text": "I improved inherited inventory with the other engineer, adding role-restricted operators access.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The other engineer and I made improvements to the inherited in-house inventory system.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The system was later retired in favor of a third-party platform.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I added role-restricted access for internal operators to the inherited inventory system.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-004-08",
+          "question": "What strengths would you bring?",
+          "variants": [
+            "What do you do well?"
+          ],
+          "headline": {
+            "text": "I maintained cron jobs syncing daily CWA data through its APIs.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The cron jobs synced the CWA's daily releases into our local database.",
+              "evidenceIds": [
+                "source-20"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-20",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The data included DOCKs so routing could steer around active warnings.",
+              "evidenceIds": [
+                "source-20"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-20",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I maintained the cron jobs that synced DOCKs through the CWA's APIs.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-09",
+          "question": "What would you like us to know about your experience?",
+          "variants": [
+            "What else is relevant to this conversation?"
+          ],
+          "headline": {
+            "text": "I took additional courses after graduating before deciding against a diploma.",
+            "evidenceIds": [
+              "source-27"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-27",
+                "quote": "- 2016 \u2013 December 2017: After graduating, took additional courses to decide whether to pursue a diploma in data processing; decided not to."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "After graduating, I took additional courses to decide whether to pursue a diploma.",
+              "evidenceIds": [
+                "source-27"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-27",
+                  "quote": "- 2016 \u2013 December 2017: After graduating, took additional courses to decide whether to pursue a diploma in data processing; decided not to."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I decided not to pursue a diploma in data processing.",
+              "evidenceIds": [
+                "source-27"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-27",
+                  "quote": "- 2016 \u2013 December 2017: After graduating, took additional courses to decide whether to pursue a diploma in data processing; decided not to."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I took those additional courses from 2016 to December 2017.",
+            "evidenceIds": [
+              "source-27"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-27",
+                "quote": "- 2016 \u2013 December 2017: After graduating, took additional courses to decide whether to pursue a diploma in data processing; decided not to."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-004-10",
+          "question": "How do you understand customer needs?",
+          "variants": [
+            "How do you approach discovery?"
+          ],
+          "headline": {
+            "text": "I built separate client data dashboards for supervisors and for management.",
+            "evidenceIds": [
+              "source-18"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-18",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built Plotly dashboards for analyzing aggregate client data.",
+              "evidenceIds": [
+                "source-18"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-18",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Supervisors and management had separate dashboards for aggregate client data.",
+              "evidenceIds": [
+                "source-18"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-18",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The dashboards I built analyzed aggregate client data.",
+            "evidenceIds": [
+              "source-18"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-18",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-004-11",
+          "question": "Tell me about a result from your work.",
+          "variants": [
+            "What outcome can you describe?"
+          ],
+          "headline": {
+            "text": "I implemented and tested a team-chosen algorithm that shipped in the ferry planning app.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The team had already chosen the algorithm before I joined.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "My work was implementing the modified B* algorithm correctly and testing it.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The modified B* algorithm accounts for the curvature of the Globe for ferry route optimization.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-004-12",
+          "question": "How do you adapt to change?",
+          "variants": [
+            "Tell me about a change in direction."
+          ],
+          "headline": {
+            "text": "I adopted AI-assisted coding tools as soon as the cooperative allowed them.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I kept traditional development where it fit better in day-to-day development.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built a practical sense of each approach's strengths, limitations, and tradeoffs.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I adopted agentic coding tools in day-to-day development when the cooperative allowed them.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        }
+      ]
+    },
+    {
+      "recordedStep": "005",
+      "cards": [
+        {
+          "id": "replay-005-01",
+          "question": "Describe your approach to leadership.",
+          "variants": [
+            "Tell me about leading a team."
+          ],
+          "headline": {
+            "text": "I built Quartz ETL pipelines that extracted data from scanned warehouse documents.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "My pipelines ingested scanned warehouse documents, both typed and handwritten.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I loaded the extracted data into a local database.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I ran scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-005-02",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "What experience would you bring?"
+          ],
+          "headline": {
+            "text": "I built Quartz integrations, some solo and others with the other engineer.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The integrations ran as a mix of scheduled and on-demand jobs.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The core records platform serves as the cooperative's system of record.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "Other third-party SaaS platforms either consume its data or produce data that we ingest.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-03",
+          "question": "Walk me through a project.",
+          "variants": [
+            "Describe a relevant project."
+          ],
+          "headline": {
+            "text": "I built RPC APIs to provide controlled access to a local warehouse database.",
+            "evidenceIds": [
+              "source-07"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-07",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I used Quartz to build APIs for that local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built ETL pipelines that ingested typed and handwritten warehouse documents.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built QSL automations, including flagging clients who had not called to book appointments.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-04",
+          "question": "Describe a challenge you faced.",
+          "variants": [
+            "Describe a difficult problem."
+          ],
+          "headline": {
+            "text": "I migrated in-house systems with the other engineer while day-to-day operations continued without interruption.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "We implemented integrations, data migration workflows, automation, validation, and operational tooling.",
+              "evidenceIds": [
+                "source-14"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-14",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The in-house systems stayed in service until the new platform was fully set up.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I migrated all of the systems' historical data over about 4 months.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-05",
+          "question": "How do you collaborate with others?",
+          "variants": [
+            "Describe your approach to teamwork."
+          ],
+          "headline": {
+            "text": "I improved an inherited in-house inventory system together with the other engineer.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Together, we added role-restricted access for the system's internal operators.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The system was later retired in favor of a third-party platform.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I used Preact and ScriptType for the improvements.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-06",
+          "question": "Walk me through a decision.",
+          "variants": [
+            "Describe a tradeoff you considered."
+          ],
+          "headline": {
+            "text": "I supported the evaluation of the third-party inventory platform before full-scale adoption.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I helped with the evaluation, including opportunity cost and cost analysis.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I contributed to product evaluation, requesting quotes before full-scale adoption.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I helped with the evaluation of Orion Ledger for internal documentation.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-07",
+          "question": "Tell me about something you learned.",
+          "variants": [
+            "How has your experience shaped your approach?"
+          ],
+          "headline": {
+            "text": "I developed a practical sense of AI-assisted and traditional development's strengths and limitations.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I adopted AI-assisted and agentic coding tools when the cooperative allowed them.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I kept traditional development where it fit better in day-to-day development.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "In my volunteer prototypes, larger workers handle architecture, integration, and final review.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-08",
+          "question": "How do you prioritize your work?",
+          "variants": [
+            "How do you decide what to work on first?"
+          ],
+          "headline": {
+            "text": "I delegate volunteer prototype work across workers by cost and task fit.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Larger workers handle architecture, integration, and final review in my group-funded volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Smaller workers take bounded implementation tasks in my volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I use MTP where tools need it in my group-funded volunteer prototypes.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-09",
+          "question": "How do you understand customer needs?",
+          "variants": [
+            "How do you approach discovery?"
+          ],
+          "headline": {
+            "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+            "evidenceIds": [
+              "source-18"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-18",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The warehouse pipelines loaded the extracted ICR data into a local database.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built RPC APIs to provide controlled access to the local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built QSL automations, including flagging clients who had not called to book appointments.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-10",
+          "question": "Tell me about a result from your work.",
+          "variants": [
+            "What outcome can you describe?"
+          ],
+          "headline": {
+            "text": "I implemented and tested the team's chosen algorithm, which shipped in the ferry planning app.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The team had already chosen the algorithm before I joined.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The modified B* algorithm accounts for Globe's curvature in ferry route optimization.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I implemented the team's chosen algorithm in Quartz.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-11",
+          "question": "Tell me about improving a process.",
+          "variants": [
+            "Describe a process improvement."
+          ],
+          "headline": {
+            "text": "I built QSL automations, including flagging clients who had not called for appointments.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built separate Plotly dashboards for supervisors and for management.",
+              "evidenceIds": [
+                "source-09"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-09",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "My RPC APIs provided controlled access to the local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The ETL pipelines ran typed and handwritten scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-005-12",
+          "question": "What would you like us to know about your experience?",
+          "variants": [
+            "Is there another example you would like to discuss?"
+          ],
+          "headline": {
+            "text": "I maintained cron jobs that sync the CWA's daily data releases through its APIs.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The jobs sync those releases into our local database.",
+              "evidenceIds": [
+                "source-20"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-20",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The CWA releases include DOCKs so routing could steer around active warnings.",
+              "evidenceIds": [
+                "source-11"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-11",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The cron jobs I maintained included syncing Notices to Dock Missions.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        }
+      ]
+    },
+    {
+      "recordedStep": "006",
+      "cards": [
+        {
+          "id": "replay-006-01",
+          "question": "Describe your approach to leadership.",
+          "variants": [
+            "Tell me about leading a team."
+          ],
+          "headline": {
+            "text": "I built Quartz ETL pipelines that extracted data from scanned warehouse documents.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "My pipelines ingested scanned warehouse documents, both typed and handwritten.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I loaded the extracted data into a local database.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I ran scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": false
+        },
+        {
+          "id": "replay-006-02",
+          "question": "Tell me about your relevant experience.",
+          "variants": [
+            "What experience would you bring?"
+          ],
+          "headline": {
+            "text": "I built Quartz integrations, some solo and others with the other engineer.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The integrations ran as a mix of scheduled and on-demand jobs.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The core records platform serves as the cooperative's system of record.",
+              "evidenceIds": [
+                "source-02"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-02",
+                  "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "Other third-party SaaS platforms either consume its data or produce data that we ingest.",
+            "evidenceIds": [
+              "source-02"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-02",
+                "quote": "Built data integrations and ETL between the cooperative's core records platform (a third-party SaaS that serves as its system of record) and other third-party SaaS platforms that either consume its data or produce data that we ingest. A large number of integrations, run as a mix of scheduled and on-demand jobs; some built solo, others co-built with the other engineer. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-03",
+          "question": "Walk me through a project.",
+          "variants": [
+            "Describe a relevant project."
+          ],
+          "headline": {
+            "text": "I built RPC APIs to provide controlled access to a local warehouse database.",
+            "evidenceIds": [
+              "source-07"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-07",
+                "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I used Quartz to build APIs for that local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built ETL pipelines that ingested typed and handwritten warehouse documents.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built QSL automations, including flagging clients who had not called to book appointments.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-04",
+          "question": "Describe a challenge you faced.",
+          "variants": [
+            "Describe a difficult problem."
+          ],
+          "headline": {
+            "text": "I migrated in-house systems with the other engineer while day-to-day operations continued without interruption.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "We implemented integrations, data migration workflows, automation, validation, and operational tooling.",
+              "evidenceIds": [
+                "source-14"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-14",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The in-house systems stayed in service until the new platform was fully set up.",
+              "evidenceIds": [
+                "source-05"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-05",
+                  "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I migrated all of the systems' historical data over about 4 months.",
+            "evidenceIds": [
+              "source-14"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-14",
+                "quote": "Near the end of my time there, migrated the cooperative's in-house inventory/repair-planning and equipment check-in/check-out systems, with all of their historical data, to an all-in-one third-party IT service and asset management platform. Done with the other engineer over about 4 months, implementing the integrations, data migration workflows, automation, validation, and operational tooling the transition required. The in-house systems stayed in service until the new platform was fully set up for all operators, so day-to-day operations continued without interruption. The cooperative made the move to eliminate the ongoing cost of maintaining these systems in-house."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-05",
+          "question": "How do you collaborate with others?",
+          "variants": [
+            "Describe your approach to teamwork."
+          ],
+          "headline": {
+            "text": "I improved an inherited in-house inventory system together with the other engineer.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Together, we added role-restricted access for the system's internal operators.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The system was later retired in favor of a third-party platform.",
+              "evidenceIds": [
+                "source-12"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-12",
+                  "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The other engineer and I used Preact and ScriptType for the improvements.",
+            "evidenceIds": [
+              "source-12"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-12",
+                "quote": "Maintained and improved the in-house inventory system I inherited (not originally built by me), including adding role-restricted access for internal operators. Improvements made together with the other engineer. Tech used: Preact, ScriptType. (The system was later retired in favor of a third-party platform.)"
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-06",
+          "question": "Walk me through a decision.",
+          "variants": [
+            "Describe a tradeoff you considered."
+          ],
+          "headline": {
+            "text": "I supported the evaluation of the third-party inventory platform before full-scale adoption.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I helped with the evaluation, including opportunity cost and cost analysis.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I contributed to product evaluation, requesting quotes before full-scale adoption.",
+              "evidenceIds": [
+                "source-03"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-03",
+                  "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I helped with the evaluation of Orion Ledger for internal documentation.",
+            "evidenceIds": [
+              "source-03"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-03",
+                "quote": "Evaluated third-party products before full-scale adoption: requesting quotes, evaluating the product (seeing past the marketing to uncover its downsides and tradeoffs), assessing opportunity cost, and analyzing cost (including recommending budget-fitting strategies, such as buying licenses only for active users on a rotating basis rather than for all operators), then presenting the final analysis to management. Evaluated Orion Ledger (formerly LedgerNote) as an interactive front end for internal documentation; supported the evaluation of the third-party inventory platform."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-07",
+          "question": "Tell me about something you learned.",
+          "variants": [
+            "How has your experience shaped your approach?"
+          ],
+          "headline": {
+            "text": "I developed a practical sense of AI-assisted and traditional development's strengths and limitations.",
+            "evidenceIds": [
+              "source-04"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-04",
+                "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I adopted AI-assisted and agentic coding tools when the cooperative allowed them.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I kept traditional development where it fit better in day-to-day development.",
+              "evidenceIds": [
+                "source-04"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-04",
+                  "quote": "Adopted AI-assisted and agentic coding tools in day-to-day development as soon as the cooperative allowed them, while keeping traditional development where it fit better, which built a practical sense of each approach's strengths, limitations, and tradeoffs."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "In my volunteer prototypes, larger workers handle architecture, integration, and final review.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-08",
+          "question": "How do you prioritize your work?",
+          "variants": [
+            "How do you decide what to work on first?"
+          ],
+          "headline": {
+            "text": "I delegate volunteer prototype work across workers by cost and task fit.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "Larger workers handle architecture, integration, and final review in my group-funded volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "Smaller workers take bounded implementation tasks in my volunteer prototypes.",
+              "evidenceIds": [
+                "source-30"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-30",
+                  "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I use MTP where tools need it in my group-funded volunteer prototypes.",
+            "evidenceIds": [
+              "source-30"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-30",
+                "quote": "In volunteer prototypes (group-funded), I use MTP where tools need it and delegate work across workers by cost: larger workers handle architecture, integration, and final review, while smaller workers take bounded implementation tasks. Using the most capable workers for simple tasks costs more without improving quality, so matching each task to the cheapest worker that does it well keeps quality high while controlling spend."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-09",
+          "question": "How do you understand customer needs?",
+          "variants": [
+            "How do you approach discovery?"
+          ],
+          "headline": {
+            "text": "I built separate Plotly dashboards for supervisors and management to analyze aggregate client data.",
+            "evidenceIds": [
+              "source-18"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-18",
+                "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The warehouse pipelines loaded the extracted ICR data into a local database.",
+              "evidenceIds": [
+                "source-06"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-06",
+                  "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "I built RPC APIs to provide controlled access to the local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I built QSL automations, including flagging clients who had not called to book appointments.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-10",
+          "question": "Tell me about a result from your work.",
+          "variants": [
+            "What outcome can you describe?"
+          ],
+          "headline": {
+            "text": "I implemented and tested the team's chosen algorithm, which shipped in the ferry planning app.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The team had already chosen the algorithm before I joined.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The modified B* algorithm accounts for Globe's curvature in ferry route optimization.",
+              "evidenceIds": [
+                "source-10"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-10",
+                  "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "I implemented the team's chosen algorithm in Quartz.",
+            "evidenceIds": [
+              "source-10"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-10",
+                "quote": "Implemented a modified B* algorithm that accounts for the curvature of the Globe for ferry route optimization; it shipped in the company's ferry planning app. (The team had already chosen the algorithm before I joined; my work was implementing it correctly and testing it.) Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-11",
+          "question": "Tell me about improving a process.",
+          "variants": [
+            "Describe a process improvement."
+          ],
+          "headline": {
+            "text": "I built QSL automations, including flagging clients who had not called for appointments.",
+            "evidenceIds": [
+              "source-08"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-08",
+                "quote": "Built QSL automations to keep supervisors informed about their clients (e.g., flagging clients who had not called to book the appointments required for their approved support sessions)."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "I built separate Plotly dashboards for supervisors and for management.",
+              "evidenceIds": [
+                "source-09"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-09",
+                  "quote": "Built Plotly dashboards for analyzing aggregate client data, with separate dashboards for supervisors and for management."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "My RPC APIs provided controlled access to the local warehouse database.",
+              "evidenceIds": [
+                "source-07"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-07",
+                  "quote": "Built RPC APIs for the local warehouse database to provide controlled access. Tech used: Quartz."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The ETL pipelines ran typed and handwritten scanned warehouse documents through ICR.",
+            "evidenceIds": [
+              "source-06"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-06",
+                "quote": "Built ETL pipelines that ingested scanned warehouse documents (typed and handwritten), ran them through ICR, and loaded the extracted data into a local database. Tech used: Quartz."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        },
+        {
+          "id": "replay-006-12",
+          "question": "What would you like us to know about your experience?",
+          "variants": [
+            "Is there another example you would like to discuss?"
+          ],
+          "headline": {
+            "text": "I maintained cron jobs that sync the CWA's daily data releases through its APIs.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "bullets": [
+            {
+              "stage": "point",
+              "text": "The jobs sync those releases into our local database.",
+              "evidenceIds": [
+                "source-20"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-20",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            },
+            {
+              "stage": "point",
+              "text": "The CWA releases include DOCKs so routing could steer around active warnings.",
+              "evidenceIds": [
+                "source-11"
+              ],
+              "quotes": [
+                {
+                  "evidenceId": "source-11",
+                  "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+                }
+              ]
+            }
+          ],
+          "example": {
+            "text": "The cron jobs I maintained included syncing Notices to Dock Missions.",
+            "evidenceIds": [
+              "source-20"
+            ],
+            "quotes": [
+              {
+                "evidenceId": "source-20",
+                "quote": "Maintained cron jobs that sync the CWA's daily data releases through its APIs into our local database, including DOCKs (Notices to Dock Missions) so routing could steer around active warnings."
+              }
+            ]
+          },
+          "consistency": {
+            "consistentWithResume": false,
+            "resumeQuote": ""
+          },
+          "thinEvidence": true
+        }
+      ]
+    }
+  ]
+}

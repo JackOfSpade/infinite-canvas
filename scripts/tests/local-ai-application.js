@@ -5,7 +5,7 @@ import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus,   queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, failedOrphanRetireDecision, LOCAL_AI_FAILED_ORPHAN_RETIRE_MS, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
 import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertAuthorityStateGraphForTests, __authorityReviewConvergenceValidationForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, __holdWriteVerifyRenderForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
-import { __recordWriteVerifyRoundDiagnosticsForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, PASTE_APPLICATION_STAGES, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
+import { __recordWriteVerifyRoundDiagnosticsForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, __setApplicationV2PagePngForTests, __setApplicationV2RendererVersionForTests, PASTE_APPLICATION_STAGES, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
 import { buildPasteRejectionTraceMarkdown } from '../../electron/ipc/bugReport/pasteRejectionTraceRollup.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
@@ -590,11 +590,25 @@ export default [
         // shortlist split, then read candidate-2's first write prompt.
         assert(!converged.handoff.prompt.includes(WRITE_VERIFY_DROPPED_FINDINGS_HEADING),
           'an undropped flow carries no dropped-draft observations');
+        const reuseArgs = { jobId: queued.id, canvasFilePath: project.canvasFilePath };
+        const reusedWrite = await getLocalApplicationHandoff({ ...reuseArgs, reuseHandoff: converged.handoff });
+        nodeAssert.strictEqual(reusedWrite.handoff, converged.handoff,
+          'a current submitted v2 handoff survives authoritative disk hydration without rebuilding');
+        const forgedWrite = await getLocalApplicationHandoff({ ...reuseArgs, reuseHandoff: structuredClone(converged.handoff) });
+        nodeAssert.notStrictEqual(forgedWrite.handoff, converged.handoff);
+        nodeAssert.equal(forgedWrite.handoff.prompt, converged.handoff.prompt, 'a cloned handoff rebuilds from verified host sources');
         const logTypesBefore = new Set((await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line).type));
         let writeRound = converged;
         for (let round = 0; round <= WRITE_VERIFY_MAX_CORRECTIONS; round += 1) {
+          const priorHandoff = writeRound.handoff;
           writeRound = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath, handoffCode: writeRound.handoff.handoffCode,
             response: 'RÉSUMÉ\nA draft without the working shortlist.\n\nCOVER LETTER\nA letter without the working shortlist.' });
+          if (round === 0) {
+            const stale = await getLocalApplicationHandoff({ ...reuseArgs, reuseHandoff: priorHandoff });
+            nodeAssert.notStrictEqual(stale.handoff, priorHandoff, 'a genuine handoff from an older revision cannot be reused');
+            nodeAssert.equal(stale.handoff.revision, writeRound.localJob.revision);
+            nodeAssert.equal(stale.handoff.handoffCode, writeRound.handoff.handoffCode);
+          }
           assert(!writeRound.accepted && writeRound.handoff?.stage === 'write' && writeRound.validationErrors?.length,
             `write round ${round} is rejected and re-prompts a write (${JSON.stringify(writeRound.validationErrors || [])})`);
           if (round < WRITE_VERIFY_MAX_CORRECTIONS) assert(!writeRound.handoff.prompt.includes(WRITE_VERIFY_DROPPED_FINDINGS_HEADING),
@@ -624,6 +638,70 @@ export default [
   },
 
 
+  {
+    name: 'v2 pick getter reuses current rendered handoffs and rebuilds after renderer changes or unknown fingerprints',
+    run: async () => {
+      const project = await createCanvasProject(); let renders = 0; let images = 0; let rendererVersion = 'synthetic-renderer-1';
+      __setLocalAiRenderPdfForTests(async () => { renders += 1; return { bytes: Buffer.from('synthetic-pdf'), pageCount: 1, fontsLoaded: true, layout: null }; });
+      __setApplicationV2PagePngForTests(async () => { images += 1; return 'synthetic-png'; });
+      __setApplicationV2RendererVersionForTests(() => rendererVersion);
+      try {
+        const queued = await queueDiscardFixture(project);
+        const args = { jobId: queued.id, canvasFilePath: project.canvasFilePath };
+        const reply = (handoff, fields) => JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage,
+          handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields });
+        const contextOf = handoff => JSON.parse(handoff.prompt.slice(handoff.prompt.lastIndexOf('\n\nAuthoritative context:\n') + '\n\nAuthoritative context:\n'.length));
+        let current = (await getLocalApplicationHandoff(args)).handoff; let context = contextOf(current);
+        const evidence = [{ id: 'p1-e1', quote: context.requirementsProgress.sourceCoverage.units.find(unit => unit.text.includes('reliable system delivery')).text,
+          requirement: 'Reliable system delivery', priority: 'high' }];
+        const requirements = [{ id: 'p1-r1', text: 'Reliable system delivery', priority: 'high', evidenceIds: ['p1-e1'] }];
+        let accepted = await submitLocalApplicationHandoff({ ...args, handoffCode: current.handoffCode,
+          response: reply(current, { storeDigest: context.authorityStore.digest, complete: true, identity: context.trustedIdentity,
+            evidence, requirements, ...listingCoverageFields(context, evidence, requirements) }) });
+        nodeAssert.equal(accepted.accepted, true); current = accepted.handoff;
+        while (current.stage === 'requirements-audit') {
+          context = contextOf(current);
+          accepted = await submitLocalApplicationHandoff({ ...args, handoffCode: current.handoffCode,
+            response: reply(current, listingSemanticAuditFields(context, evidence, requirements)) });
+          nodeAssert.equal(accepted.accepted, true); current = accepted.handoff;
+        }
+        nodeAssert.equal(current.stage, 'write');
+        const evidenceId = current.prompt.match(/\[(host\.career\.achievement\.achievement-service\.[^\]]+)\]/u)?.[1];
+        nodeAssert.ok(evidenceId);
+        const manifestPath = path.join(queued.folder, 'manifest.json');
+        const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
+        manifest.paste.stage = 'pick';
+        const candidate = manifest.paste.writeVerify.candidates[0]; candidate.status = 'accepted';
+        candidate.structured = { resume: { schemaVersion: STRUCTURED_RESUME_SCHEMA_VERSION,
+          identity: { name: 'Ada Lovelace', contact: ['ada@example.test'], subtitleRole: '', credential: '' },
+          roles: [{ id: 'role-acme', title: 'Engineer', company: 'Acme', dates: '', location: '',
+            bullets: [{ id: 'bullet-1', text: 'Built reliable services.', evidenceIds: [evidenceId] }] }],
+          projects: [], skills: [], education: [], credentials: [] },
+        coverLetter: { paragraphs: [{ id: 'para-1', text: 'I built reliable services.', evidenceIds: [evidenceId] }] } };
+        await fs.promises.writeFile(manifestPath, JSON.stringify(manifest));
+        const pick = (await getLocalApplicationHandoff(args)).handoff;
+        nodeAssert.equal(pick.stage, 'pick'); nodeAssert.equal(renders, 2); nodeAssert.equal(images, 2);
+        nodeAssert.strictEqual((await getLocalApplicationHandoff({ ...args, reuseHandoff: pick })).handoff, pick);
+        nodeAssert.equal(renders, 2); nodeAssert.equal(images, 2, 'a current host pick returns the same verified PNGs without conversion');
+        rendererVersion = 'synthetic-renderer-2';
+        const changed = (await getLocalApplicationHandoff({ ...args, reuseHandoff: pick })).handoff;
+        nodeAssert.notStrictEqual(changed, pick); nodeAssert.equal(renders, 4); nodeAssert.equal(images, 4);
+        rendererVersion = null;
+        const unknown = (await getLocalApplicationHandoff({ ...args, reuseHandoff: changed })).handoff;
+        nodeAssert.notStrictEqual(unknown, changed);
+        nodeAssert.notStrictEqual((await getLocalApplicationHandoff({ ...args, reuseHandoff: unknown })).handoff, unknown,
+          'two unknown renderer versions never authorize image reuse');
+        nodeAssert.equal(renders, 8); nodeAssert.equal(images, 8);
+        __setApplicationV2RendererVersionForTests(() => { throw new Error('synthetic unavailable fingerprint'); });
+        const unavailable = (await getLocalApplicationHandoff({ ...args, reuseHandoff: unknown })).handoff;
+        nodeAssert.notStrictEqual(unavailable, unknown);
+        nodeAssert.equal(renders, 10); nodeAssert.equal(images, 10, 'fingerprint failure rebuilds through the normal host render path');
+      } finally {
+        __setApplicationV2RendererVersionForTests(null); __setApplicationV2PagePngForTests(null); __setLocalAiRenderPdfForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'v2 rejected fact-check and fact-recheck replies persist their correction and the re-read handoff prints it',
     run: async () => {
@@ -982,6 +1060,9 @@ export default [
             baseHashes: requirementsAccepted.handoff.baseHashes, ...listingSemanticAuditFields(auditContext, requirementEvidence, requirementRecords) }) });
         assert(requirementsAccepted.accepted && requirementsAccepted.handoff?.stage === 'write',
           'the independent semantic audit must converge before v2 writing');
+        nodeAssert.strictEqual((await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath,
+          reuseHandoff: requirementsAccepted.handoff })).handoff, requirementsAccepted.handoff,
+        'submitted writing handoff reuses only after the real frozen-source and authority-store checks');
         // A completed pointer clears the write-ahead intent only after the
         // manifest receipt has become observable. Page substitution remains a
         // hard fault on every restart-style load; it cannot be hidden by an
@@ -996,7 +1077,8 @@ export default [
         await fs.promises.unlink(authorityPagePath);
         await fs.promises.symlink(outsideAuthorityPage, authorityPagePath, process.platform === 'win32' ? 'file' : undefined);
         let pageSymlinkRejected = false;
-        try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath }); }
+        try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath,
+          reuseHandoff: requirementsAccepted.handoff }); }
         catch { pageSymlinkRejected = true; }
         await fs.promises.unlink(authorityPagePath);
         await fs.promises.writeFile(authorityPagePath, authorityPageRaw, { encoding: 'utf8', mode: 0o600 });
@@ -1007,7 +1089,8 @@ export default [
         await fs.promises.unlink(storeRootPath);
         await fs.promises.symlink(outsideAuthorityIndex, storeRootPath, process.platform === 'win32' ? 'file' : undefined);
         let indexSymlinkRejected = false;
-        try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath }); }
+        try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath,
+          reuseHandoff: requirementsAccepted.handoff }); }
         catch { indexSymlinkRejected = true; }
         await fs.promises.unlink(storeRootPath);
         await fs.promises.writeFile(storeRootPath, authorityIndexRaw, { encoding: 'utf8', mode: 0o600 });
@@ -1020,7 +1103,8 @@ export default [
         const inputPath = path.join(queued.folder, 'input.json');
         await fs.promises.writeFile(inputPath, JSON.stringify({ ...input, careerAuthority: { ...input.careerAuthority, snapshotDigest: '0'.repeat(64) } }), 'utf8');
         let catalogFault = null;
-        try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath }); } catch (error) { catalogFault = error; }
+        try { await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath,
+          reuseHandoff: requirementsAccepted.handoff }); } catch (error) { catalogFault = error; }
         assert(catalogFault?.code === LOCAL_AI_JOB_INTEGRITY_ERROR_CODE
           && /pinned career authority/i.test(catalogFault.message),
         `a substituted authority digest is an application job-integrity fault before any handoff prompt is issued (${catalogFault?.code || 'none'}: ${catalogFault?.message || 'no error'})`);

@@ -4,7 +4,7 @@ import { CONSTANTS } from './constants.js';
 import { buildContinueMessage, buildStarterMessage, buildWorkerStarterMessage } from './framing.js';
 import { sanitizeActivityItem } from './log.js';
 import { createUiRestartContext } from './restartContext.js';
-import { createObservedChatContext } from './observedChatContext.js';
+import { createObservedChatContext, registerBridgeLauncherAvailability } from './observedChatContext.js';
 import { recordBridgeChatCopyResult, recordBridgeLaunchDiagnostic, recordBridgeChatOpenDiagnostic } from './telemetry.js';
 import { createChatLauncher } from './chatLauncher.js';
 import { BRIDGE_ENABLED_ATTACHMENT_TASKS } from '../nonApiAi.js';
@@ -227,6 +227,7 @@ export function registerHandoffBridgeUi({
   const launchProgress = new Map();
   const launchAttempted = new Set();
   const launchInFlight = new Set();
+  const activeLaunchOwners = new Set();
   let workerDiagnosisTimer = null;
   const workerDiagnosis = new Map();
   const workerDiagnosisInFlight = new Set();
@@ -407,6 +408,14 @@ export function registerHandoffBridgeUi({
     return worker.quietReason === 'answer_silent'
       && ['safety_block', ...OBSERVED_CHAT_FAILURES].includes(reason);
   }
+  function automaticWorkerLaunch(worker, generation) {
+    const owner = workerOwner(generation, worker?.ordinal);
+    const restart = canAutomaticallyRestartWorker(worker, generation);
+    if (!['available', 'ready'].includes(worker?.state) && !restart) return null;
+    const attempt = `${owner}:${restart ? `restart-${worker.restarts}` : 'first'}`;
+    if (launchAttempted.has(attempt) || launchInFlight.has(owner) || launchRetryTimers.has(owner)) return null;
+    return { owner, restart, attempt };
+  }
   function clearRecoveredWorkerFailures(pool) {
     for (const worker of pool?.workers || []) {
       const owner = workerOwner(pool.generation, worker.ordinal);
@@ -427,7 +436,13 @@ export function registerHandoffBridgeUi({
     setLaunchProgress(owner, { stage: 'failed', reason });
     observedFailureEvidence.set(owner, { ...observed, reason });
   }
-  async function runWorkerLaunch({ generation, workerOrdinal, restart = false, failedLaunch = false } = {}) {
+  async function runWorkerLaunch(args = {}) {
+    const owner = workerOwner(args.generation, args.workerOrdinal);
+    activeLaunchOwners.add(owner);
+    try { return await runWorkerLaunchInternal(args); }
+    finally { activeLaunchOwners.delete(owner); }
+  }
+  async function runWorkerLaunchInternal({ generation, workerOrdinal, restart = false, failedLaunch = false } = {}) {
     const owner = workerOwner(generation, workerOrdinal);
     const snapshot = currentStatus();
     if (snapshot?.chat?.pool?.generation !== generation || snapshot.serving !== 'live' || autoLaunchPaused) return false;
@@ -741,17 +756,15 @@ export function registerHandoffBridgeUi({
     }
     if ((!enableChromeLauncher && !chatLauncher) || snapshot.autoLaunchChats !== true || snapshot.serving !== 'live') return;
     for (const worker of pool.workers || []) {
-      const owner = workerOwner(pool.generation, worker.ordinal);
       // No bridge call while an answer is being written is ambiguous. Closing
       // that chat every five minutes can prevent long compilations from ever
       // submitting. Preserve its capability and leave explicit replacement to
       // the user, unless this launch actually observed a terminal refusal.
-      const restart = canAutomaticallyRestartWorker(worker, pool.generation);
-      if (!['available', 'ready'].includes(worker.state) && !restart) continue;
-      const attempt = `${owner}:${restart ? `restart-${worker.restarts}` : 'first'}`;
       // A scheduled retry owns this worker until it fires: no immediate
       // relaunch through a different attempt key.
-      if (launchAttempted.has(attempt) || launchInFlight.has(owner) || launchRetryTimers.has(owner)) continue;
+      const nextLaunch = automaticWorkerLaunch(worker, pool.generation);
+      if (!nextLaunch) continue;
+      const { owner, restart, attempt } = nextLaunch;
       for (const prior of launchAttempted) if (prior.startsWith(`${owner}:`)) launchAttempted.delete(prior);
       launchAttempted.add(attempt);
       launchInFlight.add(owner);
@@ -820,6 +833,31 @@ export function registerHandoffBridgeUi({
   const currentStatus = () => {
     try { return controller.snapshot?.() || controller.status?.() || null; } catch { return null; }
   };
+  const releaseLauncherAvailability = registerBridgeLauncherAvailability(() => {
+    if (disposed) return { available: false, pending: false, inProgress: 0 };
+    const snapshot = currentStatus();
+    const pool = snapshot?.chat?.pool;
+    const owners = new Set(pool?.active === true && Number.isSafeInteger(pool.generation)
+      ? (pool.workers || []).map(worker => workerOwner(pool.generation, worker.ordinal)) : []);
+    const inProgress = [...activeLaunchOwners].filter(owner => owners.has(owner)).length;
+    const queued = [...launchInFlight].some(owner => owners.has(owner))
+      || [...launchRetryTimers.keys()].some(owner => owners.has(owner));
+    const hasAutomaticAttempt = !pool?.active || queued || inProgress > 0
+      || pool.workers?.some(worker => automaticWorkerLaunch(worker, pool.generation) !== null);
+    // Idle auto-start and the restart hold are explicitly handled by
+    // maybeAutoStartPool; manual pauses and missing windows cannot launch.
+    const available = Boolean((enableChromeLauncher || chatLauncher) && snapshot?.autoLaunchChats === true
+      && !poolAutoStartStopped && !autoLaunchPaused
+      && hasAutomaticAttempt
+      && (!snapshot.hold || snapshot.hold === 'restart')
+      && (snapshot.serving === 'live'
+        || (!pool?.active && snapshot.serving === 'paused' && snapshot.pauseCause === 'idle')));
+    // A serialized queued start or a delayed retry remains pending for its
+    // entire wait. The presentation timeout belongs to the active attempt.
+    const pending = inProgress > 0 || poolAutoStartInFlight
+      || (available && (queued || poolAutoStartRetryTimer !== null));
+    return { available, pending, inProgress };
+  });
   // A describe/confirm round is deliberately asynchronous.  Re-check the
   // captured controller's closed status before and after each await so a
   // Disable cannot turn an already-open native dialog into a release against
@@ -1699,6 +1737,7 @@ export function registerHandoffBridgeUi({
   const dispose = ({ removePartialInvokes = false } = {}) => {
     if (disposed) return;
     disposed = true;
+    releaseLauncherAvailability();
     for (const timer of chromePermissionRetryTimers.values()) try { timers.clearTimeout?.(timer); } catch { /* optional */ }
     chromePermissionRetryTimers.clear();
     workerDiagnosis.clear();

@@ -43,7 +43,8 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   // The shared scheduler owns the single capacity value; constants re-exports
   // it as bridge policy without acquiring capabilities.
   'constants.js': { allow: ['../../../src/utils/handoffScheduler.js'] },
-  'bridgeAvailability.js': { allow: [] },
+  // Availability reads main-owned worker/launcher counts without new I/O.
+  'bridgeAvailability.js': { allow: ['./constants.js', './observedChatContext.js', '../../../src/utils/handoffScheduler.js'] },
   'contracts.js': { allow: [] },
   'respond.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
   'wire.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },

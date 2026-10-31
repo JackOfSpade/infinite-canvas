@@ -42,6 +42,96 @@ function sameDescriptor(first, second) {
 
 export default [
   {
+    name: 'handoff bridge: render: dock replay survives transient failure and remains idempotent across minimize and canvas changes',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-dock-replay-'));
+      const entry = path.join(directory, 'DockReplayProbe.jsx');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { NonApiAiDialog } from ${JSON.stringify(path.resolve('src/components/NonApiAiDialog.jsx'))};\nexport { __resetHandoffBridgeStoreForTests } from ${JSON.stringify(path.resolve('src/utils/handoffBridgeStore.js'))};\nexport function DockReplayProbe({ screen, mount = 0 }) { return <><div key={screen} data-canvas-screen={screen} /><NonApiAiDialog key={mount} /></>; }\n`);
+      const controller = new AbortController(); let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 20000);
+        await withDom(async window => withConsoleCollector(async entries => {
+          const priorCustomEvent = Object.getOwnPropertyDescriptor(globalThis, 'CustomEvent');
+          Object.defineProperty(globalThis, 'CustomEvent', { configurable: true, writable: true, value: window.CustomEvent });
+          const requests = Array.from({ length: 5 }, (_unused, index) => ({
+            requestId: `dock-replay-${index}`, handoffCode: `HANDOFF-ABCDEF`,
+            task: 'official-posting-judge-comparative', nodeId: 'refresh-board', runId: 'refresh-run',
+            prompt: `DISPLAY_ONLY_COMPARISON_${index}`, mcpEligible: true, attachments: [],
+            batch: index + 1, batchTotal: 5,
+          }));
+          let onRequest; let onSettled; let replayCount = 0; let subscriptions = 0; let cancelled = 0; let releaseReplay;
+          window.electronAPI = {
+            handoffBridgeGetStatus: async () => ({ status: status(1) }), onHandoffBridgeStatus: () => () => {},
+            handoffBridgeGetActivity: async () => ({ items: [] }), handoffBridgePublishJobs: () => undefined,
+            onNonApiAiRequest(listener) { subscriptions += 1; onRequest = listener; return () => { onRequest = null; }; },
+            onNonApiAiSettled(listener) { onSettled = listener; return () => { onSettled = null; }; },
+            cancelNonApiAiRequest() { cancelled += 1; },
+            replayPendingNonApiAiRequests() {
+              replayCount += 1;
+              assert(typeof onRequest === 'function' && typeof onSettled === 'function', 'replay subscribes before delivery');
+              if (replayCount === 1) return Promise.reject(new Error('Synthetic transient renderer delivery failure'));
+              // A replay can contain the same request more than once without
+              // multiplying its dock item or changing its transport.
+              for (const request of requests) { onRequest(request); onRequest(request); }
+              return new Promise(resolve => { releaseReplay = () => resolve({ count: requests.length }); });
+            },
+          };
+          bundle.module.__resetHandoffBridgeStoreForTests();
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          const render = (screen, mount = 0) => rootNode.render(bundle.module.React.createElement(bundle.module.DockReplayProbe, { screen, mount }));
+          const settle = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); };
+          try {
+            await bundle.module.act(async () => { render('Jobs'); await settle(); });
+            assert(replayCount === 1 && subscriptions === 1 && !window.document.querySelector('[data-handoff-dock]'), 'failed initial presentation leaves live listeners available');
+            Object.defineProperty(window.document, 'visibilityState', { configurable: true, value: 'hidden' });
+            await bundle.module.act(async () => { window.document.dispatchEvent(new window.Event('visibilitychange')); await settle(); });
+            assert(replayCount === 1, 'hiding the renderer does not invoke a replay');
+            Object.defineProperty(window.document, 'visibilityState', { configurable: true, value: 'visible' });
+            await bundle.module.act(async () => {
+              window.document.dispatchEvent(new window.Event('visibilitychange'));
+              window.dispatchEvent(new window.Event('focus'));
+              window.dispatchEvent(new window.Event('pageshow'));
+              await settle();
+            });
+            assert(replayCount === 2 && window.document.querySelector('[data-handoff-dock]'), 'returning to the renderer retries one presentation pass');
+            await bundle.module.act(async () => { window.dispatchEvent(new window.Event('focus')); await settle(); });
+            assert(replayCount === 2, 'an in-flight replay also coalesces later focus events');
+            await bundle.module.act(async () => { releaseReplay(); await settle(); });
+            const minimize = () => window.document.querySelector('button[aria-label="Minimize pending AI handoffs"]');
+            await bundle.module.act(async () => minimize().click());
+            assert(window.document.querySelector('[data-handoff-dock="collapsed"]')
+              && window.document.body.textContent.includes('5 handoffs released now'), 'minimize changes only dock presentation and duplicate deliveries retain five handoffs');
+            for (const screen of ['Sell', 'Stats', 'Jobs', 'nested-canvas', 'Jobs']) {
+              await bundle.module.act(async () => { render(screen); await settle(); });
+              assert(replayCount === 2 && subscriptions === 1 && cancelled === 0, `${screen}: replacing canvas content neither replays nor cancels handoffs`);
+              assert(window.document.body.textContent.includes('5 handoffs released now'), `${screen}: all pending comparisons stay visible in the compact dock`);
+            }
+            await bundle.module.act(async () => window.document.querySelector('button[aria-expanded="false"]').click());
+            assert(minimize() && replayCount === 2 && subscriptions === 1, 'expanding retains the same listener and five-item queue');
+            await bundle.module.act(async () => { render('Jobs', 1); await settle(); });
+            assert(replayCount === 3 && subscriptions === 2 && cancelled === 0, 'a real dock remount replays pending comparisons without cancellation');
+            await bundle.module.act(async () => minimize().click());
+            assert(window.document.body.textContent.includes('5 handoffs released now'), 'a remounted dock still de-duplicates the replay into five comparisons');
+            await bundle.module.act(async () => { releaseReplay(); await settle(); });
+            await bundle.module.act(async () => {
+              for (const request of requests) onSettled({ requestId: request.requestId, accepted: true });
+              await settle();
+            });
+            assert(!window.document.querySelector('[data-handoff-dock]') && cancelled === 0, 'worker settlements finish all five display-only comparisons');
+            await bundle.module.act(async () => rootNode.unmount());
+            window.dispatchEvent(new window.Event('focus'));
+            window.dispatchEvent(new window.Event('pageshow'));
+            assert(replayCount === 3 && onRequest === null && onSettled === null, 'unmount removes recovery and handoff listeners');
+          } finally {
+            await bundle.module.act(async () => rootNode.unmount());
+            if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;
+          }
+          assert(entries.length === 0, `dock lifecycle render emitted console output: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
+        }));
+      } finally { controller.abort(); await bundle?.dispose(); await fsPromises.rm(directory, { recursive: true, force: true }); __resetHandoffBridgeStoreForTests(); }
+    },
+  },
+  {
     name: 'handoff bridge: render: a queued handoff in a healthy automatic pool needs no attention while blocked states remain actionable',
     run() {
       const bridge = { enabled: true, serving: 'live', linked: true, tunnelReachable: true, autoLaunchChats: true };
@@ -2180,6 +2270,19 @@ export default [
             await bundle.module.act(async () => { onRequest(request({ requestId: 'manual-push-request', handoffCode: 'HANDOFF-BCDEFG', prompt: 'MANUAL_PUSH_PROMPT', mcpEligible: false, bridgeClaimId: null, initialResponse: '{"saved":true}' })); await Promise.resolve(); await Promise.resolve(); });
             assert(window.document.querySelector('#non-api-ai-prompt') && window.document.querySelector('#non-api-ai-response'), 'an explicit manual/legacy push route retains its local prompt and response fields');
             assert(window.document.body.textContent.includes('MANUAL_PUSH_PROMPT') && window.document.body.textContent.includes('HANDOFF-BCDEFG'), 'the manual/legacy route keeps the data needed to recover it locally');
+            await bundle.module.act(async () => {
+              onRequest(request({ requestId: 'second-manual-request', handoffCode: 'HANDOFF-CDEFGH', prompt: 'SECOND_MANUAL_PROMPT',
+                mcpEligible: false, bridgeClaimId: null, initialResponse: '{"second":true}' }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            await bundle.module.act(async () => {
+              onRequest(request({ requestId: 'manual-push-request', handoffCode: 'HANDOFF-BCDEFG', prompt: 'MANUAL_PUSH_PROMPT',
+                mcpEligible: false, bridgeClaimId: null, initialResponse: '{"saved":true}' }));
+              await Promise.resolve(); await Promise.resolve();
+            });
+            assert(window.document.querySelector('#non-api-ai-prompt')?.value === 'SECOND_MANUAL_PROMPT'
+              && window.document.querySelector('#non-api-ai-response')?.value === '{"second":true}',
+            'duplicate replay of an existing saved draft preserves the current selection and response');
           } finally {
             await bundle.module.act(async () => rootNode.unmount());
             if (priorCustomEvent) Object.defineProperty(globalThis, 'CustomEvent', priorCustomEvent); else delete globalThis.CustomEvent;

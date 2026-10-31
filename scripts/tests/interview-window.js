@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import vm from 'node:vm';
 import { assert } from './testHelpers.js';
 import { buildInterviewPlan } from '../../src/utils/interviewHelper.js';
 import { createInterviewWindowController, isTrustedInterviewNavigation } from '../../electron/interviewWindow.js';
@@ -124,7 +125,7 @@ function makeController({ authorized = true, additionalOwners = [], loadBundle =
   const briefRecordId = interviewPreparedBriefRecordId(storedBrief);
   const controller = createInterviewWindowController({ BrowserWindow: FakeWindow, ipcMain: { handle() {} }, registerIpc: false,
     isAuthorizedOwner: value => authorized && authorizedOwners.has(value),
-    loadSnapshot, loadBundle,
+    loadSnapshot, loadBundle, loadAnswerBank: async () => null,
     loadPreparedBrief: loadPreparedBrief || (async args => args.briefRecordId === briefRecordId && stableJson(args.brief) === stableJson(storedBrief) ? storedBrief : null),
     devServerUrl: 'http://localhost:5173/', preloadPath: '/narrow-preload.cjs' });
   const question = 'How did you improve onboarding conversion?';
@@ -133,6 +134,112 @@ function makeController({ authorized = true, additionalOwners = [], loadBundle =
 }
 
 export default [
+  {
+    name: 'interview window: explicit follow-up is sender-bound, bounded and confined to the selected example',
+    async run() {
+      const { owner, controller, args } = makeController();
+      await controller.launch({ sender: owner.webContents }, args);
+      const session = [...controller.sessions.values()][0];
+      const event = { sender: session.child.webContents };
+      const before = controller.getBrief(event);
+      const first = await controller.followUpQuestion(event, 'What did you learn?');
+      assert(JSON.stringify(first.plan.steps) === JSON.stringify(before.plan.steps), 'follow-up must preserve every literal cue and attribution');
+      assert(first.plan.missingComponents.includes('lesson') && first.plan.question.endsWith('What did you learn?'), 'missing lesson must be disclosed, with follow-up visible');
+      const second = await controller.followUpQuestion(event, 'What trade-offs did you make?');
+      assert(JSON.stringify(second.plan.steps) === JSON.stringify(before.plan.steps) && second.plan.missingComponents.includes('decision'), 'consecutive follow-ups must not drift to a new story');
+      assert(controller.getBrief(event).plan.question === second.plan.question, 'renderer reload must retain the main-owned follow-up');
+      for (const question of ['Could you expand on the impact in that same situation?', 'How did you improve onboarding conversion?']) {
+        const continued = await controller.followUpQuestion(event, question);
+        assert(continued.question === question && JSON.stringify(continued.plan.steps) === JSON.stringify(before.plan.steps), 'explicit follow-up wording must retain the selected evidence without a lexical veto');
+      }
+      const lastQuestion = controller.getBrief(event).plan.question;
+      for (const question of ['x'.repeat(2001), '']) {
+        const rejected = await controller.followUpQuestion(event, question).then(() => false, () => true);
+        assert(rejected && controller.getBrief(event).plan.question === lastQuestion, 'invalid follow-up must retain the previous usable answer');
+      }
+      assert(await controller.followUpQuestion({ sender: owner.webContents }, 'What did you learn?').then(() => false, () => true), 'canvas cannot impersonate restricted child');
+      controller.nextQuestion(event);
+      const ignored = await controller.followUpQuestion(event, 'What did you learn?');
+      assert(ignored.ignored === true && ignored.reason === 'no-selected-story' && ignored.message, 'Next question must clear the follow-up anchor and explain the unavailable continuation');
+      session.child.close();
+    },
+  },
+  {
+    name: 'interview window: follow-up rechecks snapshot and retains answer on changed or unreadable evidence',
+    async run() {
+      let mode = 'valid';
+      const { owner, controller, args } = makeController({ loadSnapshot: async () => {
+        if (mode === 'failure') throw new Error('private-path-must-not-leak');
+        const value = profile();
+        if (mode === 'changed') value.profile.achievements[0].claim = 'Changed evidence';
+        return value;
+      } });
+      await controller.launch({ sender: owner.webContents }, args);
+      const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
+      const before = JSON.stringify(controller.getBrief(event));
+      for (mode of ['failure', 'changed']) {
+        const error = await controller.followUpQuestion(event, 'What did you learn?').then(() => null, error => error);
+        assert(error?.message === 'Interview Window snapshot is unavailable.', 'full original anchor must be reverified with safe fixed error');
+        assert(JSON.stringify(controller.getBrief(event)) === before, 'failed grounding recheck must not replace usable evidence');
+      }
+      session.child.close();
+    },
+  },
+  {
+    name: 'interview window: Next, newer follow-up and closure fence pending continuation reads',
+    async run() {
+      let initial = true; const pending = [];
+      const { owner, controller, args } = makeController({ loadSnapshot: () => initial ? Promise.resolve(profile()) : new Promise(resolve => pending.push(resolve)) });
+      await controller.launch({ sender: owner.webContents }, args); initial = false;
+      const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
+      const older = controller.followUpQuestion(event, 'What did you learn?');
+      const newer = controller.followUpQuestion(event, 'What was the result?');
+      pending[1](profile()); await newer;
+      pending[0](profile()); await older;
+      assert(controller.getBrief(event).plan.question.endsWith('What was the result?'), 'late older follow-up must not replace newer continuation');
+      const late = controller.followUpQuestion(event, 'What did you learn?');
+      controller.nextQuestion(event); pending[2](profile()); await late;
+      assert(controller.getBrief(event).plan === null, 'Next must fence a pending continuation');
+      initial = true; await controller.submitQuestion(event, 'How did you improve onboarding conversion?'); initial = false;
+      const closing = controller.followUpQuestion(event, 'What did you learn?');
+      session.child.close(); pending[3](profile()); await closing;
+      assert(controller.sessionCount() === 0, 'late continuation must not resurrect a closed child');
+    },
+  },
+  {
+    name: 'interview window: a pending parent brief cannot retarget the current follow-up example',
+    async run() {
+      const updatedSnapshot = 'b'.repeat(64); const original = brief();
+      const updated = signBrief({ ...structuredClone(original), inputs: { ...original.inputs, careerSnapshotId: updatedSnapshot } });
+      const loaded = [];
+      const { owner, controller, args } = makeController({ storedBrief: original, loadPreparedBrief: memoryPreparedBriefs(original, updated), loadSnapshot: async ({ snapshotId }) => {
+        loaded.push(snapshotId); return { ...profile(), snapshotId };
+      } });
+      await controller.launch({ sender: owner.webContents }, args);
+      const session = [...controller.sessions.values()][0]; const event = { sender: session.child.webContents };
+      await controller.launch({ sender: owner.webContents }, { ...args, snapshotId: updatedSnapshot, brief: updated, briefRecordId: interviewPreparedBriefRecordId(updated), plan: null });
+      await controller.followUpQuestion(event, 'What did you learn?');
+      assert(loaded.at(-1) === SNAPSHOT && session.anchorPlan.snapshotId === SNAPSHOT, 'follow-up must keep the active pin despite a pending parent replacement');
+      controller.nextQuestion(event);
+      assert(session.snapshotId === updatedSnapshot && session.anchorPlan === null, 'explicit Next must adopt the replacement and clear the story anchor');
+      await controller.submitQuestion(event, 'How did you improve onboarding conversion?');
+      assert(session.anchorPlan.snapshotId === updatedSnapshot, 'new topic must use the newly adopted verified snapshot');
+      session.child.close();
+    },
+  },
+  {
+    name: 'interview window: narrow follow-up preload forwards only bounded question text',
+    async run() {
+      let api; const calls = [];
+      vm.runInNewContext(fs.readFileSync(new URL('../../electron/interviewWindowPreload.js', import.meta.url), 'utf8'), {
+        require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: (...args) => { calls.push(args); return Promise.resolve(true); } } }),
+      });
+      await api.followUpQuestion('What did you learn?');
+      assert(calls.length === 1 && calls[0][0] === 'interview-window:follow-up-question' && calls[0][1] === 'What did you learn?', 'follow-up must use its exact restricted route');
+      for (const invalid of [{ path: 'private' }, 'x'.repeat(2001)]) assert(await api.followUpQuestion(invalid).then(() => false, () => true), 'unbounded or object follow-up payload must be rejected before IPC');
+      assert(calls.length === 1 && !Object.hasOwn(api, 'electronAPI'), 'invalid calls cannot cross narrow preload boundary');
+    },
+  },
   {
     name: 'interview window: narrow preload exposes only sender-bound next-question route',
     run() {
@@ -358,9 +465,10 @@ export default [
       const updated = { ...structuredClone(args), brief: updatedBrief, briefRecordId: interviewPreparedBriefRecordId(updatedBrief) };
       const result = await controller.launch({ sender: owner.webContents }, updated);
       assert(result.reused && controller.sessionCount() === 1 && child.focused, 'later launch should focus the existing child');
+      assert(child.webContents.sent.filter(item => item.channel === 'interview-window:brief-updated').length === 0, 'a parent relaunch must retain the supported child rail');
       await controller.submitQuestion({ sender: owner.webContents }, 'How did you improve onboarding conversion?').then(() => { throw new Error('owner submit unexpectedly accepted'); }, () => undefined);
       const locked = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
-      assert(locked.plan.status === 'supported' && child.webContents.sent.filter(item => item.channel === 'interview-window:brief-updated').length === 0, 'a supported launch rail must ignore further submissions and parent updates until Next question');
+      assert(locked.plan.status === 'supported' && child.webContents.sent.filter(item => item.channel === 'interview-window:brief-updated').length === 1, 'an explicit child submission must replace the supported launch rail in one complete update');
       assert(await controller.nextQuestion({ sender: owner.webContents }) === null, 'owner sender must not clear the child session');
       const cleared = await controller.nextQuestion({ sender: child.webContents });
       assert(cleared.plan === null && controller.getBrief({ sender: child.webContents }).plan === null, 'authenticated Next question must clear the main-owned plan for reload/getBrief');
@@ -571,8 +679,11 @@ export default [
       pending[1](profile()); await late;
       pending[0](profile()); await early;
       assert(controller.getBrief({ sender: child.webContents }).plan.question === 'Tell me about improving onboarding conversion', 'older delayed submit must not overwrite the latest question result');
-      const lockedResult = await controller.submitQuestion({ sender: child.webContents }, question);
-      assert(lockedResult.plan.question === 'Tell me about improving onboarding conversion' && pending.length === 2, 'double submit after a supported result must be ignored without another snapshot read');
+      const replacement = controller.submitQuestion({ sender: child.webContents }, question);
+      assert(pending.length === 3, 'an explicit new submission must be honoured even when an answer is locked');
+      pending[2](profile());
+      const replaced = await replacement;
+      assert(replaced.question === question && replaced.plan.status === 'supported', 'explicit replacement must resolve with the requested answer');
     },
   },
   {
@@ -819,7 +930,8 @@ export default [
       await controller.launch({ sender: owner.webContents }, { ...structuredClone(args), plan: null, snapshotId: SNAPSHOT_B, brief: updatedBrief, briefRecordId: interviewPreparedBriefRecordId(updatedBrief) });
       pending[0]();
       const outcome = await early;
-      assert(!outcome.error && outcome.display.plan === null, `a superseded question must resolve to the current display, got ${outcome.error?.message}`);
+      assert(!outcome.error && outcome.display.ignored === true && outcome.display.reason === 'superseded' && outcome.display.message,
+        `a superseded question must return an explicit ignored result, got ${outcome.error?.message}`);
       // A genuine loader failure that is NOT superseded still surfaces.
       let failReads = false;
       const failing = makeController({ loadSnapshot: async () => { if (failReads) throw new Error('/Users/private/path: EACCES'); return profile(); } });

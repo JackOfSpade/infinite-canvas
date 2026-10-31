@@ -294,6 +294,7 @@ function reanalysisRestorePatch(data) {
     // if the new evaluation is cancelled or fails, restore the prior plan
     // along with the prior cards rather than leaving a new brief paired with
     // old assessments.
+    activeTargetRole: data?.activeTargetRole,
     activeJobPreferences: data?.activeJobPreferences,
     jobPreferencePlan: data?.jobPreferencePlan,
     jobPreferencesInterpretation: data?.jobPreferencesInterpretation,
@@ -377,14 +378,16 @@ function reanalysisInputFingerprint(data) {
 // A legacy `targetRole` (unmigrated canvas, no AI-plan concept — the
 // standalone Target role box that used to feed
 // search-jobs/search-jobs-single-source/resolve-job-source/resume-job-source
-// directly, see JobSourceCardNode.jsx) still wins outright, reproducing the
-// old single-role search exactly.
+// directly, see JobSourceCardNode.jsx) is a fallback only when no structured
+// plan titles exist. Old canvases can retain a joined targetRole alongside a
+// valid plan; the structured array is authoritative and is never comma-split.
 function deriveSearchTitles(targetRole, preferencePlan) {
-  const role = String(targetRole || '').trim();
-  if (role) return [role];
-  return Array.isArray(preferencePlan?.titles)
+  const titles = Array.isArray(preferencePlan?.titles)
     ? preferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
     : [];
+  if (titles.length) return titles;
+  const role = String(targetRole || '').trim();
+  return role ? [role] : [];
 }
 
 // FIX 2 (defence-in-depth): `resolvedRoles.length > 0` used to be the lock-
@@ -5294,7 +5297,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
 
       // Step 2: Query construction
-      const activeTargetRole = String(laneTurnData.targetRole || '').trim();
+      const legacyTargetRole = String(laneTurnData.targetRole || '').trim();
       // Freeze the raw preference text and the AI's interpretation for this
       // run. A user may edit the textarea while scraping; that edit applies to
       // their next run, never halfway through this one. (In practice a locked
@@ -5361,9 +5364,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           },
         };
       }
-      // See deriveSearchTitles above: a legacy target role (unmigrated
-      // canvas only) wins outright; otherwise this is the locked plan's
-      // AI-determined `titles`, unconditionally — there is no separate gate
+      // See deriveSearchTitles above: the locked plan's structured titles
+      // supersede a stale legacy target role. There is no separate gate
       // list anymore, so this one derivation feeds both the search queries
       // and (via `pinnedTitles` below) display. `activeSearchTitles` is also
       // what's persisted as `data.pinnedTitles` — JobBoardNode's moduleLabel
@@ -5372,6 +5374,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // activeTargetRole/activeJobPreferences and persisted so every later
       // reader of this run (the USAJobs background refresh, a paused-source
       // Solve/Resume) sees the same list this run started with.
+      const activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation).length ? '' : legacyTargetRole;
       const activeSearchTitles = deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation);
       let rolePlanCommitAccepted = false;
       updateGlobal(currentId, (node) => {
@@ -5395,6 +5398,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         resumeFingerprint,
         jobPreferences: activeJobPreferences,
         preferredLocation: activePreferredLocation,
+        titles: activeSearchTitles,
       });
       const canReuseQueries = !!(
         profile &&
@@ -11998,7 +12002,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }),
         remoteResidences: normalizeRemoteResidences(runData.remoteResidences),
       };
-      const activeTargetRole = (runData.targetRole || '').trim();
+      let activeTargetRole = (runData.targetRole || '').trim();
       const activeJobPreferences = String(runData.jobPreferences || '').trim();
       admittedReanalysisCareerSnapshotId = normalizedJobCareerSnapshotId(runData.careerSnapshotId);
       const reanalysisSnapshotStillCurrent = () => careerSnapshotBindingMatches(
@@ -12096,11 +12100,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       } else if (activeJobPreferences) {
         throw new Error('Search Brief role generation is unavailable. Restart the app and try again.');
       }
+      activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation).length ? '' : activeTargetRole;
       let reanalysisRolePlanCommitAccepted = false;
       updateGlobal(currentId, (node) => {
         if (cancelled() || !canCommitAnalysisOperation(reanalysisOperation) || !careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, admittedReanalysisCareerSnapshotId)) return null;
         reanalysisRolePlanCommitAccepted = true;
         return {
+          activeTargetRole,
           activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           jobPreferencesInterpretation,

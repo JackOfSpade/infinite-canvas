@@ -1,6 +1,8 @@
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import electronPkg from 'electron';
+import { ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 import { callLLMRaw } from './llm.js';
 import { createOfficialPostingStore, officialPostingView, officialPostingRecordMatchesScrapedIdentity, officialPostingAliases } from './officialPostingStore.js';
@@ -18,17 +20,18 @@ import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse, buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse,
   buildSemanticOfficialPostingMatchRequest, validateSemanticOfficialPostingMatchResponse,
   buildSemanticOfficialPostingShortlistRequest, validateSemanticOfficialPostingShortlistResponse } from './officialPostingBridge.js';
-import { hasLiveObservedWorker, hasPendingObservedWorkerLaunch } from './handoffBridge/observedChatContext.js';
-import { getHandoffBridgeStatus } from './handoffBridge/index.js';
-import { bridgeComparisonAvailable } from './handoffBridge/bridgeAvailability.js';
-import { CONSTANTS } from './handoffBridge/constants.js';
+import { hasLiveObservedWorker } from './handoffBridge/observedChatContext.js';
+import { getHandoffBridgeStatus, subscribeHandoffBridgeStatus } from './handoffBridge/index.js';
+import { bridgeComparisonAvailable, bridgeWorkerPoolActive, bridgeHandoffCapacity, bridgeHandoffAvailability } from './handoffBridge/bridgeAvailability.js';
 import { buildListingLivenessRequest, validateListingLivenessResponse } from './listingLivenessAi.js';
 import { snapshotOfficialPostingLeads } from './officialPostingSnapshot.js';
 import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS } from './officialPostingJudge.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from './officialPostingNegativePolicy.js';
+import { officialPostingHandoffFailureCause, officialPostingHandoffFailureCode, recordOfficialPostingDiscovery } from './officialPostingDiscoveryDiagnostics.js';
 
 export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
 export const OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS = 15_000;
+export const OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS = 20 * 60 * 1_000;
 const VERIFIED_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
 const stores = new Map();
@@ -60,42 +63,78 @@ export async function getOfficialPostingView(job, { store, fetch = fetchOfficial
 
 function bridgeError(code) { const error = new Error(code); error.code = code; return error; }
 function failureCode(error, signal) {
-  if (signal?.aborted && signal.reason?.code === 'bridge-timeout') return 'bridge-timeout';
-  if (signal?.aborted) return 'bridge-aborted';
-  if (error?.code === 'bridge-timeout') return 'bridge-timeout';
+  const classified = officialPostingHandoffFailureCode(error, signal);
+  if (signal?.aborted) return ['bridge-timeout', 'request-timeout'].includes(classified) ? 'bridge-timeout' : 'bridge-aborted';
+  if (classified === 'request-timeout') return 'bridge-timeout';
+  if (['sender-destroyed', 'renderer-stopped', 'renderer-navigated', 'abort-error'].includes(classified)) return 'bridge-aborted';
+  if (['bridge-timeout', 'bridge-aborted', 'bridge-unavailable'].includes(classified)) return classified;
   if (error?.code === 'bridge-unavailable' || /bridge.*(?:unavailable|disabled|not linked)/iu.test(String(error?.message || ''))) return 'bridge-unavailable';
+  if (['worker-lost', 'worker-replaced', 'comparison-contaminated', 'fresh-context-required', 'requeue-exhausted', 'renderer-unavailable']
+    .includes(classified)) return 'bridge-unavailable';
   return 'research-miss';
 }
 
+function comparativeFailureCode(error, signal) {
+  const code = officialPostingHandoffFailureCode(error, signal);
+  if (['comparative-unavailable', 'comparative-invalid'].includes(code)) return code;
+  const failure = failureCode(error, signal);
+  // An unexpected transport/programming error is not evidence of an invalid AI answer.
+  return failure === 'research-miss' ? 'failed' : failure;
+}
+
 export async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, nodeId, hints, now, stats,
-  comparativeWorkerAvailable = null, comparativeWorkerLaunching = null, comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS }) {
+  timeoutStartsOnAssignment = call === callLLMRaw,
+  bridgeStatus = getHandoffBridgeStatus,
+  workerAvailable = call === callLLMRaw ? () => bridgeHandoffAvailability(bridgeStatus()).liveWorkers > 0 : null,
+  workerLaunching = call === callLLMRaw ? () => bridgeHandoffAvailability(bridgeStatus()).launchPending : null,
+  workerAutoLaunchAvailable = call === callLLMRaw ? () => bridgeHandoffAvailability(bridgeStatus()).autoLaunchAvailable : null,
+  comparativeWorkerAvailable = null, comparativeWorkerLaunching = null, comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
+  availabilityGraceMs = comparativeGraceMs, unassignedTimeoutMs = OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS }) {
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason || bridgeError('bridge-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), timeoutMs);
-  timer.unref?.();
+  let timer = null; let assignmentTimer = null; let finished = false; let assigned = false;
+  const startTimeout = () => {
+    if (finished || controller.signal.aborted || timer !== null) return;
+    assigned = true;
+    clearTimeout(assignmentTimer); assignmentTimer = null;
+    timer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), timeoutMs);
+    timer.unref?.();
+  };
+  // Queue/launch waiting has its own generous ceiling. Only assignment starts
+  // the response budget, even after serialized launches or another module's turn.
+  if (timeoutStartsOnAssignment) {
+    assignmentTimer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), unassignedTimeoutMs);
+    assignmentTimer.unref?.();
+  } else {
+    timer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), timeoutMs);
+    timer.unref?.();
+  }
+  const legacyComparison = typeof comparativeWorkerAvailable === 'function';
+  const available = legacyComparison ? comparativeWorkerAvailable : workerAvailable;
+  const launching = legacyComparison ? comparativeWorkerLaunching : workerLaunching;
   let unavailableSince = null;
-  let launchWaitingSince = null;
   const checkWorkers = () => {
-    let available = false;
-    try { available = comparativeWorkerAvailable() === true; } catch { /* no proof of a live worker */ }
-    const stamp = now();
-    if (available) { unavailableSince = null; launchWaitingSince = null; }
-    else {
-      let launching = false;
-      try { launching = comparativeWorkerLaunching?.() === true; } catch { /* no proof of a pending launch */ }
-      if (launching) launchWaitingSince ??= stamp;
-      else launchWaitingSince = null;
-      if (launching && stamp - launchWaitingSince < CONSTANTS.CHAT_LAUNCH_PRESENTATION_TIMEOUT_MS) {
+    if (finished || assigned || controller.signal.aborted) return;
+    try {
+      // Pending includes queued serialized launches and retry delays, without
+      // imposing a second presentation timeout on the launcher's own lifecycle.
+      if (available() === true || launching?.() === true || workerAutoLaunchAvailable?.() === true) {
         unavailableSince = null;
         return;
       }
+      const stamp = now();
       unavailableSince ??= stamp;
-      if (stamp - unavailableSince >= comparativeGraceMs) controller.abort(bridgeError('comparative-unavailable'));
+      if (stamp - unavailableSince >= availabilityGraceMs) {
+        controller.abort(bridgeError(legacyComparison ? 'comparative-unavailable' : 'bridge-unavailable'));
+      }
+    } catch {
+      // Missing evidence is not proof that the bridge cannot serve the request.
+      unavailableSince = null;
     }
   };
-  const availabilityTimer = typeof comparativeWorkerAvailable === 'function'
-    ? setInterval(checkWorkers, Math.max(1, Math.min(250, comparativeGraceMs))) : null;
+  const availabilityTimer = typeof available === 'function'
+    ? setInterval(checkWorkers, Math.max(1, Math.min(250, availabilityGraceMs))) : null;
   availabilityTimer?.unref?.();
   if (availabilityTimer) checkWorkers();
   let rejectAbort;
@@ -107,9 +146,12 @@ export async function cappedHandoff(request, { call, signal, timeoutMs, manualAi
     if (controller.signal.aborted) throw controller.signal.reason;
     const { prompt, ...options } = request;
     return await Promise.race([Promise.resolve().then(() => call(prompt, { ...options,
+      ...(timeoutStartsOnAssignment ? { manualHandoff: { ...options.manualHandoff, onAssigned: startTimeout } } : {}),
       signal: controller.signal, manualAiRunId, nodeId, hints: { ...options.hints, ...hints } })), cancelled]);
   } finally {
-    clearTimeout(timer); clearInterval(availabilityTimer); signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', rejectAbort);
+    finished = true;
+    clearTimeout(timer); clearTimeout(assignmentTimer); clearInterval(availabilityTimer);
+    signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', rejectAbort);
     const elapsed = Math.max(0, now() - start);
     stats.handoffMs += elapsed;
   }
@@ -325,8 +367,8 @@ export async function resolveOfficialPostingsByCrawl(jobs, {
   priorOfficialRecords = [],
   timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
   bridgeStatus = getHandoffBridgeStatus,
-  comparativeWorkerAvailable = callMatch === callLLMRaw ? () => bridgeComparisonAvailable(bridgeStatus(), hasLiveObservedWorker) : null,
-  comparativeWorkerLaunching = callMatch === callLLMRaw ? hasPendingObservedWorkerLaunch : null,
+  comparativeWorkerAvailable = null,
+  comparativeWorkerLaunching = null,
   comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
 } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
@@ -365,7 +407,7 @@ export async function resolveOfficialPostingsByCrawl(jobs, {
         try {
           const raw = await cappedHandoff({ ...request, ...correction }, { call: callMatch,
             signal: semanticMatching ? signal : member.rowBudget.signal, timeoutMs, manualAiRunId, nodeId,
-            hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats,
+            hints: { itemCount: 1, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats, bridgeStatus,
             ...(comparative ? { comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs } : {}) });
           return validate(raw);
         } catch (error) {
@@ -376,9 +418,7 @@ export async function resolveOfficialPostingsByCrawl(jobs, {
             continue;
           }
           const decisionSignal = semanticMatching ? signal : member.rowBudget.signal;
-          const code = ['comparative-unavailable', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE'].includes(error?.code) ? 'comparative-unavailable'
-            : error?.code === 'OFFICIAL_POSTING_COMPARATIVE_INVALID' || Array.isArray(error?.correctionDetails) ? 'comparative-invalid' : failureCode(error, decisionSignal);
-          const failure = bridgeError(code === 'research-miss' ? 'comparative-invalid' : code);
+          const failure = bridgeError(comparativeFailureCode(error, decisionSignal));
           if (['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'comparative-unavailable'].includes(failure.code)) matchFailure = failure;
           throw failure;
         }
@@ -465,7 +505,7 @@ export async function resolveOfficialPostingsByCrawl(jobs, {
       try {
         const request = buildOfficialPostingResearchRequest(chunk.map(member => member.job));
         const raw = await cappedHandoff(request, { call: callRaw, signal, timeoutMs, manualAiRunId, nodeId,
-          hints: { itemCount: chunk.length, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats });
+          hints: { itemCount: chunk.length, batch: batch + 1, batchTotal: chunks.length }, now: clock, stats, bridgeStatus });
         leads = new Map(parseOfficialPostingResearchResponse(raw, chunk.map(member => member.id)).map(row => [row.id, row.candidates]));
       } catch (error) {
         for (const member of pending) {
@@ -575,6 +615,9 @@ async function recordJudgment(store, entry) {
   if (!store?.rootDir) return;
   try {
     const fs = await import('node:fs/promises');
+    // A forced first refresh can skip cache reads, which normally prepare the
+    // store. Keep its earliest failures diagnosable before any result is saved.
+    await ensureDirectoryWithinRoot(path.dirname(store.rootDir), store.rootDir, { label: 'Official posting store' });
     const file = path.join(store.rootDir, 'judgments.jsonl');
     const size = await fs.stat(file).then(stat => stat.size, () => 0);
     if (size > JUDGMENT_LOG_BYTES) await fs.rename(file, `${file}.1`);
@@ -588,9 +631,11 @@ export async function resolveOfficialPostingsByChat(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
   store, now = Date.now, snapshotFetch = fetchOfficialPosting, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
   priorOfficialRecords = [], timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
+  timeoutStartsOnAssignment,
   bridgeStatus = getHandoffBridgeStatus,
-  comparativeWorkerAvailable = callMatch === callLLMRaw ? () => bridgeComparisonAvailable(bridgeStatus(), hasLiveObservedWorker) : null,
-  comparativeWorkerLaunching = callMatch === callLLMRaw ? hasPendingObservedWorkerLaunch : null,
+  bridgeSubscribe = subscribeHandoffBridgeStatus,
+  comparativeWorkerAvailable = null,
+  comparativeWorkerLaunching = null,
   comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
 } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
@@ -598,6 +643,8 @@ export async function resolveOfficialPostingsByChat(jobs, {
   const clock = () => typeof now === 'function' ? Number(now()) : Number(now);
   const stats = telemetryBlock();
   const results = new Map(); const finished = new Set(); const found = new Map();
+  const discovery = new Map(members.map(member => [member, { finderCalls: 0, judgeRounds: 0, judgeCalls: 0,
+    comparisonRuns: 0, snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, failureCodes: [] }]));
   for (const member of members) {
     const index = rows.indexOf(member.job);
     member.priorOfficialRecord = priorOfficialRecords[index] || null;
@@ -606,7 +653,21 @@ export async function resolveOfficialPostingsByChat(jobs, {
   }
   try { store ||= getOfficialPostingStore(); } catch { store = null; }
   const progress = () => { try { onProgress?.({ completed: finished.size, total: rows.length }); } catch { /* Progress cannot fail the search. */ } };
-  const settle = (member, result) => { results.set(member, result); finished.add(member); progress(); };
+  const settle = (member, result) => {
+    results.set(member, result); finished.add(member);
+    // Cached rows do not describe a new attempt. Chat discovery bypasses the
+    // crawl resolver's diagnostic recorder, so record its own final counts.
+    if (!result?.officialPosting?.trail?.some(code => ['cache-hit', 'recent-miss'].includes(code))) {
+      const counts = discovery.get(member);
+      recordOfficialPostingDiscovery(member.job, { candidateCount: judgeLeadsFor(member, found.get(member) || []).total,
+        outcome: result?.officialPosting?.outcome,
+        settled: shouldPersistOfficialPostingResult(result, { signal, researchRan: true }),
+        comparisonRuns: counts.comparisonRuns, chatStats: counts,
+        failureCodes: counts.failureCodes,
+        resolutionReasons: result?.officialPosting?.trail });
+    }
+    progress();
+  };
   const unresolved = (member, trail) => unresolvedOfficialPosting(member.job, { outcome: 'ambiguous', trail });
   const persist = async (member, result) => {
     if (!store || result.record || result.officialPosting?.trail?.includes('recent-miss')
@@ -621,9 +682,64 @@ export async function resolveOfficialPostingsByChat(jobs, {
         comparison: result.comparison };
     }
   };
-  const handoff = (request, hints, comparative) => cappedHandoff(request, { call: comparative ? callMatch : callRaw, signal, timeoutMs,
-    manualAiRunId, nodeId, hints, now: clock, stats,
-    ...(comparative ? { comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs } : {}) });
+  // Expose one extra request for demand-driven expansion while keeping the
+  // admitted queue proportional to live workers and launches actually running.
+  const handoffQueue = [];
+  let activeHandoffs = 0; let activeComparisons = 0; let discoveryPending = true; let draining = false;
+  const handoffCapacity = () => {
+    try {
+      return bridgeHandoffCapacity(bridgeStatus());
+    } catch { /* no trusted pool capacity */ }
+    return 1;
+  };
+  const drainHandoffs = () => {
+    if (draining) return;
+    draining = true;
+    try {
+      const capacity = handoffCapacity();
+      while (activeHandoffs < capacity && handoffQueue.length) {
+        // Reserve a worker throughout both discovery rounds, including gaps
+        // between batches. Early judgments may use only the spare capacity.
+        let index = handoffQueue.findIndex(item => !item.comparative);
+        if (index < 0) {
+          if (discoveryPending && activeComparisons >= capacity - 1) break;
+          index = 0;
+        }
+        const item = handoffQueue.splice(index, 1)[0];
+        item.cleanup(); activeHandoffs += 1;
+        if (item.comparative) activeComparisons += 1;
+        void item.dispatch(item.request, { call: item.comparative ? callMatch : callRaw, signal, timeoutMs,
+          manualAiRunId, nodeId, hints: item.hints, now: clock, stats, timeoutStartsOnAssignment, bridgeStatus,
+          ...((timeoutStartsOnAssignment ?? (item.comparative ? callMatch : callRaw) === callLLMRaw) ? {
+            workerAvailable: () => bridgeHandoffAvailability(bridgeStatus()).liveWorkers > 0,
+            workerLaunching: () => bridgeHandoffAvailability(bridgeStatus()).launchPending,
+            workerAutoLaunchAvailable: () => bridgeHandoffAvailability(bridgeStatus()).autoLaunchAvailable,
+          } : {}),
+          ...(item.comparative ? { comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs } : {}) })
+          .then(item.resolve, item.reject).finally(() => {
+            activeHandoffs -= 1;
+            if (item.comparative) activeComparisons -= 1;
+            drainHandoffs();
+          });
+      }
+    } finally { draining = false; }
+  };
+  const handoff = (request, hints, comparative) => new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(signal.reason || bridgeError('bridge-aborted')); return; }
+    // Bridge publications execute under the publisher's async context, which
+    // can have no IPC owner or belong to another canvas/run. Preserve the
+    // enqueueing invoke's sender and durable run identity per handoff.
+    const item = { request, hints, comparative, resolve, reject, dispatch: AsyncLocalStorage.bind(cappedHandoff) };
+    const onAbort = () => {
+      const index = handoffQueue.indexOf(item);
+      if (index >= 0) handoffQueue.splice(index, 1);
+      item.cleanup(); reject(signal.reason || bridgeError('bridge-aborted'));
+    };
+    item.cleanup = () => signal?.removeEventListener('abort', onAbort);
+    signal?.addEventListener('abort', onAbort, { once: true });
+    handoffQueue.push(item);
+    drainHandoffs();
+  });
   // Finders: grounded research batches. A row the first finder could not place gets one more independent search.
   const findLeads = async (group, round) => {
     // Cards with the same scraped identity share one research slot and its answer.
@@ -637,34 +753,51 @@ export async function resolveOfficialPostingsByChat(jobs, {
         continue;
       }
       try {
+        for (const member of chunkMembers) discovery.get(member).finderCalls += 1;
         const raw = await handoff(buildOfficialPostingResearchRequest(chunk.map(({ job }) => job)),
           { itemCount: chunk.length, batch: batch + 1, batchTotal: chunks.length, ...(round > 1 ? { attemptKind: 'second-search' } : {}) }, false);
         for (const row of parseOfficialPostingResearchResponse(raw, chunk.map(({ id }) => id))) {
           for (const member of byId.get(row.id) || []) found.set(member, [...(found.get(member) || []), ...row.candidates]);
         }
+        for (const member of chunkMembers) if (judgeLeadsFor(member, found.get(member) || []).total) queueJudgment(member);
       } catch (error) {
         // A failed second search keeps whatever the first one found.
         const code = failureCode(error, signal);
-        for (const member of chunkMembers) if (round === 1 || code !== 'research-miss') settle(member, unresolved(member, [code]));
+        for (const member of chunkMembers) {
+          discovery.get(member).failureCodes.push(officialPostingHandoffFailureCode(error, signal), officialPostingHandoffFailureCause(error));
+          if (round === 1 || code !== 'research-miss') settle(member, unresolved(member, [code]));
+        }
       }
     }
   };
-  // One isolated A/B pair. Returns the two validated answers, or the unresolved row when a judgment fails.
+  // Each judge keeps its own transport identity and correction state. Only
+  // trusted observed capacity enables overlap; a single chat stays sequential.
   const judgePair = async (member, leads, round, snapshots) => {
-    const answers = {}; const valid = { A: false, B: false };
-    for (const run of ['A', 'B']) {
+    const counts = discovery.get(member);
+    counts.judgeRounds += 1;
+    const runJudge = async run => {
       const request = buildOfficialPostingJudgeRequest({ job: member.job, leads, run, round, snapshots });
       const attempts = callMatch === callLLMRaw ? 1 : 2;
-      let correction = {}; let failure = null;
+      let correction = {}; let failure = null; let failureClass = null; let failureCause = null; let answer;
+      // Comparative judgments select MCP even if availability prevents their
+      // admission. The registry reports the actual restored/adopted route if
+      // reached, including why a legacy manual state blocked admission.
+      let route = 'mcp'; let manualRoutingReason = null;
+      const onRoute = value => {
+        route = value.route;
+        manualRoutingReason = value.manualRoutingReason;
+      };
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (!bridgeAvailable) { failure = 'bridge-unavailable'; break; }
+        if (!bridgeAvailable) { failure = 'bridge-unavailable'; failureClass = failure; counts.failureCodes.push(failureClass); break; }
         try {
-          answers[run] = validateOfficialPostingJudgeResponse(await handoff({ ...request, ...correction },
+          counts.judgeCalls += 1;
+          answer = validateOfficialPostingJudgeResponse(await handoff({ ...request, ...correction,
+            manualHandoff: { ...request.manualHandoff, onRoute } },
             { itemCount: 1, optionCount: leads.length, comparisonRun: run }, true), { job: member.job, leads });
-          valid[run] = true; failure = null;
-          const answer = answers[run];
+          counts.comparisonRuns += 1;
+          failure = null;
           await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
-            company: String(member.job?.company || '').slice(0, 120), round, run, leads: leads.map(lead => lead.url),
+            company: String(member.job?.company || '').slice(0, 120), round, run, route, manualRoutingReason, leads: leads.map(lead => lead.url),
             choice: answer.choice, status: answer.status, statusQuote: answer.statusQuote, employerLinked: answer.employerLinked,
             employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, descriptionChars: answer.description.length,
             conflicts: answer.conflicts });
@@ -675,30 +808,47 @@ export async function resolveOfficialPostingsByChat(jobs, {
             correction = { correctionDetails: [...error.correctionDetails], correctionRuleIds: [...(error.correctionRuleIds || [])], correctionAttempt: 1 };
             continue;
           }
-          failure = ['comparative-unavailable', 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE'].includes(error?.code) ? 'comparative-unavailable'
-            : error?.code === 'OFFICIAL_POSTING_COMPARATIVE_INVALID' || Array.isArray(error?.correctionDetails) ? 'comparative-invalid'
-              : failureCode(error, signal);
-          if (failure === 'research-miss') failure = 'comparative-invalid';
+          failureClass = officialPostingHandoffFailureCode(error, signal);
+          failureCause = officialPostingHandoffFailureCause(error);
+          counts.failureCodes.push(failureClass, failureCause);
+          failure = comparativeFailureCode(error, signal);
         }
       }
-      if (failure) {
-        await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
-          company: String(member.job?.company || '').slice(0, 120), round, run, leads: leads.map(lead => lead.url), failure });
-        return { answers, failed: { ...unresolved(member, ['bridge-research', ...officialPostingComparativeTrail({ validA: valid.A, validB: valid.B,
-          choiceA: answers.A?.choice, choiceB: answers.B?.choice }), signal?.aborted ? abortTrail(signal) : failure]),
-        comparison: { optionCount: leads.length, validA: valid.A, validB: valid.B, invalidRuns: Number(!valid.A) + Number(!valid.B),
-          unavailable: failure === 'comparative-unavailable' } } };
-      }
-    }
+      if (failure) await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
+        company: String(member.job?.company || '').slice(0, 120), round, run, route, manualRoutingReason, leads: leads.map(lead => lead.url), failure: failureClass,
+        ...(failureCause ? { failureCause } : {}) });
+      return { run, answer, failure };
+    };
+    let parallel = false;
+    try {
+      const status = bridgeStatus();
+      parallel = bridgeWorkerPoolActive(status) && bridgeComparisonAvailable(status, () => hasLiveObservedWorker(2));
+    } catch { /* no trusted evidence of two live observed workers */ }
+    // The handoff absence timer deliberately still uses the one-live-worker
+    // predicate above. A busy worker is live while its sibling waits in queue.
+    const runs = parallel ? await Promise.all(['A', 'B'].map(runJudge)) : [await runJudge('A')];
+    if (!parallel && !runs[0].failure) runs.push(await runJudge('B'));
+    // Assemble in A/B order, independent of response completion order. A's
+    // failure takes precedence when both independent runs fail.
+    const answers = {}; const valid = { A: false, B: false };
+    for (const result of runs) if (!result.failure) { answers[result.run] = result.answer; valid[result.run] = true; }
+    const failure = runs.find(result => result.failure)?.failure;
+    if (failure) return { answers, failed: { ...unresolved(member, ['bridge-research', ...officialPostingComparativeTrail({ validA: valid.A, validB: valid.B,
+      choiceA: answers.A?.choice, choiceB: answers.B?.choice }), signal?.aborted ? abortTrail(signal) : failure]),
+    comparison: { optionCount: leads.length, validA: valid.A, validB: valid.B, invalidRuns: Number(!valid.A) + Number(!valid.B),
+      unavailable: failure === 'comparative-unavailable' } } };
     return { answers };
   };
   const judge = async member => {
     const { leads, total } = judgeLeadsFor(member, found.get(member) || []);
     if (!leads.length) return unresolved(member, ['bridge-research', 'research-miss']);
     // One download of every lead, shared by both rounds: the judges' browser cannot run JavaScript.
-    const snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotFetch, signal });
-    const textComplete = !snapshots.some(snapshot => snapshot.descriptionTruncated || snapshot.pageTextTruncated);
-    const decide = answers => decideOfficialPostingJudgments(member.job, { leads, totalLeads: total, textComplete, answerA: answers.A, answerB: answers.B, now: clock,
+    const snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, signal });
+    const counts = discovery.get(member);
+    counts.snapshotReads = snapshots.filter(snapshot => snapshot.read === true).length;
+    counts.snapshotFailures = snapshots.filter(snapshot => snapshot.read !== true).length;
+    counts.truncatedSnapshots = snapshots.filter(snapshot => snapshot.descriptionTruncated || snapshot.pageTextTruncated).length;
+    const decide = answers => decideOfficialPostingJudgments(member.job, { leads, totalLeads: total, snapshots, answerA: answers.A, answerB: answers.B, now: clock,
       fallback: unresolvedOfficialPosting, comparativeTrail: officialPostingComparativeTrail,
       inputHash: officialPostingSemanticInputHash(member.job), extractRoute: url => extractAtsTenant(url),
       employerEqual: strictEmployerEqual, negativeProofTrail: OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL });
@@ -707,7 +857,7 @@ export async function resolveOfficialPostingsByChat(jobs, {
     const answers = Object.values(first.answers);
     const withCitations = result => {
       if (result.officialPosting?.outcome !== 'ambiguous') return result;
-      const alternatives = rankJudgeCitations({ leads, answers });
+      const alternatives = rankJudgeCitations({ leads, answers, sourceUrls: [member.job?.url, member.job?.applyUrl] });
       return alternatives.length ? { ...result, officialPosting: { ...result.officialPosting, alternatives } } : result;
     };
     const decided = decide(first.answers);
@@ -724,14 +874,9 @@ export async function resolveOfficialPostingsByChat(jobs, {
       ? second.failed : withCitations(decided);
     return withCitations(decide(second.answers));
   };
-  progress();
-  if (store) await parallelRows(members.filter(member => !member.bypassCache), async member => {
-    const cached = await cachedChatResolution(member.job, store);
-    if (cached) settle(member, cached);
-  });
-  await findLeads(members.filter(member => !finished.has(member)), 1);
-  await findLeads(members.filter(member => !finished.has(member) && !judgeLeadsFor(member, found.get(member) || []).total), 2);
-  await parallelRows(members.filter(member => !finished.has(member)), async member => {
+  const judgmentQueue = []; const judgmentTasks = []; const scheduledJudgments = new Set();
+  let activeJudgments = 0;
+  const runJudgment = async member => {
     let result;
     try { result = signal?.aborted ? unresolved(member, [abortTrail(signal)]) : await judge(member); }
     catch (error) {
@@ -740,28 +885,82 @@ export async function resolveOfficialPostingsByChat(jobs, {
       result = unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] });
     }
     settle(member, await persist(member, result));
-  });
-  for (const member of members) {
-    let result = results.get(member);
-    if (TEXT_LEVELS.has(result?.officialPosting?.level) && ['found', 'link-only'].includes(result.officialPosting.outcome)) {
-      let description = result.description;
-      if (!description && store && result.officialPosting.contentHash) try { description = await store.readText(result.officialPosting.contentHash); } catch { /* The view handles missing/corrupt text. */ }
-      if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
-        result = addTrail(result, 'material-jd-change'); stats.materialJdChange += 1;
-        if (store && result.record && shouldPersistOfficialPostingResult(result, { signal })) try {
-          const record = await store.save(member.job, { officialPosting: result.officialPosting, expectedRecord: result.record });
-          if (record) result = { ...result, record, officialPosting: record.officialPosting };
-        } catch { /* Telemetry and row retain the detected change. */ }
-        results.set(member, result);
-      }
+  };
+  const drainJudgments = () => {
+    while (activeJudgments < ROW_CONCURRENCY && judgmentQueue.length) {
+      const { member, resolve, reject } = judgmentQueue.shift();
+      activeJudgments += 1;
+      void runJudgment(member).then(resolve, reject).finally(() => {
+        activeJudgments -= 1;
+        drainJudgments();
+      });
     }
-    countPosting(stats, result?.officialPosting || unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] }).officialPosting, result?.comparison);
+  };
+  function queueJudgment(member) {
+    if (finished.has(member) || scheduledJudgments.has(member)) return;
+    scheduledJudgments.add(member);
+    const task = new Promise((resolve, reject) => judgmentQueue.push({ member, resolve, reject }));
+    // Discovery continues while rows work, so retain failures for the final
+    // join without creating an unhandled rejection in that interval.
+    void task.catch(() => {});
+    judgmentTasks.push(task);
+    drainJudgments();
   }
-  const byJob = new Map([...results].map(([member, result]) => [member.job, result]));
-  const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
-    officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
-  if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
-  return { jobs: resolved, telemetry: stats, expiryCandidates: rows.map(() => []) };
+  // One invocation shares successful/in-flight downloads across rows. Failure
+  // results never outlive their subscribers, and a later lookup starts fresh.
+  const snapshotSession = createOfficialPostingFetchSession({ fetch: snapshotFetch, signal, cacheFailures: false, hostBreaker: false });
+  const unsubscribeStatus = bridgeSubscribe(drainHandoffs);
+  // UI-owned launch/retry state can change without a controller publication.
+  // Poll as a fallback, including injected status providers used by replays.
+  const capacityTimer = setInterval(() => { if (handoffQueue.length) drainHandoffs(); }, 250);
+  capacityTimer.unref?.();
+  try {
+    progress();
+    if (store) await parallelRows(members.filter(member => !member.bypassCache), async member => {
+      const cached = await cachedChatResolution(member.job, store);
+      if (cached) settle(member, cached);
+    });
+    try {
+      await findLeads(members.filter(member => !finished.has(member)), 1);
+      await findLeads(members.filter(member => !finished.has(member) && !judgeLeadsFor(member, found.get(member) || []).total), 2);
+    } finally {
+      discoveryPending = false;
+      drainHandoffs();
+    }
+    // Rows with leads were queued as each finder batch returned. Zero-lead
+    // rows settle only after their bounded second discovery attempt.
+    for (const member of members) queueJudgment(member);
+    await Promise.all(judgmentTasks);
+    for (const member of members) {
+      let result = results.get(member);
+      if (TEXT_LEVELS.has(result?.officialPosting?.level) && ['found', 'link-only'].includes(result.officialPosting.outcome)) {
+        let description = result.description;
+        if (!description && store && result.officialPosting.contentHash) try { description = await store.readText(result.officialPosting.contentHash); } catch { /* The view handles missing/corrupt text. */ }
+        if (materiallyDifferent(member.job.snippet || member.job.description, description)) {
+          result = addTrail(result, 'material-jd-change'); stats.materialJdChange += 1;
+          if (store && result.record && shouldPersistOfficialPostingResult(result, { signal })) try {
+            const record = await store.save(member.job, { officialPosting: result.officialPosting, expectedRecord: result.record });
+            if (record) result = { ...result, record, officialPosting: record.officialPosting };
+          } catch { /* Telemetry and row retain the detected change. */ }
+          results.set(member, result);
+        }
+      }
+      countPosting(stats, result?.officialPosting || unresolvedOfficialPosting(member.job, { outcome: 'failed', trail: ['failed'] }).officialPosting, result?.comparison);
+    }
+    const fetchStats = snapshotSession.telemetry();
+    for (const key of FETCH_COUNTERS) stats[key] = count(fetchStats[key]);
+    stats.maxPerHostRate = count(fetchStats.maxPerHostRate);
+    const byJob = new Map([...results].map(([member, result]) => [member.job, result]));
+    const resolved = rows.map(job => { const result = byJob.get(job); return { ...job, postedBy: result?.postedBy,
+      officialPosting: normalizeOfficialPosting(result?.officialPosting) || undefined }; });
+    if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
+    return { jobs: resolved, telemetry: stats, expiryCandidates: rows.map(() => []) };
+  } finally {
+    clearInterval(capacityTimer);
+    unsubscribeStatus();
+    await Promise.allSettled(judgmentTasks);
+    snapshotSession.dispose();
+  }
 }
 
 function atsPostingKey(posting) {

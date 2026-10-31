@@ -818,9 +818,10 @@ export function createClaudeApplicationRunner({
     const { jobId, canvasFilePath, controller } = entry;
     const signal = controller.signal;
 
-    const read = async (matchTaskId) => {
+    const read = async (matchTaskId, reuseHandoff) => {
       try {
-        return await getHandoff(matchTaskId ? { jobId, canvasFilePath, matchTaskId } : { jobId, canvasFilePath });
+        return await getHandoff({ jobId, canvasFilePath, ...(matchTaskId ? { matchTaskId } : {}),
+          ...(reuseHandoff ? { reuseHandoff } : {}) });
       } catch (error) {
         if (isEnoent(error)) return { gone: true, handoff: null };
         throw applicationError(error);
@@ -834,15 +835,18 @@ export function createClaudeApplicationRunner({
         throw new ClaudeRunnerError('CLAUDE_TOO_MANY_RUNS', MESSAGES.tooMany(maxRunsPerJob));
       }
       const actionId = Symbol('provider action');
-      entry.actions.set(actionId, { stage, activity: 'waiting', progress: handoff?.progress || null, updatedAt: now() });
+      const queuedAt = now();
+      entry.actions.set(actionId, { stage, activity: 'waiting', progress: handoff?.progress || null, updatedAt: queuedAt });
       publishActiveAction(entry);
       const release = await semaphore.acquire(signal);
-      entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: now() });
+      const acquiredAt = now();
+      entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: acquiredAt });
       publishActiveAction(entry);
       const profile = claudeStageProfile(stage);
       const record = {
         version: 2, runId: crypto.randomUUID(), jobId, stage, ...(matchTaskId ? { matchTaskId } : {}),
         sessionId, resume,
+        queuedAt: new Date(queuedAt).toISOString(), queueWaitMs: Math.max(0, acquiredAt - queuedAt),
         requestedModel: profile.model, requestedEffort: profile.effort,
         handoffSha256: crypto.createHash('sha256').update(String(handoffCodeOf(handoff) ?? '')).digest('hex'),
         promptSha256: crypto.createHash('sha256').update(text).digest('hex'), promptChars: text.length,
@@ -887,7 +891,8 @@ export function createClaudeApplicationRunner({
           await summaryChain;
           // Keep returned text before submission, cancellation or transcript cleanup.
           await logRun(jobId, canvasFilePath, { ...record, event: 'response', model: result?.model ?? null,
-            durationMs: result?.durationMs ?? null, answer: result?.text ?? '', ...coverage('complete'), runsCompleted: entry.runs + 1 });
+            durationMs: result?.durationMs ?? null, wallMs: Math.max(0, now() - queuedAt),
+            answer: result?.text ?? '', ...coverage('complete'), runsCompleted: entry.runs + 1 });
           entry.runs += 1; runCounts.set(jobId, entry.runs); persist();
           return { result, record };
         } catch (error) {
@@ -900,6 +905,7 @@ export function createClaudeApplicationRunner({
             ? cause
             : new ClaudeRunnerError('CLAUDE_ERROR', clip(cause?.message || 'Claude run failed.') || 'Claude run failed.', cause?.code);
           await logRun(jobId, canvasFilePath, { ...record, event: 'failed', error: auditFailure(failure),
+            wallMs: Math.max(0, now() - queuedAt),
             ...(typeof failure.result === 'string' ? { result: failure.result } : {}), ...coverage('incomplete') });
           throw failure;
         }
@@ -1047,9 +1053,13 @@ export function createClaudeApplicationRunner({
       }
     };
 
+    let reuseHandoff = null;
     for (;;) {
       if (signal.aborted) return { stopped: true };
-      const current = await read();
+      // The host still checks the current revision and frozen inputs on every
+      // read. A submitted handoff is only a candidate for avoiding its rebuild.
+      const current = await read(undefined, reuseHandoff);
+      reuseHandoff = null;
       if (current?.gone === true) return { gone: true };
       if (current?.completed === true) return current.terminal === true ? { needsReview: true, stop: current.stop || null } : { done: true };
       const handoff = current?.handoff;
@@ -1062,6 +1072,7 @@ export function createClaudeApplicationRunner({
         if (held?.gone === true) return { gone: true };
         if (held?.terminal === true) return { needsReview: true, stop: held.stop || null };
         if (held?.accepted === true && held.completed === true) return { done: true };
+        reuseHandoff = held?.handoff || null;
         continue;
       }
       if (handoff.stage === HUMAN_STOP_STAGE) return { needsReview: true };
@@ -1076,6 +1087,7 @@ export function createClaudeApplicationRunner({
       if (submitted?.gone === true) return { gone: true };
       if (submitted?.terminal === true) return { needsReview: true, stop: submitted.stop || null };
       if (submitted?.accepted === true && submitted.completed === true) return { done: true };
+      reuseHandoff = submitted?.handoff || null;
     }
   }
 

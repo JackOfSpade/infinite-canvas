@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import tailwindcss from '@tailwindcss/vite'
 import { execFileSync } from 'node:child_process'
+import { applicationRendererSourceDigest } from './electron/ipc/applicationV2RendererVersion.js'
 
 // package.json stays at 0.0.0, so stamp the main bundle with the commit it was
 // built from; generation logs use it to tell builds apart.
@@ -47,6 +48,7 @@ export default defineConfig({
           define: {
             'import.meta': '{}',
             __APP_BUILD__: JSON.stringify(appBuild()),
+            __APPLICATION_RENDERER_SOURCE_SHA256__: JSON.stringify(applicationRendererSourceDigest()),
           },
           build: {
             // Main-process dependencies are intentionally bundled into a few

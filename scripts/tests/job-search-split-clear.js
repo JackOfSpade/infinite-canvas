@@ -209,6 +209,16 @@ export default [
         const start = search.indexOf(`const ${name} = useCallback(`) + `const ${name} = useCallback(`.length;
         return search.slice(start, search.indexOf('\n  }, [', start) + '\n  }'.length);
       };
+      const titleStart = search.indexOf('function deriveSearchTitles(targetRole, preferencePlan) {');
+      const titleEnd = search.indexOf('\n}', titleStart);
+      assert(titleStart >= 0 && titleEnd > titleStart, 'real search-title derivation must be available to the sliced callback');
+      const deriveSearchTitles = new Function(`${search.slice(titleStart, titleEnd + 2)}\nreturn deriveSearchTitles;`)();
+      const restoreStart = search.indexOf('function reanalysisRestorePatch(data) {');
+      const restoreEnd = search.indexOf('\n}', restoreStart);
+      assert(restoreStart >= 0 && restoreEnd > restoreStart, 'real reanalysis restore capture must be available to the sliced callback');
+      const reanalysisRestorePatch = new Function('normalizeCollectionScopeCaveats',
+        `${search.slice(restoreStart, restoreEnd + 2)}\nreturn reanalysisRestorePatch;`)(value => Array.isArray(value) ? value : []);
+      assert.strictEqual(reanalysisRestorePatch({}).activeTargetRole, undefined, 'missing legacy effective roles must stay absent on restore');
       for (const existingRunId of [null, 'original-scrape']) {
         for (const mode of ['filtered', 'scored', 'scoring-repair', 'scoring-repair-failed']) {
           const filtered = mode === 'filtered';
@@ -227,6 +237,10 @@ export default [
             }));
             hub.data.preferenceCandidatePool = [...JOBS, { title: 'Previously excluded job', url: 'https://jobs.example.test/excluded' }];
             hub.data.searchBriefPlan = { titles: ['Product Manager'] };
+          }
+          if (incompleteRepair) {
+            hub.data.targetRole = 'Legacy Synthetic Role';
+            hub.data.activeTargetRole = 'Legacy Synthetic Role';
           }
           let preferenceCalls = 0;
           const history = jobSearchNextAnchor(hub.data, hub.id);
@@ -255,7 +269,7 @@ export default [
                 // supersession at the preference/scoring/terminal commits.
                 pendingNodeUpdates.push(update);
               },
-              safeClone: structuredClone, addToast() {}, hasLegacyPageScoring, dedupJobsAcrossSources,
+              safeClone: structuredClone, addToast() {}, hasLegacyPageScoring, dedupJobsAcrossSources, deriveSearchTitles,
               searchRunOutcome: (status, fields = {}) => ({ status, ...fields }),
               isJobWorkflowDeletionPending: () => false,
               isSavedJobReanalysisManualAiResume: () => false,
@@ -263,7 +277,7 @@ export default [
               staleOrdinaryManualAiResumeBlocksAdmission: () => false,
               reanalysisInputFingerprint: new Function(search.slice(search.indexOf('function reanalysisInputFingerprint('), search.indexOf('\n// --- Title derivation')) + '; return reanalysisInputFingerprint;')(),
               jobAnalysisInputDigest,
-              reanalysisRestorePatch: () => ({}),
+              reanalysisRestorePatch,
               createManualAiRunId: () => manualAiRunId,
               REANALYZE_SAVED_JOBS_MANUAL_AI_RECOVERY_MODE: 'reanalyze-saved-jobs',
               processingRunsRef: ref({ start: () => 'processing-token', finish() {} }),
@@ -326,6 +340,7 @@ export default [
                     assert.strictEqual(request.preferenceCandidatePool.length, JOBS.length + 1);
                     assert.deepStrictEqual(request.jobPreferencePlan, hub.data.searchBriefPlan);
                   }
+                  if (incompleteRepair) assert.strictEqual(hub.data.activeTargetRole, '', 'structured plan clears the stale role before scoring');
                   return { success: true, scoringComplete: !incompleteRepair, scoredJobs: JOBS.map(job => ({ ...job, scoringEvidenceReceipt: { contract: JOB_SCORING_CONTRACT } })) };
                 },
               } },
@@ -352,11 +367,12 @@ export default [
               assert.strictEqual(outcome.status, 'failed');
               assert.strictEqual(hub.data.hubState, 'done');
               assert.strictEqual(hasLegacyPageScoring(hub.data), true);
+              assert.strictEqual(hub.data.activeTargetRole, 'Legacy Synthetic Role', 'a failed scoring repair restores the prior effective role with its plan and cards');
               assert.strictEqual(hub.data.preferenceCandidatePool.length, JOBS.length + 1);
               assert.deepStrictEqual(jobSearchNextAnchor(hub.data, hub.id), history);
               continue;
             }
-            assert.strictEqual(outcome.status, 'completed');
+            assert.strictEqual(outcome.status, 'completed', JSON.stringify(outcome));
             assert.strictEqual(outcome.runId, expectedRunId);
             assert.strictEqual(claimedRunId, expectedRunId);
             assert.strictEqual(savedSnapshot.runId, expectedRunId);
@@ -797,6 +813,7 @@ export default [
           resumeFingerprint: FINGERPRINT,
           jobPreferences: preferences,
           preferredLocation,
+          titles: ['Software Engineer'],
         }),
         preferredLocation,
         canonicalLocation: preferredLocation,
