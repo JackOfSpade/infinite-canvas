@@ -69,7 +69,7 @@ export default [
   { name: 'handoff bridge: ipc: serialized launches and delayed retries keep pending evidence without inflating active launches', async run() {
     const before = getBridgeLauncherAvailability(); const clock = fakeClock(); const launches = [];
     const workers = Array.from({ length: 3 }, (_unused, index) => ({ ordinal: index + 1, state: 'ready', firstCallAt: null }));
-    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, windows: { canvasOpen: true }, config: {}, queue: {},
       chat: { pool: { active: true, generation: 91, workerCount: workers.length, workers } } };
     const h = setup({ now: clock.now, timers: clock.timers,
       controller: {
@@ -138,9 +138,9 @@ export default [
     } finally { h.api.dispose(); }
     assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before), 'the paused provider is removed on disposal');
   } },
-  { name: 'handoff bridge: ipc: exhausted automatic launch retries become unavailable instead of implying future service', async run() {
-    const clock = fakeClock(); let launches = 0;
-    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, config: {}, queue: {},
+  { name: 'handoff bridge: ipc: automatic retries continue indefinitely with availability pending through capped backoff', async run() {
+    const before = getBridgeLauncherAvailability(); const clock = fakeClock(); let launches = 0;
+    const snapshot = { enabled: true, serving: 'live', autoLaunchChats: true, windows: { canvasOpen: true }, config: {}, queue: {},
       chat: { pool: { active: true, generation: 93, workerCount: 1,
         workers: [{ ordinal: 1, state: 'ready', firstCallAt: null }] } } };
     const h = setup({ now: clock.now, timers: clock.timers,
@@ -156,20 +156,18 @@ export default [
     });
     try {
       h.api.publishStatus(snapshot); await settle(100);
-      for (const retryAt of [15_000, 60_000, 150_000]) {
+      for (const retryAt of [15_000, 60_000, 150_000, 450_000, 750_000]) {
         assert(getBridgeLauncherAvailability().available && getBridgeLauncherAvailability().pending,
           'an outstanding automatic retry remains a viable future launch');
         clock.advance(retryAt); await settle(100);
       }
-      assert(launches === 4, 'the initial launch and all three automatic retries were attempted');
+      assert(launches === 6, 'the initial launch and five retries were attempted, with the last delay capped at five minutes');
       h.api.publishStatus(snapshot); await settle(40);
-      assert(launches === 4, 'another status publication cannot turn an exhausted attempt into a new automatic launch');
-      // Other suites can leave providers whose state progresses between
-      // microtasks. Compare this provider's removal at the same settled point.
-      const exhausted = getBridgeLauncherAvailability(); h.api.dispose();
-      assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(exhausted),
-        'once every retry is exhausted removing this provider changes no available, pending or active launch evidence');
+      assert(launches === 6, 'another status publication cannot bypass the next five-minute retry timer');
+      assert(getBridgeLauncherAvailability().pending, 'the next capped retry remains pending after repeated failures');
     } finally { h.api.dispose(); }
+    assert(JSON.stringify(getBridgeLauncherAvailability()) === JSON.stringify(before),
+      'stopping and disposing clears launch evidence and retry timers');
   } },
   { name: 'handoff bridge: ipc: contract exposes exactly 30 invokes, one publish send and four events', run: () => {
     const channelValues = Object.values(IPC_CHANNELS); assert(channelValues.length === 31 && new Set(channelValues).size === 31, 'IPC channel names must be closed and unique');

@@ -41,6 +41,11 @@ export function answeringModel(requested, models) {
 }
 
 export function claudeStageProfile(stage) {
+  // Temporary, end-to-end test runs only: lets a throwaway profile compare settings per stage.
+  if (process.env.INFINITE_CANVAS_E2E === '1' && process.env.INFINITE_CANVAS_TEST_STAGE_PROFILES) {
+    const override = JSON.parse(process.env.INFINITE_CANVAS_TEST_STAGE_PROFILES)[stage];
+    if (override) return override;
+  }
   return CLAUDE_STAGE_PROFILES[stage] || { model: CLAUDE_APPLICATION_MODEL, effort: CLAUDE_APPLICATION_EFFORT };
 }
 // Normal Opus write stages take 5-7 minutes; the cap leaves room for Claude

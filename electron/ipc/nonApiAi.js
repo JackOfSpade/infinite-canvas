@@ -21,6 +21,7 @@ import { abortNodeTasksAndWait, cancellationError, getCurrentIpcRequestContext, 
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { clipCorrectionItem, REJECTED_CAUTION } from './handoffBridge/framing.js';
+import { AI_TASK_CORPUS_DIR, createAiTaskCorpus } from './aiTaskCorpus.js';
 import { validationFailure, VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from './validationFailure.js';
 
 const { app, ipcMain, shell } = electronPkg;
@@ -101,6 +102,12 @@ const HANDOFF_LIFECYCLE_REPORT_LIMIT = 20;
 // are only main-process ownership ids; cap inactive windows so a succession of
 // closed canvases cannot make this process-local diagnostic unbounded.
 const HANDOFF_LIFECYCLE_AGGREGATE_WINDOW_LIMIT = 64;
+export const SAFE_NON_API_AI_CANCEL_CAUSES = Object.freeze([
+  'app-quit', 'manual-ai-cancelled', 'job-board-cancelled', 'board-run-cancelled',
+  'node-deleted', 'sender-destroyed', 'bridge-aborted', 'bridge-timeout',
+  'bridge-unavailable', 'comparative-unavailable', 'unknown',
+]);
+const SAFE_NON_API_AI_CANCEL_CAUSE_SET = new Set(SAFE_NON_API_AI_CANCEL_CAUSES);
 // A single bad paste can be retried indefinitely, but an in-memory diagnostic
 // receipt must never become an unbounded record of a user's attempts. Keep the
 // newest failures because they explain the currently visible correction.
@@ -131,6 +138,7 @@ function emptyHandoffLifecycleAggregate() {
     bridgeRejectionAttempts: 0,
     requestsEverBridgeRejected: 0,
     acceptedAfterBridgeRejection: 0,
+    cancelledByCause: Object.fromEntries(SAFE_NON_API_AI_CANCEL_CAUSES.map(cause => [cause, 0])),
   };
 }
 
@@ -204,7 +212,14 @@ function cumulativeHandoffLifecycleAggregate(windowId) {
     : [handoffLifecycleAggregates.get(lifecycleAggregateKey(windowId))];
   for (const aggregate of entries) {
     if (!aggregate) continue;
-    for (const key of Object.keys(total)) total[key] = Math.min(999_999, total[key] + (aggregate[key] || 0));
+    for (const key of Object.keys(total)) {
+      if (key === 'cancelledByCause') {
+        for (const cause of SAFE_NON_API_AI_CANCEL_CAUSES) {
+          total.cancelledByCause[cause] = Math.min(999_999,
+            total.cancelledByCause[cause] + (aggregate.cancelledByCause?.[cause] || 0));
+        }
+      } else total[key] = Math.min(999_999, total[key] + (aggregate[key] || 0));
+    }
   }
   return total;
 }
@@ -539,6 +554,21 @@ function durableFilePath() {
     return dir ? path.join(dir, DURABLE_HANDOFF_FILE) : null;
   } catch {
     return null;
+  }
+}
+
+let aiTaskCorpusCapture = null;
+
+function captureAiTaskSample(sample) {
+  try {
+    if (!aiTaskCorpusCapture) {
+      const dir = app?.getPath?.('userData');
+      if (!dir) return Promise.resolve(false);
+      aiTaskCorpusCapture = createAiTaskCorpus({ dir: path.join(dir, AI_TASK_CORPUS_DIR) });
+    }
+    return aiTaskCorpusCapture(sample);
+  } catch {
+    return Promise.resolve(false);
   }
 }
 
@@ -1310,6 +1340,7 @@ function createHandoffLifecycle({ requestId, handoffCode, runId, sender, nodeId,
     escalatedAfterRejections: null,
     acceptedAt: null,
     settledAt: null,
+    cancelCause: null,
     outcome: 'pending',
   };
   handoffLifecycles.push(lifecycle);
@@ -1412,6 +1443,9 @@ function updateHandoffLifecycle(record, update) {
   else if (update?.settled) {
     lifecycle.settledAt = now;
     lifecycle.outcome = update.settled;
+    lifecycle.cancelCause = update.settled === 'cancelled'
+      ? SAFE_NON_API_AI_CANCEL_CAUSE_SET.has(update.cancelCause) ? update.cancelCause : 'unknown'
+      : null;
     if (!lifecycle.aggregateSettled) {
       lifecycle.aggregateSettled = true;
       incrementLifecycleAggregate(aggregate, 'settled');
@@ -1419,6 +1453,10 @@ function updateHandoffLifecycle(record, update) {
       else if (update.settled === 'cancelled') incrementLifecycleAggregate(aggregate, 'cancelled');
       else if (update.settled === 'stepped_back') incrementLifecycleAggregate(aggregate, 'steppedBack');
       else incrementLifecycleAggregate(aggregate, 'failed');
+      if (update.settled === 'cancelled') {
+        const cause = lifecycle.cancelCause || 'unknown';
+        aggregate.cancelledByCause[cause] = Math.min(999_999, (aggregate.cancelledByCause[cause] || 0) + 1);
+      }
     }
   }
 }
@@ -2602,7 +2640,8 @@ function settle(record, outcome) {
   // the step-back handler's settle() call) — not a failure. Without its own
   // branch it fell through to 'failed' and every navigational Back click was
   // misreported as a genuine handoff failure in the bug-report lifecycle.
-  updateHandoffLifecycle(record, { settled: outcome?.accepted ? 'accepted' : outcome?.cancelled ? 'cancelled' : outcome?.steppedBack ? 'stepped_back' : 'failed' });
+  updateHandoffLifecycle(record, { settled: outcome?.accepted ? 'accepted' : outcome?.cancelled ? 'cancelled' : outcome?.steppedBack ? 'stepped_back' : 'failed',
+    cancelCause: outcome?.cancelCause });
   detachProgressRecord(record);
   send(record, 'non-api-ai-settled', { requestId: record.requestId, ...outcome });
   emitNonApiAiEvent();
@@ -2614,7 +2653,15 @@ function abortPending(record, reason) {
   // An attempt-local abort can split/reissue work while its sibling handoffs
   // remain valid. Keep their explicit scope and committed contributions; full
   // workflow cancellation/completion clears it via durable-run cleanup.
-  settle(record, { accepted: false, cancelled: true, error: error.message });
+  const codeCause = error?.code === 'IPC_SENDER_DESTROYED' ? 'sender-destroyed'
+    : error?.code === 'bridge-timeout' ? 'bridge-timeout'
+      : error?.code === 'bridge-unavailable' ? 'bridge-unavailable'
+        : error?.code === 'comparative-unavailable' ? 'comparative-unavailable'
+          : error?.code === 'bridge-aborted' ? 'bridge-aborted'
+            : null;
+  const cancelCause = SAFE_NON_API_AI_CANCEL_CAUSE_SET.has(error?.cancelCause) ? error.cancelCause
+    : codeCause || (error?.message === 'Node deleted' ? 'node-deleted' : 'unknown');
+  settle(record, { accepted: false, cancelled: true, cancelCause, error: error.message });
   record.reject(error);
 }
 
@@ -3470,6 +3517,19 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     const acceptedChars = typeof args.response === 'string' ? args.response.length : null;
     const responseHash = responseReceiptHash(args.response);
     updateHandoffLifecycle(record, { accepted: true, responseChars: acceptedChars, responseHash });
+    void captureAiTaskSample({
+      task: record.task,
+      transport,
+      requestKind: record.requestKind,
+      grounded: record.grounded,
+      comparisonRun: record.comparisonRun,
+      attemptKind: record.attemptKind,
+      rejections: record.retryRejectionCount,
+      attachments: record.attachmentPaths?.length || 0,
+      prompt: record.materializedPrompt,
+      responseSchema: record.responseSchema,
+      response: args.response,
+    });
     publishProgressScope(progressScope, record);
     // Teach this process's sizer what the response actually cost. This update
     // is deliberately non-durable and must never fail an accepted answer.

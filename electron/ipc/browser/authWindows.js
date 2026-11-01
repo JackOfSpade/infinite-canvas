@@ -1,5 +1,5 @@
 import { logger } from '../../logger.js';
-import { closeOwnedBrowserProcess, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile } from '../stealthBrowser.js';
+import { closeOwnedBrowserProcess, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile, prepareSharedBrowserProfileForLaunch } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
@@ -1718,6 +1718,8 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
   updateAuthWindowDiagnostic(platformId, { chromeArgs });
 
   throwIfSignalAborted(signal, 'Native login window cancelled before launch');
+  await prepareSharedBrowserProfileForLaunch(userDataDir);
+  throwIfSignalAborted(signal, 'Native login window cancelled before launch');
   const child = spawn(nativeExecutablePath, chromeArgs, {
     stdio: 'ignore',
     detached: false,
@@ -2168,6 +2170,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
         postCloseVerify: null,
       },
     });
+    await prepareSharedBrowserProfileForLaunch(userDataDir);
     const child = spawn(executablePath, chromeArgs, { stdio: 'ignore', detached: false });
     return await new Promise((resolve, reject) => {
       let settled = false;

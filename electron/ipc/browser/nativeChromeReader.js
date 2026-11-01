@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../../logger.js';
-import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile } from '../stealthBrowser.js';
+import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile, prepareSharedBrowserProfileForLaunch } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
 import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
@@ -609,6 +609,7 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
       // race; the read self-heals on the next clean run. (We still spawn either way,
       // matching the existing stale-lock behavior.)
       if (profileFree) await ensureAppleEventsJsEnabled(userDataDir);
+      await prepareSharedBrowserProfileForLaunch(userDataDir);
       logger.info(`[NativeRead] Spawning non-CDP Chrome for ${platformId} (${urls.length} hub URL(s))`);
       // Args identical to the PROVEN native LOGIN spawn (openNativeLoginWindow).
       // The window is VISIBLE and stays open: if the hub is logged out it bounces

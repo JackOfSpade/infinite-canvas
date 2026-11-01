@@ -10,6 +10,7 @@ import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo, getBrowserProfileDiagnostics } from './stealthBrowser.js';
 import { getManualScraperTelemetry } from './browser/manualScraper.js';
 import { getLaunchCollisions } from './browserLaunchTelemetry.js';
+import { browserTabRestoreDiagnosticsMarkdown } from './browser/tabRestoreState.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
 import { getJobsTelemetry } from './jobs.js';
@@ -22,7 +23,7 @@ import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
 import { CONSTANTS as HANDOFF_BRIDGE_CONSTANTS } from './handoffBridge/constants.js';
 import { closeReportDiagnostic, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
-import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, EVENT_HISTORY_HEADING, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
+import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, eventHistoryHeading, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { codeIncludesApplicationOutput } from './bugReport/applicationOutput.js';
 import { buildPasteHandoffDiagnosticsMarkdown } from './pasteHandoffDiagnostics.js';
@@ -2121,7 +2122,7 @@ function buildRecentMainProcessLogLines({ filter } = {}) {
     // Markdown renderer reverses it at the last possible boundary. Sorting by
     // the logger's numeric capture timestamp also prevents asynchronous writes
     // from becoming an accidental chronology claim in the report.
-    const logs = (getRecentLogs(200) || [])
+    const logs = (getRecentLogs(500) || [])
       .filter(l => Number(l?.ts) >= PROCESS_START_MS)
       .filter(l => typeof filter !== 'function' || filter(l) === true)
       .sort((a, b) => Number(a.ts) - Number(b.ts));
@@ -2335,7 +2336,7 @@ ${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${ent
     queueMarkdown = `
 - Application lanes (as of ${new Date(queue.at).toISOString()}): bridge \`${queue.enabled ? 'enabled' : 'disabled'}\` · serving \`${queue.serving}\` · auto-release \`${queue.autoRelease ? 'on' : 'off'}\` · paused \`${queue.paused || 'no'}\` · fault \`${queue.fault || 'none'}\`
 - Delivery readiness: tunnel \`${queue.readiness.tunnelReachable ? 'reachable' : 'not-reachable'}\` · ChatGPT link \`${queue.readiness.linked ? 'linked' : 'not-linked'}\` · chat \`${queue.chat.state}\` · selected-text route \`${dockReason}\` · auto-release applies to application bundles only; selecting text work does not itself start a ChatGPT MCP client.
-- MCP chat calls: ${queue.chat.calls} · started ${exactTime(queue.chat.startedAt)} · first tool call ${exactTime(queue.chat.firstCallAt)} · latest ${queue.chat.lastCallKind ? `\`${queue.chat.lastCallKind}\` at ${exactTime(queue.chat.lastCallAt)}` : 'none recorded'}
+- MCP chat calls: ${queue.chat.calls} in the current chat · ${queue.chat.lifetimeCalls} lifetime calls in this app process · started ${exactTime(queue.chat.startedAt)} · first tool call ${exactTime(queue.chat.firstCallAt)} · latest ${queue.chat.lastCallKind ? `\`${queue.chat.lastCallKind}\` at ${exactTime(queue.chat.lastCallAt)}` : 'none recorded'}
 - Application lanes: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/${queue.liveLaneCapacity}
 - Chat delivery: \`${queue.chat.state}\` · traffic ${byteBudget} · application bundles assigned ${queue.chat.jobsAssigned} (no per-chat assignment cap)
 - Worker lifecycle: ${workerLifecycle}${workerRosterRows}${closedPoolRows}
@@ -3164,7 +3165,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${(isFullReport || reportCodes.has('BTABS')) ? browserTabRestoreDiagnosticsMarkdown() : ''}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];
@@ -3181,13 +3182,14 @@ ${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportC
     ? events.map(redactReportEventHistoryLine)
     : [];
   const eventsMarkdown = buildReverseChronologicalLogBlock(chronologicalEventLines, '*(No events recorded)*', { basis: 'local' });
+  const eventHeading = eventHistoryHeading(payload.eventHistoryMetadata);
 
-  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${EVENT_HISTORY_HEADING}` + eventsMarkdown;
+  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${eventHeading}` + eventsMarkdown;
   // Logs and the Event History heading live outside baseMarkdown so the
   // clipboard path (enforceClipboardMarkdownCap) can trim them independently of
   // the curated static sections above.
   if (options?.maxChars) {
-    return enforceClipboardMarkdownCap(baseMarkdown, chronologicalEventLines, mainProcessLogLines, options.maxChars);
+    return enforceClipboardMarkdownCap(baseMarkdown, chronologicalEventLines, mainProcessLogLines, options.maxChars, payload.eventHistoryMetadata);
   }
   return { markdown: fullMarkdown, truncated: false, trimmedEventCount: 0, trimmedLogCount: 0, hardTruncated: false };
 }

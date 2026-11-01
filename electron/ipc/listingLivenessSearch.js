@@ -33,17 +33,17 @@ function shouldTripBreaker(error) {
 
 /**
  * One instance belongs to one resolveScoreSafePostings call. Primary and
- * alternate rounds share its deadline and count-only telemetry. The current
+ * alternate rounds share its breaker and count-only telemetry. The current
  * IPC request context supplies the evidence, memo and cross-seam breaker.
  */
 export function createListingLivenessSearchSession({
   callText, bridgeStatus, calibrationStore = null, signal, nodeId = null, manualAiRunId = null,
+  waitForWorkers = false,
   now = Date.now, abortError = () => new Error('Listing liveness cancelled.'),
 } = {}) {
   if (typeof callText !== 'function' || typeof now !== 'function') {
     throw new TypeError('Listing liveness search requires a structured call and clock.');
   }
-  const deadline = now() + BUDGET_MS;
   // The caller injects the bridge status reader. Invoke it once for this seam,
   // including when a linked single chat has no active worker pool.
   const linkedStatus = Promise.resolve().then(() => typeof bridgeStatus === 'function'
@@ -61,7 +61,11 @@ export function createListingLivenessSearchSession({
   const checkAbort = () => {
     if (signal?.aborted) throw signal.reason || abortError();
   };
-  const breakerTripped = () => localBreaker || isListingLivenessBreakerTripped();
+  // A previous bounded card lookup may have tripped the process breaker. A
+  // Job Search/Board run owns a fresh, resumable classification pass and must
+  // still recheck its pending rows with the evidence already captured here.
+  // Errors in this session continue to trip its local breaker.
+  const breakerTripped = () => localBreaker || (!waitForWorkers && isListingLivenessBreakerTripped());
   const tripBreaker = () => { localBreaker = true; tripListingLivenessBreaker(); };
   const recordPending = member => { if (member.key) pendingByKey.set(member.key, member.board); };
   const clearPending = member => { if (member.key) pendingByKey.delete(member.key); };
@@ -89,15 +93,22 @@ export function createListingLivenessSearchSession({
     for (const [chunkIndex, chunk] of chunks.entries()) {
       checkAbort();
       if (breakerTripped()) break;
-      if (!await linkedStatus) { tripBreaker(); break; }
-      const remaining = Math.floor(deadline - now());
-      if (remaining <= 0) break;
+      if (!waitForWorkers && !await linkedStatus) { tripBreaker(); break; }
       const requestMembers = chunk.map(member => ({ row: member.expiry ? member.row : output[member.index],
         evidence: member.evidence }));
       const request = buildListingLivenessRequest(requestMembers,
         { batch: chunkIndex + 1, batchTotal: chunks.length });
+      let assigned = false;
       try {
-        const raw = await cappedHandoff(request, { call: callText, signal, timeoutMs: remaining,
+        // Each chunk gets its own ten minutes from its own assignment. Time
+        // queued for a worker, or spent on earlier chunks, is never charged.
+        const raw = await cappedHandoff({ ...request, manualHandoff: { ...request.manualHandoff,
+          onAssigned: (...args) => {
+            assigned = true;
+            request.manualHandoff?.onAssigned?.(...args);
+          } } }, { call: callText, signal,
+          timeoutMs: BUDGET_MS,
+          timeoutStartsOnAssignment: true, waitForWorkers, bridgeStatus, unassignedTimeoutMs: Infinity,
           manualAiRunId, nodeId, now, stats: handoffStats });
         checkAbort();
         let parsed = raw;
@@ -150,7 +161,8 @@ export function createListingLivenessSearchSession({
         }
       } catch (error) {
         checkAbort();
-        if (shouldTripBreaker(error)) tripBreaker();
+        const timedOutBeforeAssignment = error?.code === 'bridge-timeout' && !assigned;
+        if (!timedOutBeforeAssignment && shouldTripBreaker(error)) tripBreaker();
         // A failed chunk remains in its prior state; sibling chunks can still
         // proceed unless this was the specific circuit-breaker condition.
       }

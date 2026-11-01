@@ -44,7 +44,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   // it as bridge policy without acquiring capabilities.
   'constants.js': { allow: ['../../../src/utils/handoffScheduler.js'] },
   // Availability reads main-owned worker/launcher counts without new I/O.
-  'bridgeAvailability.js': { allow: ['./constants.js', './observedChatContext.js', '../../../src/utils/handoffScheduler.js'] },
+  'bridgeAvailability.js': { allow: ['./constants.js', './observedChatContext.js', '../../../src/utils/handoffScheduler.js', '../../../src/utils/handoffBridgeStatus.js'] },
   'contracts.js': { allow: [] },
   'respond.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
   'wire.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
@@ -85,7 +85,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'pairing.js': { allow: sibling('node:crypto') },
   // The launch-retry reason lists are shared with the dock, which renders the
   // Retry button; the status module is pure (it imports only the scheduler).
-  'ui.js': { allow: sibling('electron', '../nonApiAi.js', '../../../src/utils/handoffBridgeStatus.js') },
+  'ui.js': { allow: sibling('electron', './bridgeAvailability.js', '../nonApiAi.js', '../officialPostingDiscoveryDiagnostics.js', '../../../src/utils/handoffBridgeStatus.js') },
   'chatLauncher.js': { allow: ['../browser/appleEvents.js', 'node:crypto'] },
   'uiDialogs.js': { allow: sibling('electron') },
   'tray.js': { allow: sibling('electron') },

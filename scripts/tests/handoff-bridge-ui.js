@@ -135,7 +135,7 @@ export default [
     const normalized = normalizeBridgeStatus(rawStatus(1, {
       chat: { pool: { active: true, generation: 41, workerCount: 5, workers, plan: { recommended: 8, queued: 11, materialized: 2, expandBy: 3, reason: 'maximum_parallelism' } } },
     }));
-    const safeWorkers = workers.map(worker => ({ ...worker, lastCallAt: null, quietReason: null }));
+    const safeWorkers = workers.map(worker => ({ ...worker, lastCallAt: null, everConnected: false, quietReason: null }));
     assert(normalized.chat.pool.active === true
       && JSON.stringify(normalized.chat.pool.workers) === JSON.stringify(safeWorkers)
       && JSON.stringify(normalized.chat.pool.plan) === JSON.stringify({ recommended: 8, queued: 11, materialized: 2, expandBy: 3, reason: 'maximum_parallelism' }),
@@ -160,8 +160,8 @@ export default [
       ] } },
     }));
     assert(JSON.stringify(hostile.chat.pool.workers) === JSON.stringify([
-      { ordinal: 1, state: 'working', completed: 2, lastCallAt: null, quietReason: null },
-      { ordinal: 3, state: 'ready', completed: 0, lastCallAt: null, quietReason: null },
+      { ordinal: 1, state: 'working', completed: 2, lastCallAt: null, everConnected: false, quietReason: null },
+      { ordinal: 3, state: 'ready', completed: 0, lastCallAt: null, everConnected: false, quietReason: null },
     ])
       && !JSON.stringify(hostile).includes('PRIVATE-WORKER-SESSION-CODE'),
     'worker progress stays a closed, bounded roster and never transports a starter capability');
@@ -175,10 +175,10 @@ export default [
       ] } },
     }));
     assert(JSON.stringify(openable.chat.pool.workers) === JSON.stringify([
-      { ordinal: 1, state: 'working', completed: 1, lastCallAt: null, quietReason: null, canOpenChat: true, launch: { stage: 'presented', reason: null } },
-      { ordinal: 2, state: 'waiting', completed: 0, lastCallAt: null, quietReason: null },
-      { ordinal: 3, state: 'idle', completed: 0, lastCallAt: null, quietReason: null },
-      { ordinal: 4, state: 'ready', completed: 0, lastCallAt: null, quietReason: null },
+      { ordinal: 1, state: 'working', completed: 1, lastCallAt: null, everConnected: false, quietReason: null, canOpenChat: true, launch: { stage: 'presented', reason: null } },
+      { ordinal: 2, state: 'waiting', completed: 0, lastCallAt: null, everConnected: false, quietReason: null },
+      { ordinal: 3, state: 'idle', completed: 0, lastCallAt: null, everConnected: false, quietReason: null },
+      { ordinal: 4, state: 'ready', completed: 0, lastCallAt: null, everConnected: false, quietReason: null },
     ]), 'only a strictly true canOpenChat survives normalization; false, strings and numbers are dropped');
   } },
   { name: 'handoff bridge: ui: answer-silent worker status retains only its ordinal, safe silence reason, and call time', run: () => {
@@ -189,8 +189,8 @@ export default [
       ] } },
     }));
     assert(JSON.stringify(normalized.chat.pool.workers) === JSON.stringify([
-      { ordinal: 1, state: 'quiet', completed: 7, lastCallAt: NOW - 301_000, quietReason: 'answer_silent' },
-      { ordinal: 2, state: 'waiting', completed: 2, lastCallAt: NOW - 1_000, quietReason: null },
+      { ordinal: 1, state: 'quiet', completed: 7, lastCallAt: NOW - 301_000, everConnected: false, quietReason: 'answer_silent' },
+      { ordinal: 2, state: 'waiting', completed: 2, lastCallAt: NOW - 1_000, everConnected: false, quietReason: null },
     ]), 'the renderer gets the owning worker\'s bounded timestamp and answer-silent reason, not a session capability');
     assert(!JSON.stringify(normalized).includes('PRIVATE-ANSWER-SILENT-SESSION')
       && !JSON.stringify(normalized).includes('PRIVATE-WAITING-SESSION')

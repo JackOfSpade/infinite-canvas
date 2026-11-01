@@ -1592,16 +1592,16 @@ const tests = [
         let launches = 0;
         const ui = registerHandoffBridgeUi({
           ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
-          controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
+          controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true } }),
             subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })),
             beginObservedChat: args => engine.beginObservedChat({ linkId: LINK, ...args }),
             confirmObservedChat: args => engine.confirmObservedChat({ linkId: LINK, ...args }),
             cancelObservedChat: args => engine.cancelObservedChat({ linkId: LINK, ...args }) },
           chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true, chatId: 'synthetic-new-push-chat' }; } },
-          getCanvasWindows: () => [],
+          getCanvasWindows: () => [{}],
         });
         try {
-          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' });
+          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true } });
           await settle();
           assert(replacement?.copied && launches === 1, 'new work must automatically launch one replacement through the real UI scheduler');
           assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended', 'the old stopped credential is fenced');
@@ -1647,16 +1647,16 @@ const tests = [
         let launches = 0;
         const ui = registerHandoffBridgeUi({
           ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
-          controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
+          controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true } }),
             subscribe: () => () => {}, restartWorker: args => (replacement = engine.restartWorker({ linkId: LINK, ...args })),
             beginObservedChat: args => engine.beginObservedChat({ linkId: LINK, ...args }),
             confirmObservedChat: args => engine.confirmObservedChat({ linkId: LINK, ...args }),
             cancelObservedChat: args => engine.cancelObservedChat({ linkId: LINK, ...args }) },
           chatLauncher: { owns: () => false, close: async () => true, launch: async () => { launches++; return { ok: true, chatId: 'synthetic-new-application-chat' }; } },
-          getCanvasWindows: () => [],
+          getCanvasWindows: () => [{}],
         });
         try {
-          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' });
+          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true } });
           await settle();
           assert(replacement?.copied && launches === 1, 'new application must launch a replacement automatically');
           assert((await engine.get({ session: first.sessionCode, linkId: LINK })).status === 'session_ended');
@@ -1777,15 +1777,15 @@ const tests = [
       let replacements = 0; let closedChats = 0;
       const ui = registerHandoffBridgeUi({
         ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
-        controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' }),
+        controller: { snapshot: () => ({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true } }),
           subscribe: () => () => {}, restartWorker: args => { replacements++; return engine.restartWorker({ linkId: LINK, ...args }); } },
         chatLauncher: { owns: () => true, close: async () => { closedChats++; return true; }, launch: async () => ({ ok: true }) },
-        getCanvasWindows: () => [], timers: clock,
+        getCanvasWindows: () => [{}], timers: clock,
       });
       try {
         for (let interval = 0; interval < 4; interval++) {
           clock.advance(CONSTANTS.STALL_NOTICE_MS);
-          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live' });
+          ui.publishStatus({ ...engine.snapshot(), autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true } });
           await settle();
         }
         assert(replacements === 0 && closedChats === 0,
@@ -2606,18 +2606,19 @@ const tests = [
       let stamp = 100; const lines = [];
       const log = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => ++stamp });
       log.record('tool_call', { ms: 7, outcome: 'served', tool: 'get' });
-      assert(lines[0] === '[HandoffBridge] tool_call tool=get outcome=served ms=7', 'app logger output must use the exact closed record format and field order');
+      assert(lines.length === 0, 'routine served calls stay in the activity view without consuming the main-process report ring');
       assert(JSON.stringify(log.getRecent()) === JSON.stringify([{ kind: 'get-served', at: 101, outcome: 'served' }]) && log.getVersion() === 1,
         'a safe credential record becomes one redacted Activity item and increments its monotonic version');
       let threw = false;
       try { log.record('tool_call', { tool: 'get', outcome: 'secret prompt with spaces', ms: 8 }); } catch { threw = true; }
-      assert(threw && lines.length === 1 && log.getRecent().length === 1 && log.getVersion() === 1,
+      assert(threw && lines.length === 0 && log.getRecent().length === 1 && log.getVersion() === 1,
         'unsafe fields must be rejected before either the app logger or Activity ring changes');
       log.record('worker_pool_started', { workers: 10, recommended: 10, queued: 184 });
       log.record('worker_pool_expanded', { workers: 10, recommended: 10, queued: 184, added: 4 });
       assert(lines.includes('[HandoffBridge] worker_pool_started workers=10 recommended=10 queued=184')
         && lines.includes('[HandoffBridge] worker_pool_expanded workers=10 recommended=10 queued=184 added=4'),
       'FULL-report main logs retain closed aggregate worker-pool planning and expansion evidence');
+      assert(lines.length === 2, 'aggregate planning evidence reaches the main-process report ring');
       for (let index = 0; index < 205; index += 1) log.record('pause', { cause: 'user' });
       const activity = log.getRecent();
       assert(activity.length === 200 && log.getVersion() === 206 && activity.every(item => item.kind === 'paused' && item.outcome === 'paused'),

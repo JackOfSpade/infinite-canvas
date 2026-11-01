@@ -15,10 +15,18 @@ export function recordBridgeLaunchDiagnostic({ telemetry = false, at, workerOrdi
   if (telemetry !== true || !['failed', 'retrying', 'presented'].includes(stage)
     || !Number.isSafeInteger(workerOrdinal) || workerOrdinal < 1 || workerOrdinal > MAX_HANDOFF_CONCURRENCY
     || !Number.isFinite(at) || at < 0 || at > 8_640_000_000_000_000) return;
-  launchDiagnostics.push(Object.freeze({ at: Math.round(at), workerOrdinal, stage,
+  const entry = Object.freeze({ at: Math.round(at), workerOrdinal, stage,
     mode: ['chat', 'work'].includes(mode) ? mode : 'unknown',
     reason: launchReasons.has(reason) ? reason : null,
-    attempt: Number.isSafeInteger(attempt) && attempt >= 0 ? Math.min(999, attempt) : 0 }));
+    attempt: Number.isSafeInteger(attempt) && attempt >= 0 ? Math.min(999, attempt) : 0 });
+  // A worker flipping between two states repeats its last two outcomes. Keep
+  // one copy of each at its newest time so the flip cannot evict other history.
+  const same = prior => prior.workerOrdinal === entry.workerOrdinal && prior.stage === entry.stage
+    && prior.reason === entry.reason && prior.mode === entry.mode && prior.attempt === entry.attempt;
+  const recent = launchDiagnostics.filter(prior => prior.workerOrdinal === entry.workerOrdinal).slice(-2);
+  const repeated = recent.find(same);
+  if (repeated) launchDiagnostics.splice(launchDiagnostics.indexOf(repeated), 1);
+  launchDiagnostics.push(entry);
   launchDiagnostics = launchDiagnostics.slice(-20);
 }
 export function getBridgeLaunchDiagnostic() { return [...launchDiagnostics]; }
@@ -657,6 +665,7 @@ export function reduceBridgeQueue(raw) {
       startedAt: finite(chat.startedAt), firstCallAt: finite(chat.firstCallAt), lastCallAt: finite(chat.lastCallAt),
       lastCallKind: chat.lastCallKind === 'get' || chat.lastCallKind === 'submit' ? chat.lastCallKind : null,
       calls: smallInt(chat.calls),
+      lifetimeCalls: smallInt(chat.lifetimeCalls),
       pool: reduceWorkerPool(chat.pool),
       bytes: smallInt(smallInt(chat.bytesServed, 100_000_000) + smallInt(chat.bytesReceived, 100_000_000), 100_000_000),
       // Cumulative traffic is diagnostic-only. A response-size limit protects

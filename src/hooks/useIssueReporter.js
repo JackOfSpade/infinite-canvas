@@ -368,6 +368,7 @@ export function useIssueReporter({
         nodeComponentStates,
         sellHubResolveStates: buildSellHubResolveSnapshot(reportNodes, nodeComponentStates),
         eventLogs: filteredLogs,
+        eventHistoryMetadata: EventLogger.getEventHistoryMetadata(),
         lastSaveError: EventLogger.getLastSaveError(),
         activeEditableText,
       };

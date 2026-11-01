@@ -36,7 +36,7 @@ import {
   startBridgeJobPublisher,
 } from '../utils/handoffBridgeQueue';
 import { MAX_HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
-import { RETRYABLE_LAUNCH_REASONS } from '../utils/handoffBridgeStatus';
+import { launchRetryOffered } from '../utils/handoffBridgeStatus';
 
 const TONE_CLASS = Object.freeze({
   off: 'bg-slate-400',
@@ -674,6 +674,7 @@ export function HandoffBridgePanel() {
                       <p className="mt-1 text-[11px] leading-relaxed text-white/55">{BRIDGE_UI_COPY.workerPoolDirections(activeWorkerPool.workerCount)}</p>
                     )}
                     {workerPoolCapacity && <p className="mt-1 text-[11px] leading-relaxed text-sky-100/80">{workerPoolCapacity}</p>}
+                    {BRIDGE_UI_COPY.launcherStopped(status.launcherReason) && <p className="mt-1 text-[11px] leading-relaxed text-amber-100/80">{BRIDGE_UI_COPY.launcherStopped(status.launcherReason)}</p>}
                     {activeWorkerProgress && (
                       <ul className="mt-2 space-y-1.5" aria-label="Worker chat progress">
                         {activeWorkerProgress.workers.map(worker => (
@@ -685,12 +686,12 @@ export function HandoffBridgePanel() {
                             <span className={worker.state === 'quiet' ? 'text-amber-200' : worker.state === 'working' ? 'text-violet-200' : 'text-white/55'}>
                               {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                             </span>
-                            {worker.launch && BRIDGE_UI_COPY.workerLaunch(worker.launch) && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                            {worker.launch && BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal), worker.everConnected) && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal), worker.everConnected)}</span>}
                             {(worker.canOpenChat === true || (worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable', 'chat_stopped'].includes(worker.launch?.reason) || worker.state === 'quiet'))) && (
                               <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
                                 disabled={activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>{worker.launch?.reason === 'approval_required' ? 'Open ChatGPT for approval' : 'Open worker chat'}</button>
                             )}
-                            {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
+                            {worker.launch?.stage === 'failed' && launchRetryOffered(worker.launch?.reason, worker.everConnected) && (
                               <button type="button" className="ml-auto bridge-button-secondary" disabled={activeCopyingWorker !== null}
                                 onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>
                             )}

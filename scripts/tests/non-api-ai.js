@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { EventEmitter } from 'node:events';
-import { rejects } from 'node:assert/strict';
+import nodeAssert, { rejects } from 'node:assert/strict';
 import { fallbackBridgeAttachmentToManual, flushNonApiAiPersistence } from '../../electron/ipc/nonApiAi.js';
 import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMRaw, callLLMText, callLLMVision, createHostStagedVisionCaller, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, __selectUniqueAcceptedLegacyStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, runRewindableGroundedHandoff, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
 import { BRIDGE_ATTACHMENT_TRANSPORT_ENABLED, readBridgeableNonApiAiAttachments, readBridgeableNonApiAiHandoff, markBridgeableNonApiAiHandoffAssigned, listBridgeableNonApiAiHandoffs, returnBridgeHandoffToPerson, requeueBridgeableNonApiAiHandoff } from '../../electron/ipc/nonApiAi.js';
@@ -70,6 +70,40 @@ async function comparativeTransportFixture(label, onAssigned = null) {
 }
 
 export default [
+  {
+    name: 'non-API AI: cancellation receipts print allowlisted causes without spaces and count them cumulatively',
+    run: async () => {
+      registerNonApiAiHandlers();
+      const sent = [];
+      const sender = new EventEmitter();
+      sender.id = 736;
+      sender.isDestroyed = () => false;
+      sender.send = (channel, payload) => sent.push({ channel, payload });
+      const channel = 'non-api-cancel-cause-report-test';
+      handleSafe(channel, async (_event, _args, signal) => ({
+        result: await requestNonApiAi({ prompt: 'SYNTHETIC cancellation cause report', task: 'test-manual-cancel-cause',
+          responseSchema: { type: 'object', required: ['result'], properties: { result: { type: 'string' } } }, signal }),
+      }));
+      try {
+        const running = ipcMain.__getInvokeHandler(channel)({ sender }, {});
+        let request = null;
+        for (let attempt = 0; attempt < 200 && !request; attempt += 1) {
+          request = sent.find(item => item.channel === 'non-api-ai-request')?.payload || null;
+          if (!request) await new Promise(resolve => setTimeout(resolve, 5));
+        }
+        assert(Boolean(request?.requestId), 'the report fixture emits one visible local handoff');
+        const cancelled = await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender }, { requestId: request.requestId });
+        await running;
+        const markdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(), sender.id);
+        nodeAssert.equal(cancelled.cancelled, true);
+        nodeAssert.match(markdown, /\*\*cancelled\(manual-ai-cancelled\)\*\* in /u);
+        nodeAssert.match(markdown, /manual-ai-cancelled=1/u);
+        nodeAssert.doesNotMatch(markdown, /cancelled \(manual-ai-cancelled\)/u);
+      } finally {
+        ipcMain.removeHandler?.(channel);
+      }
+    },
+  },
   ...['delivery-failed', 'renderer-stopped', 'renderer-destroyed', 'navigation', 'repeated-remount'].map(cause => ({
     name: `comparative transport: simultaneous ${cause} preserves five pending comparisons for worker completion`,
     run: async () => {
@@ -810,7 +844,7 @@ export default [
         && dialogSource.includes('1 handoff waiting'),
       'the collapsed dock names waiting and saving separately instead of calling both waiting');
       assert(dialogSource.includes('const awaitingSuccessorRef = useRef(null)')
-        && dialogSource.includes("focus awaiting workflow successor")
+        && dialogSource.includes("focus-awaiting-successor")
         && dialogSource.includes('isWorkflowSuccessor(successor, incoming)')
         && dialogSource.includes('workflow successor issued; focus advanced from prior completed handoff')
         // A direct chip click cancels BOTH automatic preferences before it
@@ -4112,8 +4146,11 @@ export default [
       await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: activeSender }, { requestId: early.requestId });
       await activeRun;
       const afterCancel = getNonApiAiHandoffLifecycleSnapshot({ windowId: activeSender.id });
-      assert(afterCancel.aggregate.cancelled === 1 && afterCancel.aggregate.pendingAfterRejection === 0,
-        'pending-after-rejection is derived from live ownership and clears only when that request settles');
+      const afterCancelMarkdown = buildNonApiAiHandoffLifecycleMarkdown(new Set(), activeSender.id);
+      assert(afterCancel.aggregate.cancelled === 1 && afterCancel.aggregate.pendingAfterRejection === 0
+        && afterCancel.aggregate.cancelledByCause['manual-ai-cancelled'] === 1
+        && afterCancelMarkdown.includes('manual-ai-cancelled=1'),
+      'pending-after-rejection clears only when settled, and the allowlisted cancellation cause reaches the report aggregate');
 
       // Bridge recovery needs its own route-specific fact. A local dock
       // correction above must not let the report claim that a bridge rejection

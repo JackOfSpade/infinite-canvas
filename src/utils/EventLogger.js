@@ -87,6 +87,7 @@ export class EventLoggerSingleton {
   constructor() {
     this.logs = [];
     this.currentBytes = 0;
+    this.evictedCount = 0;
     this.bootTimestamp = new Date().toISOString();
     this._lastMsg   = null;
     this._lastCount = 0;
@@ -99,6 +100,7 @@ export class EventLoggerSingleton {
     this._suppressedJobCardDismissalIds = new Map();
     this._nodeStates = new Map();
     this._lastSaveError = null;
+    this._cumulativeEvents = new Map();
     this._installErrorCapture();
     this.log('Application started');
   }
@@ -164,6 +166,7 @@ export class EventLoggerSingleton {
     // Trim oldest entries if we exceed the memory ceiling
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
       this.currentBytes -= utf8ByteLength(this.logs.shift());
+      this.evictedCount++;
     }
   }
 
@@ -237,7 +240,46 @@ export class EventLoggerSingleton {
     // replacement writes subject to the same ring limit as appended entries.
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
       this.currentBytes -= utf8ByteLength(this.logs.shift());
+      this.evictedCount++;
     }
+  }
+
+  /** Keep noisy, repeated lifecycle outcomes as one cumulative event row. */
+  logCumulative(key, label) {
+    if (typeof key !== 'string' || !key || typeof label !== 'string' || !label) return;
+    const prior = this._cumulativeEvents.get(key) || { count: 0, labels: new Map(), line: null };
+    prior.count++;
+    prior.labels.set(label, (prior.labels.get(label) || 0) + 1);
+    const detail = [...prior.labels.entries()].map(([name, count]) => `${name}=${count}`).join(' · ');
+    const message = `[Manual AI] handoff settled events: ${prior.count}${detail ? ` · ${detail}` : ''}`;
+    if (prior.line) {
+      const index = this.logs.indexOf(prior.line);
+      if (index >= 0) {
+        const previous = this.logs[index];
+        const timestamp = previous.match(/^\[[^\]]+\]\s/)?.[0] || formatEventLogEntry('', new Date()).split(' ')[0] + ' ';
+        const entry = `${timestamp}${message}`;
+        this.currentBytes -= utf8ByteLength(previous);
+        this.logs[index] = entry;
+        this.currentBytes += utf8ByteLength(entry);
+        prior.line = entry;
+        while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
+          this.currentBytes -= utf8ByteLength(this.logs.shift());
+          this.evictedCount++;
+        }
+        if (!this.logs.includes(prior.line)) prior.line = null;
+      } else prior.line = null;
+    }
+    if (!prior.line) {
+      prior.line = formatEventLogEntry(message);
+      this.logs.push(prior.line);
+      this.currentBytes += utf8ByteLength(prior.line);
+      while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
+        this.currentBytes -= utf8ByteLength(this.logs.shift());
+        this.evictedCount++;
+      }
+      if (!this.logs.includes(prior.line)) prior.line = null;
+    }
+    this._cumulativeEvents.set(key, prior);
   }
 
   /**
@@ -290,6 +332,11 @@ export class EventLoggerSingleton {
   /** Returns all recorded events (chronological order, oldest first). */
   getLogs() {
     return this.logs;
+  }
+
+  getEventHistoryMetadata() {
+    const oldest = this.logs[0]?.match(/^\[([^\]]+)\]/)?.[1] || null;
+    return { retainedCount: this.logs.length, evictedCount: this.evictedCount, oldestRetainedAt: oldest };
   }
 
   /** Returns the UTF-8 byte count of the log buffer. */

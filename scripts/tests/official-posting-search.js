@@ -183,7 +183,7 @@ export default [
       assert.match(linked, /const scoringJobs = await admitForScoring\(descriptionRecoveryJobs\)/u);
       assert.doesNotMatch(linked, /items: admitForScoring\(/u);
       const generic = block('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
-      assert.match(generic, /const resolveGenericPostings = createOfficialPostingRecoveryPassResolver\(rows =>\s*resolveScoreSafePostings\(rows, \{ event, nodeId, signal, jobRunId \}\), \{ signal \}\)/u);
+      assert.match(generic, /const resolveGenericPostings = createOfficialPostingRecoveryPassResolver\(rows =>\s*resolveScoreSafePostings\(rows, \{ event, nodeId, signal, jobRunId, waitForWorkers: true \}\), \{ signal \}\)/u);
       assert.match(generic, /const resolvedJobs = \(await resolveGenericPostings\(scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(descriptionRecoveryJobs\)\)\)\).jobs/u);
       assert.match(generic, /const scoringJobs = filterNonEnglishJobs\(resolvedJobs\).jobs/u);
       assert.match(generic, /const officialResolution = await resolveGenericPostings\(\s*overlayResolvedRecoveryRows\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\), sourceRecoverySnapshot\?\.jobs\)\)/u);

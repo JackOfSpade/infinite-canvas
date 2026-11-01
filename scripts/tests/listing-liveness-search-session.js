@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
-import { createListingLivenessSearchSession } from '../../electron/ipc/listingLivenessSearch.js';
+import { createListingLivenessSearchSession as createSearchSession } from '../../electron/ipc/listingLivenessSearch.js';
 import { createListingLivenessCalibrationStore } from '../../electron/ipc/listingLivenessCalibration.js';
 import { LISTING_LIVENESS_RULES } from '../../electron/ipc/listingLiveness.js';
 import {
@@ -33,6 +33,14 @@ const answerFor = (count, verdict = 'open', quote = 'Applications are open for t
 });
 const contextRun = callback => __runWithIpcRequestContextForTests({ livenessEvidence: new Map() }, callback);
 const record = (rows, evidence = page()) => rows.forEach(item => assert.equal(recordListingEvidence(item, evidence), true));
+// A direct callLLMText mock represents a request that the host has assigned
+// immediately. The run-mode regression below opts into an unassigned wait and
+// drives this callback explicitly after advancing its fake clock.
+const createListingLivenessSearchSession = ({ callText, waitForWorkers = false, ...options }) =>
+  createSearchSession({ ...options, waitForWorkers, callText: (prompt, requestOptions) => {
+    if (!waitForWorkers) requestOptions?.manualHandoff?.onAssigned?.();
+    return callText(prompt, requestOptions);
+  } });
 async function withCalibrationStore(run) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'synthetic-liveness-amendment-'));
   try { return await run(createListingLivenessCalibrationStore(root)); }
@@ -169,15 +177,51 @@ export default [
     assert.equal((await session.classifyPrimary(rows))[0].listingLiveness.verdict, 'pending');
     assert.equal(reads, 1); assert.equal(calls, 0); assert.equal(isListingLivenessBreakerTripped(), true);
   }) },
-  { name: 'liveness search shared budget leaves alternates pending after primary consumes it', run: () => contextRun(async () => {
-    const primary = row(1); const alternate = row(2); record([primary, alternate]);
-    let clock = 0; let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked, now: () => clock,
-      callText: async (_prompt, opts) => { calls++; clock = 600_001; return answerFor(opts.hints.itemCount); } });
-    assert.equal((await session.classifyPrimary([primary]))[0].listingLiveness.verdict, 'open');
-    assert.equal((await session.classifyAlternates([alternate]))[0].listingLiveness.verdict, 'pending');
-    assert.equal(calls, 1);
+  { name: 'liveness search gives a later chunk its own budget after a long worker absence', run: () => contextRun(async () => {
+    const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1)); record(rows);
+    let clock = 0; let calls = 0; let abortedAfterAssignment = null;
+    const session = createListingLivenessSearchSession({ waitForWorkers: true,
+      bridgeStatus: () => ({ enabled: true, serving: 'live', link: { state: 'linked' } }), now: () => clock,
+      callText: async (_prompt, opts) => {
+        calls++;
+        opts.manualHandoff.onAssigned();
+        if (calls === 2) {
+          // Chunk 1 was assigned twelve minutes ago on this clock. A shared
+          // deadline would leave chunk 2 a one millisecond timer here.
+          await new Promise(resolve => setTimeout(resolve, 30));
+          abortedAfterAssignment = opts.signal.aborted;
+        }
+        clock += 720_000;
+        return answerFor(opts.hints.itemCount);
+      } });
+    const checked = await session.classifyPrimary(rows);
+    assert.equal(calls, 2);
+    assert.equal(abortedAfterAssignment, false, 'the later chunk keeps its own ten minutes');
+    assert.ok(checked.every(item => item.listingLiveness.verdict === 'open'));
+    assert.equal(isListingLivenessBreakerTripped(), false);
+  }) },
+  { name: 'liveness search does not spend its ten-minute budget while an unassigned worker is absent', run: () => contextRun(async () => {
+    const target = row('unassigned-budget'); record([target]);
+    let clock = 0; let optionsSeen = null; let resolveCall; let settled = false;
+    const session = createListingLivenessSearchSession({ waitForWorkers: true,
+      bridgeStatus: () => ({ enabled: true, serving: 'live', link: { state: 'linked' } }), now: () => clock,
+      callText: (_prompt, options) => {
+        optionsSeen = options;
+        return new Promise(resolve => { resolveCall = resolve; });
+      } });
+    const running = session.classifyPrimary([target]).then(value => { settled = true; return value; });
+    for (let index = 0; index < 50 && !optionsSeen; index += 1) await new Promise(resolve => setTimeout(resolve, 2));
+    assert.ok(optionsSeen, 'the run keeps its local dock handoff pending before a worker is assigned');
+    clock = 700_000;
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(optionsSeen.signal.aborted, false, 'time before assignment does not start the ten-minute timer');
+    assert.equal(settled, false, 'the liveness row remains pending while no worker has been assigned');
     assert.equal(session.telemetry().listingLiveness.linkedin.aiPending, 1);
+    assert.equal(isListingLivenessBreakerTripped(), false, 'an unassigned wait cannot trip the liveness breaker');
+    optionsSeen.manualHandoff.onAssigned();
+    resolveCall(answerFor(1));
+    const checked = await running;
+    assert.equal(checked[0].listingLiveness.verdict, 'open');
     assert.equal(isListingLivenessBreakerTripped(), false);
   }) },
   { name: 'liveness search run abort rethrows its reason and returns no stamped rows or memo', run: () => contextRun(async () => {
@@ -294,25 +338,6 @@ export default [
     assert.ok(prompts[0].includes('Synthetic Role 1') && prompts[0].includes('Synthetic Role 8'));
     assert.equal(prompts[0].includes('Synthetic Role 9'), false);
     assert.ok(prompts[1].includes('Synthetic Role 9'));
-  }) },
-  { name: 'liveness search uses only the remaining shared budget for each later handoff', run: () => contextRun(async () => {
-    const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1)); record(rows);
-    let clock = 0; let calls = 0;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(new Error('synthetic timeout guard')), 800);
-    try {
-      const session = createListingLivenessSearchSession({ bridgeStatus: linked, signal: controller.signal, now: () => clock,
-        callText: async (_prompt, options) => {
-          calls++;
-          if (calls === 1) { clock = 599_950; return answerFor(options.hints.itemCount); }
-          return new Promise(() => {});
-        } });
-      const checked = await session.classifyPrimary(rows);
-      assert.equal(calls, 2);
-      assert.ok(checked.slice(0, 8).every(item => item.listingLiveness.verdict === 'open'));
-      assert.equal(checked[8].listingLiveness.verdict, 'pending');
-      assert.equal(isListingLivenessBreakerTripped(), true, 'the 50 ms remainder times out the second handoff');
-    } finally { clearTimeout(timeout); }
   }) },
   { name: 'recording new listing evidence clears the prior request-local verdict memo', run: () => contextRun(() => {
     const target = row('memo');

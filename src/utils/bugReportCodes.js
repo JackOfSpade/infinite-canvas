@@ -53,6 +53,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  BTABS: {
+    label: 'Browser Tab Restore',
+    description: 'App-owned Chrome tab-restore cleanup outcomes and file counts before launch. Included automatically in FULL. No paths, URLs, cookies or file contents are retained.',
+    logFilter: line => /BrowserScraper|StealthBrowser|NativeRead|browser|launch/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   CRASH: {
     label: 'JS Crashes',
     description: 'JavaScript errors, unhandled promise rejections, console errors',

@@ -831,7 +831,7 @@ export default [
       at: 100_000, enabled: true, serving: 'live', autoRelease: false, paused: null, fault: null,
       scope: { applications: true, scoring: true, marketplace: false, private: secret },
       queue: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 },
-      chat: { state: 'working', jobsAssigned: 0, jobsCap: 2, startedAt: 90_000, firstCallAt: 91_000, lastCallAt: 99_500, lastCallKind: 'get', calls: 7 },
+      chat: { state: 'working', jobsAssigned: 0, jobsCap: 2, startedAt: 90_000, firstCallAt: 91_000, lastCallAt: 99_500, lastCallKind: 'get', calls: 7, lifetimeCalls: 471 },
       activity: [
         { kind: 'chat-started', at: 90_000 },
         { kind: 'get-served', outcome: 'served', at: 99_500 },
@@ -863,7 +863,7 @@ export default [
       && reduced.push.refreshAttempts === 3 && reduced.push.lastSelectedPoll === 'failed'
       && reduced.push.lastRefreshAt === 96_000 && reduced.push.lastSelectedPollAt === 99_000
       && reduced.push.served === 1 && reduced.push.held === 2 && reduced.push.claimed === 1
-      && reduced.chat.calls === 7 && reduced.chat.lastCallKind === 'get' && reduced.activity.length === 2,
+      && reduced.chat.calls === 7 && reduced.chat.lifetimeCalls === 471 && reduced.chat.lastCallKind === 'get' && reduced.activity.length === 2,
     'closed task, exclusion, exact timing, activity, and aggregate ownership evidence survives reduction');
     try {
       setBridgeQueueDiagnosticProvider(() => raw);
@@ -875,7 +875,7 @@ export default [
         && full.includes('`job-role-screen-batch` 9') && full.includes('`attachment` 4')
         && full.includes('all-hub discovery 3 call(s), 1 failure(s), latest `succeeded` at 1970-01-01T00:01:36.000Z (4s ago)')
         && full.includes('selected-hub MCP polls 5, 2 failure(s), latest `failed` at 1970-01-01T00:01:39.000Z (1s ago)')
-        && full.includes('MCP chat calls: 7 · started 1970-01-01T00:01:30.000Z · first tool call 1970-01-01T00:01:31.000Z · latest `get` at 1970-01-01T00:01:39.500Z')
+        && full.includes('MCP chat calls: 7 in the current chat · 471 lifetime calls in this app process · started 1970-01-01T00:01:30.000Z · first tool call 1970-01-01T00:01:31.000Z · latest `get` at 1970-01-01T00:01:39.500Z')
         && full.includes('Recent bridge activity: 2 event(s), oldest first (bounded to 20)')
         && full.includes('1970-01-01T00:01:39.500Z · `get-served` · outcome `served`'),
       'FULL names the configuration, selection split, task counts, exclusions, exact refresh/poll clocks, and bounded activity needed to diagnose docked work');

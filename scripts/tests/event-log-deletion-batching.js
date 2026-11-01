@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { EventLoggerSingleton } from '../../src/utils/EventLogger.js';
+import { eventHistoryHeading } from '../../electron/ipc/bugReport/clipboardCap.js';
 import { assert } from './testHelpers.js';
 
 export default [
@@ -64,6 +65,28 @@ export default [
       assert(board.includes('removalLogSummary: `[JobBoard] child cascade requested id=${id}`'),
         'Job Board cleanup must opt into the compact cascade summary');
       return { summaryRows: summaries.length, ordinaryDeletionRows: 2 };
+    },
+  },
+  {
+    name: 'event history reports its retained age and eviction count while settled handoffs fold into counters',
+    run: () => {
+      const logger = new EventLoggerSingleton();
+      for (let index = 0; index < 2_500; index += 1) logger.log(`retention-${index} ${'x'.repeat(240)}`);
+      for (let index = 0; index < 3; index += 1) logger.logCumulative('manual-ai-handoff-settled-test', 'focus-preserved');
+      for (let index = 0; index < 2; index += 1) logger.logCumulative('manual-ai-handoff-settled-test', 'focus-cleared');
+      const metadata = logger.getEventHistoryMetadata();
+      const heading = eventHistoryHeading(metadata);
+      const cumulativeRows = logger.getLogs().filter(line => line.includes('[Manual AI] handoff settled events:'));
+      assert(metadata.retainedCount > 0 && metadata.evictedCount > 0
+        && Number.isFinite(Date.parse(metadata.oldestRetainedAt))
+        && heading.includes(`${metadata.retainedCount} retained row(s)`)
+        && heading.includes(`${metadata.evictedCount} older row(s) evicted`)
+        && heading.includes(`oldest retained ${metadata.oldestRetainedAt}`),
+      'the report header names the actual retained event count, oldest retained timestamp, and number of evicted events');
+      assert(cumulativeRows.length === 1 && cumulativeRows[0].includes('events: 5')
+        && cumulativeRows[0].includes('focus-preserved=3') && cumulativeRows[0].includes('focus-cleared=2'),
+      'repeated dock settlement outcomes update one cumulative line instead of evicting earlier history');
+      return metadata;
     },
   },
 ];

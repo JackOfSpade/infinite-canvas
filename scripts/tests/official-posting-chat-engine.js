@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { cappedHandoff, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { cappedHandoff, resolveOfficialPostings, OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS } from '../../electron/ipc/officialPostingService.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { normalizeOfficialPosting, officialPostingComparativeTrail, officialPostingLookupStatus, officialResearchSettled } from '../../electron/ipc/officialPostingFields.js';
 import { shouldPersistOfficialPostingResult, unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
@@ -283,6 +283,91 @@ export default [
         assert.equal(result.telemetry.bridgeTimeout, 0);
         assert.deepEqual(result.jobs.map(row => row.url), rows.map(row => row.url));
         assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
+      }));
+    },
+  },
+  {
+    name: 'Run-mode official lookups stay pending through ten absence-grace windows and resolve when a worker appears',
+    async run() {
+      await withObservedWorkers(0, async setObserved => withStore(async store => {
+        const rows = Array.from({ length: 25 }, (_, index) => job({
+          url: `https://www.linkedin.com/jobs/view/wait-for-worker-${index}`, sourceJobKey: `wait-for-worker-${index}`,
+        }));
+        let clock = 0; let callCount = 0; let completed = 0; let heldFinder = null;
+        const status = () => linkedPool(true, 2);
+        const callRaw = (prompt, options) => {
+          callCount += 1;
+          const respond = () => {
+            options.manualHandoff.onAssigned();
+            return options.task.endsWith('-research') ? research(requestedIds(prompt))
+              : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
+          };
+          if (!heldFinder) {
+            return new Promise((resolve, reject) => {
+              const onAbort = () => reject(options.signal.reason);
+              options.signal.addEventListener('abort', onAbort, { once: true });
+              heldFinder = { options, release: () => {
+                options.signal.removeEventListener('abort', onAbort);
+                resolve(respond());
+              } };
+            });
+          }
+          return Promise.resolve(respond());
+        };
+        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: status,
+          waitForWorkers: true, now: () => clock, onProgress: value => { completed = value.completed; } });
+        try {
+          await waitFor(() => heldFinder !== null);
+          clock = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS * 10;
+          // Longer than the 250 ms absence poll, so a live check would have fired.
+          await new Promise(resolve => setTimeout(resolve, 400));
+          assert.equal(heldFinder.options.signal.aborted, false, 'waiting for a worker is not subject to the 15-second absence abort');
+          assert.equal(completed, 0, 'no row is settled while its finder remains queued');
+          assert.equal(await Promise.race([running.then(() => 'settled'), new Promise(resolve => setTimeout(() => resolve('pending'), 10))]), 'pending');
+          assert.equal(callCount, 1, 'the resolver retains one visible outstanding request instead of reissuing in a loop');
+          setObserved(1);
+          heldFinder.release();
+          const result = await running;
+          assert.equal(result.jobs.length, 25);
+          assert.ok(result.jobs.every(row => !row.officialPosting.trail.includes('bridge-unavailable')));
+          assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
+        } finally {
+          if (heldFinder && !heldFinder.options.signal.aborted) setObserved(1);
+        }
+      }));
+    },
+  },
+  {
+    name: 'Run-mode official lookups stay visibly pending while the bridge is unlinked or disabled',
+    async run() {
+      await withObservedWorkers(0, async setObserved => withStore(async store => {
+        const rows = [job({ sourceJobKey: 'bridge-not-ready' })];
+        const controller = new AbortController();
+        let enabled = false; let callCount = 0; let completed = 0;
+        const status = () => enabled
+          ? { ...linkedPool(false, 1), serving: 'live' }
+          : { ...linkedPool(false, 1), enabled: false, serving: 'paused', link: { state: 'unlinked' } };
+        const callRaw = async (prompt, options) => {
+          callCount += 1;
+          options.manualHandoff.onAssigned();
+          return options.task.endsWith('-research') ? research(requestedIds(prompt))
+            : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
+        };
+        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: status,
+          waitForWorkers: true, signal: controller.signal, onProgress: value => { completed = value.completed; } });
+        try {
+          await new Promise(resolve => setTimeout(resolve, 20));
+          assert.equal(callCount, 0, 'a disabled or unlinked bridge never falls through to a local-only response path');
+          assert.equal(completed, 0, 'the official-posting row remains pending while bridge setup is unavailable');
+          enabled = true;
+          setObserved(1);
+          const result = await running;
+          assert.equal(result.jobs[0].officialPosting.outcome, 'found');
+          assert.ok(callCount > 0, 'the held run proceeds after the bridge becomes live and a worker appears');
+        } finally {
+          if (!enabled) controller.abort(new Error('test cleanup'));
+          await running.catch(() => {});
+        }
       }));
     },
   },

@@ -64,6 +64,7 @@ async function search(rows, resolve, { prepareStore } = {}) {
         return [result];
       },
       officialPostingStore: store,
+      handoffBridgeStatus: () => ({ enabled: true, serving: 'live', link: { state: 'linked' } }),
       resolveOfficialPostings: (jobs, options) => resolve(jobs, { ...options, store }),
     });
     try {

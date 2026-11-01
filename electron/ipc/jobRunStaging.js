@@ -769,6 +769,9 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
     ...(receipt.funnel.finalDedupDropped != null ? { finalDedupDropped: receiptNumber(receipt.funnel.finalDedupDropped) } : {}),
     ...(receipt.funnel.officialDedupDropped != null ? { officialDedupDropped: receiptNumber(receipt.funnel.officialDedupDropped) } : {}),
+    ...(receipt.funnel.officialLookupsIncomplete != null ? { officialLookupsIncomplete: receiptNumber(receipt.funnel.officialLookupsIncomplete) } : {}),
+    ...(receipt.funnel.listingRecheck ? { listingRecheck: { visited: receiptNumber(receipt.funnel.listingRecheck.visited),
+      rechecked: receiptNumber(receipt.funnel.listingRecheck.rechecked), stillPending: receiptNumber(receipt.funnel.listingRecheck.stillPending) } } : {}),
     // Board-closed rows rescued from the evidence gate for the official-posting
     // pass, and those that pass then removed. Present only when a run had any.
     ...(receiptNumber(receipt.funnel.boardClosedSetAside) > 0 ? { boardClosedSetAside: receiptNumber(receipt.funnel.boardClosedSetAside) } : {}),

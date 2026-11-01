@@ -474,6 +474,18 @@ export default [
     assert(CONSTANTS.REFRESH_IDLE_MS === 3 * 24 * 60 * 60_000 && CONSTANTS.REFRESH_ABSOLUTE_MS === 14 * 24 * 60 * 60_000, 'refresh lifetimes must stay 3d idle and 14d absolute');
     assert(CONSTANTS.IDLE_PAUSE_MINUTES === 1440 && CONSTANTS.KEEP_AWAKE_ENABLED === false, 'idle pause and keep-awake defaults must remain explicit');
   } },
+  { name: 'handoff bridge: controls: routine served and accepted calls stay in Activity but out of the app log ring', run() {
+    const lines = [];
+    const log = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => 1_000 });
+    log.record('tool_call', { tool: 'get', outcome: 'served', ms: 12 });
+    log.record('tool_call', { tool: 'submit', outcome: 'accepted', ms: 20 });
+    assert(lines.length === 0, 'routine handoff success does not consume the main-process report ring');
+    assert(JSON.stringify(log.getRecent().map(item => item.kind)) === JSON.stringify(['get-served', 'submit-accepted']),
+      'routine outcomes remain visible in the bounded Activity projection');
+    log.record('tool_call', { tool: 'get', outcome: 'waiting', ms: 30 });
+    assert(lines.length === 1, 'non-routine bridge evidence still reaches the app log ring');
+    assert(/tool_call tool=get outcome=waiting/u.test(lines[0]));
+  } },
   { name: 'handoff bridge: controls: authenticated outcomes, versions, and fixed faults project through one closed Activity logger', async run() {
     const lines = []; let getIndex = 0; let submitIndex = 0;
     const log = createHandoffBridgeLog({ logger: { info: line => lines.push(line) }, now: () => 1_000 });

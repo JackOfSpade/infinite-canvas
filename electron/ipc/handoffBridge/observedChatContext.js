@@ -52,17 +52,20 @@ export function registerBridgeLauncherAvailability(provider) {
 
 export function getBridgeLauncherAvailability() {
   let available = false; let pending = false; let inProgress = 0;
+  let reason = 'launcher-unavailable';
   for (const provider of launcherAvailability) {
     try {
       const current = provider();
       available ||= current?.available === true;
       pending ||= current?.pending === true;
+      if (current?.available === true || current?.pending === true) reason = current.reason || 'ready';
+      else if (reason === 'launcher-unavailable' && typeof current?.reason === 'string') reason = current.reason;
       if (Number.isSafeInteger(current?.inProgress) && current.inProgress > 0) {
         inProgress = Math.min(Number.MAX_SAFE_INTEGER, inProgress + current.inProgress);
       }
     } catch { /* a detached launcher cannot prove availability */ }
   }
-  return { available, pending, inProgress };
+  return { available, pending, inProgress, reason };
 }
 
 export function hasPendingObservedWorkerLaunch() {

@@ -659,9 +659,12 @@ export default [
       'a cooldown re-probe touches only a couple of cards and leaves the remainder deferred, instead of walking a whole page against a throttled endpoint');
       assert(DETAIL_BLOCK_PROBE_CARDS_VALUE < DESC_STALE_THRESHOLD_VALUE,
         `the probe size (${DETAIL_BLOCK_PROBE_CARDS_VALUE}) must stay below the consecutive-timeout abort threshold (${DESC_STALE_THRESHOLD_VALUE})`);
-      assert(source.includes("phase: 'detail-block-reprobe-failed'")
-        && source.includes("'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared'"),
-      'a failed re-probe records its own anomaly row — the source warning slot is already held by the original block, so its evidence would otherwise be lost');
+      assert(source.includes("phase: partialRecovery ? 'detail-block-reprobe-partial' : 'detail-block-reprobe-failed'")
+        && source.includes("'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared'")
+        && source.includes('attempted: probeAttempted,')
+        && source.includes('sourceDetailPartialCycles < DETAIL_BLOCK_MAX_REPROBES')
+        && source.includes('if (probeAttempted > 0) {'),
+      're-probes record the actual probe count, distinguish partial progress, and cap partial cycles without consuming the failed-attempt budget');
 
       // The skip branch must not masquerade as a selector failure.
       assert(source.includes('enrichment skipped for ${jobsToExpand.length} card(s) — source blocked by')

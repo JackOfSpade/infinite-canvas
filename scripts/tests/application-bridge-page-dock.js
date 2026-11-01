@@ -455,12 +455,16 @@ export default [
         await dock.setStatus(withLanes(2, [lane(JOB_A, 'awaiting', 'resume'), lane(JOB_B, 'unread', 'resume')]));
         await dock.publish([first, second]);
 
-        assert(dock.logs().some(line => line.includes('dock layout: shared application page rows=2 · separate chips=0')),
+        assert(dock.logs().some(line => line.includes('dock layout shape: shared application page rows-present · separate chips 0')),
           `initial layout log present: ${dock.logs().join(' | ')}`);
 
         await dock.setStatus(withLanes(3, [lane(JOB_A, 'awaiting', 'resume'), lane(JOB_B, 'needs_user', 'resume')]));
-        assert(dock.logs().some(line => line.includes('dock layout: shared application page rows=1 · separate chips=1')),
+        assert(dock.logs().some(line => line.includes('dock layout shape: shared application page rows-present · separate chips 1-2')),
           `updated layout log present: ${dock.logs().join(' | ')}`);
+        const layoutCount = dock.logs().filter(line => line.includes('dock layout shape:')).length;
+        await dock.setStatus(withLanes(4, [lane(JOB_A, 'awaiting', 'resume'), lane(JOB_B, 'needs_user', 'resume')]));
+        assert(dock.logs().filter(line => line.includes('dock layout shape:')).length === layoutCount,
+          'a status update with the same dock shape class does not write another layout event');
       });
     },
   },

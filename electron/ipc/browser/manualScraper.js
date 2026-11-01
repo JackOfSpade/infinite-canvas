@@ -430,7 +430,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // the single `detail-panel-rate-limit` event that explained the whole run.
   // The rate-limit / panel-HTTP phases are the CAUSE rows — keep them in the
   // longer-lived anomaly ring so a report written an hour later still has them.
-  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed'].includes(entry.phase)) {
+  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed'].includes(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -616,6 +616,8 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
       descError: rest.descError || null,
       descWarning: rest.descWarning || probeResult.descWarning || null,
       expandedCount: probeExpanded + Math.max(0, Number(rest.expandedCount) || 0),
+      attemptedCount: Math.max(0, Number(probeResult.attemptedCount) || 0)
+        + Math.max(0, Number(rest.attemptedCount) || 0),
       unavailableDetailDropped: probeUnavailable + Math.max(0, Number(rest.unavailableDetailDropped) || 0),
       boardClosedDetailKept: probeBoardClosed + Math.max(0, Number(rest.boardClosedDetailKept) || 0),
     };
@@ -631,6 +633,7 @@ export function composeDetailBlockReprobeResult(probeResult = {}, restResult = n
     descError: null,
     descWarning: probeResult.descWarning || probeResult.descError || null,
     expandedCount: probeExpanded,
+    attemptedCount: Math.max(0, Number(probeResult.attemptedCount) || 0),
     unavailableDetailDropped: probeUnavailable,
     boardClosedDetailKept: probeBoardClosed,
   };
@@ -2936,6 +2939,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       descError: null,
       descWarning: null,
       expandedCount: 0,
+      attemptedCount: 0,
       // This is deliberately distinct from a description miss: a confirmed
       // closed/not-found posting is removed from the returned usable rows.
       unavailableDetailDropped: 0,
@@ -6648,6 +6652,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       let sourceDetailBlockPage    = null; // first page whose descriptions were skipped, for the report
       let sourceDetailBlockCount   = 0;    // times the block armed (1 = never recovered)
       let sourceDetailReprobes     = 0;    // cooldown re-probes attempted
+      let sourceDetailPartialCycles = 0;   // bounded partial recoveries; do not consume failed-attempt budget
+      let sourceDetailPartialCycleTotal = 0;
       let sourceDetailRecovered    = 0;    // re-probes that restored enrichment
       let sourceDetailSkippedCards = 0;    // cards that never had a panel request issued
       // `skippedCards` only counts pages ENTERED under an already-armed block, so
@@ -7512,6 +7518,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // re-arms the clock, so this can never busy-wait per page.
           if (sourceDetailBlockCode && sourceDetailBlockAt > 0
             && sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES
+            && sourceDetailPartialCycles < DETAIL_BLOCK_MAX_REPROBES
             && jobsToExpand.length > 0 && !signal?.aborted) {
             const cooldownRemainingMs = DETAIL_BLOCK_COOLDOWN_MS - (Date.now() - sourceDetailBlockAt);
             if (cooldownRemainingMs > 0) {
@@ -7529,6 +7536,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             && sourceDetailBlockAt > 0
             && (Date.now() - sourceDetailBlockAt) >= DETAIL_BLOCK_COOLDOWN_MS
             && sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES
+            && sourceDetailPartialCycles < DETAIL_BLOCK_MAX_REPROBES
             && jobsToExpand.length > 0
             && !signal?.aborted;
           const detailSkippedForBlock = Boolean(sourceDetailBlockCode) && !detailBlockReprobeDue;
@@ -7561,17 +7569,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             const reprobeOfCode = detailBlockReprobeDue ? sourceDetailBlockCode : null;
             const reprobeWaitedMs = detailBlockReprobeDue ? Date.now() - sourceDetailBlockAt : 0;
             if (detailBlockReprobeDue) {
-              sourceDetailReprobes += 1;
-              sourceDetailReprobeTotal += 1;
-              logger.info(`[BrowserScraper] ${srcName}: re-probing detail enrichment on page ${pageNum} after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode} (attempt ${sourceDetailReprobes}/${DETAIL_BLOCK_MAX_REPROBES})`);
-              recordManualScraperTelemetry({
-                phase: 'detail-block-reprobe', sourceId, srcName,
-                queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
-                reason: reprobeOfCode, waitedMs: reprobeWaitedMs,
-                attempt: sourceDetailReprobes, maxAttempts: DETAIL_BLOCK_MAX_REPROBES,
-              });
-              // Clear before the attempt so a successful pass falls straight
-              // through; the descWarning latch below re-arms it on failure.
+              // Clear during the bounded probe. Count it only after the scraper
+              // confirms that it issued at least one detail attempt; aborting
+              // during browser setup/cooldown must not consume a retry.
               sourceDetailBlockCode = null;
             }
             if (detailBlockReprobeDue) {
@@ -7589,6 +7589,32 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 page, probeJobs, sourceId, { ...overlayBase, pageNum }, allJobs.length + probeJobs.length, signal,
                 { ...buildPhysicalCardWalkPlan(extracted, probeJobs), detailPacing: sourceDetailPacing },
               );
+              const probeAttempted = Math.max(0, Number(probeResult.attemptedCount) || 0);
+              const probePartialProgress = Math.max(0, Number(probeResult.expandedCount) || 0) > 0
+                || Math.max(0, Number(probeResult.unavailableDetailDropped) || 0) > 0
+                || Math.max(0, Number(probeResult.boardClosedDetailKept) || 0) > 0;
+              if (probeAttempted > 0) {
+                sourceDetailReprobeTotal += 1;
+                if (probePartialProgress) {
+                  sourceDetailPartialCycles += 1;
+                  sourceDetailPartialCycleTotal += 1;
+                } else sourceDetailReprobes += 1;
+                logger.info(`[BrowserScraper] ${srcName}: re-probing detail enrichment on page ${pageNum} after ${Math.round(reprobeWaitedMs / 1000)}s blocked by ${reprobeOfCode} (probe ${sourceDetailReprobeTotal}; ${probeAttempted} card attempts; ${probePartialProgress ? `partial cycle ${sourceDetailPartialCycles}/${DETAIL_BLOCK_MAX_REPROBES}` : `no-progress ${sourceDetailReprobes}/${DETAIL_BLOCK_MAX_REPROBES}`})`);
+                recordManualScraperTelemetry({
+                  phase: 'detail-block-reprobe', sourceId, srcName,
+                  queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
+                  reason: reprobeOfCode, waitedMs: reprobeWaitedMs,
+                  attempt: sourceDetailReprobeTotal, noProgressAttempts: sourceDetailReprobes,
+                  partialCycle: probePartialProgress ? sourceDetailPartialCycles : null,
+                  maxAttempts: DETAIL_BLOCK_MAX_REPROBES,
+                  attempted: probeAttempted,
+                });
+              } else {
+                // No card was tried, so nothing was learned. Charge the wait so
+                // the 120s cooldown stays capped on a page with no usable card.
+                sourceDetailReprobes += 1;
+                logger.info(`[BrowserScraper] ${srcName}: re-probe on page ${pageNum} attempted no cards (no-progress ${sourceDetailReprobes}/${DETAIL_BLOCK_MAX_REPROBES})`);
+              }
               if (didDetailBlockReprobeRecover(probeResult)) {
                 // The throttle lifted — finish the page normally. A confirmed
                 // unavailable listing is terminal evidence too: it proves the
@@ -7629,6 +7655,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 // at its high-water mark meant one successful recovery early in
                 // a walk made a second, unrelated block permanent.
                 sourceDetailReprobes = 0;
+                sourceDetailPartialCycles = 0;
                 // Stop asserting a block that has provably lapsed — the skip log
                 // and the report both quote this page number.
                 sourceDetailBlockPage = null;
@@ -7640,10 +7667,14 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                   reason: reprobeOfCode, waitedMs: reprobeWaitedMs,
                   expanded: detailResult.expandedCount,
                   unavailableDetailDropped: retiredUnavailable,
-                  attempted: jobsToExpand.length,
+                  attempted: detailResult.attemptedCount,
                 });
               } else {
                 reprobeFailedThisPage = true;
+                if (probeAttempted === 0) {
+                  sourceDetailBlockCode = reprobeOfCode;
+                  sourceDetailBlockAt = Date.now();
+                }
                 // An opportunistic re-probe must never leave the run WORSE than
                 // the skip it replaced. A descError sets earlyExit below and
                 // ends the whole source walk — escalating a recoverable
@@ -7661,13 +7692,21 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 // The source-level warning slot is already occupied by the
                 // original block warning, so a failed re-probe's evidence would
                 // otherwise be lost entirely. Record it as its own anomaly row.
+                const partialRecovery = Math.max(0, Number(detailResult.expandedCount) || 0) > 0
+                  || Math.max(0, Number(detailResult.unavailableDetailDropped) || 0) > 0
+                  || Math.max(0, Number(detailResult.boardClosedDetailKept) || 0) > 0;
                 recordManualScraperTelemetry({
-                  phase: 'detail-block-reprobe-failed', sourceId, srcName,
+                  phase: partialRecovery ? 'detail-block-reprobe-partial' : 'detail-block-reprobe-failed', sourceId, srcName,
                   queryIndex: qi + 1, queryTotal: sourceTasks.length, pageNum,
                   reason: detailResult.descWarning?.code || reprobeOfCode,
                   waitedMs: reprobeWaitedMs,
-                  attempt: sourceDetailReprobes, maxAttempts: DETAIL_BLOCK_MAX_REPROBES,
-                  expanded: detailResult.expandedCount, attempted: DETAIL_BLOCK_PROBE_CARDS,
+                  attempt: sourceDetailReprobeTotal, noProgressAttempts: sourceDetailReprobes,
+                  partialCycles: sourceDetailPartialCycles, partialCyclesTotal: sourceDetailPartialCycleTotal,
+                  maxAttempts: DETAIL_BLOCK_MAX_REPROBES,
+                  expanded: detailResult.expandedCount,
+                  unavailableDetailDropped: detailResult.unavailableDetailDropped,
+                  boardClosedDetailKept: detailResult.boardClosedDetailKept,
+                  attempted: detailResult.attemptedCount,
                 });
               }
             }
@@ -8140,6 +8179,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             arms: sourceDetailBlockCount,
             reprobes: sourceDetailReprobes,
             reprobesTotal: sourceDetailReprobeTotal,
+            partialCycles: sourceDetailPartialCycles,
+            partialCyclesTotal: sourceDetailPartialCycleTotal,
             recovered: sourceDetailRecovered,
             skippedCards: sourceDetailSkippedCards,
             unenrichedRows: sourceDetailUnenriched,

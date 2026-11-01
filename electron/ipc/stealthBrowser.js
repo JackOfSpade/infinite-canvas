@@ -22,6 +22,7 @@ import { logger } from '../logger.js';
 
 import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js';
 import { createBackgroundScrapePage, prepareBackgroundScrapeLaunchOptions } from './browser/backgroundScrapeBrowser.js';
+import { clearOwnedBrowserTabRestoreState } from './browser/tabRestoreState.js';
 import { saveDiceApiKey } from './settings.js';
 import { isProfileLockCollision, recordLaunchCollision } from './browserLaunchTelemetry.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
@@ -49,6 +50,14 @@ export async function getUserDataDir() {
   }
   _userDataDir = dir;
   return _userDataDir;
+}
+
+export async function prepareSharedBrowserProfileForLaunch(userDataDir) {
+  const result = await clearOwnedBrowserTabRestoreState(userDataDir, await getUserDataDir());
+  if (result.outcome === 'failed' || result.outcome === 'unsafe-path') {
+    throw new Error('Could not prepare the app browser tab state for a fresh window. Close its browser windows and retry.');
+  }
+  return result;
 }
 
 
@@ -538,6 +547,7 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
   let askedSingletonToYield = false;
   for (let attempt = 0; attempt <= PROFILE_LOCK_RETRY_DELAYS.length; attempt++) {
     try {
+      await prepareSharedBrowserProfileForLaunch(launchOpts?.userDataDir);
       // The single launch deadline for every profile-owning Chrome path. Do
       // not let a macOS permission prompt or CDP wedge strand a close waiter.
       let timedOut = false;

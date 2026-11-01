@@ -132,10 +132,12 @@ import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validateP
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
 import { getOfficialPostingView, resolveOfficialPostings, officialPostingDedup, partitionOfficialPostingRows, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
-import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting } from './officialPostingFields.js';
+import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialPostingLookupStatus } from './officialPostingFields.js';
 import { bumpListingLivenessCount, listingLivenessTelemetryBlock, mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { listingEvidenceKey, officialExpiryCandidatesConfirmedClosed, readListingEvidence } from './listingLivenessStore.js';
 import { createListingLivenessSearchSession } from './listingLivenessSearch.js';
+import { recheckPendingListings } from './listingLivenessRecheck.js';
+import { createListingLivenessProbe } from './listingLivenessProbe.js';
 import { carryListingAlternates, collectListingAlternates, restoreListingAlternates } from './listingLivenessAlternates.js';
 import { getListingLivenessCalibrationStore } from './listingLivenessCalibration.js';
 import { getHandoffBridgeStatus } from './handoffBridge/index.js';
@@ -5997,6 +5999,8 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         descriptionEvidenceDropped: search.descriptionEvidenceDropped?.total,
         finalDedupDropped: search.finalDedupDropped,
         ...(search.officialDedupDropped != null ? { officialDedupDropped: search.officialDedupDropped } : {}),
+        ...(search.officialLookupsIncomplete != null ? { officialLookupsIncomplete: search.officialLookupsIncomplete } : {}),
+        ...(search.listingRecheck ? { listingRecheck: search.listingRecheck } : {}),
         ...(search.boardClosedSetAside > 0 ? { boardClosedSetAside: search.boardClosedSetAside } : {}),
         ...(search.boardClosedDropped > 0 ? { boardClosedDropped: search.boardClosedDropped } : {}),
         ...(search.languageDropped != null ? { languageDropped: search.languageDropped } : {}),
@@ -11215,7 +11219,8 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // evidence gate. Identity rows stay scraped; only resolution fields are added.
   // Board-closed rows the evidence gate dropped arrive here too (see
   // scoreSafeRowsWithBoardClosed) and are kept or removed after resolution.
-  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null, progressSourceId = null } = {}) => {
+  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null, progressSourceId = null,
+    waitForWorkers = true } = {}) => {
     const context = getCurrentIpcRequestContext();
     if (context) context.listingSetAsideKeys = new Set((Array.isArray(rows) ? rows : [])
       .filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
@@ -11239,6 +11244,8 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       const carriedCount = rows.length - unresolved.length;
       const resolved = unresolved.length ? await runOfficialPostings(unresolved, { signal, nodeId: context?.nodeId || nodeId,
         manualAiRunId: context?.manualAiRunId || null,
+        waitForWorkers,
+        bridgeStatus: handoffBridgeStatus,
         onProgress: progress => onProgress({ completed: carriedCount + (progress?.completed || 0), total: rows.length }),
       }) : { jobs: [], telemetry: null };
       if (signal?.aborted) throw signal.reason || nodeCancellationError();
@@ -11258,6 +11265,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
         callText: callListingLiveness, bridgeStatus: handoffBridgeStatus,
         calibrationStore: listingLivenessCalibrationStore, signal,
         nodeId: context?.nodeId || nodeId, manualAiRunId: context?.manualAiRunId || null,
+        waitForWorkers,
         abortError: nodeCancellationError,
       });
       let alternateRestored = [];
@@ -11322,10 +11330,11 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
         listingLivenessTelemetryBlock({ input: rows, settled, officialClosedDrops }),
         livenessSession.telemetry().listingLiveness, restoredCounts, expiryCounts);
       onProgress({ completed: rows.length, total: rows.length });
+      const officialLookupsIncomplete = settled.kept.filter(row => officialPostingLookupStatus(row?.officialPosting).retryable).length;
       return { jobs: settled.kept,
-        officialPosting: mergeOfficialPostingTelemetry(partition.settledTelemetry, resolved.telemetry,
+        officialPosting: { ...mergeOfficialPostingTelemetry(partition.settledTelemetry, resolved.telemetry,
           { boardClosed: boardClosedTelemetryBlock({ input: rows, settled, officialDedupDrops: deduped.dropped }),
-            listingLiveness }),
+            listingLiveness }), officialLookupsIncomplete },
         officialDedupDropped: deduped.dropped.length, officialDedupDrops: deduped.dropped,
         boardClosedDropped: settled.dropped.length + officialClosedDrops.length,
         boardClosedDrops: [...officialClosedDrops, ...settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
@@ -11339,6 +11348,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       const boardClosed = boardClosedTelemetryBlock({ input: rows, settled });
       const listingLiveness = listingLivenessTelemetryBlock({ input: rows, settled });
       return { jobs: settled.kept, officialPosting: { total: rows.length, failed: rows.length,
+        officialLookupsIncomplete: settled.kept.filter(row => officialPostingLookupStatus(row?.officialPosting).retryable).length,
         levels: {}, outcomes: { failed: rows.length }, rejections: { failed: rows.length },
         ...(Object.keys(boardClosed).length ? { boardClosed } : {}),
         ...(Object.keys(listingLiveness).length ? { listingLiveness } : {}) },
@@ -15745,11 +15755,66 @@ Return a JSON object with four arrays of search query strings:
     }
     const scoringProfile = pinnedScoringInput.profile;
     const scoringCareerData = pinnedScoringInput.careerData;
-    const postingJob = await officialPostingConsumerMap(jobs);
+    let scoringJobs = Array.isArray(jobs) ? jobs : [];
+    // A direct or legacy score request may contain no official-posting field
+    // at all; that is not evidence of an interrupted lookup to resume. Retry
+    // only rows that carry a prior resolver result whose state is retryable.
+    const retryableOfficialRows = scoringJobs.filter(job => job?.officialPosting
+      && officialPostingLookupStatus(job.officialPosting).retryable);
+    if (retryableOfficialRows.length > 0) {
+      await assertScoringCurrent();
+      const retry = await runOfficialPostings(retryableOfficialRows.map(job => ({ ...job })), {
+        signal, nodeId, manualAiRunId, waitForWorkers: true, bridgeStatus: handoffBridgeStatus,
+      });
+      await assertScoringCurrent();
+      if (!Array.isArray(retry?.jobs)) throw new TypeError('Official posting retry returned invalid rows.');
+      // The resolver can retire an official duplicate. Merge only resolver-owned
+      // fields back onto the exact score inputs so retries never alter scraped
+      // identity, evidence, or the row order used by scoring.
+      const retryByKey = new Map();
+      retry.jobs.forEach(row => {
+        const key = sourceJobKey(row);
+        if (!key) return;
+        const queue = retryByKey.get(key) || [];
+        queue.push(row);
+        retryByKey.set(key, queue);
+      });
+      const positions = new Map();
+      scoringJobs = scoringJobs.map(job => {
+        if (!officialPostingLookupStatus(job?.officialPosting).retryable) return job;
+        const key = sourceJobKey(job);
+        const candidates = retryByKey.get(key) || [];
+        const position = positions.get(key) || 0;
+        positions.set(key, position + 1);
+        const resolved = candidates[position];
+        return resolved ? { ...job, officialPosting: resolved.officialPosting, postedBy: resolved.postedBy } : job;
+      });
+    }
+    const officialLookupsIncomplete = scoringJobs.filter(job => job?.officialPosting
+      && officialPostingLookupStatus(job.officialPosting).retryable).length;
+    if (jobsTelemetry.search?.runId === snapshotContext?.runId) {
+      jobsTelemetry.search.officialLookupsIncomplete = officialLookupsIncomplete;
+    }
+    if (scoringJobs.some(job => normalizeListingLiveness(job?.listingLiveness)?.verdict === 'pending')) {
+      await assertScoringCurrent();
+      const recheck = await recheckPendingListings(scoringJobs, { signal,
+        createProbe: dependencies.createListingLivenessProbe || createListingLivenessProbe,
+        createSession: () => createListingLivenessSearchSession({
+          callText: callListingLiveness, bridgeStatus: handoffBridgeStatus,
+          calibrationStore: listingLivenessCalibrationStore, signal, nodeId, manualAiRunId,
+          waitForWorkers: true, abortError: nodeCancellationError,
+        }) });
+      await assertScoringCurrent();
+      scoringJobs = recheck.rows;
+      if (jobsTelemetry.search?.runId === snapshotContext?.runId) {
+        jobsTelemetry.search.listingRecheck = { visited: recheck.visited, rechecked: recheck.rechecked, stillPending: recheck.stillPending };
+      }
+    }
+    const postingJob = await officialPostingConsumerMap(scoringJobs);
     await assertScoringCurrent();
     const { role, gathered, toScore, cappedForBudget, scoringBatches, slimBatch, cachedPrefix: snapshotCachedPrefix, candidateEvidencePages, snapshot } =
       buildJobAnalysisSnapshot({
-        jobs, postingJob, profile: scoringProfile, careerData: scoringCareerData, careerSnapshotId, approvedScoringSnapshot: pinnedScoringInput.pinned, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority,
+        jobs: scoringJobs, postingJob, profile: scoringProfile, careerData: scoringCareerData, careerSnapshotId, approvedScoringSnapshot: pinnedScoringInput.pinned, nodeId, targetRole, jobPreferences, jobPreferencePlan, preferenceEvaluation, preferenceCandidatePool, operationAuthority,
         snapshotContext: manualAiRecoveryMode
           ? {
             ...(snapshotContext || {}),
@@ -17369,7 +17434,7 @@ Return a JSON object with four arrays of search query strings:
     let sourceRecoverySnapshot = null;
     let sourceRecoveryJobs = [];
     const resolveGenericPostings = createOfficialPostingRecoveryPassResolver(rows =>
-      resolveScoreSafePostings(rows, { event, nodeId, signal, jobRunId }), { signal });
+      resolveScoreSafePostings(rows, { event, nodeId, signal, jobRunId, waitForWorkers: true }), { signal });
     // Load the recovery snapshot for ANY source whose Solve can recover
     // descriptions, not just Google: a Glassdoor panel-429 strands rows exactly
     // the same way, and without the snapshot the postprocessor below falls back

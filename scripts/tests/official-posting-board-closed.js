@@ -281,9 +281,10 @@ const pureTests = [
       // Counters stay apart: dropped rows are NOT kept rows, and a kept row is still terminal proof.
       assert.equal(didDetailBlockReprobeRecover({ boardClosedDetailKept: 1 }), true);
       assert.equal(didDetailBlockReprobeRecover({ boardClosedDetailKept: 0, unavailableDetailDropped: 0 }), false);
-      const probe = { jobs: [card], expandedCount: 0, unavailableDetailDropped: 1, boardClosedDetailKept: 1 };
-      const composed = composeDetailBlockReprobeResult(probe, { jobs: [], unavailableDetailDropped: 2, boardClosedDetailKept: 3 });
+      const probe = { jobs: [card], expandedCount: 0, attemptedCount: 1, unavailableDetailDropped: 1, boardClosedDetailKept: 1 };
+      const composed = composeDetailBlockReprobeResult(probe, { jobs: [], attemptedCount: 4, unavailableDetailDropped: 2, boardClosedDetailKept: 3 });
       assert.equal(composed.unavailableDetailDropped, 3); assert.equal(composed.boardClosedDetailKept, 4);
+      assert.equal(composed.attemptedCount, 5, 'probe and rest telemetry retains the actual attempts issued in each branch');
       assert.equal(composeDetailBlockReprobeResult({ jobs: [], boardClosedDetailKept: 0 }, null, [], 'description-rate-limited').boardClosedDetailKept, 0);
 
       const scraper = read('electron/ipc/browser/manualScraper.js');

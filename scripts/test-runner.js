@@ -16,6 +16,7 @@ import ai_models from './tests/ai-models.js';
 import fixtures_canvas from './tests/fixtures-canvas.js';
 import job_diagnostics from './tests/job-diagnostics.js';
 import job_scoring_cache from './tests/job-scoring-cache.js';
+import ai_task_corpus from './tests/ai-task-corpus.js';
 import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js';
 import jobs_location_language from './tests/jobs-location-language.js';
 import job_source_country_scope from './tests/job-source-country-scope.js';
@@ -78,6 +79,7 @@ import listing_liveness_transport from './tests/listing-liveness-transport.js';
 import listing_liveness_alternates from './tests/listing-liveness-alternates.js';
 import listing_liveness_search_handler from './tests/listing-liveness-search-handler.js';
 import listing_liveness_search_session from './tests/listing-liveness-search-session.js';
+import listing_liveness_recheck from './tests/listing-liveness-recheck.js';
 import listing_liveness_calibration_store from './tests/listing-liveness-calibration-store.js';
 import listing_liveness_bundle from './tests/listing-liveness-bundle.js';
 import listing_liveness_generation from './tests/listing-liveness-generation.js';
@@ -144,6 +146,7 @@ import job_board_provider from './tests/job-board-provider.js';
 import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
 import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
+import browser_tab_restore from './tests/browser-tab-restore.js';
 import schema_validation from './tests/schema-validation.js';
 import validation_failure from './tests/validation-failure.js';
 import job_resume_ingestion from './tests/job-resume-ingestion.js';
@@ -314,6 +317,7 @@ const testGroups = [
   ['fixtures-canvas.js', fixtures_canvas],
   ['job-diagnostics.js', job_diagnostics],
   ['job-scoring-cache.js', job_scoring_cache],
+  ['ai-task-corpus.js', ai_task_corpus],
   ['marketplace-extractors-auth.js', marketplace_extractors_auth],
   ['jobs-location-language.js', jobs_location_language],
   ['job-source-country-scope.js', job_source_country_scope],
@@ -376,6 +380,7 @@ const testGroups = [
   ['listing-liveness-alternates.js', listing_liveness_alternates],
   ['listing-liveness-search-handler.js', listing_liveness_search_handler],
   ['listing-liveness-search-session.js', listing_liveness_search_session],
+  ['listing-liveness-recheck.js', listing_liveness_recheck],
   ['listing-liveness-calibration-store.js', listing_liveness_calibration_store],
   ['listing-liveness-bundle.js', listing_liveness_bundle],
   ['listing-liveness-generation.js', listing_liveness_generation],
@@ -447,6 +452,7 @@ const testGroups = [
   ['job-fit-assessment.js', job_fit_assessment],
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],
   ['browser-launch-lock-regression.js', browser_launch_lock_regression],
+  ['browser-tab-restore.js', browser_tab_restore],
   ['schema-validation.js', schema_validation],
   ['validation-failure.js', validation_failure],
   ['job-resume-ingestion.js', job_resume_ingestion],

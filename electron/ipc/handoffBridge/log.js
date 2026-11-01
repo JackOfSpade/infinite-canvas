@@ -166,6 +166,12 @@ function formatLogRecord(record) {
   return parts.join(' ');
 }
 
+function isRoutineToolCall(record) {
+  return record.code === 'tool_call'
+    && ((record.fields.tool === 'get' && record.fields.outcome === 'served')
+      || (record.fields.tool === 'submit' && record.fields.outcome === 'accepted'));
+}
+
 /**
  * Concrete production log owner. `logger` is injected from electron/main.js;
  * keeping this module Electron-free preserves B0 import inertness and lets
@@ -181,7 +187,12 @@ export function createHandoffBridgeLog({ logger = null, now = Date.now, limit = 
     const entry = makeLogRecord(code, fields);
     // The existing app logger owns its own bounded bug-report ring. A logger
     // failure must not change serving, but it must not bypass validation.
-    try { logger?.info?.(formatLogRecord(entry)); } catch { /* logging is best effort */ }
+    // Routine polling and accepted delivery are already represented by
+    // aggregate counters and the Activity view; keep exceptional outcomes in
+    // the main-process ring without letting successes crowd them out.
+    if (!isRoutineToolCall(entry)) {
+      try { logger?.info?.(formatLogRecord(entry)); } catch { /* logging is best effort */ }
+    }
     const activity = activityForRecord(entry);
     if (activity) {
       const safe = sanitizeActivityItem({ ...activity, at: safeActivityTime(now) });

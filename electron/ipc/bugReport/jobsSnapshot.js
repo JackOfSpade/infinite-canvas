@@ -5,7 +5,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import { CAREER_CONVERGENCE_CATEGORIES, sanitizeCareerConvergenceRound, getCurrentRequestJobAnalysisPaths, getJobsBoardTelemetryForReport, getJobsCareerCompilationForReport, getJobsResumeAttributionForReport, getJobsSourceRunHistoryForReport, getJobsTelemetryForReport, getJobsTelemetryHubCountForReport, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, listDescriptionRecoveryCheckpointsSync } from '../jobs.js';
-import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
+import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_CANCEL_CAUSES, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
 import { getManualScraperTelemetry } from '../browser/manualScraper.js';
@@ -960,9 +960,20 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
     const boardClosedDetail = boardClosedRescued > 0 || boardClosedRemoved > 0
       ? ` · board-closed: ${boardClosedRescued} rescued from the evidence gate for the official-posting check, ${boardClosedRemoved} dropped after it`
       : '';
+    const incompleteOfficialLookups = nonnegativeCount(funnel.officialLookupsIncomplete) || 0;
+    const officialRetryDetail = incompleteOfficialLookups > 0
+      ? ` · ${incompleteOfficialLookups} official lookup${incompleteOfficialLookups === 1 ? '' : 's'} incomplete`
+      : '';
     const languageDropped = nonnegativeCount(funnel.languageDropped) || 0;
     const languageDropDetail = languageDropped > 0 ? `, non-English ${languageDropped}` : '';
-    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${languageDropDetail}${boardClosedDetail}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${languageDropDetail}${boardClosedDetail}${officialRetryDetail}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+  }
+  const pendingLivenessRows = Object.values(receipt.listingLiveness || {})
+    .reduce((total, entry) => total + (nonnegativeCount(entry?.aiPending) || 0), 0);
+  if (pendingLivenessRows > 0) lines.push(`  - Listing-liveness rows pending recheck with fresh evidence: ${pendingLivenessRows}.`);
+  if (receipt.funnel?.listingRecheck) {
+    const recheck = receipt.funnel.listingRecheck;
+    lines.push(`  - Listing recheck before scoring: ${nonnegativeCount(recheck.visited) || 0} visited, ${nonnegativeCount(recheck.rechecked) || 0} resolved, ${nonnegativeCount(recheck.stillPending) || 0} still pending.`);
   }
   const sources = Object.entries(receipt.sources || {});
   if (sources.length) {
@@ -5095,6 +5106,8 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     ?? Math.max(0, detailedRetained - lifecycles.length);
   const activeRecovered = boardDiagnosticNumber(lifecycleSnapshot?.activeRecoveredFromSourceEviction) ?? 0;
   const aggregateNumber = (key) => boardDiagnosticNumber(aggregate[key]) ?? 0;
+  const cancelledByCause = SAFE_NON_API_AI_CANCEL_CAUSES
+    .map(cause => `${cause}=${boardDiagnosticNumber(aggregate.cancelledByCause?.[cause]) ?? 0}`).join(', ');
   const bridgeRejected = aggregateNumber('bridgeRejectionAttempts');
   const bridgeRequestsRejected = aggregateNumber('requestsEverBridgeRejected');
   const bridgeRecovered = aggregateNumber('acceptedAfterBridgeRejection');
@@ -5103,6 +5116,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   const lines = [
     `- Detailed receipts: ${lifecycles.length} shown · ${detailedRetained} retained for this report window · ${detailedOmitted} retained receipt(s) omitted by the ${limit}-row report cap · lifecycle source currently retains ${sourceRetained}/${sourceLimit} row(s) · ${sourceEvicted} earlier receipt(s) evicted by the source cap${activeRecovered ? ` · ${activeRecovered} live receipt(s) restored from the active registry` : ''}.`,
     `- Cumulative registry (this process window): ${aggregateIssued} issued · ${aggregateNumber('settled')} settled (accepted ${aggregateNumber('accepted')} · cancelled ${aggregateNumber('cancelled')} · stepped back ${aggregateNumber('steppedBack')} · failed ${aggregateNumber('failed')}) · ${aggregateNumber('rejectionAttempts')} rejection attempt(s) across ${aggregateNumber('requestsEverRejected')} request(s) · ${aggregateNumber('acceptedAfterRejection')} rejected request(s) later accepted · ${aggregateNumber('pendingAfterRejection')} still pending after rejection.`,
+    `- Cancelled handoffs by cause: ${cancelledByCause}.`,
     `- Bridge-route reconciliation: ${bridgeRejected} bridge validation rejection attempt(s) across ${bridgeRequestsRejected} request(s) · ${bridgeRecovered} bridge-rejected request(s) later accepted on that same lifecycle · ${bridgePending} still pending after a bridge rejection${bridgeOtherSettled ? ` · ${bridgeOtherSettled} settled without later acceptance` : ''}. This is route-specific registry evidence; Handoff Bridge Diagnostics' submit counters are transport-wide and are not paired to these rows.`,
   ];
   const failureSummary = (item) => {
@@ -5157,6 +5171,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
       : '';
     return receipts.length ? ` · rejection detail: ${receipts.join(' | ')}${omission}` : omission;
   };
+  const lifecycleLines = [];
   for (const item of lifecycles) {
     const nodeId = boardDiagnosticValue(item, 'nodeId');
     const issuedAt = Number(boardDiagnosticValue(item, 'issuedAt')) || 0;
@@ -5257,13 +5272,29 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const accepted = acceptedAt && issuedAt
       ? ` · accepted after ${handoffElapsed(acceptedAt - issuedAt)}`
       : '';
+    const outcome = lifecycleCode(boardDiagnosticValue(item, 'outcome'), 'settled');
+    const cancelCause = SAFE_NON_API_AI_CANCEL_CAUSES.includes(boardDiagnosticValue(item, 'cancelCause'))
+      ? boardDiagnosticValue(item, 'cancelCause') : null;
+    const terminalLabel = outcome === 'cancelled' ? `cancelled${cancelCause ? `(${cancelCause})` : ''}` : outcome;
     const terminal = settledAt && issuedAt
-      ? ` · **${lifecycleCode(boardDiagnosticValue(item, 'outcome'), 'settled')}** in ${handoffElapsed(settledAt - issuedAt)}`
+      ? ` · **${terminalLabel}** in ${handoffElapsed(settledAt - issuedAt)}`
       : ` · **pending** for ${handoffElapsed(Date.now() - issuedAt)}`;
     // The visible handoff code is derived from the private prompt. Exporting
     // it would give a report reader a small offline membership oracle for
     // guessed prompt contents; request/batch labels already provide correlation.
-    lines.push(`- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${poolProgress}${planSize}${origin}${workflowScope}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${failureSummary(item)}${accepted}${terminal}${orchestration}`);
+    const line = `- \`${lifecycleLabel(boardDiagnosticValue(item, 'requestId'))}\` · task \`${lifecycleCode(boardDiagnosticValue(item, 'task'), 'unknown')}\` · ${node}${batch}${count}${attempt}${promptSize}${responseSize}${poolProgress}${planSize}${origin}${workflowScope}${issuedClock} · ${deliveries}${retries.length ? ` · ${retries.join(', ')}` : ''}${failureSummary(item)}${accepted}${terminal}${orchestration}`;
+    // Only cancellations carry no per-request evidence worth keeping. A failed,
+    // accepted or pending receipt stays on its own line.
+    const signature = outcome === 'cancelled' ? [boardDiagnosticValue(item, 'task'), boardDiagnosticValue(item, 'channel'),
+      outcome, cancelCause, attemptKind, boardDiagnosticValue(item, 'itemCount')].join('|') : null;
+    const previous = lifecycleLines.at(-1);
+    if (signature && previous?.signature === signature) previous.count++;
+    else lifecycleLines.push({ signature, line, count: 1 });
+  }
+  for (const group of lifecycleLines) {
+    lines.push(group.count > 1
+      ? `${group.line} · ${group.count} consecutive identical lifecycle outcomes (representative receipt shown)`
+      : group.line);
   }
 
   // Detect and flag duplicate response body collisions across accepted handoffs
@@ -6155,6 +6186,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const counts = value => Object.entries(value || {}).filter(([, count]) => Number.isFinite(Number(count)))
         .map(([key, count]) => `${key}=${Math.max(0, Math.floor(Number(count)))}`).join(', ') || 'none';
       lines.push(`- Official postings: levels ${counts(resolution.levels)}; outcomes ${counts(resolution.outcomes)}; rejections ${counts(resolution.rejections)}; failures ${Math.max(0, Number(resolution.failed) || 0)}.`);
+      if (Number(resolution.officialLookupsIncomplete) > 0) lines.push(`- Official lookups incomplete after resolution: ${Math.max(0, Math.floor(Number(resolution.officialLookupsIncomplete) || 0))}; they remain retryable before scoring.`);
       lines.push(`- Official-posting bridge: ${Math.max(0, Number(resolution.handoffs) || 0)} handoff(s), ${Math.max(0, Number(resolution.handoffMs) || 0)} ms; material description changes ${Math.max(0, Number(resolution.materialJdChange) || 0)}; timeout ${Math.max(0, Number(resolution.bridgeTimeout) || 0)}; unavailable ${Math.max(0, Number(resolution.bridgeUnavailable) || 0)}.`);
       const comparisonCount = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
       const optionCounts = Array.from({ length: 8 }, (_, index) => `${index + 1}=${comparisonCount(resolution.comparisonOptions?.[index + 1])}`).join(', ');
@@ -6171,6 +6203,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .slice(0, 24)
         .map(([board, entry]) => `\`${board}\` ${LISTING_LIVENESS_COUNT_FIELDS.map(key => `${key}=${closedCount(entry[key])}`).join(', ')}`);
       if (livenessRows.length) lines.push(`- Listing liveness (per board, counts only): ${livenessRows.join('; ')}.`);
+      const pendingLiveness = Object.values(resolution.listingLiveness && typeof resolution.listingLiveness === 'object' ? resolution.listingLiveness : {})
+        .reduce((total, entry) => total + closedCount(entry?.aiPending), 0);
+      if (pendingLiveness > 0) lines.push(`- Listing-liveness rows pending recheck with fresh evidence: ${pendingLiveness}.`);
     }
     const dedup = s.dedupProvenance;
     if (dedup?.total > 0) {

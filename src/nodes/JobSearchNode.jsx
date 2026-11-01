@@ -20,6 +20,7 @@ import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSou
 // gather, without over-collapsing distinct same-title/company reqs in
 // different cities. See the policy note in jobIdentity.js.
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../utils/jobIdentity';
+import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
@@ -1216,6 +1217,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const [selectedCanvasFileSelections, setSelectedCanvasFileSelections] = useState([]);
   const canvasCareerFiles = useMemo(() => canvasCareerImportCandidates(canvasNodes), [canvasNodes]);
   const processingRunsRef = useRef(createRunOwnershipGuard());
+  const directSearchDeferralEventsRef = useRef(new Set());
   // Snapshot equality is intentionally insufficient: a second request may use
   // the same immutable career snapshot. This ledger revokes the first request
   // synchronously at admission and its serialized receipt gives every
@@ -4688,9 +4690,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         getEdges(),
       );
       if (durableBoardOwner) {
-        EventLogger.log(
-          `[JobSearch][${id}] Direct search deferred to durable Job Board ${durableBoardOwner.orchestratorNodeId}`,
-        );
+        const deferralRunId = boardRunId || getNode(id)?.data?.jobRunId || durableBoardOwner.boardRunId || 'unscoped';
+        const deferralKey = `${id}|${deferralRunId}|${durableBoardOwner.orchestratorNodeId}`;
+        const seenDeferrals = directSearchDeferralEventsRef.current;
+        if (!seenDeferrals.has(deferralKey)) {
+          seenDeferrals.add(deferralKey);
+          while (seenDeferrals.size > 128) seenDeferrals.delete(seenDeferrals.values().next().value);
+          EventLogger.log(`[JobSearch][${id}] Direct search deferred to durable Job Board ${durableBoardOwner.orchestratorNodeId} run=${deferralRunId}`);
+        }
         addToast({
           title: 'Run from Job Board',
           description: 'This Job Search is reserved by an interrupted Job Board run. Finish or cancel that Board first.',
@@ -10603,6 +10610,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         || (boardPlan?.cancellationCleanup?.sourceId === id
           ? boardPlan.cancellationCleanup
           : null);
+      let cancelledAuthority = persistedCleanup?.operationAuthority || null;
       const persistedCleanupHasPriorRun = Object.prototype.hasOwnProperty.call(
         persistedCleanup || {},
         'priorRunId',
@@ -10676,6 +10684,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       let cancellationLease = null;
       let cancellationAcknowledged = false;
       let manualAiRetirementCompleted = false;
+      let cancelledAuthorityRetired = false;
       try {
         // This first durable child intent is also inside the lease cleanup
         // boundary. The safety lease was deliberately reserved before any await;
@@ -10689,6 +10698,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           priorRunId: persistedPriorRunId,
           ownsExistingRecoveryRun: persistedCleanup?.ownsExistingRecoveryRun === true,
           runCleanupAuthorized: persistedCleanup?.runCleanupAuthorized === true,
+          operationAuthority: cancelledAuthority,
         });
         updateGlobal(id, {
           queuedModuleRun: null,
@@ -10758,7 +10768,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           });
         }
         cancellationLease = await cancellationLeasePromise;
-        if (!recoveredRunId) {
+        if (!recoveredRunId || !cancelledAuthority) {
           const info = await window.electronAPI?.peekJobRun?.({ canvasFilePath, nodeId: id });
           if (info?.success === false) {
             throw new Error(info.error || 'Could not inspect the interrupted Job Search before cancellation.');
@@ -10769,7 +10779,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             && typeof info?.runId === 'string'
             && info.runId
           ) {
+            if (recoveredRunId && recoveredRunId !== info.runId) {
+              throw new Error('The Job Search recovery token changed while cancellation was settling.');
+            }
             recoveredRunId = info.runId;
+            // Older failed cancellations rolled node data back before retaining
+            // this receipt. Recover it only from the exact owned ledger; never
+            // substitute an unrelated current operation from the node.
+            cancelledAuthority ||= info.operationAuthority || null;
             runCleanupAuthorized = runCleanupAuthorized || (
               hasDurablePriorRunProof
               && (
@@ -10786,7 +10803,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         ) {
           throw new Error('The terminal Job Search recovery token changed before cancellation settled.');
         }
-        if (recoveredRunId && persistedCleanup?.runId !== recoveredRunId) {
+        if (recoveredRunId && (persistedCleanup?.runId !== recoveredRunId
+          || persistedCleanup?.operationAuthority !== cancelledAuthority)) {
           await persistChildCancellationCleanup({
             sourceId: id,
             runId: recoveredRunId,
@@ -10795,16 +10813,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             priorRunId: persistedPriorRunId,
             ownsExistingRecoveryRun: persistedCleanup?.ownsExistingRecoveryRun === true,
             runCleanupAuthorized,
+            operationAuthority: cancelledAuthority,
           });
         }
         if (recoveredRunId && runCleanupAuthorized && !terminalFinalizationRecovery) {
-          const cancelledAuthority = getNode(id)?.data?.analysisOperation?.authority || null;
           const cleanup = await window.electronAPI?.discardBoardJobRun?.({
             canvasFilePath, nodeId: id, runId: recoveredRunId, operationAuthority: cancelledAuthority,
           });
           if (cleanup?.ok !== true) {
             throw new Error('Durable Job Search recovery cleanup could not be verified.');
           }
+          cancelledAuthorityRetired = true;
         }
         // A terminal-finalization failure already committed a valid new result.
         // Cancelling that cleanup-only Board turn must leave the result and its
@@ -10813,6 +10832,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         if (durableRollbackReceipt && !terminalFinalizationRecovery) {
           const rollback = {
             ...boardRunRollbackPatch(safeClone(durableRollbackReceipt.previousData || {}), id),
+            ...(cancelledAuthorityRetired && cancelledAuthority ? {
+              analysisOperation: { authority: cancelledAuthority, tombstoned: true },
+            } : {}),
             _boardRollbackSourceProgressFence: {
               nonce: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
             },
@@ -10918,6 +10940,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
       return { status: 'cancelled', cancelled: true, runId: recoveredRunId };
     }
+    // Admission can still be publishing its host receipt when Cancel arrives.
+    // Stop the worker through its predicate first, then retain the final exact
+    // receipt before restoring any pre-run node data. Recheck rollbackApplied
+    // after this shared wait so concurrent callers use the first cleanup.
+    control.cancelled = true;
+    await analysisOperationClaimTailRef.current;
     if (control.rollbackApplied) {
       const [rollbackResult, cleanupResult] = await Promise.allSettled([
         control.rollbackPromise,
@@ -10947,6 +10975,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
 
     const live = getNode(id)?.data || {};
+    control.cancelledAnalysisOperation = live.analysisOperation || null;
+    control.cancelledAuthority = control.cancelledAnalysisOperation?.authority || null;
+    analysisOperationLedgerRef.current.revoke();
     const priorRunId = control.priorRunId || null;
     const liveRunId = live.jobRunId || null;
     const activeRunId = control.cancelledRunId
@@ -10976,6 +11007,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         priorRunId,
         ownsExistingRecoveryRun: control.ownsExistingRecoveryRun === true,
         runCleanupAuthorized: control.runCleanupAuthorized === true || runCleanupAuthorized,
+        operationAuthority: control.cancelledAuthority,
       });
       if (!window.electronAPI?.cancelNodeTaskAndWait) {
         window.electronAPI?.cancelNodeTask?.(id, reason);
@@ -11036,6 +11068,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           throw new Error('The Job Search recovery token changed while cancellation was settling.');
         }
         control.cancelledRunId = info.runId;
+        control.cancelledAuthority ||= info.operationAuthority || null;
         control.runCleanupAuthorized = control.ownsExistingRecoveryRun === true
           || info.runId !== priorRunId;
         await persistChildCancellationCleanup({
@@ -11046,11 +11079,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           priorRunId,
           ownsExistingRecoveryRun: control.ownsExistingRecoveryRun === true,
           runCleanupAuthorized: control.runCleanupAuthorized,
+          operationAuthority: control.cancelledAuthority,
         });
       }
     };
     const rollback = {
       ...boardRunRollbackPatch(control.previousData, id),
+      // Result rollback must not rewind the host's operation revision. Keep
+      // its receipt available if cleanup fails and Quit needs to pause it.
+      analysisOperation: control.cancelledAnalysisOperation,
       _boardRollbackSourceProgressFence: {
         nonce: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`,
       },
@@ -11106,13 +11143,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         || cleanupRunId !== priorRunId
         || control.ownsExistingRecoveryRun
       )) {
-        const cancelledAuthority = getNode(id)?.data?.analysisOperation?.authority || null;
+        const cancelledAuthority = control.cancelledAuthority;
         const cleanup = await window.electronAPI?.discardBoardJobRun?.({
           canvasFilePath, nodeId: id, runId: cleanupRunId, operationAuthority: cancelledAuthority,
         });
         if (cleanup?.ok !== true) {
           throw new Error('The interrupted Job Search recovery files could not be removed safely.');
         }
+        updateGlobal(id, node => (
+          node?.data?.analysisOperation?.authority?.operationId === cancelledAuthority?.operationId
+            ? { analysisOperation: { ...node.data.analysisOperation, tombstoned: true } }
+            : null
+        ));
       }
     };
     control.cleanupArtifacts = () => {
@@ -14502,6 +14544,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [epoch, getNode, id, moduleRunQueue, updateGlobal]);
   const careerCompilationUnstarted = hasCareerIdentity && !data.careerImportCompilation
     && careerResumeInputPaths(data).length > 0;
+  const officialLookupsIncomplete = (Array.isArray(data.scoredJobs) ? data.scoredJobs : [])
+    .filter(job => job?.officialPosting && officialPostingLookupStatus(job.officialPosting).retryable).length;
 
 
   const banner = (
@@ -14520,6 +14564,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       )}
       {resumeBanner}
       {manualAiRecoveryBanner}
+      {officialLookupsIncomplete > 0 && (
+        <div className="m-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-100/80" role="status">
+          {officialLookupsIncomplete} official {officialLookupsIncomplete === 1 ? 'lookup is' : 'lookups are'} incomplete. Continue retries these before scoring.
+        </div>
+      )}
       {data.terminalFinalizationRecovery && !data.errorMessage ? (
         <div className="m-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2" role="status" onPointerDown={(e) => e.stopPropagation()}>
           <div className="text-[11px] font-medium text-amber-200">Scored jobs saved · cleanup pending</div>

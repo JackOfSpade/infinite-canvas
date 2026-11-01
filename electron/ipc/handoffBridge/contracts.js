@@ -71,7 +71,7 @@ export const STATUS_SNAPSHOT_EXAMPLE = deepFreeze({
   // correlation values. They deliberately contain no worker/session code,
   // prompt, or clipboard contents, but let a persistent renderer keep an
   // already-started worker out of its copy controls after a remount.
-  chat: { ordinal: 0, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, state: 'none', jobsAssigned: 0, expiresInMs: null, pool: { active: false, generation: null, workerCount: 0, workers: [], plan: { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' } }, outstanding: null, servedTwice: false, previous: [] },
+  chat: { ordinal: 0, startedAt: null, firstCallAt: null, lastCallAt: null, lastCallKind: null, calls: 0, lifetimeCalls: 0, state: 'none', jobsAssigned: 0, expiresInMs: null, pool: { active: false, generation: null, workerCount: 0, workers: [], plan: { recommended: 0, queued: 0, materialized: 0, expandBy: 0, reason: 'empty' } }, outstanding: null, servedTwice: false, previous: [] },
   queue: { applications: { ready: 0, working: 0, needsYou: 0, held: 0, done: 0 }, scoring: { pending: 0, withChat: 0, tasks: [] }, jobs: [] },
   push: { selectedHubs: [], optedOutHubs: 0, discovered: [], claimed: [], claimWorkers: [], available: [] }, alarms: [],
   counts: {

@@ -5,7 +5,7 @@ import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/
 import { deriveBridgeJobProgress, deriveBridgePushProgress, progressTimeLines } from '../utils/bridgeJobProgress';
 import { MAX_HANDOFF_CONCURRENCY } from '../utils/handoffScheduler';
 import { HEADLINE_CLASS, TONE_CLASS } from '../utils/bridgeProgressStyles';
-import { RETRYABLE_LAUNCH_REASONS } from '../utils/handoffBridgeStatus';
+import { launchRetryOffered } from '../utils/handoffBridgeStatus';
 
 // Live progress for an application the bridge holds or a selected push handoff
 // awaiting/holding an exact claim. Its start action prepares the same adaptive
@@ -536,6 +536,7 @@ export function BridgeProgress({
             <p className="mt-1 text-[11px] text-white/60">{BRIDGE_UI_COPY.workerPoolDirections(activeWorkerPool.workerCount)}</p>
           )}
           {workerPoolCapacity && <p className="mt-1 text-[11px] text-sky-100/80">{workerPoolCapacity}</p>}
+          {BRIDGE_UI_COPY.launcherStopped(status.launcherReason) && <p className="mt-1 text-[11px] text-amber-100/80">{BRIDGE_UI_COPY.launcherStopped(status.launcherReason)}</p>}
           {activeWorkerProgress && (
             <ul className="mt-2 space-y-1.5" aria-label="Worker chat progress">
               {activeWorkerProgress.workers.map(worker => (
@@ -547,12 +548,12 @@ export function BridgeProgress({
                   <span className={worker.state === 'quiet' ? 'text-amber-200' : worker.state === 'working' ? 'text-violet-200' : 'text-white/55'}>
                     {BRIDGE_UI_COPY.workerState(worker.state, worker.quietReason, worker.launch)}
                   </span>
-                  {worker.launch && BRIDGE_UI_COPY.workerLaunch(worker.launch) && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal))}</span>}
+                  {worker.launch && BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal), worker.everConnected) && <span className="basis-full text-sky-100/80">{BRIDGE_UI_COPY.workerLaunch(worker.launch, launchAccountName(activeWorkerPool.generation, worker.ordinal), worker.everConnected)}</span>}
                   {(worker.canOpenChat === true || (worker.launch?.canReveal !== false && (worker.launch?.stage === 'failed' || ['approval_required', 'delivery_timeout', 'conversation_unavailable', 'chat_stopped'].includes(worker.launch?.reason) || worker.state === 'quiet'))) && (
                     <button type="button" className="rounded border border-amber-300/50 px-2 py-1 text-amber-100"
                       disabled={busy || activeCopyingWorker !== null} onClick={() => void retryWorkerLaunch(worker.ordinal, true)}>{worker.launch?.reason === 'approval_required' ? 'Open ChatGPT for approval' : 'Open worker chat'}</button>
                   )}
-                  {worker.launch?.stage === 'failed' && RETRYABLE_LAUNCH_REASONS.includes(worker.launch?.reason) && (
+                  {worker.launch?.stage === 'failed' && launchRetryOffered(worker.launch?.reason, worker.everConnected) && (
                     <button type="button" className="ml-auto rounded-md border border-white/15 bg-white/5 px-2.5 py-1.5 text-[11px] font-medium text-white/85"
                       disabled={busy || activeCopyingWorker !== null}
                       onClick={() => void retryWorkerLaunch(worker.ordinal)}>Retry</button>

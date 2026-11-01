@@ -26,6 +26,7 @@ const safeNow = now => {
 };
 const noOp = () => undefined;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+let processLifetimeMcpCalls = 0;
 const finite = (value, fallback = null) => Number.isFinite(value) ? value : fallback;
 const bool = value => value === true;
 const oneOf = (value, allowed, fallback) => allowed.has(value) ? value : fallback;
@@ -301,6 +302,7 @@ export function createHandoffBridgeController(options = {}) {
     return raw.replaceAll('_', '-');
   }
   function recordToolOutcome(tool, result, startedAt) {
+    processLifetimeMcpCalls = Math.min(Number.MAX_SAFE_INTEGER, processLifetimeMcpCalls + 1);
     const finishedAt = safeNow(now);
     const elapsed = Number.isFinite(startedAt) ? Math.max(0, Math.floor(finishedAt - startedAt)) : 0;
     record('tool_call', { tool, outcome: toolOutcome(tool, result), ms: elapsed });
@@ -673,6 +675,7 @@ export function createHandoffBridgeController(options = {}) {
       ordinal: Math.max(0, finite(rawChat.ordinal, base.chat.ordinal)),
       startedAt: finite(rawChat.startedAt), firstCallAt: finite(rawChat.firstCallAt), lastCallAt: finite(rawChat.lastCallAt),
       lastCallKind: oneOf(rawChat.lastCallKind, new Set(['get', 'submit']), null), calls: Math.max(0, finite(rawChat.calls, 0)),
+      lifetimeCalls: processLifetimeMcpCalls,
       state: oneOf(rawChat.state, CHAT_STATES, base.chat.state), jobsAssigned: Math.max(0, finite(rawChat.jobsAssigned, 0)),
       expiresInMs: finite(rawChat.expiresInMs),
       pool: {

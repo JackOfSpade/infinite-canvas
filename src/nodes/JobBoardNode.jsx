@@ -801,6 +801,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const [finalizingCommittedCombine, setFinalizingCommittedCombine] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState(null);
+  const [pauseSaving, setPauseSaving] = useState(false);
   const [recoveryError, setRecoveryError] = useState(null);
   // Kept out of persistent Board data: this is a renderer-only observation of
   // the selector's real action predicate and measured layout at report time.
@@ -2682,7 +2683,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     if (!suppressToast) {
       addToast({
         title: 'Board run cancelled',
-        description: 'The existing board and completed search results were kept.',
+        description: 'Partial work in the active Search was rolled back. Completed Search results and existing Board results were kept.',
         type: 'info',
       });
     }
@@ -2691,13 +2692,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
   const pauseBoardForQuit = useCallback(async ({ pauseSearchModule, isQuitPauseCurrent = () => true } = {}) => {
     const live = getNode(id)?.data || data;
+    const plan = live.boardScanResume;
+    if (!isQuitPauseCurrent()) return { success: false, status: 'stale', error: 'This search run is no longer current.' };
     if (!jobWorkflowNeedsQuitPause({ type: 'jobboard', data: live })
       && !scanRunRef.current && !scanPreflightRef.current && !combineRunRef.current
       && !combineRecoveryTokenClaimRef.current && !activeCombineManualAiRunRef.current
       && !activeSearchModuleIdRef.current && activeSearchModuleIdsRef.current.size === 0) {
       return { success: true, settled: true, idle: true };
     }
-    const plan = live.boardScanResume;
     const activeCombine = activeCombineManualAiRunRef.current;
     const marker = live.manualAiResume || (activeCombine?.runId ? {
       runId: activeCombine.runId, startedAt: activeCombine.startedAt,
@@ -2757,6 +2759,29 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       || (committed?.manualAiResume && committed.manualAiResume.pausedByUser !== true)) throw new Error('The Job Board pause was not committed.');
     return { success: true, settled: true };
   }, [canvasFilePath, data, epoch, getNode, id, moduleRunQueue, updateGlobal]);
+
+  const pauseSearchesAndSave = useCallback(async () => {
+    if (pauseSaving) return;
+    const boardRunId = getNode(id)?.data?.boardScanResume?.boardRunId || null;
+    const isCurrentSearchRun = () => {
+      const plan = getNode(id)?.data?.boardScanResume;
+      return Boolean(boardRunId && plan?.boardRunId === boardRunId && plan.phase === 'searches');
+    };
+    if (!isCurrentSearchRun()) return;
+    setPauseSaving(true);
+    try {
+      const result = await pauseBoardForQuit({ boardRunId,
+        pauseSearchModule: sourceId => jobSearchCoordinator.pauseSearchModule(sourceId),
+        isQuitPauseCurrent: isCurrentSearchRun,
+      });
+      if (result?.success) addToast({ title: 'Search paused and saved',
+        description: 'The active Search can continue later. Existing Board results stay in place.', type: 'info' });
+      else if (result?.status !== 'stale') throw new Error(result?.error || 'The active Search could not be paused safely.');
+    } catch (error) {
+      setRecoveryError(error?.message || 'The active Search could not be paused safely.');
+      addToast({ title: 'Pause & save did not finish', description: error?.message || 'The Board kept its recovery receipt.', type: 'error' });
+    } finally { setPauseSaving(false); }
+  }, [addToast, getNode, id, jobSearchCoordinator, pauseBoardForQuit, pauseSaving]);
 
   useEffect(() => jobSearchCoordinator.registerBoardModule(id, async (options = {}) => {
     const result = await handleCancelRun({
@@ -6889,10 +6914,23 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [careerCanvasOpen, careerCanvasFileKey, getNodes]);
 
   const boardRunVisible = scanning || combining || durableRecoveryActive || cancellationCleanupActive;
-  const awaitingSourceId = data.boardScanResume?.awaitingSourceResolution?.sourceId || null;
-  const awaitingSourceLabel = awaitingSourceId
-    ? connectedModules.find(module => module.id === awaitingSourceId)?.label || 'selected Job Search'
-    : null;
+  const awaitingSourceEntries = [
+    ...(Array.isArray(data.boardScanResume?.awaitingSourceResolutions) ? data.boardScanResume.awaitingSourceResolutions : []),
+    data.boardScanResume?.awaitingSourceResolution,
+  ].filter((entry, index, entries) => entry?.sourceId
+    && entries.findIndex(other => other?.sourceId === entry.sourceId) === index);
+  const awaitingSourceIds = awaitingSourceEntries.map(entry => entry.sourceId);
+  const awaitingSourceLabels = awaitingSourceIds.map(sourceId =>
+    connectedModules.find(module => module.id === sourceId)?.label || 'selected Job Search');
+  const awaitingSourceLabel = awaitingSourceLabels.length ? awaitingSourceLabels.join(', ') : null;
+  const waitingForWorkers = data.boardScanResume?.phase === 'searches' && awaitingSourceIds.length > 0;
+  const showPauseSave = boardRunVisible && data.boardScanResume?.phase === 'searches';
+  const pauseDisabledReason = !showPauseSave ? 'Pause & save is available only during the searches phase.'
+    : data.locked ? 'Unlock this Job Board before pausing the search.'
+      : pauseSaving ? 'Saving the active Search continuation…'
+        : !data.boardScanResume?.boardRunId ? 'Waiting for the Job Board to save a search run id before pausing safely.' : '';
+  const waitingWorkersLabel = waitingForWorkers
+    ? `Waiting for ChatGPT workers or a live bridge connection to finish search resolution for ${awaitingSourceLabel}.` : null;
 
   return (
     <>
@@ -6927,7 +6965,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           progress={finalizingCommittedCombine
             ? { label: 'Board updated — finalizing saved recovery cleanup…' }
             : scanning
-            ? scanProgress
+            ? waitingForWorkers ? { label: waitingWorkersLabel } : scanProgress
             : combining
               ? { label: 'Combining all connected saved results…' }
               : durableRecoveryActive
@@ -6937,6 +6975,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
                 : null}
           onRun={handleSearchSelected}
           onCancel={handleCancelRun}
+          onPause={pauseSearchesAndSave}
+          showPauseSave={showPauseSave}
+          pauseDisabledReason={pauseDisabledReason}
+          waitingForWorkers={waitingForWorkers}
           recoveryError={scanning || combining ? null : recoveryError}
           onRetry={handleRetryRecovery}
           recoveryActionLabel={

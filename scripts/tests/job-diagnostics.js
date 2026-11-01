@@ -1810,6 +1810,7 @@ export default [
         descError: null,
         descWarning: null,
         expandedCount: 0,
+        attemptedCount: 2,
         unavailableDetailDropped: 2,
       };
       assert(didDetailBlockReprobeRecover(allUnavailableProbe),
@@ -1819,18 +1820,19 @@ export default [
       });
       assert(allUnavailableComposite.unavailableDetailDropped === 2
         && allUnavailableComposite.expandedCount === 0
+        && allUnavailableComposite.attemptedCount === 2
         && allUnavailableComposite.jobs.length === 0,
-      'an all-unavailable probe retains its terminal removal count through the successful composite branch');
+      'an all-unavailable probe retains its terminal removal and real attempt counts through the successful composite branch');
 
-      const probe = { ...allUnavailableProbe, unavailableDetailDropped: 1 };
+      const probe = { ...allUnavailableProbe, attemptedCount: 3, unavailableDetailDropped: 1 };
       const rest = {
         jobs: [{ id: 'usable-rest-row' }], descError: null, descWarning: null,
-        expandedCount: 1, unavailableDetailDropped: 2,
+        expandedCount: 1, attemptedCount: 5, unavailableDetailDropped: 2,
       };
       const composite = composeDetailBlockReprobeResult(probe, rest);
       assert(composite.expandedCount === 1 && composite.unavailableDetailDropped === 3
-        && composite.jobs.length === 1,
-      'successful probe/rest composition sums unavailable removals instead of losing either branch');
+        && composite.attemptedCount === 8 && composite.jobs.length === 1,
+      'successful probe/rest composition sums actual attempts and unavailable removals instead of losing either branch');
 
       const ordinaryMiss = {
         jobs: [{ id: 'ambiguous-probe-row' }], descError: null,
@@ -1841,8 +1843,16 @@ export default [
         'an ordinary zero-description miss is not mistaken for throttle recovery');
       const blocked = composeDetailBlockReprobeResult(ordinaryMiss, null, [{ id: 'untouched-rest-row' }], 'description-rate-limited');
       assert(blocked.unavailableDetailDropped === 0
+        && blocked.attemptedCount === 0
         && blocked.jobs[1]?.descriptionDeferredReason === 'description-rate-limited',
       'an ambiguous probe retains the block and defers its untouched remainder without inventing unavailable removals');
+      const scraper = fs.readFileSync(new URL('../../electron/ipc/browser/manualScraper.js', import.meta.url), 'utf8');
+      const reprobeStart = scraper.indexOf('const probeAttempted =');
+      const reprobeEnd = scraper.indexOf('if (didDetailBlockReprobeRecover(probeResult))', reprobeStart);
+      const reprobe = scraper.slice(reprobeStart, reprobeEnd);
+      assert(reprobe.includes('Number(probeResult.attemptedCount)')
+        && reprobe.includes('attempted: probeAttempted'),
+      'cooldown telemetry reports actual detail attempts instead of the configured probe-card ceiling');
       return { unavailable: allUnavailableComposite.unavailableDetailDropped, compositeUnavailable: composite.unavailableDetailDropped };
     },
   },
@@ -4553,8 +4563,8 @@ export default [
       const roomy = enforceClipboardMarkdownCap('# Bug Report\nbody\n', events, logs, 1_000_000);
       assert(!roomy.truncated && roomy.markdown.includes('## Event History') && roomy.markdown.includes('## Recent Main-Process Logs'),
         'Clipboard cap: roomy budget keeps logs + full event history untouched');
-      assert(roomy.markdown.includes('Up to 200 lines from the main process') && !roomy.markdown.includes('Last ~60 lines'),
-        'Main-process log heading matches the current 200-line ring-buffer request');
+      assert(roomy.markdown.includes('Up to 500 entries from the main process') && !roomy.markdown.includes('Last ~60 lines'),
+        'Main-process log heading matches the combined 200-line normal and 300-line warn/error rings');
       assert(roomy.markdown.includes('Timestamps:** full ISO UTC')
         && roomy.markdown.includes('Timestamps:** full local ISO with numeric UTC offset'),
       'Clipboard cap: timestamp bases are labeled for main-process (UTC) and renderer (local) evidence');

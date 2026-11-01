@@ -1,4 +1,5 @@
 import { resolveHandoffConcurrency } from '../../../src/utils/handoffScheduler.js';
+import { LAUNCHER_AVAILABILITY_REASONS } from '../../../src/utils/handoffBridgeStatus.js';
 import { CONSTANTS } from './constants.js';
 import { getBridgeLauncherAvailability, liveObservedWorkerCount } from './observedChatContext.js';
 
@@ -27,6 +28,7 @@ export function bridgeHandoffAvailability(status) {
     launchesInProgress: launcher.inProgress,
     launchPending: launcher.pending,
     autoLaunchAvailable: bridgeLinked(status) && launcher.available,
+    launcherReason: LAUNCHER_AVAILABILITY_REASONS.includes(launcher.reason) ? launcher.reason : 'launcher-unavailable',
   };
 }
 

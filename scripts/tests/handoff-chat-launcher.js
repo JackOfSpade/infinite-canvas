@@ -10,7 +10,7 @@ import { applyHandoffBridgeStatus, getHandoffBridgeStatus, __resetHandoffBridgeS
 import { IPC_ERROR_COPY } from '../../src/utils/handoffBridgeCopy.js';
 import { clearBridgeChatOpenDiagnostic, getBridgeChatOpenDiagnostic, clearBridgeLaunchDiagnostic, getBridgeLaunchDiagnostic } from '../../electron/ipc/handoffBridge/telemetry.js';
 import { isUiRestartContext } from '../../electron/ipc/handoffBridge/restartContext.js';
-import { observedChatContext } from '../../electron/ipc/handoffBridge/observedChatContext.js';
+import { getBridgeLauncherAvailability, observedChatContext } from '../../electron/ipc/handoffBridge/observedChatContext.js';
 
 // These scheduler fixtures predate the observed-chat transport. Bootstrap the
 // controller double with the same begin/confirm/cancel handshake; confirmation
@@ -133,7 +133,7 @@ function observedWorkerUi({ worker, clock, diagnosis, controller = {}, launchRes
   const diagnoses = [];
   const handlers = new Map();
   let observationTimer = null;
-  const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+  const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
     chat: { pool: { active: true, generation: 31, workerCount: 1, workers: [worker] } } };
   const ui = registerHandoffBridgeUi({
     ipc: { handle: (key, value) => handlers.set(key, value), removeHandler() {}, on() {}, removeListener() {} },
@@ -154,7 +154,7 @@ function observedWorkerUi({ worker, clock, diagnosis, controller = {}, launchRes
         worker.firstCallAt = clock.now; worker.lastCallAt = clock.now; worker.state = 'waiting';
         return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` };
       } },
-    getCanvasWindows: () => [],
+    getCanvasWindows: () => [{}],
   });
   const launch = async () => (await handlers.get(IPC_CHANNELS.GET_STATUS)({ sender: { __isCanvasRenderer: true } }))
     .status.chat.pool.workers[0].launch || null;
@@ -370,7 +370,7 @@ export default [
     const handlers = new Map(); const sender = { id: 813, __isCanvasRenderer: true };
     const window = { webContents: sender, isDestroyed: () => false };
     const worker = { ordinal: 1, state: 'available', firstCallAt: null, completed: 4, restarts: 4 };
-    const snapshot = { serving: 'live', autoLaunchChats: true, config: { pluginName: 'Infinite Canvas' },
+    const snapshot = { serving: 'live', autoLaunchChats: true, windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
       chat: { pool: { active: true, generation: 62, workerCount: 1, workers: [worker] } } };
     let launches = 0; let starters = 0; let owns = false;
     const ui = registerHandoffBridgeUi({
@@ -407,7 +407,7 @@ export default [
       controller: { snapshot: () => snapshot, subscribe: () => () => {},
         copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }),
         abandonWorkerStarter: async () => true },
-      chatLauncher: h.launcher, getCanvasWindows: () => [], launchPresentationTimeoutMs: 8,
+      chatLauncher: h.launcher, getCanvasWindows: () => [{}], launchPresentationTimeoutMs: 8,
       timers: { setTimeout() { return { unref() {} }; }, clearTimeout() {} },
     });
     try {
@@ -706,12 +706,14 @@ export default [
         let completeDiagnosis;
         const diagnosis = new Promise(resolve => { completeDiagnosis = resolve; });
         const calls = [];
+        let clock = Date.now();
         const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', firstCallAt: 1, lastCallAt: 1, restarts: 0 };
-        const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+        const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
           chat: { pool: { active: true, generation: 21, workerCount: 2, workers: [worker,
             { ordinal: 2, state: 'working', firstCallAt: 2, lastCallAt: 2 }] } } };
         const ui = registerHandoffBridgeUi({
           ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
+          now: () => clock,
           controller: { snapshot: () => snapshot, subscribe: () => () => {},
             restartWorker: async args => {
               calls.push(['restart', args.workerOrdinal]);
@@ -724,13 +726,17 @@ export default [
               calls.push(['launch', 1]); worker.firstCallAt = Date.now(); worker.state = 'working';
               return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` };
             } },
-          getCanvasWindows: () => [],
+          getCanvasWindows: () => [{}],
         });
         try {
           ui.publishStatus(snapshot);
           await new Promise(resolve => setImmediate(resolve));
           if (stale) { worker.lastCallAt = 3; worker.state = 'working'; }
           completeDiagnosis({ reason });
+          for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve));
+          assert.deepEqual(calls, [], 'one diagnosis is not enough to act on');
+          clock += 15_000;
+          ui.publishStatus(snapshot);
           for (let turn = 0; turn < 8; turn++) await new Promise(resolve => setImmediate(resolve));
           assert.deepEqual(calls, stale ? [] : [['restart', 1], ['close', 'worker:21:1'], ['launch', 1]]);
         } finally { ui.dispose(); }
@@ -843,6 +849,8 @@ export default [
     try {
       await h.publish();
       assert.deepEqual(h.diagnoses, ['worker:31:1']);
+      assert.deepEqual(h.calls, [], 'the alert must persist across two diagnoses');
+      await h.tick(15_000);
       assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true, automatic: true }], ['close', 'worker:31:1'], ['launch']]);
     } finally { h.ui.dispose(); }
   } },
@@ -862,11 +870,12 @@ export default [
   } },
   { name: 'chat launcher: a waiting worker silent under a minute is not yet replaced', async run() {
     const clock = { now: Date.now() };
-    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 45_000, restarts: 0 };
+    const worker = { ordinal: 1, state: 'waiting', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 41_000, restarts: 0 };
     const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ reason: 'delivery_timeout', assistantPresent: true, responding: false }) });
     try {
       await h.publish();
       assert.deepEqual(h.diagnoses, ['worker:31:1']);
+      await h.tick(15_000);
       assert.deepEqual(h.calls, []);
       assert.equal((await h.launch())?.reason, 'delivery_timeout');
       await h.tick(16_000);
@@ -930,6 +939,7 @@ export default [
         pending = false; resolveDiagnosis({ ...noStop, reason: 'delivery_timeout' }); await flush();
         assert.equal((await h.launch())?.reason ?? null, null, `${change} invalidates the pending observation`);
         await h.tick(400_000);
+        await h.tick(15_000);
         assert.equal((await h.launch()).reason, 'delivery_timeout', 'a fresh explicit failure belongs to the current owner and lifecycle');
         assert.deepEqual(h.calls, []);
       } finally { resolveDiagnosis(noStop); h.ui.dispose(); }
@@ -972,6 +982,7 @@ export default [
         diagnosis: () => ({ ...noStop, reason }) });
       try {
         await h.publish();
+        await h.tick(15_000);
         assert.equal((await h.launch()).reason, reason);
         const diagnoses = h.diagnoses.length;
         worker.lastCallAt = ++clock.now;
@@ -1016,6 +1027,21 @@ export default [
       assert.equal((await h.launch()).reason, 'delivery_timeout', 'another incarnation cannot acknowledge this observation');
     } finally { h.ui.dispose(); }
   } },
+  { name: 'chat launcher: a stale alert on a worker that keeps calling never flips it to failed', async run() {
+    const clock = { now: Date.now() };
+    const worker = { ordinal: 1, state: 'working', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
+    const h = observedWorkerUi({ worker, clock, diagnosis: () => ({ ...noStop, reason: 'delivery_timeout' }) });
+    try {
+      await h.publish();
+      for (let round = 0; round < 4; round++) {
+        worker.lastCallAt = clock.now;
+        await h.tick(15_000);
+        assert.equal((await h.launch())?.stage ?? null, null, 'a bridge call between diagnoses restarts the streak');
+      }
+      assert.ok(h.diagnoses.length >= 4);
+      assert.deepEqual(h.calls, []);
+    } finally { h.ui.dispose(); }
+  } },
   { name: 'chat launcher: a not-responding look never clears a delivery failure', async run() {
     const clock = { now: Date.now() };
     const worker = { ordinal: 1, state: 'working', firstCallAt: clock.now - 600_000, lastCallAt: clock.now - 400_000, restarts: 0 };
@@ -1023,6 +1049,7 @@ export default [
     const h = observedWorkerUi({ worker, clock, diagnosis: () => next });
     try {
       await h.publish();
+      await h.tick(15_000);
       assert.equal((await h.launch()).reason, 'delivery_timeout');
       next = noStop; await h.tick(15_000);
       assert.equal((await h.launch()).reason, 'delivery_timeout');
@@ -1068,6 +1095,7 @@ export default [
         abandonWorkerStarter: async args => { abandoned.push(args.workerOrdinal); } } });
     try {
       await h.publish();
+      await h.tick(15_000);
       assert.deepEqual(h.calls, [['restart', { generation: 31, workerOrdinal: 1, observedFailure: true, automatic: true }], ['close', 'worker:31:1']]);
       assert.deepEqual(abandoned, [1]);
       assert.equal((await h.launch())?.reason, 'attachment_prepare_read_error');
@@ -1093,7 +1121,7 @@ export default [
     const calls = [];
     let abandoned = 0;
     const snapshot = {
-      autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+      autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: true, generation: 7, workerCount: 1, workers: [{ ordinal: 1, state, quietReason, restarts: 0 }] } },
     };
     const controller = {
@@ -1105,7 +1133,7 @@ export default [
     const ui = registerHandoffBridgeUi({
       ipc: { handle: (key, value) => handlers.set(key, value), removeHandler: key => handlers.delete(key), on() {}, removeListener() {} },
       controller, chatLauncher: { launch: async () => ({ ok: false, reason: 'chrome_unavailable' }), close: async () => true, owns: () => false, rekey: () => false },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     assert.equal(ui.registration.ok, true);
     ui.publishStatus(snapshot);
@@ -1119,7 +1147,7 @@ export default [
     let retryTick;
     let launches = 0;
     let closes = 0;
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: true, generation: 8, workerCount: 1,
         workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
     const ui = registerHandoffBridgeUi({
@@ -1135,7 +1163,7 @@ export default [
         owns: () => true, rekey: () => false,
       },
       timers: { setTimeout(fn, ms) { if (ms === 15_000) retryTick = fn; return { unref() {} }; }, clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setImmediate(resolve));
@@ -1158,7 +1186,7 @@ export default [
       ipc: { handle: (key, value) => handlers.set(key, value), removeHandler: key => handlers.delete(key), on() {}, removeListener() {} },
       controller: { snapshot: () => snapshot, subscribe: () => () => {} },
       chatLauncher: { owns: owner => owner === 'worker:9:1', close: async owner => { closed.push(owner); return true; } },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setImmediate(resolve));
@@ -1169,7 +1197,7 @@ export default [
     for (const [task, expected] of [['career-profile-audit-skills', true], ['resume-parse', true], ['job-scoring', false]]) {
       const handlers = new Map();
       const seen = [];
-      const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+      const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
         queue: { applications: { ready: 0, working: 0 }, scoring: { pending: 1, tasks: [{ task, pending: 1 }] } },
         chat: { pool: { active: true, generation: 16, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
       const ui = registerHandoffBridgeUi({
@@ -1178,7 +1206,7 @@ export default [
           copyWorkerStarter: async () => ({ copied: true, sessionCode: '2'.repeat(26), workerCount: 1 }) },
         chatLauncher: { launch: async args => { seen.push(args.application); return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; }, close: async () => true,
           diagnose: async () => ({ reason: 'none' }), owns: () => true, observation: () => null },
-        getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+        getCanvasWindows: () => [{}], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
       });
       ui.publishStatus(snapshot);
       await new Promise(resolve => setTimeout(resolve, 40));
@@ -1221,7 +1249,7 @@ export default [
     const notifications = [];
     const launches = [];
     const closes = [];
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas', telemetryInBugReports: true },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas', telemetryInBugReports: true },
       chat: { pool: { active: true, generation: 25, workerCount: 2, workers: [
         { ordinal: 1, state: 'available', restarts: 0 }, { ordinal: 2, state: 'available', restarts: 0 },
       ] } } };
@@ -1236,7 +1264,7 @@ export default [
       }, close: async owner => { closes.push(owner); return true; },
         diagnose: async () => ({ reason: 'approval_required' }), owns: () => true },
       notifyLaunchProblem: kind => notifications.push(kind),
-      getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+      getCanvasWindows: () => [{}], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
     });
     clearBridgeLaunchDiagnostic();
     try {
@@ -1257,7 +1285,7 @@ export default [
   { name: 'chat launcher: usage limit preserves the unpresented worker without retrying at Pro effort', async run() {
     const handlers = new Map();
     const calls = [];
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
       queue: { applications: { ready: 1, working: 0 } },
       chat: { pool: { active: true, generation: 15, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
     let launches = 0;
@@ -1269,7 +1297,7 @@ export default [
       chatLauncher: { launch: async () => { launches++; return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; }, close: async () => true,
         diagnose: async () => ({ reason: launches === 1 ? 'usage_limit' : 'none' }),
         markProUnavailable: () => calls.push('cap'), owns: () => true, observation: () => null },
-      getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+      getCanvasWindows: () => [{}], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setTimeout(resolve, 40));
@@ -1281,7 +1309,7 @@ export default [
     for (const delayedRetry of [false, true]) {
       const calls = []; let retry;
       const worker = { ordinal: 1, state: delayedRetry ? 'available' : 'quiet', quietReason: delayedRetry ? null : 'polling_stopped', restarts: 0 };
-      const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+      const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
         chat: { pool: { active: true, generation: 21, workerCount: 1, workers: [worker] } } };
       const ui = registerHandoffBridgeUi({
         ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1292,7 +1320,7 @@ export default [
         chatLauncher: { owns: () => true, close: async () => { calls.push('close'); return true; },
           launch: async () => { calls.push('launch'); return { ok: false, reason: 'chrome_timeout' }; } },
         timers: { setTimeout(fn, ms) { if (ms === 15_000) retry = fn; return { unref() {} }; }, clearTimeout() {} },
-        getCanvasWindows: () => [],
+        getCanvasWindows: () => [{}],
       });
       try {
         ui.publishStatus(snapshot);
@@ -1307,7 +1335,7 @@ export default [
   { name: 'chat launcher: unanswered long-running handoffs are never automatically closed or rekeyed', async run() {
     const calls = [];
     const worker = { ordinal: 1, state: 'quiet', quietReason: 'answer_silent', restarts: 0, firstCallAt: 1, completed: 0 };
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'Infinite Canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },
       chat: { pool: { active: true, generation: 20, workerCount: 1, workers: [worker] } } };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1315,7 +1343,7 @@ export default [
         restartWorker: async () => { calls.push('rekey'); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }; } },
       chatLauncher: { launch: async () => { calls.push('launch'); return { ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }; },
         close: async () => { calls.push('close'); return true; }, owns: () => true },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     try {
       // Repeated quiet observations, including the report's 3 replacements /
@@ -1340,7 +1368,7 @@ export default [
         restartWorker: async args => { calls.push(args); return { copied: true, sessionCode: '3'.repeat(26), workerCount: 1 }; } },
       chatLauncher: { launch: async () => ({ ok: true, chatId: `synthetic-launcher-chat-${++syntheticChatOrdinal}` }), close: async () => true,
         diagnose: async () => ({ reason: 'safety_block' }), owns: () => true, observation: () => null },
-      getCanvasWindows: () => [], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
+      getCanvasWindows: () => [{}], launchPresentationTimeoutMs: 8, launchDiagnosisIntervalMs: 1,
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setTimeout(resolve, 35));
@@ -1401,7 +1429,7 @@ export default [
     ['a pool is already active', { serving: 'live', queue: { scoring: { pending: 1 } }, chat: { pool: { active: true, generation: 3, workerCount: 1, workers: [] } } }, 0],
   ].map(([label, extra, expected]) => ({ name: `chat launcher: pool auto-start when ${label}`, async run() {
     let starts = 0;
-    const snapshot = { autoLaunchChats: true, config: { pluginName: 'infinite_canvas' }, chat: { pool: { active: false } }, ...extra };
+    const snapshot = { autoLaunchChats: true, windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' }, chat: { pool: { active: false } }, ...extra };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
       controller: {
@@ -1414,7 +1442,7 @@ export default [
       },
       chatLauncher: { launch: async () => ({ ok: false, reason: 'chrome_unavailable' }), close: async () => true, owns: () => false, rekey: () => false },
       timers: { setTimeout: () => ({ unref() {} }), clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => (extra.hold === 'no-window' ? [] : [{}]),
     });
     ui.publishStatus(snapshot);
     ui.publishStatus(snapshot);
@@ -1426,7 +1454,7 @@ export default [
     let starts = 0;
     let clock = 1_000_000;
     const pending = [];
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: false } }, queue: { scoring: { pending: 1 } } };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1437,7 +1465,7 @@ export default [
       chatLauncher: { launch: async () => ({ ok: false, reason: 'chrome_unavailable' }), close: async () => true, owns: () => false, rekey: () => false },
       now: () => clock,
       timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setImmediate(resolve));
@@ -1457,11 +1485,12 @@ export default [
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(starts, 2, 'nothing starts after dispose');
   } },
-  { name: 'chat launcher: a one-off launch failure retries in a fresh tab, then stops after three tries', async run() {
+  { name: 'chat launcher: Chat mode failures retry indefinitely in fresh tabs and remain available during capped backoff', async run() {
     const pending = [];
     let launches = 0;
     let closes = 0;
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+    const order = [];
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: true, generation: 9, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1471,29 +1500,35 @@ export default [
         abandonWorkerStarter: async () => true,
       },
       chatLauncher: {
-        launch: async () => { launches += 1; return { ok: false, reason: 'editor_timeout' }; },
-        close: async () => { closes += 1; return true; }, owns: () => true, rekey: () => false,
+        launch: async () => { launches += 1; order.push('launch'); return { ok: false, reason: 'chat_mode_unavailable' }; },
+        close: async () => { closes += 1; order.push('close'); return true; }, owns: () => true, rekey: () => false,
       },
       timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     const settle = () => new Promise(resolve => setTimeout(resolve, 5));
     ui.publishStatus(snapshot);
     await settle();
     assert.equal(launches, 1);
-    for (const [index, delay] of [15_000, 45_000, 90_000].entries()) {
+    assert(getBridgeLauncherAvailability().available && getBridgeLauncherAvailability().pending,
+      'an eligible pool remains available and pending during its first retry backoff');
+    for (const [index, delay] of [15_000, 45_000, 90_000, 300_000, 300_000].entries()) {
       const retry = pending.filter(handle => handle.ms === delay).at(-1);
       assert(retry, `retry ${index + 1} is armed after ${delay} ms`);
       await retry.fn();
       await settle();
       assert.equal(launches, index + 2, `retry ${index + 1} opens a new launch`);
+      assert(getBridgeLauncherAvailability().available && getBridgeLauncherAvailability().pending,
+        `availability remains true during retry ${index + 1}'s backoff`);
+      const launchIndex = order.lastIndexOf('launch');
+      assert.equal(order[launchIndex - 1], 'close', `retry ${index + 1} closes its previous tab first`);
     }
-    assert(closes >= 3, 'each retry closes the failed tab first');
-    assert.equal(pending.filter(handle => [15_000, 45_000, 90_000].includes(handle.ms)).length, 3,
-      'exactly three retries are ever scheduled');
+    assert(closes >= 5, 'each retry closes the failed tab first');
+    assert.equal(pending.filter(handle => handle.ms === 300_000).length, 3,
+      'repeated retries cap their delay at five minutes without stopping');
     ui.publishStatus(snapshot);
     await settle();
-    assert.equal(launches, 4, 'after three retries the worker waits for Retry instead of looping');
+    assert.equal(launches, 6, 'a status publication does not bypass the next five-minute backoff');
     ui.dispose();
   } },
   ...[
@@ -1501,7 +1536,7 @@ export default [
   ].map(reason => ({ name: `chat launcher: ${reason} is never retried automatically as a one-off failure`, async run() {
     const pending = [];
     let launches = 0;
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: true, generation: 10, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1516,7 +1551,7 @@ export default [
         close: async () => true, owns: () => true, rekey: () => false, javascriptReady: async () => false,
       },
       timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -1527,7 +1562,7 @@ export default [
   { name: 'chat launcher: every launch outcome is written to the serve ledger as reason codes only', async run() {
     const records = [];
     const pending = [];
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: true, generation: 11, workerCount: 1, workers: [{ ordinal: 1, state: 'available', restarts: 0 }] } } };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1539,7 +1574,7 @@ export default [
       chatLauncher: { launch: async () => ({ ok: false, reason: 'tab_open_failed' }), close: async () => true, owns: () => true, rekey: () => false },
       recordLaunch: fields => records.push(fields),
       timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     ui.publishStatus(snapshot);
     await new Promise(resolve => setTimeout(resolve, 5));
@@ -1593,7 +1628,7 @@ export default [
     const pending = [];
     let launches = 0;
     const worker = { ordinal: 1, state: 'quiet', quietReason: 'fresh_context_required', restarts: 0 };
-    const snapshot = { autoLaunchChats: true, serving: 'live', config: { pluginName: 'infinite_canvas' },
+    const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'infinite_canvas' },
       chat: { pool: { active: true, generation: 12, workerCount: 1, workers: [worker] } } };
     const ui = registerHandoffBridgeUi({
       ipc: { handle() {}, removeHandler() {}, on() {}, removeListener() {} },
@@ -1609,7 +1644,7 @@ export default [
         close: async () => true, owns: () => true, rekey: () => false,
       },
       timers: { setTimeout: (fn, ms) => { const handle = { fn, ms, unref() {} }; pending.push(handle); return handle; }, clearTimeout() {} },
-      getCanvasWindows: () => [],
+      getCanvasWindows: () => [{}],
     });
     const settle = () => new Promise(resolve => setTimeout(resolve, 5));
     ui.publishStatus(snapshot);

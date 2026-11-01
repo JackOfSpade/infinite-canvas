@@ -474,9 +474,15 @@ export function NonApiAiDialog() {
   // persisted — so record the composition whenever it changes.
   const sharedPageRows = groupEntryByRequestId.size;
   const separateChipCount = mergedRequests.length - sharedPageRows;
+  const dockLayoutShapeRef = useRef(null);
   useEffect(() => {
     if (sharedPageRows + separateChipCount === 0) return;
-    EventLogger.log(`[Manual AI] dock layout: shared application page rows=${sharedPageRows} · separate chips=${separateChipCount}`);
+    const rowShape = sharedPageRows > 0 ? 'rows-present' : 'no-rows';
+    const chipShape = separateChipCount === 0 ? '0' : separateChipCount <= 2 ? '1-2' : 'more';
+    const shape = `${rowShape}|${chipShape}`;
+    if (dockLayoutShapeRef.current === shape) return;
+    dockLayoutShapeRef.current = shape;
+    EventLogger.log(`[Manual AI] dock layout shape: shared application page ${rowShape} · separate chips ${chipShape}`);
   }, [sharedPageRows, separateChipCount]);
   // Run before paint: after a manual Minimize, a newly populated queue must
   // not flash its compact button for one frame before reopening.
@@ -857,13 +863,13 @@ export function NonApiAiDialog() {
         activeRequestId: activeRequestIdRef.current,
       });
       if (selection.focus === 'awaiting-successor') {
-        EventLogger.log('[Manual AI] handoff settled; focus awaiting workflow successor');
+        EventLogger.logCumulative('manual-ai-handoff-settled', 'focus-awaiting-successor');
       } else if (selection.focus === 'queued-successor') {
-        EventLogger.log('[Manual AI] handoff settled; focus advanced to queued successor');
+        EventLogger.logCumulative('manual-ai-handoff-settled', 'focus-queued-successor');
       } else if (selection.focus === 'preserved') {
-        EventLogger.log('[Manual AI] handoff settled; preserved user-selected handoff');
+        EventLogger.logCumulative('manual-ai-handoff-settled', 'focus-preserved');
       } else {
-        EventLogger.log('[Manual AI] handoff settled; focus cleared');
+        EventLogger.logCumulative('manual-ai-handoff-settled', 'focus-cleared');
       }
       setRequests(previous => previous.filter(request => request.requestId !== requestId));
       setSelectedRequestId(selection.selectedRequestId);

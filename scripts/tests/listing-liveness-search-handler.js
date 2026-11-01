@@ -156,26 +156,33 @@ export default [
     },
   },
   {
-    name: 'listing liveness handler: linked single chat checks pending L5 while unlinked leaves it pending',
+    name: 'listing liveness handler: run waits while unlinked, then checks pending L5 when the bridge reconnects',
     async run() {
-      for (const [name, status, expectedCalls, expectedVerdict] of [
-        ['linked', linked, 1, 'open'], ['unlinked', unlinked, 0, 'pending'],
-      ]) await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
+      for (const [name, initiallyLinked] of [['linked', true], ['unlinked', false]]) await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const pending = job({ key: `synthetic-${name}-pending`, title: `Synthetic ${name} Engineer` });
         const official = job({ key: `synthetic-${name}-official`, title: `Synthetic ${name} Official`, basis: 'neither' });
         const evidence = new Map([[pending.jobkey, evidenceFor(pending, {
           chromeText: `${OPEN_NOTICE} ${'This synthetic job is accepting applications. '.repeat(4)}`, closed: false,
         })], [official.jobkey, evidenceFor(official, { closed: false })]]);
         let calls = 0;
-        const { result, telemetry } = await runSearch({ canvasFilePath, careerSnapshotId,
+        const link = { linked: initiallyLinked };
+        let complete = false;
+        const running = runSearch({ canvasFilePath, careerSnapshotId,
           nodeId: `synthetic-liveness-${name}`, rows: [pending, official], evidence,
           officialPosting: row => row.jobkey === official.jobkey ? found(row) : missed(row),
-          handoffBridgeStatus: status,
+          handoffBridgeStatus: () => link.linked ? linked() : unlinked(),
           callListingLiveness: async (...args) => { calls += 1; return answer(['open'])(...args); },
-        });
+        }).then(value => { complete = true; return value; });
+        if (!initiallyLinked) {
+          await new Promise(resolve => setTimeout(resolve, 30));
+          assert.equal(calls, 0, 'an unlinked run does not dispatch or finish the pending lookup');
+          assert.equal(complete, false, 'the search remains pending while its bridge is unlinked');
+          link.linked = true;
+        }
+        const { result, telemetry } = await running;
         assert.equal(result.success, true, result.error);
-        assert.equal(calls, expectedCalls);
-        assert.equal(result.jobs.find(row => row.jobkey === pending.jobkey)?.listingLiveness?.verdict, expectedVerdict);
+        assert.equal(calls, 1);
+        assert.equal(result.jobs.find(row => row.jobkey === pending.jobkey)?.listingLiveness?.verdict, 'open');
         assert.equal(result.jobs.find(row => row.jobkey === official.jobkey)?.officialPosting?.level, 'L2');
         assert.equal(telemetry?.officialPosting?.listingLiveness?.remoteok?.aiSkippedOfficial, 1);
         assert.equal(telemetry?.reconciliation?.reconciled, true);

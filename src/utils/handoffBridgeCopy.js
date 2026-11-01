@@ -216,6 +216,14 @@ export const BRIDGE_UI_COPY = Object.freeze({
   preparingWorkerPool: 'Preparing worker chats…',
   workerPoolReady: 'Worker plan ready.',
   // A forecast equal to what is already released adds nothing to read.
+  // Why new worker chats are not opening. Backoff and ordinary waiting say nothing.
+  launcherStopped: reason => ({
+    'auto-launch-disabled': 'New worker chats will not open: automatic launch is off.',
+    held: 'New worker chats will not open while the bridge is on hold.',
+    'no-window': 'New worker chats will not open until a canvas window is open.',
+    'bridge-paused': 'New worker chats will not open while the bridge is paused.',
+    'user-action-required': 'New worker chats will not open until the problem above is resolved.',
+  })[reason] || '',
   workerPoolPlan: (count, queued, materialized = queued) => queued
     ? `${count} ${count === 1 ? 'worker chat' : 'worker chats'} · ${materialized} released now${materialized === queued ? '' : ` · ${queued} forecast`}`
     : `${count} ${count === 1 ? 'worker chat' : 'worker chats'}`,
@@ -244,10 +252,14 @@ export const BRIDGE_UI_COPY = Object.freeze({
     waiting: 'Ready for later work',
     idle: 'Idle',
   })[state] || 'Worker active',
-  workerLaunch: (launch, accountName = '') => {
+  workerLaunch: (launch, accountName = '', everConnected = false) => {
     if (launch?.reason === 'approval_required') return 'Approval needed in ChatGPT. Open this worker’s chat and review the Infinite Canvas tool approval prompt. This chat is being kept open.';
-    if (launch?.reason === 'delivery_timeout') return 'ChatGPT’s response delivery timed out. The bridge will reopen this worker and resume its unfinished work automatically.';
-    if (launch?.reason === 'conversation_unavailable') return 'ChatGPT could not load this worker’s conversation. The bridge will reopen this worker and resume its unfinished work automatically.';
+    if (launch?.reason === 'delivery_timeout') return everConnected
+      ? 'ChatGPT’s response did not arrive. The connected worker is kept; it is replaced only after 60 seconds without a bridge call.'
+      : 'ChatGPT’s first response did not arrive. The bridge will retry in a fresh tab.';
+    if (launch?.reason === 'conversation_unavailable') return everConnected
+      ? 'ChatGPT could not load this worker’s conversation. The connected worker is kept until its 60-second silence check.'
+      : 'ChatGPT could not load the new worker conversation. The bridge will retry in a fresh tab.';
     if (launch?.reason === 'chat_stopped') return 'ChatGPT stopped working in this worker’s chat without reporting an error. The bridge will reopen this worker and resume its unfinished work automatically.';
     if (launch?.stage === 'opening') return 'Opening a new ChatGPT chat…';
     if (launch?.stage === 'checking') return 'Checking ChatGPT model, effort, and sign-in…';
@@ -255,7 +267,7 @@ export const BRIDGE_UI_COPY = Object.freeze({
     if (launch?.stage === 'presented') return null;
     if (launch?.stage === 'retrying') return 'Chrome launch hit a temporary problem. Retrying in a fresh tab automatically…';
     if (launch?.reason === 'model_selection_failed' || launch?.reason === 'effort_unavailable') return 'Could not confirm the highest model/effort in ChatGPT. Check it and press Send.';
-    if (['chat_mode_unavailable', 'chat_mode_mismatch'].includes(launch?.reason)) return 'The worker was not sent because Chat mode could not be confirmed. Start a new Chat conversation, then retry this worker.';
+    if (['chat_mode_unavailable', 'chat_mode_mismatch'].includes(launch?.reason)) return 'The worker was not sent because Chat mode could not be confirmed. The bridge will retry in a fresh tab.';
     if (launch?.reason === 'model_menu_missing') return 'ChatGPT model controls were unavailable. Check the open tab before sending.';
     if (launch?.reason === 'editor_not_empty') return 'The existing chat has an unsent draft. Preserve it, then use Copy Continue.';
     if (launch?.reason === 'account_unknown') return 'Sign in to ChatGPT in Chrome, then press Send.';

@@ -47,6 +47,7 @@ import {
   startRun,
 } from '../../electron/ipc/jobRunStaging.js';
 import electronPkg, { ipcMain } from 'electron';
+import { boardCancellationAuthorityFixture } from './jobBoardCancellationAuthorityFixture.mjs';
 
 function assert(value, message) { if (!value) throw new Error(message); }
 
@@ -104,6 +105,95 @@ async function settlesWithin(promise, ms = 2_000) {
 }
 
 export default [
+  {
+    name: 'legacy Board cancellation with no manifest or renderer receipt permits quit and a fresh scan without borrowing authority',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-cancel-absent-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = new EventEmitter(); sender.id = 895; sender.isDestroyed = () => false;
+      try {
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        await fs.promises.writeFile(canvas, '{}');
+        const prior = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'search',
+          operationId: 'legacy-active-operation', semanticBase: base('job-board-scan', { runId: null }) });
+        const f = boardCancellationAuthorityFixture({ canvasFilePath: canvas,
+          operationAuthority: prior.receipt, electronAPI: {
+            peekJobRun: args => ipcMain.__getInvokeHandler('peek-job-run')({ sender }, args),
+            discardBoardJobRun: async () => { throw new Error('Absent run must not borrow authority to discard anything'); },
+          },
+        });
+        f.controlRef.current = null;
+        f.nodes.get('search').data.analysisOperation = null;
+        f.nodes.get('board').data.boardScanResume.cancellationCleanupsBySource = { search: {
+          sourceId: 'search', runId: null, priorRunId: 'completed-run', runCleanupAuthorized: false,
+        } };
+        assert((await f.cancel()).status === 'cancelled', 'a missing legacy ledger must not strand Board cancellation');
+        beginSenderQuitPause(sender);
+        const pause = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, {
+          canvasFilePath: canvas, nodeId: 'search', runId: null, cause: 'app-quit', operationAuthority: null,
+        });
+        assert(pause.ok && pause.settled && pause.absent, 'quit needs no discarded receipt when no provider ledger remains');
+        releaseSenderQuitPause(sender);
+        const fresh = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'search',
+          operationId: 'fresh-board-operation', semanticBase: base('job-board-scan', { runId: null }) });
+        assert(fresh.admitted && fresh.receipt.revision === prior.receipt.revision + 1,
+          'the next explicit fresh scan supersedes the old idle writer without fabricated resume lineage');
+        assert(!await currentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'search', ...prior.receipt }),
+          'the superseded legacy receipt cannot write after the fresh admission');
+      } finally {
+        releaseSenderQuitPause(sender);
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Board cancellation retires the exact staged authority and a subsequent app quit settles without losing prior results',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-cancel-quit-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = new EventEmitter(); sender.id = 894; sender.isDestroyed = () => false;
+      try {
+        ipcMain.__clearInvokeHandlers(); registerJobsHandlers();
+        await fs.promises.writeFile(canvas, '{}');
+        const prior = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'search',
+          operationId: 'prior-operation', semanticBase: base('search', { runId: 'completed-run' }) });
+        await __saveJobAnalysisSnapshotForTests(snapshot({ canvasFilePath: canvas, hubId: 'search',
+          runId: 'completed-run', authority: prior.receipt }));
+        const paths = getJobAnalysisPaths(canvas, null, 'search');
+        const priorBytes = await fs.promises.readFile(paths.jsonPath, 'utf8');
+        const current = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'search',
+          operationId: 'current-operation', semanticBase: base('job-board-scan', { runId: null }) });
+        await startRun(canvas, { runId: 'scrape-run', startedAt: Date.now(), nodeId: 'search', careerSnapshotId: pin,
+          profileFingerprint: 'b'.repeat(64), sourceIds: ['provider'], operationAuthority: current.receipt });
+        await recordSourcePage(canvas, { sourceId: 'provider', query: 'synthetic', page: 0,
+          jobs: [{ title: 'Cancelled partial listing' }], now: Date.now(), expectedRunId: 'scrape-run', nodeId: 'search',
+          expectedOperationAuthority: current.receipt });
+        const f = boardCancellationAuthorityFixture({ canvasFilePath: canvas,
+          previousAuthority: prior.receipt, operationAuthority: current.receipt,
+          electronAPI: {
+            peekJobRun: args => ipcMain.__getInvokeHandler('peek-job-run')({ sender }, args),
+            discardBoardJobRun: args => ipcMain.__getInvokeHandler('discard-board-job-run')({ sender }, args),
+          },
+        });
+        assert((await f.cancel()).status === 'cancelled', 'actual renderer cancellation must acknowledge host cleanup');
+        assert(!await readRunState(canvas, Date.now(), { nodeId: 'search' }), 'the cancelled staged ledger must be gone');
+        assert(!await currentJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'search', ...current.receipt }),
+          'the cancelled writer must be durably revoked');
+        assert(await fs.promises.readFile(paths.jsonPath, 'utf8') === priorBytes,
+          'rollback must retain the prior completed snapshot byte-for-byte');
+        beginSenderQuitPause(sender);
+        const paused = await ipcMain.__getInvokeHandler('pause-job-run-and-cancel')({ sender }, {
+          canvasFilePath: canvas, nodeId: 'search', runId: null, cause: 'app-quit',
+          operationAuthority: f.nodes.get('search').data.analysisOperation.authority,
+        });
+        assert(paused.ok && paused.settled && paused.absent,
+          'quit after successful cancellation must settle without an authority-mismatch blocker');
+      } finally {
+        releaseSenderQuitPause(sender);
+        await fs.promises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'saved pause: repeated Stop and quit after restart accept only the exact tombstoned run',
     async run() {

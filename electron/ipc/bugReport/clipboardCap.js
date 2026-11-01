@@ -89,7 +89,7 @@ export function buildMainProcessLogsMarkdown(lines) {
   if (!Array.isArray(lines) || lines.length === 0) return '';
   return `
 ## Recent Main-Process Logs
-> Up to 200 lines from the main process's logger (ring buffer). Use this to
+> Up to 500 entries from the main process's logger: the latest 200 ordinary entries plus up to 300 warnings/errors. Use this to
 > see what \`[Accounts]\` / \`[StealthBrowser]\` / \`[Marketplace]\` actually
 > did and any errors that were swallowed by an IPC handler before the
 > renderer got a useful response.
@@ -104,6 +104,17 @@ ${newestFirstLogLines(timestampedLogLines(lines, { basis: 'utc' })).join('\n')}
 // Event history originates in the renderer, whose display timestamps are local
 // to the user. Keep the time-basis note adjacent to the history itself.
 export const EVENT_HISTORY_HEADING = '## Event History\n> **Order within this section:** newest first; last row is the oldest retained renderer event. **Timestamps:** full local ISO with numeric UTC offset. Legacy time-only rows retain their capture time but omit date and offset. See Runtime Identity for the report date, IANA timezone, and UTC offset.\n';
+
+export function eventHistoryHeading(metadata = null) {
+  const retainedCount = Number.isSafeInteger(metadata?.retainedCount) && metadata.retainedCount >= 0
+    ? metadata.retainedCount : null;
+  const evictedCount = Number.isSafeInteger(metadata?.evictedCount) && metadata.evictedCount >= 0
+    ? metadata.evictedCount : null;
+  const oldest = typeof metadata?.oldestRetainedAt === 'string'
+    && Number.isFinite(Date.parse(metadata.oldestRetainedAt)) ? metadata.oldestRetainedAt : null;
+  if (retainedCount == null && evictedCount == null && !oldest) return EVENT_HISTORY_HEADING;
+  return `${EVENT_HISTORY_HEADING}> Capture ring: ${retainedCount ?? 'unknown'} retained row(s) · ${evictedCount ?? 'unknown'} older row(s) evicted · oldest retained ${oldest || 'not recorded'}.\n`;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Render-time folding (clipboard path only)
@@ -523,17 +534,17 @@ function openTailWindow(lines, chromeChars, emptyChars) {
 }
 
 // A "floor" tail: a guaranteed minimum of the MOST-RECENT logs + events, balanced
-// so neither fully crowds out the other. The main-process logs (a bounded 200-line
+// so neither fully crowds out the other. The main-process logs (a bounded 500-entry
 // ring buffer holding swallowed-error detail) get up to ~45% of the floor; the
 // rest goes to the most-recent event lines, which reclaim the slack when the logs
 // are short or absent. Returns the trimmed slices (newest-kept, still in
 // chronological order) — NOT mutated copies.
-function reserveFloorTail(allLogs, allEvents, floorChars) {
+function reserveFloorTail(allLogs, allEvents, floorChars, historyHeadingLength = EVENT_HISTORY_HEADING.length) {
   const logs = openTailWindow(allLogs, LOGS_BLOCK_CHROME, 0);
   const events = openTailWindow(allEvents, EVENTS_BLOCK_CHROME, EMPTY_EVENTS_CHARS);
   const logBudget = Math.floor(floorChars * 0.45);
   while (logs.count > 0 && logs.chars > logBudget) logs.dropOldest();
-  const eventBudget = Math.max(0, floorChars - logs.chars - EVENT_HISTORY_HEADING.length);
+  const eventBudget = Math.max(0, floorChars - logs.chars - historyHeadingLength);
   while (events.count > 0 && events.chars > eventBudget) events.dropOldest();
   return { logs: logs.lines(), events: events.lines() };
 }
@@ -569,14 +580,15 @@ function buildNamedStaticTruncation(baseMarkdown, tailMarkdown, maxChars, buildB
 // ─────────────────────────────────────────────────────────────────────────
 // The clipboard cap itself
 // ─────────────────────────────────────────────────────────────────────────
-export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProcessLogLines, maxChars) {
+export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProcessLogLines, maxChars, eventMetadata = null) {
   const rawEvents = Array.isArray(eventLines) ? eventLines : [];
   const rawLogs = Array.isArray(mainProcessLogLines) ? mainProcessLogLines : [];
+  const historyHeading = eventHistoryHeading(eventMetadata);
 
   // Both halves render newest-first; the arrays handed in and trimmed below
   // stay chronological throughout (see the file-header ordering contract).
   const tailOf = (logs, events) =>
-    `${buildMainProcessLogsMarkdown(logs)}${EVENT_HISTORY_HEADING}${buildReverseChronologicalLogBlock(events, EMPTY_EVENTS_FALLBACK, { basis: 'local' })}`;
+    `${buildMainProcessLogsMarkdown(logs)}${historyHeading}${buildReverseChronologicalLogBlock(events, EMPTY_EVENTS_FALLBACK, { basis: 'local' })}`;
 
   // Fits with the full base + full tail: nothing to do. A report that fits keeps
   // every id verbatim — burst folding is strictly a last-resort transform.
@@ -595,7 +607,7 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   const logFoldDetail = { foldedLineCount: foldedLogLineCount, collapsedShapes, rawTotal: rawLogs.length };
 
   const TAIL_FLOOR = Math.min(14_000, Math.floor(maxChars * 0.3));
-  const floor = reserveFloorTail(allLogs, allEvents, TAIL_FLOOR);
+  const floor = reserveFloorTail(allLogs, allEvents, TAIL_FLOOR, historyHeading.length);
 
   // The full base still leaves room for at least the floor tail → keep the FULL
   // base and MAXIMIZE the tail: start from everything and trim oldest events, then
@@ -604,7 +616,7 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   if (baseMarkdown.length + tailOf(floor.logs, floor.events).length <= maxChars) {
     const events = openTailWindow(allEvents, EVENTS_BLOCK_CHROME, EMPTY_EVENTS_CHARS);
     const logs = openTailWindow(allLogs, LOGS_BLOCK_CHROME, 0);
-    const tailChars = () => logs.chars + EVENT_HISTORY_HEADING.length + events.chars;
+    const tailChars = () => logs.chars + historyHeading.length + events.chars;
     let trimmedEventCount = 0;
     let trimmedLogCount = 0;
     while (baseMarkdown.length + tailChars() > maxChars && events.count > floor.events.length) {
@@ -702,7 +714,7 @@ export function enforceClipboardMarkdownCap(baseMarkdown, eventLines, mainProces
   // and the ceiling is reached exactly as before.
   const overflow = Math.max(0, baseMarkdown.length + floorTailLength - maxChars);
   const tailBudget = TAIL_FLOOR + Math.min(Math.max(0, TAIL_CEILING - TAIL_FLOOR), overflow);
-  const grown = reserveFloorTail(allLogs, allEvents, Math.max(TAIL_FLOOR, tailBudget));
+  const grown = reserveFloorTail(allLogs, allEvents, Math.max(TAIL_FLOOR, tailBudget), historyHeading.length);
   const useGrown = tailOf(grown.logs, grown.events).length >= floorTailLength;
   const tail = useGrown ? grown : floor;
 

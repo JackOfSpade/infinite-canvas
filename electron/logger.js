@@ -18,8 +18,12 @@
  */
 const isProd = typeof process !== 'undefined' && !process.defaultApp;
 
-const RING_BUFFER_SIZE = 200;
-const ringBuffer = [];
+const NORMAL_RING_BUFFER_SIZE = 200;
+const HIGH_SIGNAL_RING_BUFFER_SIZE = 300;
+const RING_BUFFER_SIZE = NORMAL_RING_BUFFER_SIZE + HIGH_SIGNAL_RING_BUFFER_SIZE;
+const normalRingBuffer = [];
+const highSignalRingBuffer = [];
+let logSequence = 0;
 
 function formatArg(a) {
   if (a == null) return String(a);
@@ -30,17 +34,23 @@ function formatArg(a) {
 }
 
 function pushRing(level, args) {
-  ringBuffer.push({
+  const target = level === 'warn' || level === 'error' ? highSignalRingBuffer : normalRingBuffer;
+  const ceiling = target === highSignalRingBuffer ? HIGH_SIGNAL_RING_BUFFER_SIZE : NORMAL_RING_BUFFER_SIZE;
+  target.push({
     ts: Date.now(),
+    sequence: ++logSequence,
     level,
     message: args.map(formatArg).join(' '),
   });
-  if (ringBuffer.length > RING_BUFFER_SIZE) ringBuffer.shift();
+  if (target.length > ceiling) target.shift();
 }
 
 export function getRecentLogs(limit = RING_BUFFER_SIZE) {
-  const start = Math.max(0, ringBuffer.length - limit);
-  return ringBuffer.slice(start);
+  const requested = Number.isSafeInteger(limit) ? Math.max(0, limit) : RING_BUFFER_SIZE;
+  if (requested === 0) return [];
+  return [...normalRingBuffer, ...highSignalRingBuffer]
+    .sort((a, b) => a.sequence - b.sequence)
+    .slice(-requested);
 }
 
 export const logger = {

@@ -1,5 +1,5 @@
 import React, { useId, useLayoutEffect, useMemo, useRef } from 'react';
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Loader2, Save, Search, X } from 'lucide-react';
 import { jobBoardModuleReadiness, jobBoardSelectionPresentation } from '../../utils/jobBoardSearchSelection.js';
 
 function normalizeProgress(progress, selectedCount) {
@@ -79,6 +79,10 @@ export function JobBoardSearchSelection({
   progress = null,
   onRun,
   onCancel = null,
+  onPause = null,
+  pauseDisabledReason = '',
+  showPauseSave = false,
+  waitingForWorkers = false,
   recoveryError = null,
   onRetry = null,
   recoveryActionLabel = 'Retry recovery',
@@ -324,6 +328,18 @@ export function JobBoardSearchSelection({
         </div>
       )}
 
+      {running && waitingForWorkers && !progressState && (
+        <p className="text-center text-[9px] leading-snug text-sky-200/75" role="status" aria-live="polite">
+          {progressState?.label || 'Waiting for ChatGPT workers or a live bridge connection to finish official posting lookups.'}
+        </p>
+      )}
+
+      {running && (
+        <p className="text-center text-[8px] leading-snug text-white/30">
+          Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.
+        </p>
+      )}
+
       {recoveryError && (
         <p className="text-center text-[9px] leading-snug text-amber-300/70" role="alert">
           {recoveryError}
@@ -333,6 +349,12 @@ export function JobBoardSearchSelection({
       {primaryActionDisabledReason && (
         <p id={actionDisabledReasonId} className="text-center text-[9px] leading-snug text-amber-300/65" role="status">
           {primaryActionDisabledReason}
+        </p>
+      )}
+
+      {running && showPauseSave && pauseDisabledReason && (
+        <p id={`${fieldsetId}-pause-reason`} className="text-center text-[9px] leading-snug text-amber-200/65" role="status">
+          {pauseDisabledReason}
         </p>
       )}
 
@@ -381,12 +403,25 @@ export function JobBoardSearchSelection({
                 : 'border-white/10 bg-white/[0.04] text-white/35 shadow-none opacity-70'
           }`}
           title={running
-            ? 'Cancel this Board run and keep existing completed results'
+            ? 'Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.'
             : primaryActionDisabledReason || presentation.title}
         >
           {running ? <X size={11} /> : <Search size={11} />}
           {running ? 'Cancel current run' : runLabel}
         </button>
+        {running && showPauseSave && (
+          <button
+            type="button"
+            onClick={onPause}
+            disabled={!!pauseDisabledReason || typeof onPause !== 'function'}
+            aria-describedby={pauseDisabledReason ? `${fieldsetId}-pause-reason` : undefined}
+            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-500/10 px-2 py-1.5 text-[10px] font-medium text-amber-100 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+            title={pauseDisabledReason || 'Pause active Search work and save its continuation for later.'}
+          >
+            <Save size={11} />
+            Pause &amp; save
+          </button>
+        )}
       </div>
       )}
     </fieldset>
