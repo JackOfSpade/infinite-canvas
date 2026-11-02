@@ -9,6 +9,7 @@ import {
   CLAUDE_STAGE_TIMEOUT_MS,
   ClaudeRunnerError,
 } from './claudeApplicationRunner.js';
+import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
 
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const SAFEGUARD_MESSAGE = 'Claude blocked this request with its safeguards. The private run log contains the provider message. Review the request before retrying.';
@@ -53,6 +54,10 @@ export async function runClaudeSdkStage({
   clearTimeoutImpl = globalThis.clearTimeout,
 } = {}) {
   if (signal?.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', 'Claude run was cancelled.');
+  const promptTokens = estimateClaudePromptTokens(systemAppend, text);
+  if (promptTokens > CLAUDE_PROMPT_TOKEN_BUDGET) {
+    throw new ClaudeRunnerError(CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage(promptTokens));
+  }
 
   const controller = new AbortController();
   const mainModels = new Set();

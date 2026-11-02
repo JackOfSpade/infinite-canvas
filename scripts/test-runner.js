@@ -16,6 +16,7 @@ import ai_models from './tests/ai-models.js';
 import fixtures_canvas from './tests/fixtures-canvas.js';
 import job_diagnostics from './tests/job-diagnostics.js';
 import job_scoring_cache from './tests/job-scoring-cache.js';
+import claude_prompt_limit from './tests/claude-prompt-limit.js';
 import claude_task_worker from './tests/claude-task-worker.js';
 import claude_pause_notice from './tests/claude-pause-notice.js';
 import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js';
@@ -285,6 +286,7 @@ const testGroups = [
   ['fixtures-canvas.js', fixtures_canvas],
   ['job-diagnostics.js', job_diagnostics],
   ['job-scoring-cache.js', job_scoring_cache],
+  ['claude-prompt-limit.js', claude_prompt_limit],
   ['claude-task-worker.js', claude_task_worker],
   ['claude-pause-notice.js', claude_pause_notice],
   ['marketplace-extractors-auth.js', marketplace_extractors_auth],

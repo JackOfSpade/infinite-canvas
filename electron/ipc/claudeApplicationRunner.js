@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { CLAUDE_OUTPUT_TOKENS, CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
 import { APPLICATION_STAGE_PROFILES, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL } from './careerWritingCore.js';
 import { buildEditorialPlanPrompt, editorialPlanAllowedIds, editorialPlanBinding, parseEditorialPlanResponse, writerPromptWithEditorialPlan } from './applicationEditorialPlan.js';
 import { loadEditorialPlan, saveEditorialPlan } from './applicationEditorialPlanArchive.js';
@@ -62,6 +63,7 @@ const HUMAN_STOP_STAGE = 'write-verify-human-stop';
 const MESSAGES = Object.freeze({
   missing: 'Claude Code is not installed or not on PATH. Install it and sign in with your Claude subscription, then retry.',
   usage: 'Claude usage limit reached. Retry this application after your limit resets.',
+  promptTooLong: 'This AI request is too large for Claude to accept.',
   login: 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.',
   timeout: minutes => `Claude did not finish this stage within ${minutes} minutes.`,
   cancelled: 'Claude run was cancelled.',
@@ -144,7 +146,7 @@ export function resolveClaudeBinary({ env = process.env, homedir = '', isExecuta
 // Anthropic's official maximum output per call for the latest Haiku, Sonnet and
 // Opus models (platform.claude.com/docs/en/models/overview). Every Claude child
 // is told to use all of it, so batch sizes derived from that limit can be met.
-export const CLAUDE_MAX_OUTPUT_TOKENS = '128000';
+export const CLAUDE_MAX_OUTPUT_TOKENS = String(CLAUDE_OUTPUT_TOKENS);
 
 export function claudeChildEnv(env = {}, binaryDir = '') {
   const out = {};
@@ -192,6 +194,7 @@ export function parseClaudeStreamOutput(stdoutText) {
 }
 
 const USAGE_RE = /usage limit|limit reached|hit your limit|rate.?limit|out of (extra )?usage/i;
+const PROMPT_TOO_LONG_RE = /prompt is too long|exceed context limit/i;
 const LOGIN_RE = /not logged in|log ?in|\/login|authenticat|credential|invalid api key/i;
 // These are provider error sentences, not a keyword detector. A normal answer
 // or an incidental mention of safeguards cannot establish a blocked request.
@@ -219,6 +222,10 @@ export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
   }
   if (LOGIN_RE.test(combined)) {
     return new ClaudeRunnerError('CLAUDE_NOT_SIGNED_IN', MESSAGES.login, detail, resultText);
+  }
+  // Retrying cannot help: the same prompt gets the same answer.
+  if (PROMPT_TOO_LONG_RE.test(combined)) {
+    return new ClaudeRunnerError(CLAUDE_PROMPT_TOO_LONG, MESSAGES.promptTooLong, detail, resultText);
   }
   const providerText = resultText.trim() || plainSafeguardStderr(stderrText);
   if (SAFEGUARD_ERROR_RE.test(providerText)) {

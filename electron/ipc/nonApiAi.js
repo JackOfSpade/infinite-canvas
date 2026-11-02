@@ -3154,6 +3154,14 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
   }
 }
 
+/** Fail a worker-served handoff whose prompt no attempt could ever answer. */
+export function failWorkerHandoff({ requestId, error } = {}) {
+  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : null;
+  if (!record || record.handoffRoute !== 'mcp' || record.settling) return false;
+  abortPending(record, error);
+  return true;
+}
+
 /**
  * Hand a worker-served handoff back to the person's dock without a rejected answer,
  * for example when the worker that owned it keeps failing. Same

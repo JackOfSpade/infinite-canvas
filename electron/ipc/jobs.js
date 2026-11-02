@@ -15135,14 +15135,10 @@ Return a JSON object with four arrays of search query strings:
         scoringBatches.length,
       );
       const envelope = scoringPromptFitsEnvelopeForTests(requestParts);
-      // PROACTIVE context-window preflight: if this batch's prompt + reserved
-      // output won't fit the serving model's window, split it in HALF and score
-      // the halves independently BEFORE spending a doomed (truncated) call. The
-      // recursion bottoms out at one job. checkPromptFits is always permissive
-      // on the manual-handoff transport (there is no provider window to check
-      // against), so `fit.fits` is always true and this split branch currently
-      // never triggers — kept as insurance/future-proofing rather than deleted,
-      // since it costs nothing when it doesn't fire.
+      // PROACTIVE context-window preflight: if this batch's prompt won't fit
+      // what Claude can accept, split it in HALF and score the halves
+      // independently BEFORE spending a doomed call. The recursion bottoms out
+      // at one job.
       // Run the preflight for EVERY batch size, including a single-job batch
       // that could never be split by it. This await is the ONLY suspension
       // point between the Promise.all dispatch below and the handoff actually
@@ -15184,9 +15180,9 @@ Return a JSON object with four arrays of search query strings:
       // Splitting still requires more than one job. At length 1 `mid` is 1, the
       // right half is empty, and scoreBatch would recurse on the identical
       // batch forever. A single job that genuinely cannot fit must fall through
-      // to the call so the provider's own error surfaces instead.
+      // to the call, which refuses it with a clear error before any request.
       if (fit && !fit.fits && batch.length > 1) {
-        logger.info(`[Jobs][${nodeId}] Window preflight: batch of ${batch.length} = ~${fit.tokens} tok + ${fit.reservedOutput} out > ${fit.budget} budget on ${fit.model} (${fit.via}) — splitting`);
+        logger.info(`[Jobs][${nodeId}] Window preflight: batch of ${batch.length} = ~${fit.tokens} tok > ${fit.budget} budget — splitting`);
         emitScoringProgress(completedScoringJobCount, {
           phase: 'splitting', batch: context.topLevelBatch, attemptSize: batch.length,
           detail: 'context-window',

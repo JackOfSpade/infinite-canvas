@@ -1,3 +1,4 @@
+import { CLAUDE_CONTEXT_WINDOW_TOKENS, CLAUDE_PROMPT_TOKEN_BUDGET } from '../../electron/ipc/claudePromptLimit.js';
 import { BATCH_OUTPUT_TOKEN_BUDGET, JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS, JOB_PREFERENCE_RESEARCH_MAX_ITEMS, MAX_LISTING_BATCH, legacyJobScoringMaxTokens } from '../../electron/ipc/resultCaps.js';
 // AI task/model sizing — NOT provider routing. Every AI call in the app now
 // goes through the single human copy/paste handoff (electron/ipc/nonApiAi.js,
@@ -7,7 +8,7 @@ import { BATCH_OUTPUT_TOKEN_BUDGET, JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS
 // worth covering here:
 //   - the known-task registry and each task's output-size guidance
 //     (getKnownTaskIds / taskMaxTokensFor / TASK_MAX_TOKENS in llm.js),
-//   - the always-permissive manual preflight (checkPromptFits),
+//   - the prompt size check (checkPromptFits),
 //   - the job-scoring batch-size ceiling (resultCaps.jobScoringBatchSize),
 //   - two schema-shape guarantees (application cover-letter / job-taxonomy
 //     JSON schemas) that the manual handoff still depends on,
@@ -515,22 +516,19 @@ export default [
     },
   },
 {
-    name: 'llm: checkPromptFits is always permissive and its reservedOutput mirrors taskMaxTokensFor for the same task/hints',
+    name: 'llm: checkPromptFits applies the Claude limit and its reservedOutput mirrors taskMaxTokensFor for the same task/hints',
     run: async () => {
       const hints = { itemCount: 20 };
       const fit = await checkPromptFits('x'.repeat(300_000), { task: 'job-scoring', hints });
-      assert(fit.fits === true, 'the manual-handoff transport has no provider context window to preflight against, so every prompt fits');
-      assert(fit.model === 'non-api-ai' && fit.provider === 'non-api-ai' && fit.via === 'manual',
-        'the verdict names the single manual transport, not a provider/model');
-      assert(fit.budget === Number.MAX_SAFE_INTEGER && fit.contextWindow === Number.MAX_SAFE_INTEGER,
-        'budget and contextWindow are unbounded — nothing is gated on them anymore');
+      assert(fit.fits === true, 'a prompt well under the limit fits');
+      assert(fit.budget === CLAUDE_PROMPT_TOKEN_BUDGET && fit.contextWindow === CLAUDE_CONTEXT_WINDOW_TOKENS,
+        'budget and contextWindow are the real Claude limits');
       assert(fit.reservedOutput === taskMaxTokensFor('job-scoring', hints),
         'reservedOutput is exactly the same task-specific ceiling taskMaxTokensFor would report for the identical task/hints');
-      assert(Number.isFinite(fit.tokens) && fit.tokens > 0, 'tokens is a real (informational-only) local estimate, not left undefined');
-      // A wildly larger prompt still fits — there is no size past which this flips.
+      assert(Number.isFinite(fit.tokens) && fit.tokens > 0, 'tokens is a real local estimate, not left undefined');
       const bigger = await checkPromptFits('y'.repeat(5_000_000), { task: 'career-profile-compile' });
-      assert(bigger.fits === true && bigger.reservedOutput === taskMaxTokensFor('career-profile-compile'),
-        'even a multi-megabyte prompt reports fits:true with the correct task-specific reservedOutput');
+      assert(bigger.fits === false && bigger.reservedOutput === taskMaxTokensFor('career-profile-compile'),
+        'a multi-megabyte prompt does not fit, and still reports the task-specific reservedOutput');
       return { reservedOutput: fit.reservedOutput };
     },
   },

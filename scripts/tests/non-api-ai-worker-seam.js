@@ -12,7 +12,7 @@ import {
 } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
 import {
-  __workerExclusionReasonForTests, __claimAcceptedResponseFingerprintForTests, WORKER_EXCLUSION_REASONS, WORKER_RAW_RESEARCH_TASKS, WORKER_RELEASE_ONE_TASKS, listWorkerHandoffs, onNonApiAiEvent, readWorkerHandoff, submitWorkerResponse,
+  failWorkerHandoff, __workerExclusionReasonForTests, __claimAcceptedResponseFingerprintForTests, WORKER_EXCLUSION_REASONS, WORKER_RAW_RESEARCH_TASKS, WORKER_RELEASE_ONE_TASKS, listWorkerHandoffs, onNonApiAiEvent, readWorkerHandoff, submitWorkerResponse,
 } from '../../electron/ipc/nonApiAi.js';
 import { callLLMRaw, getKnownTaskIds } from '../../electron/ipc/llm.js';
 import {
@@ -604,6 +604,18 @@ export default [
         assert((await pending).accepted, 'the in-flight acceptance owns settlement');
       });
     },
+  },
+  {
+    name: 'W3 transport: failing a worker handoff ends it for good and leaves other requests alone',
+    run: () => withRuleHandoff(() => {}, async ctx => {
+      const requestId = ctx.request.requestId;
+      assert(failWorkerHandoff({ requestId: 'unknown', error: new Error('x') }) === false, 'an unknown request is ignored');
+      assert(listWorkerHandoffs({ allowTasks: new Set(['career-profile-repair']) }).handoffs.some(entry => entry.requestId === requestId), 'the request is live first');
+      const error = Object.assign(new Error('too long'), { code: 'CLAUDE_PROMPT_TOO_LONG' });
+      assert(failWorkerHandoff({ requestId, error }) === true, 'the worker can fail its own handoff');
+      assert(!listWorkerHandoffs({ allowTasks: new Set(['career-profile-repair']) }).handoffs.some(entry => entry.requestId === requestId), 'no worker is offered it again');
+      assert(failWorkerHandoff({ requestId, error }) === false, 'it can only be failed once');
+    }),
   },
   {
     name: 'W3 transport: schema details survive manual copying without attacker property names',

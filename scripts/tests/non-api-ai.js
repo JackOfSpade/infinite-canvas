@@ -626,11 +626,12 @@ export default [
       // The old dual-transport router picked a live API branch per task; that
       // guarantee used to be checked by asserting manual-branch/provider-branch
       // ORDERING inside llm.js. With only one transport left, the guarantee
-      // that actually matters is structural: llm.js cannot name a provider at
-      // all, and every public call shape reaches the one transport function.
+      // that actually matters is structural: llm.js cannot reach a provider
+      // itself (it may read Claude's size limits), and every public call shape
+      // reaches the one transport function.
       const llmSource = readFileSync(new URL('../../electron/ipc/llm.js', import.meta.url), 'utf8');
       const lowered = llmSource.toLowerCase();
-      const banned = ['gemini', 'claude', 'anthropic', 'apikey', 'providerfortask', 'modelfortask'];
+      const banned = ['gemini', 'claudeapplication', 'claudetask', 'claude-agent-sdk', 'anthropic', 'apikey', 'providerfortask', 'modelfortask'];
       const present = banned.filter(token => lowered.includes(token));
       assert(present.length === 0,
         `llm.js must name no provider, credential, or removed routing helper; found: ${present.join(', ') || 'none'}`);
@@ -2104,7 +2105,7 @@ export default [
     },
   },
   {
-    name: 'non-API AI: job prompt preflight is manual and never invokes a provider token counter',
+    name: 'non-API AI: job prompt preflight is local and never invokes a provider token counter',
     run: async () => {
       const fit = await checkPromptFits('x'.repeat(250_000), {
         task: 'job-scoring',
@@ -2112,10 +2113,9 @@ export default [
         responseSchema: { type: 'object', properties: {} },
         hints: { itemCount: 5 },
       });
-      assert(fit.fits === true && fit.provider === 'non-api-ai' && fit.model === 'non-api-ai'
-        && fit.via === 'manual' && fit.contextWindow === Number.MAX_SAFE_INTEGER,
-      'job preflight returns the local manual transport contract without resolving credentials or contacting a token-count endpoint');
-      return { via: fit.via, tokens: fit.tokens };
+      assert(fit.fits === true && Number.isFinite(fit.tokens),
+        'job preflight answers locally without resolving credentials or contacting a token-count endpoint');
+      return { tokens: fit.tokens };
     },
   },
   {

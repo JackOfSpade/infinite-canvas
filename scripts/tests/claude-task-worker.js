@@ -12,7 +12,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 20; i += 1) await tick(); };
 
 function harness({ entries, runStage, submit, ...options }) {
-  const state = { pending: new Map(entries.map(entry => [entry.requestId, entry])), reads: [], submits: [], returned: [], stages: [], listeners: new Set(), timers: [], clock: 1000 };
+  const state = { pending: new Map(entries.map(entry => [entry.requestId, entry])), failed: [], reads: [], submits: [], returned: [], stages: [], listeners: new Set(), timers: [], clock: 1000 };
   const seam = {
     list: () => ({ handoffs: [...state.pending.values()], settlingRequestIds: [], retryAfterMs: 0 }),
     read: (args) => { state.reads.push(args); return state.pending.has(args.requestId) ? { ok: true, prompt: `prompt ${args.requestId}` } : { ok: false }; },
@@ -25,6 +25,7 @@ function harness({ entries, runStage, submit, ...options }) {
       return outcome;
     },
     returnToPerson: (args) => { state.returned.push(args); state.pending.delete(args.requestId); return true; },
+    fail: (args) => { state.failed.push(args); state.pending.delete(args.requestId); return true; },
     onEvent: (listener) => { state.listeners.add(listener); return () => state.listeners.delete(listener); },
   };
   const worker = createClaudeTaskWorker({
@@ -156,6 +157,21 @@ export default [
       await settle();
       assert.equal(state.stages.length, 3);
       assert.equal(state.returned.length, 1);
+    },
+  },
+  {
+    name: 'claude task worker: a prompt Claude calls too long fails its caller at once, with no retry or manual paste',
+    async run() {
+      const { worker, state } = harness({ entries: [entry('a')], runStage: failing('CLAUDE_PROMPT_TOO_LONG') });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1);
+      assert.equal(state.timers.length, 0, 'no retry is scheduled');
+      assert.equal(state.returned.length, 0);
+      assert.equal(state.failed.length, 1);
+      assert.equal(state.failed[0].requestId, 'a');
+      assert.equal(state.failed[0].error.code, 'CLAUDE_PROMPT_TOO_LONG');
+      assert.equal(worker.status().retrying, 0);
     },
   },
   {

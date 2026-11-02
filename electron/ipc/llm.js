@@ -14,6 +14,7 @@ import {
   roleFamilyAssessmentMaxTokens,
 } from './resultCaps.js';
 import { NON_API_AI_TRANSPORT, requestNonApiAi } from './nonApiAi.js';
+import { assertClaudePromptFits, CLAUDE_CONTEXT_WINDOW_TOKENS, CLAUDE_PROMPT_TOKEN_BUDGET, estimateClaudePromptTokens } from './claudePromptLimit.js';
 import { KNOWN_TASKS, getKnownTaskIds } from './knownTasks.js';
 import { logger } from '../logger.js';
 import { CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS } from './careerSnapshot.js';
@@ -191,38 +192,24 @@ export function taskMaxTokensFor(task, hints = {}) {
   return typeof entry === 'function' ? entry(hints) : entry;
 }
 
-// Local char→token estimate for the verdict below. It is informational
-// only — checkPromptFits is always permissive, nothing is gated on this
-// number — so a simple constant-ratio estimate is enough.
-const LOCAL_CHARS_PER_TOKEN = 2.5;
-function estimateTokensFromChars(chars) {
-  return Math.ceil(Math.max(0, Number(chars) || 0) / LOCAL_CHARS_PER_TOKEN);
-}
+const schemaText = responseSchema => (responseSchema ? JSON.stringify(responseSchema) : '');
 
 /**
- * Sizing/verdict info for a prompt this task would use. The model's context
- * window is far larger than any prompt the app builds, so this always returns
- * the permissive verdict below (`fits: true`, unbounded budget). Kept as its
- * own function, rather than inlined at call sites, because callers still rely on the
- * { fits, tokens, budget, reservedOutput, contextWindow } shape for
- * batch-sizing decisions (e.g. job-scoring's chunking).
- * @returns {Promise<{fits:boolean, tokens:number, model:string, provider:string,
- *   budget:number, reservedOutput:number, contextWindow:number, via:string}>}
+ * Whether a prompt for this task fits what Claude can accept, for callers that
+ * can split their batch instead. Every call below enforces the same limit, so a
+ * caller that cannot split fails before a request is issued.
+ * @returns {Promise<{fits:boolean, tokens:number, budget:number,
+ *   reservedOutput:number, contextWindow:number}>}
  */
 export async function checkPromptFits(prompt, opts = {}) {
   const { task, hints, responseSchema, cachedPrefix } = normalizeOpts(opts);
-  const chars = (cachedPrefix?.length || 0) + (prompt?.length || 0)
-    + (responseSchema ? JSON.stringify(responseSchema).length : 0);
-  const requestedOutput = taskMaxTokensFor(task, hints);
+  const tokens = estimateClaudePromptTokens(cachedPrefix, prompt, schemaText(responseSchema));
   return {
-    fits: true,
-    tokens: estimateTokensFromChars(chars),
-    model: 'non-api-ai',
-    provider: 'non-api-ai',
-    via: 'manual',
-    budget: Number.MAX_SAFE_INTEGER,
-    reservedOutput: requestedOutput,
-    contextWindow: Number.MAX_SAFE_INTEGER,
+    fits: tokens <= CLAUDE_PROMPT_TOKEN_BUDGET,
+    tokens,
+    budget: CLAUDE_PROMPT_TOKEN_BUDGET,
+    reservedOutput: taskMaxTokensFor(task, hints),
+    contextWindow: CLAUDE_CONTEXT_WINDOW_TOKENS,
   };
 }
 
@@ -247,6 +234,7 @@ function assertStructuredResponseSchema(responseSchema, caller) {
 export async function callLLMText(prompt, opts = {}) {
   const { signal, task, hints, grounding, responseSchema, cachedPrefix, displayOnlyPromptSuffix, responseValidator, manualHandoff } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMText');
+  assertClaudePromptFits(cachedPrefix, prompt, schemaText(responseSchema));
   // Optional by-reference out-param: callers pass `meta: {}` and read back
   // `meta.model` for per-stage telemetry. There is only one transport, so
   // this is always 'non-api-ai', but the out-param contract stays the same
@@ -294,6 +282,7 @@ export async function callLLMRaw(prompt, opts = {}) {
     responseValidator,
     manualHandoff,
   } = normalizeOpts(opts);
+  assertClaudePromptFits(cachedPrefix, prompt);
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const result = await requestNonApiAi({
     prompt, cachedPrefix, task, grounding, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,
@@ -351,6 +340,7 @@ export async function callLLMVision(imagePaths, prompt, opts = {}) {
   }
   const { signal, task, hints, responseSchema, responseValidator } = normalizeOpts(opts);
   assertStructuredResponseSchema(responseSchema, 'callLLMVision');
+  assertClaudePromptFits(prompt, schemaText(responseSchema));
   const meta = (opts.meta && typeof opts.meta === 'object') ? opts.meta : null;
   const result = await requestNonApiAi({
     prompt, task, responseSchema, batch: hints.batch, batchTotal: hints.batchTotal, itemCount: hints.itemCount,

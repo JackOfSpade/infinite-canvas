@@ -8,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { logger } from '../logger.js';
 import { claudeChildEnv, resolveClaudeBinary } from './claudeApplicationRunner.js';
+import { CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
 import { CLAUDE_TASK_IDS, claudeTaskProfile } from './claudeTaskProfiles.js';
 import {
   listWorkerHandoffs,
@@ -15,6 +16,7 @@ import {
   onNonApiAiEvent,
   readWorkerHandoff,
   readWorkerHandoffAttachments,
+  failWorkerHandoff,
   returnHandoffToPerson,
   submitWorkerResponse,
 } from './nonApiAi.js';
@@ -36,6 +38,7 @@ const SEAM = Object.freeze({
   attachments: readWorkerHandoffAttachments,
   submit: submitWorkerResponse,
   returnToPerson: returnHandoffToPerson,
+  fail: failWorkerHandoff,
   onEvent: onNonApiAiEvent,
 });
 
@@ -129,6 +132,13 @@ export function createClaudeTaskWorker({
     if (error?.code === 'CLAUDE_CANCELLED') return;
     if (error?.code === 'CLAUDE_USAGE_LIMIT') return pause(error.code, USAGE_LIMIT_WAIT_MS);
     if (error?.code === 'CLAUDE_NOT_SIGNED_IN' || error?.code === 'CLAUDE_CLI_MISSING') return pause(error.code, RETRY_BASE_MS * 2);
+    if (error?.code === CLAUDE_PROMPT_TOO_LONG) {
+      // No retry or manual paste can make this prompt fit, so its caller is told.
+      failures.delete(entry.requestId);
+      logger.warn(`[Claude tasks] '${entry.task}' prompt is too long.`);
+      seam.fail({ requestId: entry.requestId, error });
+      return;
+    }
     const failure = failures.get(entry.requestId) || { attempts: 0, blocked: 0, notBefore: 0 };
     failure.attempts += 1;
     logger.warn(`[Claude tasks] '${entry.task}' failed (${error?.code || 'error'}), attempt ${failure.attempts}.`);
