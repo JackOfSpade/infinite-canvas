@@ -32,18 +32,6 @@ const previewFixtureRoot = await fs.mkdtemp(path.join(
 const workspacePath = path.join(await fs.realpath(previewFixtureRoot), 'roundtrip.json');
 const env = { ...process.env };
 const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
-const BRIDGE_PRELOAD_KEYS = [
-  'handoffBridgeGetStatus', 'handoffBridgeSetEnabled', 'handoffBridgeSaveConfig', 'handoffBridgeChooseBinary',
-  'handoffBridgeApproveBinary', 'handoffBridgeChooseCredentials', 'handoffBridgeRestartTunnel', 'handoffBridgeStopOrphan',
-  'handoffBridgeGetTunnelLog', 'handoffBridgeOpenPairing', 'handoffBridgeCancelPairing', 'handoffBridgeNewChat',
-  'handoffBridgeContinueChat', 'handoffBridgeStartWorkerPool', 'handoffBridgeCopyWorkerStarter', 'handoffBridgeRestartWorker',
-  'handoffBridgeOpenWorkerChat', 'handoffBridgeRetryWorkerLaunch', 'handoffBridgeGetLaunchAccount',
-  'handoffBridgePause', 'handoffBridgeResume', 'handoffBridgeRevokeAll',
-  'handoffBridgeForgetSetup', 'handoffBridgeRelease', 'handoffBridgeUnrelease', 'handoffBridgeReleasePush',
-  'handoffBridgeUnreleasePush', 'handoffBridgeHoldJob', 'handoffBridgeAckAlarm', 'handoffBridgeGetActivity',
-  'handoffBridgeTestSyntheticPreflight',
-  'handoffBridgePublishJobs', 'onHandoffBridgeStatus', 'onHandoffBridgeJobChanged', 'onHandoffBridgeCanvasFileReady', 'onHandoffBridgeOpenPanel',
-].sort();
 
 // Codex and some CI environments use Electron as a Node runtime. Playwright
 // needs the normal Electron runtime for renderer automation.
@@ -52,7 +40,6 @@ env.INFINITE_CANVAS_E2E = '1';
 env.INFINITE_CANVAS_E2E_BACKGROUND = '1';
 
 let app;
-let bridgeUserDataDir = null;
 const rendererErrors = [];
 const execFileAsync = promisify(execFile);
 
@@ -226,15 +213,6 @@ async function closeElectron(app) {
     await killSmokeElectronProcesses(userDataDir);
     await waitForSmokeElectronExit(userDataDir, 'Electron SIGKILL fallback', 3_000);
   }
-}
-
-function objectKeys(value, keys = []) {
-  if (!value || typeof value !== 'object') return keys;
-  for (const [key, child] of Object.entries(value)) {
-    keys.push(key.toLowerCase());
-    objectKeys(child, keys);
-  }
-  return keys;
 }
 
 // Poll a locator count until the predicate holds — asserting the instant an
@@ -458,33 +436,10 @@ try {
     assert.equal(backgroundWindowState.activationPolicy, 'prohibited',
       'background smoke must prohibit macOS app activation when Electron exposes the policy');
   }
-  step('bridge remains inert during the ordinary E2E smoke');
-  await app.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
-  const bridgeOff = await page.evaluate(async () => ({
-    keys: Object.keys(window.electronAPI || {}).filter(key => key.startsWith('handoffBridge') || key.startsWith('onHandoffBridge')).sort(),
-    status: await window.electronAPI.handoffBridgeGetStatus(),
-    enable: await window.electronAPI.handoffBridgeSetEnabled({ enabled: true }),
-    statusAfterEnable: await window.electronAPI.handoffBridgeGetStatus(),
-    syntheticUnavailable: await window.electronAPI.handoffBridgeTestSyntheticPreflight('progress').then(() => false, () => true),
-  }));
-  bridgeUserDataDir = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
-  assert.equal(bridgeOff.enable.success, false, 'ordinary E2E must refuse bridge enablement');
-  assert.equal(bridgeOff.syntheticUnavailable, true, 'ordinary E2E must not register the synthetic bridge test handler');
-  assert.equal(bridgeOff.enable.code, 'UNAVAILABLE', 'ordinary E2E refusal must use the fixed unavailable IPC code');
-  assert.equal(bridgeOff.status.status.serving, 'off', 'ordinary E2E bridge status must stay off');
-  assert.equal(bridgeOff.statusAfterEnable.status.availability.reason, 'e2e', 'ordinary E2E status must expose its unavailable reason');
-  assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge', 'b.sock')).then(() => true, () => false), false,
-    'ordinary E2E must not create a bridge Unix socket');
-  assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge')).then(() => true, () => false), false,
-    'ordinary E2E must not create bridge state or a Unix socket');
-  assert.deepEqual(bridgeOff.keys, BRIDGE_PRELOAD_KEYS, 'ordinary E2E must retain the exact closed, non-secret bridge preload surface');
-  const forbiddenStatusKeys = new Set([
-    'accesstoken', 'refreshtoken', 'sessioncode', 'chatkey', 'handoffcode', 'pairingcode',
-    'tunnelsecret', 'credentialspath', 'canvasfilepath', 'label', 'prompt', 'response',
-  ]);
-  assert(objectKeys(bridgeOff.status.status).every(key => !forbiddenStatusKeys.has(key)),
-    'bridge-off status must not expose any secret or content-bearing key');
-  await assertNoTunnelDescendant(app, 'initial bridge-off check');
+  step('no ChatGPT bridge remains');
+  const bridgeKeys = await page.evaluate(() => Object.keys(window.electronAPI || {}).filter(key => /handoffBridge/i.test(key)));
+  assert.deepEqual(bridgeKeys, [], 'the preload must expose no bridge API');
+  await assertNoTunnelDescendant(app, 'initial check');
   // All subsequent renderer documents are test fixtures. Prevent their
   // beforeunload guard from registering so a late Chromium dialog cannot race
   // Playwright's navigation machinery. The initial document is handled by
@@ -1397,8 +1352,7 @@ try {
     await settingsPanel.getByPlaceholder('sk-ant-api...').count(), 0,
     'Settings must not expose an Anthropic API key field',
   );
-  const bridgeSettings = settingsPanel.getByRole('group', { name: 'ChatGPT bridge controls' });
-  await bridgeSettings.waitFor();
+  assert.equal(await settingsPanel.getByText(/ChatGPT|bridge/i).count(), 0, 'Settings must show no ChatGPT or bridge controls');
   const originalWindowSize = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getSize());
   await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(320, 800));
   await page.waitForFunction(() => window.innerWidth <= 320);
@@ -1414,114 +1368,8 @@ try {
   });
   assert(narrowSettingsLayout.scrollWidth <= narrowSettingsLayout.clientWidth + 1, 'narrow Settings must not create horizontal scroll');
   assert(narrowSettingsLayout.left >= -0.5 && narrowSettingsLayout.right <= narrowSettingsLayout.viewportWidth + 0.5, 'narrow Settings must remain inside the viewport');
-  const bridgeLayout = await bridgeSettings.evaluate((group) => {
-    const groupBounds = group.getBoundingClientRect();
-    const buttons = Array.from(group.querySelectorAll('.bridge-button-primary, .bridge-button-secondary, .bridge-button-danger')).map((button) => {
-      const bounds = button.getBoundingClientRect();
-      const style = getComputedStyle(button);
-      return { left: bounds.left, right: bounds.right, height: bounds.height, display: style.display };
-    });
-    return {
-      clientWidth: group.clientWidth,
-      scrollWidth: group.scrollWidth,
-      left: groupBounds.left,
-      right: groupBounds.right,
-      viewportWidth: window.innerWidth,
-      buttons,
-    };
-  });
-  assert(bridgeLayout.buttons.length >= 4, 'Settings must render setup, panel, and danger actions with the shared button styles');
-  assert(bridgeLayout.scrollWidth <= bridgeLayout.clientWidth + 1, 'bridge Settings must not create horizontal scroll');
-  for (const button of bridgeLayout.buttons) {
-    assert(['inline-flex', 'flex'].includes(button.display), 'bridge actions must use the compact shared flex button layout');
-    assert(button.height >= 35.5, `bridge action targets must remain accessible in Settings (height=${button.height})`);
-    assert(button.left >= bridgeLayout.left - 0.5 && button.right <= bridgeLayout.right + 0.5, 'bridge actions must remain inside the Settings group');
-  }
-  assert(bridgeLayout.left >= -0.5 && bridgeLayout.right <= bridgeLayout.viewportWidth + 0.5, 'bridge Settings must remain inside a narrow viewport');
-  const bridgeSwitch = bridgeSettings.getByRole('checkbox').first();
-  assert.equal(await bridgeSwitch.isDisabled(), true, 'ordinary E2E bridge switch must render disabled');
-  await bridgeSettings.getByText('The bridge is disabled during automated test runs.', { exact: true }).waitFor();
-  // The main-owned status event must also reach the renderer status store.
-  // Exercise a normal live state and a paused state through the actual preload
-  // event channel, never by writing renderer state directly.
-  const syntheticLive = JSON.parse(JSON.stringify(bridgeOff.status.status));
-  syntheticLive.seq += 100;
-  syntheticLive.availability = { ok: true, reason: null };
-  syntheticLive.enabled = true;
-  syntheticLive.serving = 'live';
-  syntheticLive.paused = false;
-  syntheticLive.pauseCause = null;
-  syntheticLive.setup = {
-    ...syntheticLive.setup,
-    hostnameOk: true,
-    binaryApproved: true,
-    credentialsOk: true,
-    tunnelReachable: true,
-    linked: true,
-  };
-  syntheticLive.tunnel = {
-    ...syntheticLive.tunnel,
-    state: 'up',
-    probe: { state: 'ok', okAt: Date.now(), failingSince: null, consecutiveFailures: 0, reason: null },
-  };
-  syntheticLive.link = { ...syntheticLive.link, state: 'linked' };
-  await app.evaluate(({ BrowserWindow }, snapshot) => {
-    for (const window of BrowserWindow.getAllWindows()) window.webContents?.send?.('handoff-bridge:status', snapshot);
-  }, syntheticLive);
-  await bridgeSettings.getByText(/^Ready:/).waitFor();
-  await bridgeSettings.getByRole('button', { name: 'Manage…', exact: true }).click();
-  const bridgeSetupDialog = page.getByRole('dialog', { name: 'Set up ChatGPT bridge', exact: true });
-  await bridgeSetupDialog.waitFor();
-  await page.waitForFunction(() => {
-    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
-    return Boolean(dialog) && document.activeElement === dialog;
-  });
-  const narrowSetupLayout = await bridgeSetupDialog.evaluate((dialog) => {
-    const bounds = dialog.getBoundingClientRect();
-    return {
-      clientWidth: dialog.clientWidth,
-      scrollWidth: dialog.scrollWidth,
-      left: bounds.left,
-      right: bounds.right,
-      viewportWidth: window.innerWidth,
-    };
-  });
-  assert(narrowSetupLayout.scrollWidth <= narrowSetupLayout.clientWidth + 1, 'narrow bridge setup must not create horizontal scroll');
-  assert(narrowSetupLayout.left >= -0.5 && narrowSetupLayout.right <= narrowSetupLayout.viewportWidth + 0.5, 'narrow bridge setup must remain inside the viewport');
-  await bridgeSetupDialog.getByRole('button', { name: 'Close setup', exact: true }).click();
-  await bridgeSetupDialog.waitFor({ state: 'hidden' });
-  await bridgeSettings.getByText(/^Ready:/).waitFor();
-  const syntheticPaused = {
-    ...syntheticLive,
-    seq: syntheticLive.seq + 1,
-    serving: 'paused',
-    paused: true,
-    pauseCause: 'user',
-  };
-  await app.evaluate(({ BrowserWindow }, snapshot) => {
-    for (const window of BrowserWindow.getAllWindows()) window.webContents?.send?.('handoff-bridge:status', snapshot);
-  }, syntheticPaused);
-  await bridgeSettings.getByText(/^Paused:/).waitFor();
-  await bridgeSettings.getByRole('button', { name: 'Open panel', exact: true }).click();
-  // Opening the popover from Settings must dismiss the higher-z-index modal;
-  // otherwise the popover is present but cannot be interacted with.
+  await page.keyboard.press('Escape');
   await page.getByRole('heading', { name: 'Settings', exact: true }).waitFor({ state: 'hidden' });
-  const bridgePopover = page.getByRole('complementary', { name: 'ChatGPT bridge', exact: true });
-  await bridgePopover.waitFor();
-  const narrowPopoverLayout = await bridgePopover.evaluate((panel) => {
-    const bounds = panel.getBoundingClientRect();
-    return {
-      clientWidth: panel.clientWidth,
-      scrollWidth: panel.scrollWidth,
-      left: bounds.left,
-      right: bounds.right,
-      viewportWidth: window.innerWidth,
-    };
-  });
-  assert(narrowPopoverLayout.scrollWidth <= narrowPopoverLayout.clientWidth + 1, 'narrow bridge popover must not create horizontal scroll');
-  assert(narrowPopoverLayout.left >= -0.5 && narrowPopoverLayout.right <= narrowPopoverLayout.viewportWidth + 0.5, 'narrow bridge popover must remain inside the viewport');
-  await bridgePopover.getByRole('button', { name: 'Close bridge panel', exact: true }).click();
-  await bridgePopover.waitFor({ state: 'hidden' });
   await app.evaluate(({ BrowserWindow }, size) => BrowserWindow.getAllWindows()[0].setSize(size[0], size[1]), originalWindowSize);
   await page.waitForFunction(width => window.innerWidth >= width - 1, originalWindowSize[0]);
 
@@ -1699,7 +1547,7 @@ try {
     `screen pagination should retain all six fixed-height shadow columns: ${JSON.stringify(paginationState)}`,
   );
   assert.deepEqual(rendererErrors, [], 'generated pagination workspace should not emit runtime errors');
-  await assertNoTunnelDescendant(app, 'final bridge-off check');
+  await assertNoTunnelDescendant(app, 'final check');
   smokePassed = true;
 } catch (error) {
   primarySmokeFailure = error;
@@ -1708,14 +1556,6 @@ try {
   // retained so a passing test can never conceal an undisposed fixture root.
   try {
     await closeElectron(app);
-  } catch (error) {
-    cleanupFailures.push(error);
-  }
-  try {
-    if (bridgeUserDataDir) {
-      assert.equal(await fs.access(path.join(bridgeUserDataDir, 'handoff-bridge')).then(() => true, () => false), false,
-        'ordinary E2E shutdown must leave no bridge state directory');
-    }
   } catch (error) {
     cleanupFailures.push(error);
   }

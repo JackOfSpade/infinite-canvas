@@ -165,7 +165,7 @@ export function selectOrphanedLocalAiJobs(discoveredJobs, knownJobIds) {
 // A 'failed' folder with no card is the one orphan nothing can ever act on:
 // the dock and the review-stop recovery both start from a card, and a deleted
 // card's result is never saved. Left alone it sat for the 30-day retention as a
-// released bridge lane counted as "needs you", which also answered every
+// released worker lane counted as "needs you", which also answered every
 // worker's empty-queue poll with "paused" (2026-10-23: three review-stopped
 // first attempts whose cards were deleted before the same jobs were generated
 // again). The manager discards it once it has stayed card-less this long, so a

@@ -26,7 +26,7 @@ function posting(extra = {}) {
     officialApplyUrl: 'https://apply.example.test/platform?keep=yes&utm_medium=listing#form',
     ats: 'ashby', tenant: 'northwind-synthetic', fetchedAt: '2026-10-01T12:00:00Z',
     contentHash: 'a'.repeat(64), scrapedListingSha256: 'b'.repeat(64),
-    trail: ['careers-page', 'tenant-unproven', 'bridge-unavailable'],
+    trail: ['careers-page', 'tenant-unproven', 'worker-unavailable'],
     alternatives: [{ url: 'https://careers.example.test/jobs/alternative?utm_source=board#details', title: 'Platform Engineer II' }],
     ...extra,
   };
@@ -69,10 +69,17 @@ function generateScope() {
 
 export default [
   {
+    name: 'saved bridge-era trail codes normalize to their worker names',
+    run() {
+      const saved = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research', 'bridge-timeout'] };
+      assert.deepEqual(normalizeOfficialPosting(saved).trail, ['worker-research', 'worker-timeout']);
+    },
+  },
+  {
     name: 'unproved fetched sources stay incomplete and never become cached negative research',
     run() {
       const miss = { level: 'L5', outcome: 'ambiguous', employer: 'Northwind Labs',
-        trail: ['bridge-research', 'source-unproven'] };
+        trail: ['worker-research', 'source-unproven'] };
       assert.deepEqual(normalizeOfficialPosting(miss), miss);
       assert.equal(officialResearchSettled(miss), false);
       const status = officialPostingLookupStatus(miss);
@@ -87,13 +94,13 @@ export default [
     name: 'every rejected or unreadable fetch keeps negative research retryable and uncached while verified matches stay usable',
     run() {
       for (const code of ['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']) {
-        const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research', code] };
+        const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['worker-research', code] };
         assert.equal(officialResearchSettled(miss), false, code);
         assert.equal(officialPostingLookupStatus(miss).state, 'incomplete', code);
         assert.equal(officialPostingLookupStatus(miss).retryable, true, code);
         assert.equal(shouldPersistOfficialPostingResult(miss, { researchRan: true }), false, code);
         const failure = { url: 'https://careers.example.test/unreadable', code };
-        const metadataOnly = { ...miss, trail: ['bridge-research'], fetchFailures: [failure] };
+        const metadataOnly = { ...miss, trail: ['worker-research'], fetchFailures: [failure] };
         assert.equal(officialResearchSettled(metadataOnly), false, `${code} metadata`);
         assert.equal(officialPostingLookupStatus(metadataOnly).state, 'incomplete', `${code} metadata`);
         assert.equal(shouldPersistOfficialPostingResult(metadataOnly, { researchRan: true }), false, `${code} metadata`);
@@ -116,7 +123,7 @@ export default [
       assert.deepEqual(normalizeOfficialPosting(value).fetchFailures, [failure]);
       assert.deepEqual(safeJob(row({ officialPosting: value })).officialPosting.fetchFailures, [failure]);
       assert.deepEqual(cardFor(row({ officialPosting: value })).data.officialPosting.fetchFailures, [failure]);
-      const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research'], fetchFailures: [failure] };
+      const miss = { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['worker-research'], fetchFailures: [failure] };
       assert.equal(officialResearchSettled(miss), false, 'unread verification evidence cannot establish a completed miss');
       assert.equal(officialPostingLookupStatus(miss).state, 'incomplete');
       const incomplete = { ...miss, trail: [...miss.trail, 'fetch-failed'] };
@@ -343,7 +350,7 @@ export default [
       assert.equal(job.postingVariants[0]?.liveness, 'closed');
       job.applyUrl = 'https://frozen-apply-sentinel.example.test/job';
       const sentinels = [job.postedBy, job.snippet, job.applyOptions[0].href, job.applyUrl,
-        job.googleCardUrl, job.sourceJobKey, 'tenant-unproven', 'bridge-unavailable',
+        job.googleCardUrl, job.sourceJobKey, 'tenant-unproven', 'worker-unavailable',
         job.officialPosting.officialApplyUrl, job.officialPosting.sourceUrl, job.officialPosting.alternatives[0].url,
         job.boardClosed.reason, job.boardClosed.at];
       const input = { jobId: 'synthetic-metadata-job', job, authorityProtocol: 'requirements-ledger.v3', careerAuthority: { version: 1 },

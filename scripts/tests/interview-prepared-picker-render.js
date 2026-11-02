@@ -1,6 +1,6 @@
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 
 const CARDS = Array.from({ length: 24 }, (_, index) => ({ id: `card-${index}`, question: index < 2 ? 'A shared question?' : `Prepared question ${index}?` }));
 const CARD = { ...CARDS[0], headline: 'I revised the team guide.', headlineEvidenceIds: ['guide'],

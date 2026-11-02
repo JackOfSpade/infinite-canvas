@@ -18,8 +18,8 @@ const job = (extra = {}) => ({ title: 'Synthetic Platform Builder', company: 'No
   snippet: 'A synthetic position that exercises the Generate listing check.', ...extra });
 const state = (verdict, basis, at = AT - 60_000) => ({ verdict, basis, board: 'linkedin', at: new Date(at).toISOString() });
 const marker = () => ({ board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: new Date(AT - 60_000).toISOString() });
-const miss = (extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'], ...extra });
-const ambiguous = () => ({ level: 'L6', outcome: 'ambiguous', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'ambiguous'] });
+const miss = (extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research'], ...extra });
+const ambiguous = () => ({ level: 'L6', outcome: 'ambiguous', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'ambiguous'] });
 const official = () => ({ level: 'L4', outcome: 'link-only', employer: 'Northwind Labs',
   sourceUrl: 'https://northwind.test/jobs/synthetic-one',
   officialApplyUrl: 'https://northwind.test/jobs/synthetic-one', trail: ['description-anchor'] });
@@ -45,7 +45,6 @@ async function withRefKeepAlive(run) {
 const deadline = () => AT + 8 * 60_000;
 const decision = (row, posting, verdict, basis, listingOverride = false) =>
   decideGenerationListingCheck({ job: row, posting, verdict, basis, at: AT, listingOverride });
-const linkedStatus = async () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active: false } } });
 const args = row => ({ nodeId: 'synthetic-board', cardId: 'synthetic-card',
   manualAiRunId: 'synthetic-generation-run', job: row });
 
@@ -214,7 +213,7 @@ export default [
           .map(rule => ({ ...rule, state: 'active' })) }) });
       const before = structuredClone(variants);
       const kept = await checkPostingVariantsForGeneration({ job: job(), variants, probe,
-        bridgeAvailable: true, calibrationStore: calibration(true), now: () => AT, deadline: deadline(),
+        calibrationStore: calibration(true), now: () => AT, deadline: deadline(),
         callText: async (_prompt, request) => { aiCalls += 1;
           return request.responseValidator({ rows: [{ id: 'r1', verdict: 'closed', quote: 'This job is no longer available.' }] }); } });
       assert.equal(visits.length, 4);
@@ -237,7 +236,7 @@ export default [
       const kept = await checkPostingVariantsForGeneration({ job: row, variants,
         probe: { probe: async url => { visits.push(url); clock = deadline();
           return evidence({ requestedUrl: url, finalUrl: url, jsonLd: { isListed: false, validThrough: '' } }); } },
-        bridgeAvailable: true, calibrationStore: calibration(), now: () => clock, deadline: deadline(),
+        calibrationStore: calibration(), now: () => clock, deadline: deadline(),
         callText: async () => { throw new Error('variant AI must not run after the tail deadline'); } });
       assert.deepEqual(visits, [variants[0].url]);
       assert.deepEqual(kept.map(variant => variant.location), ['First', 'Second']);
@@ -259,7 +258,7 @@ export default [
             + 'The remaining page describes synthetic tools and reliable engineering work.',
           closedHits: [{ ruleId: 'no-longer-available', insideDescription: false,
             context: 'This job is no longer available.' }] }) },
-        bridgeAvailable: true, calibrationStore: calibration(), now: () => AT, deadline: deadline(),
+        calibrationStore: calibration(), now: () => AT, deadline: deadline(),
         callText: async () => ({ rows: [{ id: 'r1', verdict: ++calls === 1 ? 'unclear' : 'closed',
           quote: calls === 1 ? '' : 'A quote absent from this synthetic page.' }] }) });
       assert.equal(calls, 2);
@@ -346,7 +345,7 @@ export default [
       assert.equal(decision(row, miss(), 'closed', 'ai').listingCheck.action, 'refuse-final');
       assert.equal(decision(row, ambiguous(), 'closed', 'ai').message,
         'Closed on LinkedIn — several official postings match');
-      assert.equal(decision(row, { ...miss(), trail: ['bridge-unavailable'] }, 'closed', 'ai').message,
+      assert.equal(decision(row, { ...miss(), trail: ['worker-unavailable'] }, 'closed', 'ai').message,
         'Closed on LinkedIn — official posting not checked yet');
       assert.equal(decision(row, miss(), 'pending', 'closed-marker').message,
         'Possibly closed on LinkedIn — not confirmed yet');
@@ -450,7 +449,7 @@ export default [
       const page = evidence({ jsonLd: { isListed: false, validThrough: '' }, closedHits: [] });
       const store = { ...calibration(), recordAiAnswer: async () => { calibrated += 1; } };
       const options = { job: row, posting: miss(), probe: { probe: async () => page },
-        calibrationStore: store, bridgeAvailable: true, now: () => AT };
+        calibrationStore: store, now: () => AT };
       const closed = await checkListingForGeneration({ ...options, deadline: deadline(),
         callText: async (_prompt, request) => { seen.push(request.task);
           return { rows: [{ id: 'r1', verdict: 'closed', quote: '' }] }; } });
@@ -465,10 +464,6 @@ export default [
       assert.equal(pending.listingCheck.verdict, 'pending');
       assert.equal(pending.listingLiveness.basis, 'closed-marker');
       assert.equal(pending.listingCheck.action, 'refuse-retry');
-      let unavailableAiCalls = 0;
-      await checkListingForGeneration({ ...options, bridgeAvailable: false, deadline: deadline(),
-        callText: async () => { unavailableAiCalls += 1; return { rows: [{ id: 'r1', verdict: 'closed', quote: '' }] }; } });
-      assert.equal(unavailableAiCalls, 0, 'the unavailable worker pool must skip the AI');
     },
   },
   {
@@ -479,7 +474,6 @@ export default [
       const result = await prepareOfficialPostingForGeneration(args(row), {
         projectJob: value => value, slots: { acquire: async () => { held = true; return () => { held = false; }; } },
         store: { find: async () => null },
-        bridgeStatus: linkedStatus,
         resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
         listingProbe: { probe: async () => { visits += 1; assert.equal(held, false); return evidence(); } },
         now: () => AT,
@@ -495,9 +489,7 @@ export default [
       assert.equal(result.officialPosting.level, 'L5');
       const probed = await prepareOfficialPostingForGeneration(args(job()), {
         slots: { acquire: async () => { held = true; return () => { held = false; }; } },
-        store: { find: async () => null }, bridgeStatus: async () => ({
-          enabled: true, link: { state: 'linked' }, chat: { pool: { active: true } },
-        }),
+        store: { find: async () => null },
         resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
         listingProbe: { probe: async () => {
           visits += 1; assert.equal(held, false); return evidence({ httpStatus: 404, chromeText: '' });
@@ -515,7 +507,7 @@ export default [
       const row = job({ listingLiveness: state('unclear', 'ai') });
       let overrideVisits = 0;
       const result = await prepareOfficialPostingForGeneration({ ...args(row), listingOverride: true }, {
-        store: { find: async () => null }, bridgeStatus: linkedStatus,
+        store: { find: async () => null },
         resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
         listingProbe: { probe: async () => { overrideVisits += 1; return evidence(); } },
         now: () => AT,
@@ -529,18 +521,18 @@ export default [
       const direct = await checkListingForGeneration({ job: row, posting: miss(), listingOverride: true,
         probe: { probe: async () => { directVisits += 1; return evidence({ jsonLd: { isListed: false, validThrough: '' } }); } },
         callText: async () => { directAiCalls += 1; return { rows: [{ id: 'r1', verdict: 'closed', quote: '' }] }; },
-        bridgeAvailable: true, calibrationStore: calibration(), now: () => AT, deadline: deadline() });
+        calibrationStore: calibration(), now: () => AT, deadline: deadline() });
       assert.equal(direct.listingCheck.action, 'proceed');
       assert.equal(directVisits, 0); assert.equal(directAiCalls, 0);
       const failedTail = await prepareOfficialPostingForGeneration(args(job()), {
-        store: { find: async () => null }, bridgeStatus: linkedStatus,
+        store: { find: async () => null },
         resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
         listingProbe: { probe: async () => { throw new Error('synthetic probe failure'); } },
         now: () => AT,
       });
       assert.equal(failedTail.officialPosting.level, 'L5');
       assert.equal(failedTail.officialPosting.outcome, 'not-found');
-      assert.ok(failedTail.officialPosting.trail.includes('bridge-research'), 'the tail failure retains resolved research');
+      assert.ok(failedTail.officialPosting.trail.includes('worker-research'), 'the tail failure retains resolved research');
       assert.equal(failedTail.listingCheck.action, 'hold');
       assert.equal(failedTail.message, "Couldn't confirm the listing is still open");
       const counts = getListingLivenessProbeCounts();
@@ -558,7 +550,7 @@ export default [
       ]) {
         const row = job({ listingLiveness: state(verdict, basis), boardClosed: marker() });
         const result = await prepareOfficialPostingForGeneration({ ...args(row), listingOverride: true }, {
-          store: { find: async () => null }, bridgeStatus: linkedStatus,
+          store: { find: async () => null },
           resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: posting })) }),
           listingProbe: { probe: async () => { throw new Error('Override must skip the listing probe'); } },
           now: () => AT,
@@ -595,8 +587,7 @@ export default [
       const timeoutRow = job({ sourceJobKey: 'synthetic-timeout' });
       const pending = prepareOfficialPostingForGeneration({ ...args(timeoutRow), listingOverride: true }, {
         slots: { acquire: signal => new Promise((_resolve, reject) =>
-          signal.addEventListener('abort', () => reject(signal.reason), { once: true })) },
-        bridgeStatus: async () => ({ enabled: false }), timeoutMs: 5, now: () => AT,
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })) }, timeoutMs: 5, now: () => AT,
       });
       const keepAlive = setTimeout(() => {}, 25);
       const timed = await pending.finally(() => clearTimeout(keepAlive));
@@ -628,8 +619,7 @@ export default [
       return withRefKeepAlive(async () => {
         const timeoutOptions = {
           slots: { acquire: signal => new Promise((_resolve, reject) =>
-            signal.addEventListener('abort', () => reject(signal.reason), { once: true })) },
-          bridgeStatus: async () => ({ enabled: false }), timeoutMs: 5, now: () => AT,
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })) }, timeoutMs: 5, now: () => AT,
           calibrationStore: calibration(),
         };
         for (const override of [false, true]) {
@@ -658,7 +648,7 @@ export default [
 
         let demotionReads = 0;
         const tail = await prepareOfficialPostingForGeneration(args(openRow), {
-          store: { find: async () => null }, bridgeStatus: linkedStatus,
+          store: { find: async () => null },
           resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
           calibrationStore: { latestDemotedAt: async () => {
             demotionReads += 1;
@@ -684,8 +674,7 @@ export default [
         let visited = false;
         const result = await prepareOfficialPostingForGeneration(args(row), {
           slots: { acquire: signal => new Promise((_resolve, reject) =>
-            signal.addEventListener('abort', () => reject(signal.reason), { once: true })) },
-          bridgeStatus: async () => ({ enabled: false }), timeoutMs: 5, now: () => AT,
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })) }, timeoutMs: 5, now: () => AT,
           calibrationStore: calibration(),
           listingProbe: { probe: async () => { visited = true; throw new Error('no budget for alternate'); } },
         });
@@ -699,13 +688,12 @@ export default [
     },
   },
   {
-    name: 'Generate prepare runs listing AI with either a linked single chat or active worker pool',
+    name: 'Generate prepare runs listing AI after the official lookup',
     async run() {
-      for (const [active, expectedCalls] of [[false, 1], [true, 1]]) {
+      {
         let aiCalls = 0;
-        const result = await prepareOfficialPostingForGeneration(args(job({ sourceJobKey: `synthetic-pool-${active}` })), {
+        const result = await prepareOfficialPostingForGeneration(args(job({ sourceJobKey: 'synthetic-listing-ai' })), {
           store: { find: async () => null },
-          bridgeStatus: async () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active } } }),
           resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
           listingProbe: { probe: async () => evidence({ jsonLd: { isListed: false, validThrough: '' } }) },
           callText: async (_prompt, request) => {
@@ -714,7 +702,7 @@ export default [
           },
           calibrationStore: calibration(), now: () => AT,
         });
-        assert.equal(aiCalls, expectedCalls, `worker pool active=${active}`);
+        assert.equal(aiCalls, 1);
         assert.equal(result.listingCheck.action, 'refuse-final');
       }
     },
@@ -726,7 +714,6 @@ export default [
       const sender = new EventEmitter(); sender.id = 9072; sender.isDestroyed = () => false;
       try {
         registerOfficialPostingGenerationHandlers({ projectJob: row => ({ ...row }), store: { find: async () => null },
-          bridgeStatus: async () => ({ enabled: false }),
           resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }), now: () => AT });
         const invoke = electronPkg.ipcMain.__getInvokeHandler('prepare-official-posting-for-generation');
         const row = job({ source: 'remoteok', url: 'https://remoteok.com/jobs/synthetic-override' });
@@ -744,8 +731,7 @@ export default [
         const before = getListingLivenessProbeCounts().held;
         const timed = await prepareOfficialPostingForGeneration(args(job({ sourceJobKey: 'synthetic-held-timeout' })), {
           slots: { acquire: signal => new Promise((_resolve, reject) =>
-            signal.addEventListener('abort', () => reject(signal.reason), { once: true })) },
-          bridgeStatus: async () => ({ enabled: false }), timeoutMs: 5, now: () => AT,
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true })) }, timeoutMs: 5, now: () => AT,
       });
       assert.equal(timed.listingCheck.action, 'refuse-retry');
       assert.equal(timed.listingCheck.basis, 'official-lookup');
@@ -757,7 +743,7 @@ export default [
       assert.equal(projection.listingCheck.basis, 'official-lookup');
       assert.equal(getListingLivenessProbeCounts().held, before + 2);
       const tail = await prepareOfficialPostingForGeneration(args(job()), {
-        store: { find: async () => null }, bridgeStatus: linkedStatus,
+        store: { find: async () => null },
         resolve: async jobs => ({ jobs: jobs.map(value => ({ ...value, officialPosting: miss() })) }),
         listingProbe: { probe: async () => { throw new Error('synthetic probe failure'); } }, now: () => AT,
       });

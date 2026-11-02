@@ -1030,21 +1030,6 @@ export default [
     },
   },
   {
-    name: 'claude runner driver: a bridge-laned job is left to the bridge',
-    async run() {
-      const script = scriptedApi([{ handoffCode: 'c', stage: 'draft', prompt: 'p' }]);
-      let runs = 0;
-      const runner = createClaudeApplicationRunner({
-        api: script.api, stateFile: tempStateFile(), logger: quietLogger(), isBridgeLaned: id => id === 'job-bridge',
-        runStage: async () => { runs += 1; return { text: 'x' }; },
-      });
-      assert.deepEqual(runner.ensure({ jobId: 'job-bridge', canvasFilePath: '/c.canvas' }), { status: 'bridge' });
-      await new Promise(resolve => setTimeout(resolve, 10));
-      assert.equal(runs, 0);
-      assert.equal(script.reads.length, 0);
-    },
-  },
-  {
     name: 'claude runner driver: a discard aborts the running stage and records no failure',
     async run() {
       const script = scriptedApi([{ handoffCode: 'c', stage: 'draft', prompt: 'p' }]);

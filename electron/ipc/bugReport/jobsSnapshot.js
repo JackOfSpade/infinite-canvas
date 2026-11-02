@@ -5108,16 +5108,10 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
   const aggregateNumber = (key) => boardDiagnosticNumber(aggregate[key]) ?? 0;
   const cancelledByCause = SAFE_NON_API_AI_CANCEL_CAUSES
     .map(cause => `${cause}=${boardDiagnosticNumber(aggregate.cancelledByCause?.[cause]) ?? 0}`).join(', ');
-  const bridgeRejected = aggregateNumber('bridgeRejectionAttempts');
-  const bridgeRequestsRejected = aggregateNumber('requestsEverBridgeRejected');
-  const bridgeRecovered = aggregateNumber('acceptedAfterBridgeRejection');
-  const bridgePending = aggregateNumber('pendingAfterBridgeRejection');
-  const bridgeOtherSettled = Math.max(0, bridgeRequestsRejected - bridgeRecovered - bridgePending);
   const lines = [
     `- Detailed receipts: ${lifecycles.length} shown · ${detailedRetained} retained for this report window · ${detailedOmitted} retained receipt(s) omitted by the ${limit}-row report cap · lifecycle source currently retains ${sourceRetained}/${sourceLimit} row(s) · ${sourceEvicted} earlier receipt(s) evicted by the source cap${activeRecovered ? ` · ${activeRecovered} live receipt(s) restored from the active registry` : ''}.`,
     `- Cumulative registry (this process window): ${aggregateIssued} issued · ${aggregateNumber('settled')} settled (accepted ${aggregateNumber('accepted')} · cancelled ${aggregateNumber('cancelled')} · stepped back ${aggregateNumber('steppedBack')} · failed ${aggregateNumber('failed')}) · ${aggregateNumber('rejectionAttempts')} rejection attempt(s) across ${aggregateNumber('requestsEverRejected')} request(s) · ${aggregateNumber('acceptedAfterRejection')} rejected request(s) later accepted · ${aggregateNumber('pendingAfterRejection')} still pending after rejection.`,
     `- Cancelled handoffs by cause: ${cancelledByCause}.`,
-    `- Bridge-route reconciliation: ${bridgeRejected} bridge validation rejection attempt(s) across ${bridgeRequestsRejected} request(s) · ${bridgeRecovered} bridge-rejected request(s) later accepted on that same lifecycle · ${bridgePending} still pending after a bridge rejection${bridgeOtherSettled ? ` · ${bridgeOtherSettled} settled without later acceptance` : ''}. This is route-specific registry evidence; Handoff Bridge Diagnostics' submit counters are transport-wide and are not paired to these rows.`,
   ];
   const failureSummary = (item) => {
     const failures = Array.isArray(item?.failures) ? item.failures.slice(-8) : [];
@@ -5157,7 +5151,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
       const responseChars = boardDiagnosticNumber(failure?.responseChars, { max: 10_000_000 });
       const size = Number.isInteger(responseChars) ? ` · ${responseChars} chars` : '';
       const hash = typeof failure?.responseHash === 'string' && /^[a-f0-9]{8}$/i.test(failure.responseHash) ? ` · receipt tag \`${failure.responseHash}\`` : '';
-      // Bridged answers only: equal tags are the same failing rule, and the
+      // Worker answers only: equal tags are the same failing rule, and the
       // count is how many answers to this handoff have failed it so far.
       const causeRepeats = boardDiagnosticNumber(failure?.causeRepeats, { max: 1_000_000 });
       const cause = typeof failure?.causeTag === 'string' && /^[a-f0-9]{8}$/.test(failure.causeTag)
@@ -5251,9 +5245,9 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     const issuedClock = issuedAt
       ? ` · issued ${new Date(issuedAt).toISOString()}`
       : '';
-    // `deliveries` is renderer dispatch count, not evidence of an MCP GET.
-    // Name the route so a report cannot mistake "shown in the local dock" for
-    // "claimed by ChatGPT" (the bridge section owns that latter evidence).
+    // `deliveries` is the renderer dispatch count, not evidence that the worker
+    // claimed the handoff. Name the route so a report cannot mistake "shown in
+    // the local dock" for a worker claim.
     const deliveries = `sent to local dock ${Math.max(0, Number(boardDiagnosticValue(item, 'deliveries')) || 0)} time(s)`;
     const retries = [];
     const codeMismatches = Number(boardDiagnosticValue(item, 'codeMismatches')) || 0;
@@ -5265,9 +5259,9 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
     if (boardDiagnosticValue(item, 'replays')) retries.push(`${boardDiagnosticValue(item, 'replays')} replayed after dialog remount`);
     if (boardDiagnosticValue(item, 'escalated') === 'rejection_cap') {
       const after = boardDiagnosticNumber(boardDiagnosticValue(item, 'escalatedAfterRejections'));
-      retries.push(`**returned to the person** (\`rejection_cap\`: one cause kept failing in ChatGPT's answers${after != null ? `, after ${after} rejection(s)` : ''})`);
+      retries.push(`**returned to the person** (\`rejection_cap\`: one cause kept failing in the worker's answers${after != null ? `, after ${after} rejection(s)` : ''})`);
     } else if (boardDiagnosticValue(item, 'escalated') === 'worker_restart_cap') {
-      retries.push('**returned to the person** (`worker_restart_cap`: the ChatGPT chat was replaced repeatedly without answering this handoff)');
+      retries.push('**returned to the person** (`worker_restart_cap`: the worker failed repeatedly without answering this handoff)');
     }
     const accepted = acceptedAt && issuedAt
       ? ` · accepted after ${handoffElapsed(acceptedAt - issuedAt)}`
@@ -6187,7 +6181,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .map(([key, count]) => `${key}=${Math.max(0, Math.floor(Number(count)))}`).join(', ') || 'none';
       lines.push(`- Official postings: levels ${counts(resolution.levels)}; outcomes ${counts(resolution.outcomes)}; rejections ${counts(resolution.rejections)}; failures ${Math.max(0, Number(resolution.failed) || 0)}.`);
       if (Number(resolution.officialLookupsIncomplete) > 0) lines.push(`- Official lookups incomplete after resolution: ${Math.max(0, Math.floor(Number(resolution.officialLookupsIncomplete) || 0))}; they remain retryable before scoring.`);
-      lines.push(`- Official-posting bridge: ${Math.max(0, Number(resolution.handoffs) || 0)} handoff(s), ${Math.max(0, Number(resolution.handoffMs) || 0)} ms; material description changes ${Math.max(0, Number(resolution.materialJdChange) || 0)}; timeout ${Math.max(0, Number(resolution.bridgeTimeout) || 0)}; unavailable ${Math.max(0, Number(resolution.bridgeUnavailable) || 0)}.`);
+      lines.push(`- Official-posting handoffs: ${Math.max(0, Number(resolution.handoffs) || 0)} handoff(s), ${Math.max(0, Number(resolution.handoffMs) || 0)} ms; material description changes ${Math.max(0, Number(resolution.materialJdChange) || 0)}; timeout ${Math.max(0, Number(resolution.workerTimeout) || 0)}; unavailable ${Math.max(0, Number(resolution.workerUnavailable) || 0)}.`);
       const comparisonCount = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
       const optionCounts = Array.from({ length: 8 }, (_, index) => `${index + 1}=${comparisonCount(resolution.comparisonOptions?.[index + 1])}`).join(', ');
       lines.push(`- Official-posting comparisons: ${comparisonCount(resolution.comparisons)}; options per comparison ${optionCounts}; agreements ${comparisonCount(resolution.comparativeAgreements)}; disagreements ${comparisonCount(resolution.comparativeDisagreements)}; invalid runs ${comparisonCount(resolution.comparativeInvalidRuns)}; none-none ${comparisonCount(resolution.comparativeNone)}; independence unavailable ${comparisonCount(resolution.comparativeUnavailable)}; accepted by comparative-match ${comparisonCount(resolution.comparativeMatches)}.`);

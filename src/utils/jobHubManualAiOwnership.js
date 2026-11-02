@@ -1,6 +1,6 @@
 import { isCareerCompilerTask } from './careerCompilerTasks.js';
 
-// Card preparation is routed through its parent hub's AI bridge, but the card
+// Card preparation is routed through its parent hub's AI handoff route, but the card
 // owns the request. Search-owned official-posting checks reuse the Search run
 // id and must continue to participate in normal hub recovery.
 export function isCardOfficialPostingRunId(runId) {

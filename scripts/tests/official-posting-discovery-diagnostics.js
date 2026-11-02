@@ -135,12 +135,12 @@ export default [
     run() {
       isolated(() => {
         for (const [code, expected] of [
-          ['BRIDGE_WORKER_LOST', 'worker-lost'], ['BRIDGE_WORKER_REPLACED', 'worker-replaced'],
-          ['BRIDGE_COMPARISON_CONTAMINATED', 'comparison-contaminated'], ['BRIDGE_FRESH_CONTEXT_REQUIRED', 'fresh-context-required'],
-          ['BRIDGE_REQUEUE_EXHAUSTED', 'requeue-exhausted'], ['BRIDGE_RENDERER_UNAVAILABLE', 'renderer-unavailable'],
+          ['WORKER_WORKER_LOST', 'worker-lost'], ['WORKER_WORKER_REPLACED', 'worker-replaced'],
+          ['WORKER_COMPARISON_CONTAMINATED', 'comparison-contaminated'], ['WORKER_FRESH_CONTEXT_REQUIRED', 'fresh-context-required'],
+          ['WORKER_REQUEUE_EXHAUSTED', 'requeue-exhausted'], ['WORKER_RENDERER_UNAVAILABLE', 'renderer-unavailable'],
           ['IPC_SENDER_DESTROYED', 'sender-destroyed'], ['IPC_RENDERER_STOPPED', 'renderer-stopped'],
           ['IPC_RENDERER_NAVIGATED', 'renderer-navigated'], ['IPC_REQUEST_TIMEOUT', 'request-timeout'],
-          ['OFFICIAL_POSTING_COMPARATIVE_INVALID', 'comparative-invalid'], ['bridge-aborted', 'bridge-aborted'],
+          ['OFFICIAL_POSTING_COMPARATIVE_INVALID', 'comparative-invalid'], ['worker-aborted', 'worker-aborted'],
         ]) {
           const error = Object.assign(new Error('PRIVATE_PROMPT_AND_ERROR'), { code });
           assert.equal(officialPostingHandoffFailureCode(error), expected);
@@ -151,7 +151,7 @@ export default [
         assert.equal(officialPostingHandoffFailureCode(new SyntaxError('PRIVATE_DETAILS')), 'syntax-error');
         assert.equal(officialPostingHandoffFailureCode({ code: 'PRIVATE_CODE', name: 'PRIVATE_NAME' }), 'unexpected-error');
         assert.equal(officialPostingHandoffFailureCode({ name: '__proto__' }), 'unexpected-error');
-        assert.equal(officialPostingHandoffFailureCause({ recoveryCode: 'BRIDGE_WORKER_LOST' }), 'worker-lost');
+        assert.equal(officialPostingHandoffFailureCause({ recoveryCode: 'WORKER_WORKER_LOST' }), 'worker-lost');
         assert.equal(officialPostingHandoffFailureCause({ recoveryCode: 'PRIVATE_CAUSE' }), null);
         recordOfficialPostingDiscovery(job(), observation({ failureCodes: ['worker-lost', 'comparative-invalid', 'worker-lost',
           'PRIVATE_PROMPT', new Error('PRIVATE_ERROR')], chatStats: { judgeCalls: 3 } }));
@@ -183,7 +183,7 @@ export default [
       isolated(() => {
         recordOfficialPostingDiscovery(job(), observation());
         recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: 0,
-          launchPending: false, autoLaunchAvailable: false, reason: 'no-eligible-worker' });
+          launchPending: false, autoLaunchAvailable: false, reason: 'pool-ended' });
         recordOfficialPostingPlannerTransition({ reason: 'maximum_parallelism', recommended: 10,
           queued: 20, materialized: 5, expandBy: 4 });
         const logs = Array.from({ length: 20 }, (_, index) => `Synthetic unrelated renderer event ${index}`);
@@ -201,7 +201,7 @@ export default [
           const report = generateMarkdown({ ...base, filterCode }).markdown;
           assert.ok(report.includes('Official Posting Discovery Diagnostics (OFFDISC)'));
           assert.ok(report.includes('candidates 3 · validated comparison runs 2'));
-          assert.ok(report.includes('Worker availability') && report.includes('closed reason no-eligible-worker'));
+          assert.ok(report.includes('Worker availability') && report.includes('closed reason pool-ended'));
           assert.ok(report.includes('Worker planner transition') && report.includes('recommended 10 · queued 20'));
           assert.ok(report.includes('Synthetic official-posting main discovery marker'));
           assert.equal(report.includes('Synthetic unrelated main discovery marker'), filterCode !== 'OFFDISC');
@@ -217,19 +217,19 @@ export default [
     run() {
       isolated(() => {
         assert.equal(recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: 0,
-          launchPending: false, autoLaunchAvailable: false, reason: 'no-eligible-worker' }), true);
+          launchPending: false, autoLaunchAvailable: false, reason: 'pool-ended' }), true);
         assert.equal(recordOfficialPostingAvailabilityDecision({ stage: 'launch-refused', liveWorkers: 0,
           launchPending: true, autoLaunchAvailable: true, reason: 'ready', launchReason: 'chat_mode_unavailable' }), true);
         for (let index = 0; index < 60; index += 1) {
           recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: index + 1,
-            launchPending: index % 2 === 0, autoLaunchAvailable: index % 3 === 0, reason: 'no-eligible-worker' });
+            launchPending: index % 2 === 0, autoLaunchAvailable: index % 3 === 0, reason: 'pool-ended' });
         }
         for (let index = 0; index < 55; index += 1) {
           recordOfficialPostingPlannerTransition({ reason: 'one_work_item', recommended: index,
             queued: index + 1, materialized: index, expandBy: 1 });
         }
         recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: 0,
-          launchPending: false, autoLaunchAvailable: false, reason: 'no-eligible-worker' });
+          launchPending: false, autoLaunchAvailable: false, reason: 'pool-ended' });
         recordOfficialPostingAvailabilityDecision({ stage: 'launch-refused', liveWorkers: 0,
           launchPending: true, autoLaunchAvailable: true, reason: 'ready', launchReason: 'chat_mode_unavailable' });
         const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
@@ -239,7 +239,7 @@ export default [
         assert.equal(snapshot.availabilityDecisions[0].liveWorkers, 13);
         assert.equal(snapshot.plannerTransitions.length, 50);
         assert.equal(snapshot.plannerTransitions[0].recommended, 5);
-        assert.match(markdown, /Worker availability .*absence-abort · live workers 0 · launch pending no · auto launch available no · closed reason no-eligible-worker/u);
+        assert.match(markdown, /Worker availability .*absence-abort · live workers 0 · launch pending no · auto launch available no · closed reason pool-ended/u);
         assert.match(markdown, /launch refusal chat_mode_unavailable/u);
         assert.match(markdown, /Worker planner transition .*one_work_item · recommended 54 · queued 55/u);
       });

@@ -33,9 +33,9 @@ export default [
   {
     name: 'Official posting unresolved fallback keeps the scraped identity out of the resolution and never throws on an invalid row',
     run() {
-      const missing = unresolvedOfficialPosting(row(), { outcome: 'ambiguous', trail: ['bridge-research', 'research-miss'] });
+      const missing = unresolvedOfficialPosting(row(), { outcome: 'ambiguous', trail: ['worker-research', 'research-miss'] });
       assert.equal(missing.officialPosting.outcome, 'ambiguous');
-      assert.deepEqual(missing.officialPosting.trail, ['bridge-research', 'research-miss']);
+      assert.deepEqual(missing.officialPosting.trail, ['worker-research', 'research-miss']);
       assert.equal(unresolvedOfficialPosting(null).officialPosting.outcome !== undefined, true);
     },
   },
@@ -43,11 +43,11 @@ export default [
     name: 'Official posting durability keeps retryable transient misses out of the store and settled misses in it',
     run() {
       const miss = (trail, extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Acme Talent Partners', trail: [...trail, OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], ...extra });
-      for (const code of ['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss', 'fetch-failed', 'fetch-timeout', 'failed', 'semantic-uncertain']) {
+      for (const code of ['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss', 'fetch-failed', 'fetch-timeout', 'failed', 'semantic-uncertain']) {
         assert.equal(shouldPersistOfficialPostingResult(miss([code]), { researchRan: true }), false, code);
       }
       assert.equal(shouldPersistOfficialPostingResult(miss(['comparative-none'])), true);
-      assert.equal(shouldPersistOfficialPostingResult(miss(['bridge-research'])), true);
+      assert.equal(shouldPersistOfficialPostingResult(miss(['worker-research'])), true);
       assert.equal(shouldPersistOfficialPostingResult(miss([])), false);
       assert.equal(shouldPersistOfficialPostingResult({ ...miss(['comparative-none']), trail: ['comparative-none'] }), false, 'a negative without the current ownership-proof marker is rechecked');
       assert.equal(shouldPersistOfficialPostingResult(miss(['comparative-none']), { signal: { aborted: true } }), false);

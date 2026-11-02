@@ -30,19 +30,6 @@ export default [
         parseAiJson('{"outer":{"text":"keep ,} marker",},"items":[{"value":1,},],}'),
         { outer: { text: 'keep ,} marker' }, items: [{ value: 1 }] },
       ), 'parseAiJson: nested structural trailing commas are repaired');
-      // ChatGPT can inject content-reference transport annotations while
-      // copying an answer that cites an automatic paste attachment. Its quoted
-      // attributes sit inside a JSON string unescaped, so remove only that
-      // bounded, known artifact after the initial strict parse has failed.
-      const reportShape = '{"evidence":"Role fit is not established. :chatgpt-content-reference{index="0"}","evidenceQuote":"Intermediate Frontend Developer"}';
-      assert(eq(
-        parseAiJson(reportShape),
-        { evidence: 'Role fit is not established. ', evidenceQuote: 'Intermediate Frontend Developer' },
-      ), 'parseAiJson: repairs the exact ChatGPT content-reference form recorded in the bug report');
-      assert(eq(
-        parseAiJson('```json\n{"items":[{"text":"first :chatgpt-content-reference{index="0"}"},{"text":"second :chatgpt-content-reference{index="1"}"}]}\n```'),
-        { items: [{ text: 'first ' }, { text: 'second ' }] },
-      ), 'parseAiJson: repairs multiple bounded ChatGPT content-reference artifacts inside a fenced payload');
       const validArtifactText = { evidence: ':chatgpt-content-reference{index="0"}' };
       assert(eq(parseAiJson(JSON.stringify(validArtifactText)), validArtifactText),
         'parseAiJson: preserves a valid literal that resembles a ChatGPT artifact because strict parsing succeeds first');
@@ -71,8 +58,7 @@ export default [
       assert(parseLog
         && !parseLog.message.includes(privateSentinel)
         && /category=expected-structure|category=unexpected-token/.test(parseLog.message)
-        && /position=\d+ line=\d+ column=\d+ length=\d+/.test(parseLog.message)
-        && /chatgptContentReferenceCandidates=0/.test(parseLog.message),
+        && /position=\d+ line=\d+ column=\d+ length=\d+/.test(parseLog.message),
       'parseAiJson: failure diagnostics retain only safe parse metadata, never pasted response content');
       return { ok: true };
     },

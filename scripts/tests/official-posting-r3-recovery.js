@@ -61,13 +61,13 @@ export default [
       const resolveRows = async rows => {
         calls.push(rows.map(row => row.url));
         const resolved = await resolveOfficialPostings(rows, { store: { find: async () => null, save: async () => { saves++; throw new Error('transient results must not save'); } },
-          callRaw: async () => { handoffs++; throw Object.assign(new Error('Synthetic research timeout.'), { code: 'bridge-timeout' }); } });
+          callRaw: async () => { handoffs++; throw Object.assign(new Error('Synthetic research timeout.'), { code: 'worker-timeout' }); } });
         return result(resolved.jobs, resolved.telemetry);
       };
       const glue = actualGenericGlue(resolveRows, first, checkpoints);
       await glue.persist([first]);
       assert.equal(checkpoints.length, 1, 'score-safe checkpoint completes before publication');
-      assert.ok(checkpoints[0].jobs[0].officialPosting.trail.includes('bridge-timeout'));
+      assert.ok(checkpoints[0].jobs[0].officialPosting.trail.includes('worker-timeout'));
       const cleaned = { ...first, snippet: 'Requirements include newly cleaned dispatch responsibilities.', salary: '$80 - $90 per hour' };
       const published = await glue.publish([cleaned, fresh]);
       assert.deepEqual(calls, [[first.url], [cleaned.url, fresh.url]]); assert.equal(handoffs, 2, 'the changed source and new row share one fresh research chunk');

@@ -407,7 +407,7 @@ export default [
         __registerJobsHandlersForTests({ resolveOfficialPostings: async jobs => ({
           jobs,
           telemetry: { total: jobs.length, levels: {}, outcomes: {}, rejections: {}, handoffs: 0, handoffMs: 0,
-            materialJdChange: 0, bridgeTimeout: 0, bridgeUnavailable: 0 },
+            materialJdChange: 0, workerTimeout: 0, workerUnavailable: 0 },
         }) });
         const searchJobs = ipcMain.__getInvokeHandler('search-jobs');
         const guard = setTimeout(() => destroy(), 20_000);

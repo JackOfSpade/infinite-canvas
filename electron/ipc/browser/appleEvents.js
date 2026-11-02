@@ -22,8 +22,8 @@ export async function runChromeAppleScript(script, args = [], options = {}) {
 // The app runs its own Chrome (headless scraping, login windows) from the same
 // Google Chrome.app. With two instances running, `tell application "Google
 // Chrome"` reaches whichever one macOS picks — often the app's own, which has
-// Apple Events JavaScript off and is not signed in to ChatGPT. Chat launches
-// therefore address the person's own Chrome by process id through JXA.
+// Apple Events JavaScript off and is not signed in to the person's accounts.
+// Chat launches therefore address the person's own Chrome by process id through JXA.
 const CHROME_MAIN_BINARY = /\/Google Chrome\.app\/Contents\/MacOS\/Google Chrome(?:\s|$)/;
 const APP_OWNED_CHROME_FLAG = /\s--(?:headless(?:=\S*)?|remote-debugging-port=\S*|remote-debugging-pipe|user-data-dir=)/;
 

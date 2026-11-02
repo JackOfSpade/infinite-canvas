@@ -17,7 +17,7 @@ export function resolveHandoffConcurrency(capability = null) {
 }
 
 // The default is intentionally conservative for callers which have no host
-// capability (local automatic handoffs and the renderer dock). Bridge engines
+// capability (local automatic handoffs and the renderer dock). Worker engines
 // pass their persisted host capability to resolveHandoffConcurrency instead.
 export const HANDOFF_CONCURRENCY = resolveHandoffConcurrency();
 

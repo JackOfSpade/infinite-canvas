@@ -1,6 +1,4 @@
 import { handleSafe } from './ipcUtils.js';
-import { getHandoffBridgeStatus } from './handoffBridge/index.js';
-import { bridgeLinked } from './handoffBridge/bridgeAvailability.js';
 import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingLookupStatus } from './officialPostingFields.js';
@@ -26,7 +24,7 @@ const ID = /^[a-zA-Z0-9_.:-]{1,300}$/u;
 const officialLevels = new Set(['L1', 'L2', 'L3', 'L4']);
 const error = (message, code) => Object.assign(new Error(message), { code });
 function active(signal) {
-  if (signal?.aborted) throw signal.reason || error('Official posting refresh was cancelled.', 'bridge-aborted');
+  if (signal?.aborted) throw signal.reason || error('Official posting refresh was cancelled.', 'worker-aborted');
 }
 
 function serializedBytes(value) {
@@ -75,15 +73,11 @@ export function validateOfficialPostingRefreshArgs(args) {
  * or passes its rows through Board deduplication, scoring or retirement. */
 export async function refreshOfficialPostingEntries(args, {
   projectJob = value => ({ ...value }), resolve = resolveOfficialPostings, store,
-  bridgeStatus = getHandoffBridgeStatus, signal, onProgress,
+  signal, onProgress,
   callRaw, callMatch, snapshotFetch, now = Date.now,
 } = {}) {
   validateOfficialPostingRefreshArgs(args);
   active(signal);
-  let linked = false;
-  try { linked = bridgeLinked(await bridgeStatus()); } catch { /* Missing research cannot silently become a completed miss. */ }
-  active(signal);
-  if (!linked) throw error('Claude research is not running. Restart the app, then refresh official postings.', 'OFFICIAL_POSTING_RESEARCH_UNAVAILABLE');
   store ||= getOfficialPostingStore();
   const jobs = args.entries.map(({ job }) => {
     const projected = structuredClone(projectJob(job));
@@ -122,7 +116,7 @@ export async function refreshOfficialPostingEntries(args, {
       const posting = normalizeOfficialPosting(job.officialPosting);
       return Boolean(posting && officialPostingLookupStatus(posting).retryable);
     }),
-    bridgeAvailable: true, bridgeStatus, priorOfficialRecords, candidateUrlsByRow, onProgress: progress,
+    priorOfficialRecords, candidateUrlsByRow, onProgress: progress,
     ...(callRaw ? { callRaw } : {}), ...(callMatch ? { callMatch } : {}), ...(snapshotFetch ? { snapshotFetch } : {}) });
   active(signal);
   if (!Array.isArray(resolved?.jobs) || resolved.jobs.length !== jobs.length) {

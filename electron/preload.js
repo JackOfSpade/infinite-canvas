@@ -378,53 +378,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     nodeId, cause, manualAiRunIds: typeof manualAiRunIds === 'string' ? [manualAiRunIds] : manualAiRunIds,
   }),
 
-  // ── ChatGPT handoff bridge ──────────────────────────────────────────────
-  // This closed surface mirrors contracts.js: 27 invoke channels, one
-  // renderer-to-main publisher, and the four main-to-renderer notifications.
-  handoffBridgeGetStatus: () => ipcRenderer.invoke('handoff-bridge:get-status'),
-  handoffBridgeSetEnabled: (payload) => ipcRenderer.invoke('handoff-bridge:set-enabled', payload),
-  handoffBridgeSaveConfig: (payload) => ipcRenderer.invoke('handoff-bridge:save-config', payload),
-  handoffBridgeChooseBinary: () => ipcRenderer.invoke('handoff-bridge:choose-binary'),
-  handoffBridgeApproveBinary: () => ipcRenderer.invoke('handoff-bridge:approve-binary'),
-  handoffBridgeChooseCredentials: () => ipcRenderer.invoke('handoff-bridge:choose-credentials'),
-  handoffBridgeRestartTunnel: () => ipcRenderer.invoke('handoff-bridge:restart-tunnel'),
-  handoffBridgeStopOrphan: () => ipcRenderer.invoke('handoff-bridge:stop-orphan'),
-  handoffBridgeGetTunnelLog: () => ipcRenderer.invoke('handoff-bridge:get-tunnel-log'),
-  handoffBridgeOpenPairing: () => ipcRenderer.invoke('handoff-bridge:open-pairing'),
-  handoffBridgeCancelPairing: () => ipcRenderer.invoke('handoff-bridge:cancel-pairing'),
-  handoffBridgeNewChat: () => ipcRenderer.invoke('handoff-bridge:new-chat'),
-  handoffBridgeContinueChat: () => ipcRenderer.invoke('handoff-bridge:continue-chat'),
-  // Keep the bounded optional target intact for compatibility callers. The
-  // normal UI lets the planner decide, but a dropped payload made an explicit
-  // capacity request silently look like a successful no-op.
-  handoffBridgeStartWorkerPool: (payload) => ipcRenderer.invoke('handoff-bridge:start-worker-pool', payload),
-  handoffBridgeCopyWorkerStarter: (payload) => ipcRenderer.invoke('handoff-bridge:copy-worker-starter', payload),
-  handoffBridgeRestartWorker: (payload) => ipcRenderer.invoke('handoff-bridge:restart-worker', payload),
-  handoffBridgeOpenWorkerChat: (payload) => ipcRenderer.invoke('handoff-bridge:open-worker-chat', payload),
-  handoffBridgeRetryWorkerLaunch: (payload) => ipcRenderer.invoke('handoff-bridge:retry-worker-launch', payload),
-  handoffBridgeGetLaunchAccount: (payload) => ipcRenderer.invoke('handoff-bridge:get-launch-account', payload),
-  handoffBridgePause: () => ipcRenderer.invoke('handoff-bridge:pause'),
-  handoffBridgeResume: () => ipcRenderer.invoke('handoff-bridge:resume'),
-  handoffBridgeRevokeAll: () => ipcRenderer.invoke('handoff-bridge:revoke-all'),
-  handoffBridgeForgetSetup: () => ipcRenderer.invoke('handoff-bridge:forget-setup'),
-  handoffBridgeRelease: (payload) => ipcRenderer.invoke('handoff-bridge:release', payload),
-  handoffBridgeUnrelease: (payload) => ipcRenderer.invoke('handoff-bridge:unrelease', payload),
-  handoffBridgeReleasePush: (payload) => ipcRenderer.invoke('handoff-bridge:release-push', payload),
-  handoffBridgeUnreleasePush: (payload) => ipcRenderer.invoke('handoff-bridge:unrelease-push', payload),
-  handoffBridgeHoldJob: (payload) => ipcRenderer.invoke('handoff-bridge:hold-job', payload),
-  handoffBridgeAckAlarm: (payload) => ipcRenderer.invoke('handoff-bridge:ack-alarm', payload),
-  handoffBridgeGetActivity: () => ipcRenderer.invoke('handoff-bridge:get-activity'),
-  // Main registers this channel only for an unpackaged test-mode synthetic
-  // source. No production UI calls it and packaged runs have no handler.
-  handoffBridgeTestSyntheticPreflight: action => ipcRenderer.invoke('handoff-bridge:test-synthetic-preflight', action),
-  handoffBridgePublishJobs: (payload) => ipcRenderer.send('handoff-bridge:publish-jobs', payload),
-  onHandoffBridgeStatus: createListener('handoff-bridge:status'),
-  onHandoffBridgeJobChanged: createListener('handoff-bridge:job-changed'),
-  // Main sends this after it has bound this BrowserWindow to a restored canvas
-  // path. It contains no path or job detail; the renderer only republishes
-  // its existing bounded application snapshot.
-  onHandoffBridgeCanvasFileReady: createListener('handoff-bridge:canvas-file-ready'),
-  onHandoffBridgeOpenPanel: createListener('handoff-bridge:open-panel'),
+  // ── Claude application runner ──────────────────────────────────────────────
   // Main-process Claude Code application runner (latest Opus and Sonnet via the local CLI).
   claudeApplicationEnsure: (args) => ipcRenderer.invoke('claude-application:ensure', args),
   claudeApplicationRetry: (args) => ipcRenderer.invoke('claude-application:retry', args),

@@ -8,7 +8,6 @@
 paths-ignore:
   - scripts/tests/**
   - scripts/test-stubs/**
-  - scripts/chatgpt-handoff-spike/**
   - "Job Application Design System/_ds_bundle.js"
   - "Job Application Design System/preview/**"
   - "Job Application Design System/handoff/**"

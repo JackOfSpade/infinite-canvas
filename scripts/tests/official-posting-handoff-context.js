@@ -4,11 +4,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import electronPkg from 'electron';
-import { __runWithIpcRequestContextForTests, getCurrentIpcRequestContext } from '../../electron/ipc/ipcUtils.js';
+import { __runWithIpcRequestContextForTests } from '../../electron/ipc/ipcUtils.js';
 import { callLLMRaw } from '../../electron/ipc/llm.js';
-import { listBridgeableNonApiAiHandoffs, readBridgeableNonApiAiHandoff, registerNonApiAiHandlers,
-  submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
-import { registerObservedWorkerAvailability } from '../../electron/ipc/handoffBridge/observedChatContext.js';
+import { listWorkerHandoffs, readWorkerHandoff, registerNonApiAiHandlers,
+  submitWorkerResponse } from '../../electron/ipc/nonApiAi.js';
+import { CLAUDE_TASK_CONCURRENCY } from '../../electron/ipc/claudeTaskWorker.js';
 import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 import { officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
@@ -29,8 +29,8 @@ async function until(read, message) {
   assert.fail(message);
 }
 
-export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
-  name: `official-posting handoff context: ${publication} capacity publication preserves a simultaneous MCP judgment batch`,
+export default [{
+  name: "official-posting handoff context: a transient dock gap preserves a simultaneous worker judgment batch",
   async run() {
     registerNonApiAiHandlers();
     const id = ++sequence;
@@ -41,12 +41,7 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
     const attempts = [];
     const foreignAttempts = [];
     let failedPresentations = 0;
-    let failPresentation = false;
-    let poolActive = false;
-    let liveWorkers = 0;
-    let statusListener;
-    let unsubscribed = false;
-    let snapshotReads = 0;
+    let failPresentation = true;
     let settledRows = 0;
     let completed = false;
     const sender = new EventEmitter();
@@ -72,9 +67,8 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
     const postingFor = row => `https://context-${id}-${rows.indexOf(row)}.test/jobs/dispatch`;
     const byId = new Map(rows.map(row => [officialPostingRequestId(row), row]));
     const byPosting = new Map(rows.map(row => [postingFor(row), row]));
-    const pending = () => listBridgeableNonApiAiHandoffs({ allowTasks: ALLOW_TASKS }).handoffs
+    const pending = () => listWorkerHandoffs({ allowTasks: ALLOW_TASKS }).handoffs
       .filter(item => item.runId === runId);
-    const releaseWorkers = registerObservedWorkerAvailability(() => liveWorkers > 0, null, () => liveWorkers);
     const store = createOfficialPostingStore(path.join(root, 'official-postings'));
     const context = { sender, nodeId, manualAiRunId: runId, channel: 'refresh-official-postings' };
     const running = __runWithIpcRequestContextForTests(context, () => resolveOfficialPostings(rows, {
@@ -93,41 +87,21 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
         }).join('\n');
       },
       snapshotFetch: async url => {
-        snapshotReads += 1;
         return { url, body: '<html><body>Apply for this job</body></html>', contentType: 'text/html' };
-      },
-      bridgeStatus: () => ({ enabled: true, link: { state: 'linked' }, limits: { maxConcurrentHandoffs: 6 },
-        chat: { state: 'working', pool: { active: poolActive, workerCount: liveWorkers } } }),
-      bridgeSubscribe: listener => {
-        statusListener = listener;
-        return () => { unsubscribed = true; };
       },
     }));
     void running.then(() => { completed = true; });
     try {
-      await until(() => snapshotReads === rows.length && pending().length === 1,
-        'one cold-pool A judgment must own the only slot while its four siblings wait');
-      await flush();
-      assert.equal(attempts.length, 1);
-      assert.equal(typeof statusListener, 'function');
-      assert.equal(getCurrentIpcRequestContext(), null, 'status publication originates outside the refresh invoke');
-      failPresentation = true;
-      poolActive = true;
-      liveWorkers = 6;
-      if (publication === 'foreign-ipc') {
-        __runWithIpcRequestContextForTests({ sender: foreignSender, nodeId: 'foreign-node', manualAiRunId: 'foreign-run' }, statusListener);
-      } else statusListener();
-      // Microtasks finish durable admission before the fallback capacity poll
-      // can rescue a queue the explicit status callback should have drained.
-      for (let turn = 0; turn < 10; turn += 1) await flush();
-      await until(() => pending().length === rows.length || settledRows >= rows.length - 1 || completed || foreignAttempts.length,
-        'the status publication must issue the four waiting comparative A handoffs');
+      // Both judges of every row queue at once; the worker admits only its concurrency.
+      const admitted = Math.min(CLAUDE_TASK_CONCURRENCY, rows.length * 2);
+      await until(() => pending().length === admitted || settledRows >= rows.length - 1 || completed || foreignAttempts.length,
+        'the simultaneous judgment batch fills every worker slot');
       assert.equal(foreignAttempts.length, 0, 'another invoke cannot acquire this refresh\'s queued handoffs');
       const earlyJudgments = await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8').catch(() => '');
-      assert.equal(pending().length, rows.length,
-        `all five A judgments retain the originating IPC sender and run after the status-driven burst; judgments=${earlyJudgments}`);
-      assert.equal(failedPresentations, 4, 'all four newly issued handoffs encounter the same transient dock gap');
-      assert(attempts.every(request => request.mcpEligible === true && request.runId === runId && request.nodeId === nodeId));
+      assert.equal(pending().length, admitted,
+        `every admitted judgment retains the originating IPC sender and run after the failed presentations; judgments=${earlyJudgments}`);
+      assert.equal(failedPresentations, admitted, 'every issued handoff encounters the same transient dock gap');
+      assert(attempts.every(request => request.workerOwned === true && request.runId === runId && request.nodeId === nodeId));
       assert(pending().every(item => item.windowId === sender.id));
       failPresentation = false;
       let accepted = 0;
@@ -138,8 +112,8 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
         if (!requests.length) { await flush(); continue; }
         for (const request of requests) {
           const args = { requestId: request.requestId, handoffCode: request.handoffCode, allowTasks: ALLOW_TASKS };
-          const view = readBridgeableNonApiAiHandoff({ ...args, comparisonProvenance: {
-            version: 2, transport: 'bridge', observed: true, comparisonGroup: request.comparisonGroup,
+          const view = readWorkerHandoff({ ...args, comparisonProvenance: {
+            version: 2, transport: 'worker', observed: true, comparisonGroup: request.comparisonGroup,
             comparisonRun: request.comparisonRun, conversationKey: (request.comparisonRun === 'A' ? '1' : '2').repeat(64),
             isolated: request.comparisonRun === 'B',
           } });
@@ -148,7 +122,7 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
           const lead = leads.find(item => byPosting.has(item.url));
           const row = byPosting.get(lead?.url);
           assert(row);
-          const submission = await submitNonApiAiResponseForBridge({ ...args, response: JSON.stringify({
+          const submission = await submitWorkerResponse({ ...args, response: JSON.stringify({
             handoffCode: request.handoffCode, choice: lead.id, postingUrl: lead.url, status: 'open',
             statusQuote: 'Apply for this job', employerLinked: true, employerPageUrl: lead.url,
             employerLinkQuote: row.title, title: row.title, employer: row.company, location: row.location,
@@ -166,16 +140,14 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
       const judgments = (await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
       assert.equal(judgments.length, rows.length * 2);
       assert(judgments.every(entry => entry.route === 'mcp' && entry.manualRoutingReason === null));
-      assert.equal(unsubscribed, true);
-      return { accepted, simultaneousFailedPresentations: failedPresentations, publisher: publication };
+      return { accepted, simultaneousFailedPresentations: failedPresentations };
     } finally {
       failPresentation = false;
       controller.abort(new Error('Synthetic official-posting context fixture cleanup'));
       await running;
-      releaseWorkers();
       await electronPkg.ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender }, { runId });
       await electronPkg.ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: foreignSender }, { runId: 'foreign-run' });
       await fs.rm(root, { recursive: true, force: true });
     }
   },
-}));
+}];

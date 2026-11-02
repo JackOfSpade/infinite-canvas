@@ -44,7 +44,7 @@ const FOUND_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MISS_TTL_MS = 24 * 60 * 60 * 1000;
 
 // The task id is deliberately the existing grounded compensation batch task:
-// it is already bridge-eligible (raw-text + grounded + responseValidator) and
+// it is already worker-eligible (raw-text + grounded + responseValidator) and
 // registered everywhere a task id must be. A new id would need five lists and
 // their drift tests for no behavioural gain.
 export const JOB_LOCATION_LOOKUP_TASK = 'job-compensation-research-batch';

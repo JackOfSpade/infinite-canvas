@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { cappedHandoff, resolveOfficialPostings, OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS } from '../../electron/ipc/officialPostingService.js';
+import { cappedHandoff, resolveOfficialPostings} from '../../electron/ipc/officialPostingService.js';
+import { CLAUDE_TASK_CONCURRENCY } from '../../electron/ipc/claudeTaskWorker.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { normalizeOfficialPosting, officialPostingComparativeTrail, officialPostingLookupStatus, officialResearchSettled } from '../../electron/ipc/officialPostingFields.js';
 import { shouldPersistOfficialPostingResult, unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
@@ -15,9 +16,6 @@ import { buildOfficialPostingJudgeRequest, canonicalJudgeDescription, decideOffi
   rankJudgeCitations, validateOfficialPostingJudgeResponse } from '../../electron/ipc/officialPostingJudge.js';
 import { _resetOfficialPostingDiscoveryDiagnosticsForTests, buildOfficialPostingDiscoveryMarkdown,
   getOfficialPostingDiscoveryDiagnosticsSnapshot } from '../../electron/ipc/officialPostingDiscoveryDiagnostics.js';
-import { hasLiveObservedWorker, registerObservedWorkerAvailability, registerBridgeLauncherAvailability } from '../../electron/ipc/handoffBridge/observedChatContext.js';
-import { bridgeComparisonAvailable, bridgeHandoffCapacity } from '../../electron/ipc/handoffBridge/bridgeAvailability.js';
-import { recommendWorkerPool } from '../../electron/ipc/handoffBridge/workerPool.js';
 
 const DESCRIPTION = 'Northwind Labs is hiring a Dispatch Engineer to build reliable routing services for regional delivery teams.\n'
   + '• Design the dispatch scheduling service and its reporting pipeline.\n'
@@ -46,13 +44,7 @@ const requestedIds = prompt => prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1
 const offline = async () => { const error = new Error('offline test'); error.code = 'fetch-failed'; throw error; };
 const hostLeads = prompt => JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
 const flush = () => new Promise(resolve => setImmediate(resolve));
-const linkedPool = (active = true, capacity = 2) => ({ enabled: true, link: { state: 'linked' },
-  limits: { maxConcurrentHandoffs: capacity }, chat: { state: 'working', pool: { active, workerCount: capacity } } });
-async function withObservedWorkers(count, run) {
-  let live = count;
-  const release = registerObservedWorkerAvailability(() => live > 0, null, () => live);
-  try { return await run(value => { live = value; }); } finally { release(); }
-}
+async function withObservedWorkers(_count, run) { return run(() => {}); }
 async function waitFor(check) {
   for (let index = 0; index < 200; index += 1) {
     if (check()) return;
@@ -68,333 +60,6 @@ async function withStore(run) {
 
 export default [
   {
-    name: 'An enabled cold bridge stays serial until its pool starts, even with automatic launching configured',
-    run() {
-      const cold = { ...linkedPool(false, 6), autoLaunchChats: true };
-      assert.equal(bridgeHandoffCapacity(cold), 1, 'one queued request creates cold-start demand');
-      assert.equal(bridgeHandoffCapacity({ ...cold, autoLaunchChats: false }), 1, 'a manual single chat stays serial');
-      assert.equal(bridgeHandoffCapacity({ ...cold, enabled: false }), 1);
-      assert.equal(bridgeHandoffCapacity({ ...cold, link: { state: 'unlinked' } }), 1);
-      assert.equal(bridgeHandoffCapacity({ ...cold, limits: { maxConcurrentHandoffs: 3 } }), 1);
-    },
-  },
-  {
-    name: 'Cold pool startup admits queued work before its first slow handoff finishes',
-    async run() {
-      await withObservedWorkers(6, async () => withStore(async store => {
-        const rows = Array.from({ length: 13 }, (_, index) => job({
-          url: `https://www.linkedin.com/jobs/view/cold-pool-${index}`, sourceJobKey: `cold-pool-${index}`,
-        }));
-        let poolActive = false; let launchScheduled = false; let firstFinder = true; let released = false; let active = 0; let maximum = 0;
-        const held = [];
-        const status = () => ({ ...linkedPool(poolActive, 6), autoLaunchChats: true });
-        const callRaw = async (prompt, options) => {
-          const finder = options.task.endsWith('-research');
-          if (finder && firstFinder) { firstFinder = false; return research(requestedIds(prompt)); }
-          active += 1; maximum = Math.max(maximum, active);
-          // The first queued work starts the automatic pool, then holds its
-          // turn while the other locally queued requests should be admitted.
-          if (!launchScheduled) {
-            launchScheduled = true;
-            setImmediate(() => { poolActive = true; });
-          }
-          if (!released) await new Promise(resolve => held.push(resolve));
-          active -= 1;
-          return finder ? research(requestedIds(prompt))
-            : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-        };
-        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: status });
-        let result;
-        try {
-          await waitFor(() => poolActive);
-          await waitFor(() => maximum === 6);
-          assert.equal(released, false, 'pool startup must expose all six slots while the first turn is still held');
-        } finally {
-          released = true; held.splice(0).forEach(resolve => resolve()); result = await running;
-        }
-        assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
-      }));
-    },
-  },
-  {
-    name: 'Parallel judge admission requires trusted observed counts rather than planned pool slots or a legacy boolean',
-    run() {
-      const release = registerObservedWorkerAvailability(() => true);
-      try {
-        assert.equal(hasLiveObservedWorker(), true);
-        assert.equal(hasLiveObservedWorker(2), false, 'a boolean provider proves only one live worker');
-        for (const minimum of [0, -1, 1.5, NaN]) assert.equal(hasLiveObservedWorker(minimum), false);
-      } finally { release(); }
-    },
-  },
-  {
-    name: 'Two live observed workers overlap isolated A and B judgments with distinct comparison runs',
-    async run() {
-      await withObservedWorkers(2, async () => withStore(async store => {
-        const started = []; const waiting = []; let released = false;
-        const callRaw = async (prompt, options) => {
-          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
-          started.push({ ...options.manualHandoff });
-          if (!released) await new Promise(resolve => waiting.push(resolve));
-          return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-        };
-        const running = resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline, bridgeStatus: linkedPool });
-        let result;
-        try {
-          await waitFor(() => started.length === 2);
-          assert.deepEqual(started.map(item => item.comparisonRun), ['A', 'B']);
-          assert.equal(started[0].comparisonGroup, started[1].comparisonGroup);
-        } finally {
-          released = true; waiting.splice(0).forEach(resolve => resolve());
-          result = await running;
-        }
-        assert.equal(result.jobs[0].officialPosting.outcome, 'found');
-      }));
-    },
-  },
-  {
-    name: 'One observed worker, unobserved pool slots, and a linked single chat all retain sequential A and B judgments',
-    async run() {
-      for (const [observed, pool] of [[1, true], [0, true], [2, false]]) await withObservedWorkers(observed, async () => withStore(async store => {
-        let active = 0; let maximum = 0; const runs = [];
-        const callRaw = async (prompt, options) => {
-          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
-          active += 1; maximum = Math.max(maximum, active); runs.push(options.manualHandoff.comparisonRun);
-          await flush(); active -= 1;
-          return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-        };
-        const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline, bridgeStatus: () => linkedPool(pool) });
-        assert.equal(result.jobs[0].officialPosting.outcome, 'found');
-        assert.equal(maximum, 1, `observed=${observed}, pool=${pool}`);
-        assert.deepEqual(runs, ['A', 'B']);
-      }));
-    },
-  },
-  {
-    name: 'Concurrent judge failures prefer A deterministically even when B fails first',
-    async run() {
-      await withObservedWorkers(2, async () => withStore(async store => {
-        let releaseA; const bFailed = new Promise(resolve => { releaseA = resolve; }); const order = [];
-        const callRaw = async (prompt, options) => {
-          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
-          const run = options.manualHandoff.comparisonRun;
-          if (run === 'A') await bFailed; else releaseA();
-          order.push(run);
-          throw Object.assign(new Error('Synthetic judge failure'), { code: run === 'A'
-            ? 'OFFICIAL_POSTING_COMPARATIVE_INVALID' : 'comparative-unavailable' });
-        };
-        const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline, bridgeStatus: linkedPool });
-        assert.equal(order[0], 'B');
-        assert.equal(order.at(-1), 'A');
-        assert.ok(order.includes('A') && order.includes('B'));
-        assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-invalid'));
-        assert.equal(result.jobs[0].officialPosting.trail.includes('comparative-unavailable'), false);
-        assert.equal(result.telemetry.comparativeInvalidRuns, 2);
-        assert.equal(await store.find(job()), null);
-      }));
-    },
-  },
-  {
-    name: 'A concurrent B waiting behind a busy live worker does not exhaust comparative absence grace',
-    async run() {
-      await withObservedWorkers(2, async setObserved => withStore(async store => {
-        let releaseB; const aFinished = new Promise(resolve => { releaseB = resolve; }); const aborted = [];
-        const callRaw = async (prompt, options) => {
-          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
-          const run = options.manualHandoff.comparisonRun;
-          options.signal.addEventListener('abort', () => aborted.push(run));
-          if (run === 'A') {
-            await new Promise(resolve => setTimeout(resolve, 35));
-            releaseB();
-          } else {
-            setObserved(1); // One observed worker is occupied; B remains queued.
-            await aFinished;
-            await new Promise(resolve => setTimeout(resolve, 35));
-          }
-          return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-        };
-        const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline, bridgeStatus: linkedPool,
-          comparativeGraceMs: 10, comparativeWorkerAvailable: () => bridgeComparisonAvailable(linkedPool(), hasLiveObservedWorker) });
-        assert.equal(result.jobs[0].officialPosting.outcome, 'found');
-        assert.deepEqual(aborted, []);
-      }));
-    },
-  },
-  {
-    name: 'Ten queued handoffs survive serialized 60-second launches and grow admission as each worker appears',
-    async run() {
-      await withObservedWorkers(1, async setObserved => withStore(async store => {
-        const rows = Array.from({ length: 25 }, (_, index) => job({
-          url: `https://www.linkedin.com/jobs/view/grow-pool-${index}`, sourceJobKey: `grow-pool-${index}`,
-        }));
-        const status = () => linkedPool(true, 10);
-        const queue = []; const aborted = []; const launched = []; const admissions = [];
-        let live = 1; let active = 0; let outstanding = 0; let maximum = 0; let target = 1; let launchTimer = null; let firstFinder = true;
-        const schedule = globalThis.setTimeout; const repeat = globalThis.setInterval;
-        // One real millisecond represents one second. Production's old 105s
-        // deadline would fire before the second serialized worker arrives.
-        globalThis.setTimeout = (fn, delay, ...args) => schedule(fn, delay >= 100_000 ? delay / 1_000 : delay, ...args);
-        globalThis.setInterval = (fn, delay, ...args) => repeat(fn, delay === 250 ? 1 : delay, ...args);
-        const releaseLauncher = registerBridgeLauncherAvailability(() => ({ available: true,
-          pending: launchTimer !== null, inProgress: launchTimer !== null ? 1 : 0 }));
-        const start = Date.now();
-        const pump = () => {
-          while (active < live && queue.length) {
-            const item = queue.shift(); active += 1;
-            item.options.manualHandoff.onAssigned();
-            schedule(() => {
-              item.options.signal.removeEventListener('abort', item.onAbort);
-              active -= 1; outstanding -= 1;
-              item.resolve(item.reply()); pump();
-            }, 750);
-          }
-        };
-        const launchNext = () => {
-          if (launchTimer !== null || live >= target) return;
-          launchTimer = schedule(() => {
-            live += 1; setObserved(live); launched.push(live); launchTimer = null;
-            pump(); launchNext();
-          }, 60);
-        };
-        const callRaw = (prompt, options) => {
-          if (firstFinder) { firstFinder = false; options.manualHandoff.onAssigned(); return research(requestedIds(prompt)); }
-          return new Promise(resolve => {
-            outstanding += 1; maximum = Math.max(maximum, outstanding);
-            admissions.push({ live, outstanding, bound: Math.min(10, live + (launchTimer !== null ? 1 : 0) + 1) });
-            const recommendation = recommendWorkerPool({ tasks: [{ task: options.task, pending: outstanding }], capability: status().limits });
-            target = Math.max(target, recommendation.recommended); launchNext();
-            const item = { options, resolve, onAbort: () => aborted.push(options.task), reply: () => options.task.endsWith('-research')
-              ? research(requestedIds(prompt)) : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id })) };
-            options.signal.addEventListener('abort', item.onAbort, { once: true });
-            queue.push(item); pump();
-          });
-        };
-        let result;
-        try {
-          result = await resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: status,
-            now: () => (Date.now() - start) * 1_000, timeoutStartsOnAssignment: true });
-        } finally {
-          clearTimeout(launchTimer); releaseLauncher();
-          globalThis.setTimeout = schedule; globalThis.setInterval = repeat;
-        }
-        assert.ok(admissions.every(item => item.outstanding <= item.bound), JSON.stringify(admissions));
-        assert.equal(maximum, 10);
-        assert.deepEqual(launched, [2, 3, 4, 5, 6, 7, 8, 9, 10], 'workers launch one at a time');
-        assert.deepEqual(aborted, [], 'serialized launches must not consume response time or trigger absence');
-        assert.equal(result.telemetry.bridgeTimeout, 0);
-        assert.deepEqual(result.jobs.map(row => row.url), rows.map(row => row.url));
-        assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
-      }));
-    },
-  },
-  {
-    name: 'Run-mode official lookups stay pending through ten absence-grace windows and resolve when a worker appears',
-    async run() {
-      await withObservedWorkers(0, async setObserved => withStore(async store => {
-        const rows = Array.from({ length: 25 }, (_, index) => job({
-          url: `https://www.linkedin.com/jobs/view/wait-for-worker-${index}`, sourceJobKey: `wait-for-worker-${index}`,
-        }));
-        let clock = 0; let callCount = 0; let completed = 0; let heldFinder = null;
-        const status = () => linkedPool(true, 2);
-        const callRaw = (prompt, options) => {
-          callCount += 1;
-          const respond = () => {
-            options.manualHandoff.onAssigned();
-            return options.task.endsWith('-research') ? research(requestedIds(prompt))
-              : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-          };
-          if (!heldFinder) {
-            return new Promise((resolve, reject) => {
-              const onAbort = () => reject(options.signal.reason);
-              options.signal.addEventListener('abort', onAbort, { once: true });
-              heldFinder = { options, release: () => {
-                options.signal.removeEventListener('abort', onAbort);
-                resolve(respond());
-              } };
-            });
-          }
-          return Promise.resolve(respond());
-        };
-        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: status,
-          waitForWorkers: true, now: () => clock, onProgress: value => { completed = value.completed; } });
-        try {
-          await waitFor(() => heldFinder !== null);
-          clock = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS * 10;
-          // Longer than the 250 ms absence poll, so a live check would have fired.
-          await new Promise(resolve => setTimeout(resolve, 400));
-          assert.equal(heldFinder.options.signal.aborted, false, 'waiting for a worker is not subject to the 15-second absence abort');
-          assert.equal(completed, 0, 'no row is settled while its finder remains queued');
-          assert.equal(await Promise.race([running.then(() => 'settled'), new Promise(resolve => setTimeout(() => resolve('pending'), 10))]), 'pending');
-          assert.equal(callCount, 1, 'the resolver retains one visible outstanding request instead of reissuing in a loop');
-          setObserved(1);
-          heldFinder.release();
-          const result = await running;
-          assert.equal(result.jobs.length, 25);
-          assert.ok(result.jobs.every(row => !row.officialPosting.trail.includes('bridge-unavailable')));
-          assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
-        } finally {
-          if (heldFinder && !heldFinder.options.signal.aborted) setObserved(1);
-        }
-      }));
-    },
-  },
-  {
-    name: 'Run-mode official lookups stay visibly pending while the bridge is unlinked or disabled',
-    async run() {
-      await withObservedWorkers(0, async setObserved => withStore(async store => {
-        const rows = [job({ sourceJobKey: 'bridge-not-ready' })];
-        const controller = new AbortController();
-        let enabled = false; let callCount = 0; let completed = 0;
-        const status = () => enabled
-          ? { ...linkedPool(false, 1), serving: 'live' }
-          : { ...linkedPool(false, 1), enabled: false, serving: 'paused', link: { state: 'unlinked' } };
-        const callRaw = async (prompt, options) => {
-          callCount += 1;
-          options.manualHandoff.onAssigned();
-          return options.task.endsWith('-research') ? research(requestedIds(prompt))
-            : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-        };
-        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: status,
-          waitForWorkers: true, signal: controller.signal, onProgress: value => { completed = value.completed; } });
-        try {
-          await new Promise(resolve => setTimeout(resolve, 20));
-          assert.equal(callCount, 0, 'a disabled or unlinked bridge never falls through to a local-only response path');
-          assert.equal(completed, 0, 'the official-posting row remains pending while bridge setup is unavailable');
-          enabled = true;
-          setObserved(1);
-          const result = await running;
-          assert.equal(result.jobs[0].officialPosting.outcome, 'found');
-          assert.ok(callCount > 0, 'the held run proceeds after the bridge becomes live and a worker appears');
-        } finally {
-          if (!enabled) controller.abort(new Error('test cleanup'));
-          await running.catch(() => {});
-        }
-      }));
-    },
-  },
-  {
-    name: 'A live linked chat with autoLaunchChats but no launcher stays serial and does not abort',
-    async run() {
-      await withObservedWorkers(6, async () => withStore(async store => {
-        const rows = Array.from({ length: 13 }, (_, index) => job({ url: `https://www.linkedin.com/jobs/view/single-chat-${index}` }));
-        let active = 0; let maximum = 0;
-        const callRaw = async (prompt, options) => {
-          active += 1; maximum = Math.max(maximum, active);
-          await new Promise(resolve => setTimeout(resolve, 15));
-          assert.equal(options.signal.aborted, false, 'a live chat suspends absence grace without an automatic launcher');
-          active -= 1;
-          return options.task.endsWith('-research') ? research(requestedIds(prompt))
-            : JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-        };
-        const result = await resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline,
-          bridgeStatus: () => ({ ...linkedPool(false, 10), autoLaunchChats: true }),
-          comparativeGraceMs: 5, timeoutStartsOnAssignment: true });
-        assert.equal(maximum, 1);
-        assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
-      }));
-    },
-  },
-  {
     name: 'An assigned handoff still times out during an unresponsive worker turn',
     async run() {
       let assigned; let workerSignal;
@@ -406,7 +71,7 @@ export default [
       await new Promise(resolve => setTimeout(resolve, 35));
       assert.equal(workerSignal.aborted, false, 'queued requests have no running response timer');
       assigned(); assigned();
-      const expired = assert.rejects(pending, error => error.code === 'bridge-timeout');
+      const expired = assert.rejects(pending, error => error.code === 'worker-timeout');
       await waitFor(() => workerSignal.aborted);
       await expired;
       assigned();
@@ -415,119 +80,23 @@ export default [
     },
   },
   {
-    name: 'Assignment timing keeps comparative launch grace and ignores a late assignment after settlement',
+    name: 'A late assignment after the response settles cannot restart the cleared response timer',
     async run() {
-      let available = false; let launching = true; let workerSignal; let assigned;
-      const result = await cappedHandoff({ prompt: 'Synthetic comparative launch' }, {
+      let workerSignal; let assigned;
+      const result = await cappedHandoff({ prompt: 'Synthetic settled response' }, {
         call: async (_prompt, options) => {
           workerSignal = options.signal; assigned = options.manualHandoff.onAssigned;
-          await new Promise(resolve => setTimeout(resolve, 35));
-          assert.equal(workerSignal.aborted, false, 'pending worker launch suspends the shorter absence grace');
-          available = true; launching = false; assigned();
+          await new Promise(resolve => setTimeout(resolve, 5));
+          assigned();
           await new Promise(resolve => setTimeout(resolve, 5));
           return 'Synthetic completed response';
         },
         timeoutMs: 20, timeoutStartsOnAssignment: true, now: Date.now, stats: { handoffs: 0, handoffMs: 0 },
-        comparativeWorkerAvailable: () => available, comparativeWorkerLaunching: () => launching, comparativeGraceMs: 10,
       });
       assert.equal(result, 'Synthetic completed response');
       assigned();
       await new Promise(resolve => setTimeout(resolve, 35));
       assert.equal(workerSignal.aborted, false, 'a stale assignment cannot restart the cleared response timer');
-    },
-  },
-  {
-    name: 'Comparative B waits beyond presentation and absence deadlines while its separate chat launch is pending',
-    async run() {
-      await withObservedWorkers(1, async setObserved => withStore(async store => {
-        let pendingLaunch = false; let offset = 0; const runs = []; const aborted = [];
-        const releaseLauncher = registerBridgeLauncherAvailability(() => ({ available: false,
-          pending: pendingLaunch, inProgress: Number(pendingLaunch) }));
-        try {
-          const callRaw = async (prompt, options) => {
-            options.signal.addEventListener('abort', () => aborted.push(options.signal.reason.code), { once: true });
-            if (options.task.endsWith('-research')) {
-              options.manualHandoff.onAssigned(); return research(requestedIds(prompt));
-            }
-            const run = options.manualHandoff.comparisonRun; runs.push(run);
-            if (run === 'B') {
-              await new Promise(resolve => setTimeout(resolve, 15));
-              offset += 180_000;
-              await new Promise(resolve => setTimeout(resolve, 15));
-              assert.equal(options.signal.aborted, false, 'B keeps waiting for the fresh chat despite elapsed presentation time');
-              setObserved(1); pendingLaunch = false;
-            }
-            options.manualHandoff.onAssigned();
-            if (run === 'A') { setObserved(0); pendingLaunch = true; }
-            return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-          };
-          const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline, bridgeStatus: linkedPool,
-            timeoutStartsOnAssignment: true, timeoutMs: 20, comparativeGraceMs: 5, now: () => Date.now() + offset });
-          assert.deepEqual(runs, ['A', 'B']);
-          assert.deepEqual(aborted, []);
-          assert.equal(result.jobs[0].officialPosting.outcome, 'found');
-        } finally { releaseLauncher(); }
-      }));
-    },
-  },
-  {
-    name: 'Three admitted handoffs wait behind two workers busy with another module without spending their response budgets',
-    async run() {
-      await withObservedWorkers(2, async () => withStore(async store => {
-        const rows = Array.from({ length: 25 }, (_, index) => job({
-          url: `https://www.linkedin.com/jobs/view/slow-workers-${index}`, sourceJobKey: `slow-workers-${index}`,
-        }));
-        const queue = []; const aborted = []; const completedFinders = [];
-        let active = 0; let outstanding = 0; let maximum = 0; let missing; let maximumWait = 0; let available = false;
-        const timeoutMs = 150; const turnMs = 90;
-        const pump = () => {
-          while (available && active < 2 && queue.length) {
-            const item = queue.shift();
-            active += 1;
-            maximumWait = Math.max(maximumWait, Date.now() - item.queuedAt);
-            item.options.manualHandoff.onAssigned();
-            item.timer = setTimeout(() => {
-              item.cleanup(); active -= 1; outstanding -= 1;
-              if (item.options.task === 'job-official-posting-research') completedFinders.push(item.options.hints);
-              item.resolve(item.reply());
-              pump();
-            }, turnMs);
-          }
-        };
-        const callRaw = (prompt, options) => new Promise((resolve, reject) => {
-          const finder = options.task === 'job-official-posting-research';
-          const reply = () => {
-            if (!finder) return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
-            const ids = requestedIds(prompt);
-            if (options.hints.attemptKind === 'second-search') return research(ids);
-            missing ||= ids[0];
-            return ids.map(id => id === missing ? notFound([id]) : research([id])).join('\n');
-          };
-          const item = { options, reply, resolve, timer: null, queuedAt: Date.now() };
-          const onAbort = () => {
-            item.cleanup(); outstanding -= 1;
-            if (item.timer) { clearTimeout(item.timer); active -= 1; }
-            else queue.splice(queue.indexOf(item), 1);
-            aborted.push(options.task);
-            reject(options.signal.reason);
-            pump();
-          };
-          item.cleanup = () => options.signal.removeEventListener('abort', onAbort);
-          options.signal.addEventListener('abort', onAbort, { once: true });
-          outstanding += 1; maximum = Math.max(maximum, outstanding);
-          queue.push(item); pump();
-        });
-        setTimeout(() => { available = true; pump(); }, 200);
-        const result = await resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline,
-          bridgeStatus: () => linkedPool(true, 6), timeoutMs, timeoutStartsOnAssignment: true });
-        assert.deepEqual(aborted, [], 'a turn shorter than its timeout must not expire waiting for a worker');
-        assert.equal(maximum, 3, 'two live workers expose only one extra request');
-        assert.ok(maximumWait > timeoutMs, `queued time must exceed the response timeout, observed ${maximumWait}ms`);
-        assert.equal(completedFinders.length, 4, 'all three first-search batches and the second-search batch finish');
-        assert.equal(completedFinders.filter(hints => hints.attemptKind === 'second-search').length, 1);
-        assert.equal(result.telemetry.bridgeTimeout, 0);
-        assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
-      }));
     },
   },
   {
@@ -541,7 +110,7 @@ export default [
         const callRaw = async (prompt, options) => {
           if (options.task.endsWith('-research')) {
             finders += 1;
-            if (finders === 2) await waitFor(() => judges === 2);
+            if (finders === 2) await waitFor(() => judges === CLAUDE_TASK_CONCURRENCY - 1);
             finderJudgmentCounts.push(judges);
             const ids = requestedIds(prompt);
             if (options.hints.attemptKind === 'second-search') return research(ids);
@@ -552,11 +121,11 @@ export default [
           await judgmentsBlocked;
           return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
         };
-        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: () => linkedPool(true, 6) });
+        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline });
         let result;
         try {
           await waitFor(() => finderJudgmentCounts.length === 4);
-          assert.deepEqual(finderJudgmentCounts, [0, 2, 2, 2], 'all finder batches pass queued judgments while two comparison slots remain occupied');
+          assert.deepEqual(finderJudgmentCounts, [0, 3, 3, 3], 'all finder batches pass queued judgments while every slot but the finder\'s stays occupied');
         } finally { release(); result = await running; }
         assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
       }));
@@ -579,14 +148,14 @@ export default [
           await flush(); active -= 1;
           return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
         };
-        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, bridgeStatus: linkedPool });
+        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline });
         let result;
         try {
           await waitFor(() => finderWaiting && judgeCalls > 0);
           assert.equal(finderCalls, 2, 'the later finder is still waiting while earlier rows judge');
         } finally { releaseFinder(); result = await running; }
         assert.equal(finderCalls, 3);
-        assert.ok(maximum <= 2, `issued judgments fit the live workers, observed ${maximum}`);
+        assert.ok(maximum <= CLAUDE_TASK_CONCURRENCY, `issued judgments fit the worker concurrency, observed ${maximum}`);
         assert.deepEqual(result.jobs.map(row => row.url), rows.map(row => row.url));
         assert.ok(result.jobs.every(row => row.officialPosting.outcome === 'found'));
       }));
@@ -626,16 +195,15 @@ export default [
           } else judgeCalls += 1;
           return new Promise(() => {}); // The handoff owner must enforce cancellation.
         };
-        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, signal: controller.signal,
-          bridgeStatus: linkedPool });
+        const running = resolveOfficialPostings(rows, { store, callRaw, snapshotFetch: offline, signal: controller.signal });
         let result;
         try { await waitFor(() => finderCalls === 2 && judgeCalls > 0); }
         finally {
-          controller.abort(Object.assign(new Error('Synthetic stop'), { code: 'bridge-aborted' }));
+          controller.abort(Object.assign(new Error('Synthetic stop'), { code: 'worker-aborted' }));
           result = await running;
         }
         assert.deepEqual(result.jobs.map(row => row.url), rows.map(row => row.url));
-        assert.ok(result.jobs.every(row => row.officialPosting.trail.includes('bridge-aborted')));
+        assert.ok(result.jobs.every(row => row.officialPosting.trail.includes('worker-aborted')));
         for (const row of rows) assert.equal(await store.find(row), null);
       }));
     },
@@ -653,7 +221,7 @@ export default [
           return JSON.stringify((second ? run === 'B' : run === 'A')
             ? chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }) : unresolvedAnswer('uncertain'));
         };
-        const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline, bridgeStatus: linkedPool });
+        const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline });
         assert.equal(result.jobs[0].officialPosting.outcome, 'ambiguous');
         assert.equal(await store.find(job()), null);
         assert.equal(identities.length, 4);
@@ -748,7 +316,7 @@ export default [
     },
   },
   {
-    name: 'Production ChatGPT lookup records discovery and snapshot counts, while cache reuse preserves the prior observation',
+    name: 'Production worker lookup records discovery and snapshot counts, while cache reuse preserves the prior observation',
     async run() {
       _resetOfficialPostingDiscoveryDiagnosticsForTests();
       try {
@@ -1264,7 +832,7 @@ export default [
     },
   },
   {
-    name: 'The production lookup asks ChatGPT only: finder, two judges, stored text, then a cache hit without new chats',
+    name: 'The production lookup asks workers only: finder, two judges, stored text, then a cache hit without new chats',
     async run() {
       await withStore(async store => {
         const row = job(); const calls = [];
@@ -1274,7 +842,7 @@ export default [
           assert.equal(options.grounding, true, 'judges are asked to browse');
           return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
         };
-        const result = await resolveOfficialPostings([row], { store, snapshotFetch: offline, callRaw, bridgeStatus: () => ({}) });
+        const result = await resolveOfficialPostings([row], { store, snapshotFetch: offline, callRaw });
         assert.deepEqual(calls, ['job-official-posting-research', 'job-official-posting-match', 'job-official-posting-match']);
         const posting = result.jobs[0].officialPosting;
         assert.equal(posting.outcome, 'found'); assert.equal(posting.sourceUrl, POSTING);
@@ -1495,6 +1063,30 @@ export default [
     },
   },
   {
+    name: 'Concurrent judge failures prefer A deterministically even when B fails first',
+    async run() {
+      await withStore(async store => {
+        let releaseA; const bFailed = new Promise(resolve => { releaseA = resolve; }); const order = [];
+        const callRaw = async (prompt, options) => {
+          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
+          const run = options.manualHandoff.comparisonRun;
+          if (run === 'A') await bFailed; else releaseA();
+          order.push(run);
+          throw Object.assign(new Error('Synthetic judge failure'), { code: run === 'A'
+            ? 'OFFICIAL_POSTING_COMPARATIVE_INVALID' : 'comparative-unavailable' });
+        };
+        const result = await resolveOfficialPostings([job()], { store, callRaw, snapshotFetch: offline });
+        assert.equal(order[0], 'B');
+        assert.equal(order.at(-1), 'A');
+        assert.ok(order.includes('A') && order.includes('B'));
+        assert.ok(result.jobs[0].officialPosting.trail.includes('comparative-invalid'));
+        assert.equal(result.jobs[0].officialPosting.trail.includes('comparative-unavailable'), false);
+        assert.equal(result.telemetry.comparativeInvalidRuns, 2);
+        assert.equal(await store.find(job()), null);
+      });
+    },
+  },
+  {
     name: 'A malformed judgment gets one correction round; a second failure leaves the row retryable and unsaved',
     async run() {
       await withStore(async store => {
@@ -1505,7 +1097,7 @@ export default [
           return '{"choice":"P1"}';
         };
         const result = await resolveOfficialPostings([job()], { store, snapshotFetch: offline, callRaw });
-        assert.equal(corrections, 1);
+        assert.equal(corrections, 2, 'each of the two parallel judges gets exactly one correction round');
         const posting = result.jobs[0].officialPosting;
         assert.ok(posting.trail.includes('comparative-invalid'));
         assert.equal(officialPostingLookupStatus(posting).retryable, true);
@@ -1514,11 +1106,11 @@ export default [
     },
   },
   {
-    name: 'Without the ChatGPT bridge the lookup is incomplete, never a conclusion',
+    name: 'When no worker can answer the lookup is incomplete, never a conclusion',
     async run() {
       await withStore(async store => {
-        const result = await resolveOfficialPostings([job()], { store, snapshotFetch: offline, bridgeAvailable: false,
-          callRaw: () => { throw new Error('no chat without the bridge'); } });
+        const result = await resolveOfficialPostings([job()], { store, snapshotFetch: offline,
+          callRaw: () => { throw new Error('no worker answer'); } });
         const status = officialPostingLookupStatus(result.jobs[0].officialPosting);
         assert.equal(status.state, 'incomplete'); assert.equal(status.retryable, true);
       });
@@ -1553,7 +1145,7 @@ export default [
         const store = createOfficialPostingStore(root);
         assert.equal(store.rootDir, root);
         const row = job(); const time = Date.UTC(2026, 9, 29);
-        let card; let judgeCalls = 0; let judgeLeadUrls;
+        let card; let judgeCalls = 0; const judgeLeadUrls = {};
         const callRaw = async (prompt, options) => {
           assert.equal(options.task, 'job-official-posting-research');
           const ids = requestedIds(prompt); [card] = ids;
@@ -1562,15 +1154,18 @@ export default [
         const callMatch = async (prompt, options) => {
           assert.equal(options.task, 'job-official-posting-match');
           judgeCalls += 1;
-          judgeLeadUrls = hostLeads(prompt).map(lead => lead.url);
+          judgeLeadUrls[options.manualHandoff.comparisonRun] = hostLeads(prompt).map(lead => lead.url);
           return '{"choice":"P1"}';
         };
         await resolveOfficialPostings([row], { store, now: () => time, snapshotFetch: offline, callRaw, callMatch });
-        assert.equal(judgeCalls, 2, 'the invalid answer receives one correction attempt');
-        assert.ok(judgeLeadUrls.includes(POSTING));
+        assert.equal(judgeCalls, 4, 'each parallel judge: the invalid answer receives one correction attempt');
+        assert.ok(judgeLeadUrls.A.includes(POSTING) && judgeLeadUrls.B.includes(POSTING));
         const entries = (await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
-        assert.deepEqual(entries, [{ at: new Date(time).toISOString(), card, title: row.title, company: row.company,
-          round: 1, run: 'A', route: 'mcp', manualRoutingReason: null, leads: judgeLeadUrls, failure: 'comparative-invalid' }]);
+        entries.sort((left, right) => left.run.localeCompare(right.run));
+        // Each judge sees the leads in its own order; the log lists them in the host's order.
+        assert.deepEqual(entries, ['A', 'B'].map(run => ({ at: new Date(time).toISOString(), card, title: row.title, company: row.company,
+          round: 1, run, route: 'mcp', manualRoutingReason: null, leads: [POSTING, CAREERS], failure: 'comparative-invalid' })));
+        for (const run of ['A', 'B']) assert.deepEqual([...judgeLeadUrls[run]].sort(), [CAREERS, POSTING].sort());
       } finally {
         await fs.rm(root, { recursive: true, force: true });
       }
@@ -1586,12 +1181,14 @@ export default [
           throw Object.assign(new Error('Synthetic legacy manual state'), { code: 'OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE' });
         };
         await resolveOfficialPostings([job()], { store, snapshotFetch: offline, callRaw, callMatch,
-          timeoutStartsOnAssignment: true, bridgeStatus: linkedPool });
+          timeoutStartsOnAssignment: true });
         const entries = (await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
-        assert.equal(entries.length, 1);
-        assert.equal(entries[0].route, 'manual');
-        assert.equal(entries[0].manualRoutingReason, 'restored-draft');
-        assert.equal(entries[0].failure, 'comparative-unavailable');
+        assert.equal(entries.length, 2, 'both parallel judges record their failure');
+        for (const entry of entries) {
+          assert.equal(entry.route, 'manual');
+          assert.equal(entry.manualRoutingReason, 'restored-draft');
+          assert.equal(entry.failure, 'comparative-unavailable');
+        }
       });
     },
   },
@@ -1613,9 +1210,10 @@ export default [
           return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id }));
         };
         const result = await resolveOfficialPostings([job()], { store, snapshotFetch: offline, callRaw, callMatch });
-        assert.deepEqual(calls, ['1A', '1B', '2A', '2B', '2B']);
+        assert.deepEqual([...calls].sort(), ['1A', '1B', '2A', '2B', '2B']);
         assert.ok(result.jobs[0].officialPosting.trail.includes('semantic-uncertain'));
         const entries = (await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
+        entries.sort((left, right) => left.round - right.round || left.run.localeCompare(right.run));
         assert.deepEqual(entries.map(({ round, run, failure }) => ({ round, run, failure })), [
           { round: 1, run: 'A', failure: undefined }, { round: 1, run: 'B', failure: undefined },
           { round: 2, run: 'A', failure: undefined }, { round: 2, run: 'B', failure: 'comparative-invalid' },

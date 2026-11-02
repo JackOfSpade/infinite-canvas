@@ -1,15 +1,44 @@
 // The runner supplies the current action and host-verified candidate counts.
 // No ordered stepper: writing and correction can repeat for every candidate.
-import { formatProgressDuration } from './bridgeJobProgress.js';
-import { BRIDGE_PROGRESS_COPY } from './handoffBridgeCopy.js';
 import { applicationProgressContext, applicationProgressStageLabel, normalizeApplicationProgress } from './applicationProgress.js';
 
 const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 const time = value => Number.isFinite(value) && value >= 0 ? value : null;
 
+/** 20s, 4 min, 1 h 5 min. Null for a value that is not a non-negative number. */
+export function formatProgressDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) return null;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} h ${rest} min` : `${hours} h`;
+}
+
 export const CLAUDE_PROGRESS_COPY = Object.freeze({
   lastHeard: ago => `Last heard from Claude ${ago}`,
   notHeardYet: 'Waiting for activity from Claude',
+  justNow: 'just now',
+  ago: duration => `${duration} ago`,
+  region: 'Claude progress',
+  working: Object.freeze(['Claude is working on this handoff', '']),
+  toneLabel: Object.freeze({ neutral: '', working: '', attention: 'Needs attention', problem: 'Problem' }),
+});
+
+// Tone styling for the Claude progress section.
+export const TONE_CLASS = Object.freeze({
+  neutral: 'border-white/10 bg-white/[0.03]',
+  working: 'border-violet-400/25 bg-violet-500/10',
+  attention: 'border-amber-400/35 bg-amber-500/10',
+  problem: 'border-red-400/35 bg-red-500/10',
+});
+export const HEADLINE_CLASS = Object.freeze({
+  neutral: 'text-white',
+  working: 'text-white',
+  attention: 'text-amber-50',
+  problem: 'text-red-100',
 });
 
 function deriveInner(input) {
@@ -51,7 +80,7 @@ export function claudeProgressTimeLines(view, now) {
     let heardLine = null;
     if (heard !== null && clock !== null) {
       const ms = Math.max(0, clock - heard);
-      heardLine = CLAUDE_PROGRESS_COPY.lastHeard(ms < 2000 ? BRIDGE_PROGRESS_COPY.justNow : BRIDGE_PROGRESS_COPY.ago(formatProgressDuration(ms)));
+      heardLine = CLAUDE_PROGRESS_COPY.lastHeard(ms < 2000 ? CLAUDE_PROGRESS_COPY.justNow : CLAUDE_PROGRESS_COPY.ago(formatProgressDuration(ms)));
     } else if (since !== null && !['claude-checking', 'claude-queued'].includes(view?.kind)) heardLine = CLAUDE_PROGRESS_COPY.notHeardYet;
     return { total: duration(startedAt) ? `Total elapsed: ${duration(startedAt)}` : null,
       elapsed: duration(since) ? `${view?.kind === 'claude-queued' ? 'Waiting' : 'This action'}: ${duration(since)}` : null, heard: heardLine };

@@ -1,6 +1,5 @@
 import { assert, __setAuthorityLedgerStoreFaultHookForTests, fs, getLocalApplicationHandoff, localApplicationStatus, openAuthorityLedgerStore, path, submitLocalApplicationHandoff } from '../test-dependencies.js';
 import { requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
-import { createApplicationSource } from '../../electron/ipc/handoffBridge/sources/application.js';
 import { queueLocalApplicationJob, __setLocalAiJobMutationLockObserverForTests, __setQueuedCurrentAuthorityProtocolForTests, PASTE_REQUIREMENTS_SCHEMA_RULE_IDS, pasteCorrectionPrompt, pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { makeCurrentAuthorityParallelMatchFixture } from './fixtures/current-authority-parallel-match.mjs';
@@ -612,10 +611,7 @@ export default [
       'restart replays the effective adjudication provenance and resumes matching rather than terminalizing the job');
 
       const status = await localApplicationStatus(queued.id, fixture.canvasFilePath);
-      const source = createApplicationSource({ api: { localApplicationStatus: async () => status } });
-      const bridged = await source.status({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath });
-      assert(status.status === 'queued' && bridged.kind === 'awaiting',
-      'the persisted continuation remains live to status and bridge routing');
+      assert(status.status === 'queued', 'the persisted continuation remains live to status');
     } finally {
       await fs.promises.rm(fixture.root, { recursive: true, force: true });
     }

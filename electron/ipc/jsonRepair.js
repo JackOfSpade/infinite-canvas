@@ -38,47 +38,6 @@ function removeStructuralTrailingCommas(value) {
   return result;
 }
 
-// ChatGPT's web UI can append these inline transport annotations while copying
-// an answer that cites an automatically-created paste attachment. They are not
-// model-authored JSON and the quoted attribute values make an otherwise-valid
-// JSON string syntactically invalid (for example
-// `:chatgpt-content-reference{index="0"}`). Keep this deliberately exact and
-// bounded: it is a recovery for a known UI artifact, never a general attempt to
-// guess whether an arbitrary unescaped quote was intended as text. In
-// particular, do not remove the same-looking text outside a JSON string — it
-// might be the malformed structure we need to reject.
-// Exported for copy/paste flows that intentionally accept only one complete
-// JSON object, but still need the same narrow ChatGPT UI-artifact recovery as
-// the general AI response parser below. Callers must retry strict JSON parsing
-// after this cleanup; this helper does not make malformed JSON acceptable.
-export function removeChatGptContentReferenceArtifacts(value) {
-  const source = String(value || '');
-  let cleaned = '';
-  let count = 0;
-  let inString = false;
-  let escaped = false;
-  for (let index = 0; index < source.length; index += 1) {
-    if (inString && !escaped && source.startsWith(':chatgpt-content-reference{index="', index)) {
-      const marker = source.slice(index).match(/^:chatgpt-content-reference\{index="\d{1,10}"\}/);
-      if (marker) {
-        count += 1;
-        index += marker[0].length - 1;
-        continue;
-      }
-    }
-    const char = source[index];
-    cleaned += char;
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (char === '\\') escaped = true;
-      else if (char === '"') inString = false;
-    } else if (char === '"') {
-      inString = true;
-    }
-  }
-  return { cleaned, count };
-}
-
 function jsonErrorLocation(error, source) {
   const message = String(error?.message || '');
   const positionMatch = message.match(/(?:at\s+)?position\s+(\d+)/i);
@@ -128,7 +87,7 @@ function jsonParseErrorCategory(error) {
  * Despite living under a Gemini-sounding name for a while (parseGeminiJSON),
  * this parser is provider-agnostic: nonApiAi.js calls it on whatever text the
  * user pastes back from their own chosen chat application (Claude, Gemini,
- * ChatGPT, or anything else), not a specific provider's output. Relocated to
+ * or anything else), not a specific provider's output. Relocated to
  * this neutral file so that isn't a readability trap for the next reader.
  */
 export function parseAiJson(raw) {
@@ -185,19 +144,6 @@ export function parseAiJson(raw) {
     const parsed = JSON.parse(jsonStr.trim());
     return parsed;
   } catch (error) {
-    // Do not alter a response that parsed successfully above. Only after a
-    // strict parse failure may this known ChatGPT copy/paste artifact be
-    // removed, then the complete payload is parsed strictly again. A failed
-    // retry deliberately falls through to the ordinary fail-loud path so we do
-    // not turn this into a generic unescaped-quote repairer.
-    const artifactRepair = removeChatGptContentReferenceArtifacts(jsonStr);
-    if (artifactRepair.count > 0) {
-      try {
-        const repaired = JSON.parse(artifactRepair.cleaned.trim());
-        logger.info(`[jsonRepair] Recovered JSON after removing ${artifactRepair.count} ChatGPT content-reference transport artifact${artifactRepair.count === 1 ? '' : 's'}.`);
-        return repaired;
-      } catch { /* continue with the original syntax error and strict fallbacks */ }
-    }
     // Strictly-additive fallback: the first-open/last-close span above can
     // mis-bracket when the model prefixes the JSON with prose that contains a
     // stray '{', '[', '}' or ']' (e.g. "use [ ] for arrays: {…}"), so it starts
@@ -224,7 +170,7 @@ export function parseAiJson(raw) {
     }
     logger.error(
       `[jsonRepair] Failed to parse JSON response: category=${jsonParseErrorCategory(error)} `
-      + `${jsonErrorMetadata(error, jsonStr)} chatgptContentReferenceCandidates=${artifactRepair.count}.`,
+      + `${jsonErrorMetadata(error, jsonStr)}`,
     );
     const friendly = new Error(
       `AI returned invalid JSON${jsonErrorLocation(error, jsonStr)}. `

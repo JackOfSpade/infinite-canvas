@@ -173,7 +173,7 @@ export default [
       const session = createOfficialPostingFetchSession({ fetch: async () => { calls++; return wait.promise; } });
       const a = session.fetch('https://northwind.test/start', { signal: first.signal });
       const b = session.fetch('https://northwind.test/start', { signal: second.signal });
-      const rejected = assert.rejects(a, /bridge-aborted/u);
+      const rejected = assert.rejects(a, /worker-aborted/u);
       await flush(); first.abort(); await rejected;
       assert.equal(calls, 1);
       wait.resolve(page('https://northwind.test/final'));
@@ -371,11 +371,11 @@ export default [
       for (let index = 0; index < 12; index++) {
         const session = createOfficialPostingFetchSession({ signal: run.signal, fetch: () => new Promise(() => {}) });
         assert.equal(getEventListeners(run.signal, 'abort').length, 1);
-        const pending = assert.rejects(session.fetch('https://northwind.test/one'), /bridge-aborted/u);
+        const pending = assert.rejects(session.fetch('https://northwind.test/one'), /worker-aborted/u);
         await flush(); session.dispose(); await pending;
         assert.equal(getEventListeners(run.signal, 'abort').length, 0);
         assert.equal(run.signal.aborted, false);
-        await assert.rejects(session.fetch('https://northwind.test/two'), /bridge-aborted/u);
+        await assert.rejects(session.fetch('https://northwind.test/two'), /worker-aborted/u);
       }
     },
   },
@@ -385,10 +385,10 @@ export default [
       const timer = clock(); const starts = []; const run = new AbortController();
       const pages = { 'https://northwind.test/one': { pending: true }, 'https://northwind.test/two': { pending: true } };
       const session = createOfficialPostingFetchSession({ fetch: forwarded(pages, timer, starts), signal: run.signal, now: timer.now, sleep: timer.sleep });
-      const one = assert.rejects(session.fetch('https://northwind.test/one'), /bridge-aborted/u);
-      const two = assert.rejects(session.fetch('https://northwind.test/two'), /bridge-aborted/u);
+      const one = assert.rejects(session.fetch('https://northwind.test/one'), /worker-aborted/u);
+      const two = assert.rejects(session.fetch('https://northwind.test/two'), /worker-aborted/u);
       await flush(); run.abort(); await Promise.all([one, two]); await timer.tick(1_000);
-      assert.equal(starts.length, 1); await assert.rejects(session.fetch('https://other.test/one'), /bridge-aborted/u);
+      assert.equal(starts.length, 1); await assert.rejects(session.fetch('https://other.test/one'), /worker-aborted/u);
       assert.equal(session.telemetry().fetches, 1);
     },
   },

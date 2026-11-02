@@ -6,8 +6,8 @@ import { runInNewContext } from 'node:vm';
 import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation } from '../../src/utils/officialPostingPreparation.js';
 import { applicationDockRequest, brokenApplicationDockRequest, workingApplicationDockRequest } from '../../src/utils/applicationHandoffDock.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
-import { withConsoleCollector } from './fixtures/handoff-bridge/renderHarness.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
+import { withConsoleCollector } from './fixtures/practice-connector/renderHarness.js';
 
 const posting = extra => ({ level: 'L4', outcome: 'link-only', employer: '', title: 'Platform Engineer',
   sourceUrl: 'https://careers.example.test/platform', officialApplyUrl: 'https://careers.example.test/platform/apply', trail: [], ...extra });

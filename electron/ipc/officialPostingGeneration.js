@@ -1,8 +1,6 @@
 import crypto from 'node:crypto';
 import { stripHtmlToText } from '../../src/utils/textEncoding.js';
 import { handleSafe } from './ipcUtils.js';
-import { getHandoffBridgeStatus } from './handoffBridge/index.js';
-import { bridgeLinked } from './handoffBridge/bridgeAvailability.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { getOfficialPostingStore, mergeOfficialPostingTelemetry, resolveOfficialPostings } from './officialPostingService.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
@@ -34,8 +32,7 @@ const sha256 = text => crypto.createHash('sha256').update(text).digest('hex');
 const aliasesOf = job => officialPostingAliases(job).sort();
 function errorWithCode(code) { return Object.assign(new Error(code), { code }); }
 function withTrail(posting, ...codes) { return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), ...codes]) }; }
-function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('bridge-aborted'); }
-function available(status) { return bridgeLinked(status); }
+function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('worker-aborted'); }
 
 export function createOfficialPostingPrepareSemaphore(limit = 3) {
   let running = 0; const waiting = [];
@@ -53,7 +50,7 @@ export function createOfficialPostingPrepareSemaphore(limit = 3) {
       if (signal?.aborted) { reject(signal.reason); return; }
       const waiter = { resolve, reject, signal, abort: () => {
         const index = waiting.indexOf(waiter); if (index >= 0) waiting.splice(index, 1);
-        reject(signal.reason || errorWithCode('bridge-aborted'));
+        reject(signal.reason || errorWithCode('worker-aborted'));
       } };
       signal?.addEventListener('abort', waiter.abort, { once: true }); waiting.push(waiter); drain();
     });
@@ -91,7 +88,7 @@ function remember(scrapedJob, result, now, semanticMatching = true) {
     message: String(result.message || '').slice(0, 160) };
 }
 
-async function checkAlternateLinks({ job, posting, primary, probe, callText, bridgeAvailable,
+async function checkAlternateLinks({ job, posting, primary, probe, callText,
   calibrationStore, signal, now, deadline, manualAiRunId, nodeId }) {
   if (primary?.listingCheck?.basis === 'official-closed') return primary;
   if (!['refuse-final', 'refuse-retry'].includes(primary?.listingCheck?.action)
@@ -110,11 +107,11 @@ async function checkAlternateLinks({ job, posting, primary, probe, callText, bri
     let checked;
     try {
       checked = await checkListingForGeneration({ job: alternateJob, posting, probe,
-        callText, bridgeAvailable, calibrationStore, signal, now, deadline,
+        callText, calibrationStore, signal, now, deadline,
         manualAiRunId, nodeId, listingOverride: false });
       active(signal);
     } catch (error) {
-      if (signal?.aborted && signal.reason?.code !== 'bridge-timeout') throw signal.reason || error;
+      if (signal?.aborted && signal.reason?.code !== 'worker-timeout') throw signal.reason || error;
       undecided = true;
       continue;
     }
@@ -174,7 +171,7 @@ function authoritativeBoardPage(page, route) {
   });
 }
 
-async function reverify(job, record, { fetch, signal, now, store, callText, bridgeAvailable, deadline, manualAiRunId, nodeId,
+async function reverify(job, record, { fetch, signal, now, store, callText, deadline, manualAiRunId, nodeId,
   semanticMatching, resolveFresh, invalidateCachedProof }) {
   const prior = record.officialPosting; const url = prior.sourceUrl;
   const postedBy = strictEmployerEqual(job.company, prior.employer) ? '' : job.company;
@@ -282,7 +279,7 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
     };
     const classification = classifyListingLiveness(evidence, LISTING_LIVENESS_RULES.generic);
     const remaining = deadline - now();
-    if (classification.verdict !== 'needs-ai' || !bridgeAvailable || remaining < 90_000 || typeof callText !== 'function') return unconfirmed();
+    if (classification.verdict !== 'needs-ai' || remaining < 90_000 || typeof callText !== 'function') return unconfirmed();
     const members = [{ row: job, evidence }];
     const request = buildListingLivenessRequest(members);
     const stats = { handoffs: 0, handoffMs: 0 };
@@ -320,7 +317,7 @@ async function reverify(job, record, { fetch, signal, now, store, callText, brid
  * failure produces a bounded host fallback for the normal application gate. */
 export async function prepareOfficialPostingForGeneration(args, {
   projectJob = value => value, signal, store, fetch = fetchOfficialPosting, resolve = resolveOfficialPostings,
-  bridgeStatus = getHandoffBridgeStatus, now = Date.now, timeoutMs = OFFICIAL_POSTING_PREPARE_TIMEOUT_MS,
+  now = Date.now, timeoutMs = OFFICIAL_POSTING_PREPARE_TIMEOUT_MS,
   slots = semaphore, callRaw, callMatch, callText = callLLMText, telemetry = { failed: 0 }, listingProbe, calibrationStore,
   semanticMatching = true,
 } = {}) {
@@ -338,8 +335,7 @@ export async function prepareOfficialPostingForGeneration(args, {
       || listing.listingCheck?.action === 'refuse-final') return listing;
     return { ...listing, listingCheck: { ...listing.listingCheck,
       action: 'refuse-retry', basis: 'official-lookup', override: false },
-    message: `${lookup.label}. ${posting.trail?.includes('bridge-unavailable')
-      ? 'Claude research was unavailable. Retry Generate.' : 'Retry Generate to finish checking the official posting.'}`,
+    message: `${lookup.label}. Retry Generate to finish checking the official posting.`,
     listingAudit: null };
   };
   // The budget can expire before research or during the tail. Stored closed,
@@ -411,9 +407,9 @@ export async function prepareOfficialPostingForGeneration(args, {
       })()]);
     } finally { clearTimeout(timer); }
   };
-  const controller = new AbortController(); const abort = () => controller.abort(signal.reason || errorWithCode('bridge-aborted'));
+  const controller = new AbortController(); const abort = () => controller.abort(signal.reason || errorWithCode('worker-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => controller.abort(errorWithCode('bridge-timeout')), timeoutMs); timer.unref?.();
+  const timer = setTimeout(() => controller.abort(errorWithCode('worker-timeout')), timeoutMs); timer.unref?.();
   let onAbort; const cancelled = new Promise((_, reject) => { onAbort = () => reject(controller.signal.reason); });
   controller.signal.addEventListener('abort', onAbort, { once: true });
   const cleanup = () => {
@@ -421,19 +417,18 @@ export async function prepareOfficialPostingForGeneration(args, {
     signal?.removeEventListener('abort', abort);
     controller.signal.removeEventListener('abort', onAbort);
   };
-  let release; let finalPosting; let bridgeAvailable = false; let verifiedFallback; let resolvedTelemetry = null;
+  let release; let finalPosting; let verifiedFallback; let resolvedTelemetry = null;
   try {
     finalPosting = await Promise.race([(async () => {
       active(controller.signal);
-      try { bridgeAvailable = available(await bridgeStatus()); } catch { bridgeAvailable = false; }
       active(controller.signal); release = await slots.acquire(controller.signal); active(controller.signal);
       store = trackedStore(store || getOfficialPostingStore());
       const record = await store.find(scrapedJob); active(controller.signal);
       const resolveFresh = async ({ candidateUrls = [], bypassCache = false, priorOfficialRecord } = {}) => {
         if (semanticMatching && bypassCache) verifiedFallback = undefined;
         const resolved = await resolve([scrapedJob], { store, snapshotFetch: fetch, signal: controller.signal,
-          manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, callMatch, now, bridgeAvailable,
-          timeoutMs, candidateUrls, bypassCache, bridgeStatus,
+          manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, callMatch, now,
+          timeoutMs, candidateUrls, bypassCache,
           ...(priorOfficialRecord ? { priorOfficialRecords: [priorOfficialRecord] } : {}) });
         resolvedTelemetry = mergeOfficialPostingTelemetry(resolvedTelemetry, resolved.telemetry);
         active(controller.signal);
@@ -468,9 +463,8 @@ export async function prepareOfficialPostingForGeneration(args, {
           } catch { /* Keep proof metadata when the stored text cannot be read. */ }
           active(controller.signal);
           const verified = await reverify(scrapedJob, record, { fetch, signal: controller.signal, now, store,
-            callText, bridgeAvailable, deadline, manualAiRunId: args.manualAiRunId, nodeId: args.nodeId,
+            callText, deadline, manualAiRunId: args.manualAiRunId, nodeId: args.nodeId,
             semanticMatching, resolveFresh, invalidateCachedProof: () => { verifiedFallback = undefined; } }); active(controller.signal);
-          if (!bridgeAvailable) verified.officialPosting = withTrail(verified.officialPosting, 'bridge-unavailable');
           if (!verified.resolvedFresh) await store.save(scrapedJob, { officialPosting: verified.officialPosting, description: verified.description, expectedRecord: record }); active(controller.signal);
           return verified;
         }
@@ -483,9 +477,9 @@ export async function prepareOfficialPostingForGeneration(args, {
   } catch (error) {
     if (signal?.aborted) { cleanup(); throw signal.reason || error; }
     failed(error);
-    const code = controller.signal.reason?.code === 'bridge-timeout' ? 'bridge-timeout' : error?.code || 'failed';
-    finalPosting = code === 'bridge-timeout' && controller.signal.aborted && verifiedFallback
-      ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'bridge-timeout', 'reverify-failed') }
+    const code = controller.signal.reason?.code === 'worker-timeout' ? 'worker-timeout' : error?.code || 'failed';
+    finalPosting = code === 'worker-timeout' && controller.signal.aborted && verifiedFallback
+      ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'worker-timeout', 'reverify-failed') }
       : unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
   } finally {
     // Cancellation must finish owned filesystem work before cancel-and-wait
@@ -495,10 +489,6 @@ export async function prepareOfficialPostingForGeneration(args, {
     release?.();
   }
   try {
-    const cachedLookup = officialPostingLookupStatus(finalPosting.officialPosting);
-    const settledCache = finalPosting.officialPosting.trail?.includes('recent-miss')
-      && ['not-found', 'ambiguous', 'closed'].includes(cachedLookup.state);
-    if (!bridgeAvailable && !settledCache) finalPosting.officialPosting = withTrail(finalPosting.officialPosting, 'bridge-unavailable');
     let listing;
     if (controller.signal.aborted && !signal?.aborted) {
       listing = await typedFallback(scrapedJob, finalPosting.officialPosting);
@@ -506,33 +496,33 @@ export async function prepareOfficialPostingForGeneration(args, {
       try {
         listing = await checkListingForGeneration({
           job: scrapedJob, posting: finalPosting.officialPosting, probe: listingProbe,
-          callText, bridgeAvailable, calibrationStore, signal: controller.signal,
+          callText, calibrationStore, signal: controller.signal,
           deadline, now, manualAiRunId: args.manualAiRunId, nodeId: args.nodeId,
           listingOverride: args.listingOverride === true,
         });
       } catch (error) {
         if (signal?.aborted) throw signal.reason || error;
-        listing = controller.signal.reason?.code === 'bridge-timeout' || error?.code === 'bridge-timeout'
+        listing = controller.signal.reason?.code === 'worker-timeout' || error?.code === 'worker-timeout'
           ? await typedFallback(scrapedJob, finalPosting.officialPosting)
           : holdFallback(scrapedJob, finalPosting.officialPosting);
       }
     }
     listing = await checkAlternateLinks({ job: scrapedJob,
       posting: finalPosting.officialPosting, primary: listing, probe: listingProbe,
-      callText, bridgeAvailable, calibrationStore, signal: controller.signal, now, deadline,
+      callText, calibrationStore, signal: controller.signal, now, deadline,
       manualAiRunId: args.manualAiRunId, nodeId: args.nodeId });
     listing = guardOfficialLookup(finalPosting.officialPosting, listing);
     let postingVariants = normaliseJobPostingVariants(scrapedJob.postingVariants);
     if (!controller.signal.aborted && postingVariants.length) try {
       postingVariants = await checkPostingVariantsForGeneration({ job: scrapedJob,
-        variants: postingVariants, probe: listingProbe, callText, bridgeAvailable,
+        variants: postingVariants, probe: listingProbe, callText,
         calibrationStore, signal: controller.signal, now, deadline,
         manualAiRunId: args.manualAiRunId, nodeId: args.nodeId });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
       // Variant availability cannot change the primary listing decision.
     }
-    if (signal?.aborted) throw signal.reason || errorWithCode('bridge-aborted');
+    if (signal?.aborted) throw signal.reason || errorWithCode('worker-aborted');
     return { ...remember(scrapedJob, { ...finalPosting, ...listing, postingVariants }, now(), semanticMatching),
       telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } };
   } catch (error) {

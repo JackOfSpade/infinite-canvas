@@ -138,7 +138,6 @@ import { recheckPendingListings } from './listingLivenessRecheck.js';
 import { createListingLivenessProbe } from './listingLivenessProbe.js';
 import { carryListingAlternates, collectListingAlternates, restoreListingAlternates } from './listingLivenessAlternates.js';
 import { getListingLivenessCalibrationStore } from './listingLivenessCalibration.js';
-import { getHandoffBridgeStatus } from './handoffBridge/index.js';
 import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
@@ -10463,7 +10462,6 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const runOfficialPostings = dependencies.resolveOfficialPostings || resolveOfficialPostings;
   const readOfficialPostingView = dependencies.getOfficialPostingView || getOfficialPostingView;
   const callListingLiveness = dependencies.callListingLiveness || callLLMText;
-  const handoffBridgeStatus = dependencies.handoffBridgeStatus || getHandoffBridgeStatus;
   const listingLivenessCalibrationStore = dependencies.listingLivenessCalibrationStore || getListingLivenessCalibrationStore();
   const retryIndeedDescriptions = dependencies.retryIndeedJobDescriptions || retryIndeedJobDescriptions;
   const settleBoardClosedRowsForHandler = dependencies.settleBoardClosedRowsForTests || settleBoardClosedRows;
@@ -10491,8 +10489,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // evidence gate. Identity rows stay scraped; only resolution fields are added.
   // Board-closed rows the evidence gate dropped arrive here too (see
   // scoreSafeRowsWithBoardClosed) and are kept or removed after resolution.
-  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null, progressSourceId = null,
-    waitForWorkers = true } = {}) => {
+  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null, progressSourceId = null } = {}) => {
     const context = getCurrentIpcRequestContext();
     if (context) context.listingSetAsideKeys = new Set((Array.isArray(rows) ? rows : [])
       .filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
@@ -10516,8 +10513,6 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       const carriedCount = rows.length - unresolved.length;
       const resolved = unresolved.length ? await runOfficialPostings(unresolved, { signal, nodeId: context?.nodeId || nodeId,
         manualAiRunId: context?.manualAiRunId || null,
-        waitForWorkers,
-        bridgeStatus: handoffBridgeStatus,
         onProgress: progress => onProgress({ completed: carriedCount + (progress?.completed || 0), total: rows.length }),
       }) : { jobs: [], telemetry: null };
       if (signal?.aborted) throw signal.reason || nodeCancellationError();
@@ -10534,10 +10529,9 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
         ? collectListingAlternates({ ...alternateReceipts, officialDrops: deduped.dropped,
           finalKept: deduped.kept }) : null;
       const livenessSession = createListingLivenessSearchSession({
-        callText: callListingLiveness, bridgeStatus: handoffBridgeStatus,
+        callText: callListingLiveness,
         calibrationStore: listingLivenessCalibrationStore, signal,
         nodeId: context?.nodeId || nodeId, manualAiRunId: context?.manualAiRunId || null,
-        waitForWorkers,
         abortError: nodeCancellationError,
       });
       let alternateRestored = [];
@@ -13069,8 +13063,8 @@ Return a JSON object with four arrays of search query strings:
     if (providerPhaseOnly) {
       // The durable page ledger and every source terminal disposition were
       // committed above. Stop before the semantic role screen: it may require
-      // a ChatGPT handoff and therefore belongs to the mounted card/bridge, not
-      // a hidden startup coordinator. Keeping the manifest at `searching`
+      // an AI handoff and therefore belongs to the mounted card, not a hidden
+      // startup coordinator. Keeping the manifest at `searching`
       // makes the next exact Resume rebuild from staged rows without contacting
       // any now-done source.
       await throwIfSearchAborted();
@@ -14943,7 +14937,7 @@ Return a JSON object with four arrays of search query strings:
     if (retryableOfficialRows.length > 0) {
       await assertScoringCurrent();
       const retry = await runOfficialPostings(retryableOfficialRows.map(job => ({ ...job })), {
-        signal, nodeId, manualAiRunId, waitForWorkers: true, bridgeStatus: handoffBridgeStatus,
+        signal, nodeId, manualAiRunId,
       });
       await assertScoringCurrent();
       if (!Array.isArray(retry?.jobs)) throw new TypeError('Official posting retry returned invalid rows.');
@@ -14979,9 +14973,9 @@ Return a JSON object with four arrays of search query strings:
       const recheck = await recheckPendingListings(scoringJobs, { signal,
         createProbe: dependencies.createListingLivenessProbe || createListingLivenessProbe,
         createSession: () => createListingLivenessSearchSession({
-          callText: callListingLiveness, bridgeStatus: handoffBridgeStatus,
+          callText: callListingLiveness,
           calibrationStore: listingLivenessCalibrationStore, signal, nodeId, manualAiRunId,
-          waitForWorkers: true, abortError: nodeCancellationError,
+          abortError: nodeCancellationError,
         }) });
       await assertScoringCurrent();
       scoringJobs = recheck.rows;
@@ -16503,7 +16497,7 @@ Return a JSON object with four arrays of search query strings:
     let sourceRecoverySnapshot = null;
     let sourceRecoveryJobs = [];
     const resolveGenericPostings = createOfficialPostingRecoveryPassResolver(rows =>
-      resolveScoreSafePostings(rows, { event, nodeId, signal, jobRunId, waitForWorkers: true }), { signal });
+      resolveScoreSafePostings(rows, { event, nodeId, signal, jobRunId }), { signal });
     // Load the recovery snapshot for ANY source whose Solve can recover
     // descriptions, not just Google: a Glassdoor panel-429 strands rows exactly
     // the same way, and without the snapshot the postprocessor below falls back

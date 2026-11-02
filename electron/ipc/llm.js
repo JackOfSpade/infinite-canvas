@@ -107,7 +107,7 @@ const TASK_MAX_TOKENS = {
     Math.min(BATCH_OUTPUT_TOKEN_BUDGET, 1024 + Math.max(1, itemCount) * 32),
   // One tiny yes/no verdict per near-match pair. The full descriptions are
   // input evidence; the response deliberately has no prose/reason field, so
-  // it stays compact and every idle bridge worker can finish a four-pair batch
+  // it stays compact and every idle worker can finish a four-pair batch
   // without reserving capacity needed by scoring or taxonomy.
   'job-location-consolidation-confirmation': ({ itemCount = 1 } = {}) =>
     Math.min(2048, 512 + Math.max(1, itemCount) * 128),

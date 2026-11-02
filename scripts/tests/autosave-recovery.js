@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { EventLoggerSingleton } from '../../src/utils/EventLogger.js';
 import { buildLastSaveErrorMarkdown } from '../../electron/ipc/bugReport.js';
 

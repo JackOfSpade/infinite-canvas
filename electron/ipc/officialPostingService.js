@@ -17,16 +17,13 @@ import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse } from './officialPostingBridge.js';
-import { hasLiveObservedWorker } from './handoffBridge/observedChatContext.js';
-import { getHandoffBridgeStatus, subscribeHandoffBridgeStatus } from './handoffBridge/index.js';
-import { bridgeComparisonAvailable, bridgeWorkerPoolActive, bridgeHandoffCapacity, bridgeHandoffAvailability } from './handoffBridge/bridgeAvailability.js';
+import { CLAUDE_TASK_CONCURRENCY } from './claudeTaskWorker.js';
 import { snapshotOfficialPostingLeads } from './officialPostingSnapshot.js';
 import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS } from './officialPostingJudge.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from './officialPostingNegativePolicy.js';
-import { officialPostingHandoffFailureCause, officialPostingHandoffFailureCode, recordOfficialPostingAvailabilityDecision, recordOfficialPostingDiscovery } from './officialPostingDiscoveryDiagnostics.js';
+import { officialPostingHandoffFailureCause, officialPostingHandoffFailureCode, recordOfficialPostingDiscovery } from './officialPostingDiscoveryDiagnostics.js';
 
 export const OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS = 20 * 60 * 1_000;
-export const OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS = 15_000;
 export const OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS = 20 * 60 * 1_000;
 const VERIFIED_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
@@ -57,16 +54,16 @@ export async function getOfficialPostingView(job, { store, fetch = fetchOfficial
   return officialPostingView(job, { store, refetch: restore, requireSemantic });
 }
 
-function bridgeError(code) { const error = new Error(code); error.code = code; return error; }
+function workerError(code) { const error = new Error(code); error.code = code; return error; }
 function failureCode(error, signal) {
   const classified = officialPostingHandoffFailureCode(error, signal);
-  if (signal?.aborted) return ['bridge-timeout', 'request-timeout'].includes(classified) ? 'bridge-timeout' : 'bridge-aborted';
-  if (classified === 'request-timeout') return 'bridge-timeout';
-  if (['sender-destroyed', 'renderer-stopped', 'renderer-navigated', 'abort-error'].includes(classified)) return 'bridge-aborted';
-  if (['bridge-timeout', 'bridge-aborted', 'bridge-unavailable'].includes(classified)) return classified;
-  if (error?.code === 'bridge-unavailable' || /bridge.*(?:unavailable|disabled|not linked)/iu.test(String(error?.message || ''))) return 'bridge-unavailable';
+  if (signal?.aborted) return ['worker-timeout', 'request-timeout'].includes(classified) ? 'worker-timeout' : 'worker-aborted';
+  if (classified === 'request-timeout') return 'worker-timeout';
+  if (['sender-destroyed', 'renderer-stopped', 'renderer-navigated', 'abort-error'].includes(classified)) return 'worker-aborted';
+  if (['worker-timeout', 'worker-aborted', 'worker-unavailable'].includes(classified)) return classified;
+  if (error?.code === 'worker-unavailable') return 'worker-unavailable';
   if (['worker-lost', 'worker-replaced', 'comparison-contaminated', 'fresh-context-required', 'requeue-exhausted', 'renderer-unavailable']
-    .includes(classified)) return 'bridge-unavailable';
+    .includes(classified)) return 'worker-unavailable';
   return 'research-miss';
 }
 
@@ -78,108 +75,37 @@ function comparativeFailureCode(error, signal) {
   return failure === 'research-miss' ? 'failed' : failure;
 }
 
-async function waitForRunBridge(signal, bridgeStatus) {
-  // Do not let run-mode work fall through to a local-only route while the
-  // bridge is unlinked, disabled, or paused. The Board stays in its searches
-  // phase with Pause & save available. Once the bridge is linked and live,
-  // create the usual handoff; if workers are absent, it remains visible in the
-  // dock and can be claimed when one returns.
-  for (;;) {
-    if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
-    let status = null;
-    try { status = bridgeStatus?.(); } catch { /* a failed read is not readiness */ }
-    if (status?.enabled === true && status?.link?.state === 'linked'
-      && (status.serving === undefined || status.serving === 'live')) return;
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        signal?.removeEventListener('abort', onAbort);
-        resolve();
-      }, 250);
-      const onAbort = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-        reject(signal.reason || bridgeError('bridge-aborted'));
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-      if (signal?.aborted) onAbort();
-    });
-  }
-}
-
 export async function cappedHandoff(request, { call, signal, timeoutMs, manualAiRunId, nodeId, hints, now, stats,
   timeoutStartsOnAssignment = call === callLLMRaw,
-  waitForWorkers = false,
-  bridgeStatus = getHandoffBridgeStatus,
-  workerAvailable = call === callLLMRaw ? () => bridgeHandoffAvailability(bridgeStatus()).liveWorkers > 0 : null,
-  workerLaunching = call === callLLMRaw ? () => bridgeHandoffAvailability(bridgeStatus()).launchPending : null,
-  workerAutoLaunchAvailable = call === callLLMRaw ? () => bridgeHandoffAvailability(bridgeStatus()).autoLaunchAvailable : null,
-  comparativeWorkerAvailable = null, comparativeWorkerLaunching = null, comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
-  availabilityGraceMs = comparativeGraceMs, unassignedTimeoutMs = OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS }) {
-  const assignmentTimed = waitForWorkers || timeoutStartsOnAssignment;
+  unassignedTimeoutMs = OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS }) {
+  const assignmentTimed = timeoutStartsOnAssignment;
   const controller = new AbortController();
-  const abort = () => controller.abort(signal?.reason || bridgeError('bridge-aborted'));
+  const abort = () => controller.abort(signal?.reason || workerError('worker-aborted'));
   if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
-  let timer = null; let assignmentTimer = null; let finished = false; let assigned = false;
+  let timer = null; let assignmentTimer = null; let finished = false;
   const startTimeout = () => {
     if (finished || controller.signal.aborted || timer !== null) return;
-    assigned = true;
     clearTimeout(assignmentTimer); assignmentTimer = null;
-    timer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), timeoutMs);
+    timer = setTimeout(() => controller.abort(workerError('worker-timeout')), timeoutMs);
     timer.unref?.();
   };
-  // Queue/launch waiting has its own generous ceiling. Only assignment starts
-  // the response budget, even after serialized launches or another module's turn.
+  // Queue waiting has its own generous ceiling. Only assignment starts the
+  // response budget, even after another module's turn.
   if (assignmentTimed) {
-    if (!waitForWorkers && Number.isFinite(unassignedTimeoutMs) && unassignedTimeoutMs >= 0) {
-      assignmentTimer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), unassignedTimeoutMs);
+    if (Number.isFinite(unassignedTimeoutMs) && unassignedTimeoutMs >= 0) {
+      assignmentTimer = setTimeout(() => controller.abort(workerError('worker-timeout')), unassignedTimeoutMs);
       assignmentTimer.unref?.();
     }
   } else if (Number.isFinite(timeoutMs) && timeoutMs >= 0) {
-    timer = setTimeout(() => controller.abort(bridgeError('bridge-timeout')), timeoutMs);
+    timer = setTimeout(() => controller.abort(workerError('worker-timeout')), timeoutMs);
     timer.unref?.();
   }
-  const legacyComparison = !waitForWorkers && typeof comparativeWorkerAvailable === 'function';
-  const available = legacyComparison ? comparativeWorkerAvailable : workerAvailable;
-  const launching = legacyComparison ? comparativeWorkerLaunching : workerLaunching;
-  let unavailableSince = null;
-  const checkWorkers = () => {
-    if (finished || assigned || controller.signal.aborted) return;
-    try {
-      // Pending includes queued serialized launches and retry delays, without
-      // imposing a second presentation timeout on the launcher's own lifecycle.
-      if (available() === true || launching?.() === true || workerAutoLaunchAvailable?.() === true) {
-        unavailableSince = null;
-        return;
-      }
-      const stamp = now();
-      unavailableSince ??= stamp;
-      if (stamp - unavailableSince >= availabilityGraceMs) {
-        try {
-          const evidence = bridgeHandoffAvailability(bridgeStatus());
-          recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort',
-            liveWorkers: evidence.liveWorkers, launchPending: evidence.launchPending,
-            autoLaunchAvailable: evidence.autoLaunchAvailable,
-            reason: evidence.launcherReason || 'no-eligible-worker' });
-        } catch { /* the bounded decision trail must never alter handoff behavior */ }
-        controller.abort(bridgeError(legacyComparison ? 'comparative-unavailable' : 'bridge-unavailable'));
-      }
-    } catch {
-      // Missing evidence is not proof that the bridge cannot serve the request.
-      unavailableSince = null;
-    }
-  };
-  const availabilityTimer = !waitForWorkers && typeof available === 'function'
-    ? setInterval(checkWorkers, Math.max(1, Math.min(250, availabilityGraceMs))) : null;
-  availabilityTimer?.unref?.();
-  if (availabilityTimer) checkWorkers();
   let rejectAbort;
-  const cancelled = new Promise((_, reject) => { rejectAbort = () => reject(controller.signal.reason || bridgeError('bridge-aborted')); });
+  const cancelled = new Promise((_, reject) => { rejectAbort = () => reject(controller.signal.reason || workerError('worker-aborted')); });
   controller.signal.addEventListener('abort', rejectAbort, { once: true });
   const start = now();
   stats.handoffs += 1;
   try {
-    if (controller.signal.aborted) throw controller.signal.reason;
-    if (waitForWorkers) await waitForRunBridge(controller.signal, bridgeStatus);
     if (controller.signal.aborted) throw controller.signal.reason;
     const { prompt, ...options } = request;
     return await Promise.race([Promise.resolve().then(() => call(prompt, { ...options,
@@ -190,7 +116,7 @@ export async function cappedHandoff(request, { call, signal, timeoutMs, manualAi
       signal: controller.signal, manualAiRunId, nodeId, hints: { ...options.hints, ...hints } })), cancelled]);
   } finally {
     finished = true;
-    clearTimeout(timer); clearTimeout(assignmentTimer); clearInterval(availabilityTimer);
+    clearTimeout(timer); clearTimeout(assignmentTimer);
     signal?.removeEventListener('abort', abort); controller.signal.removeEventListener('abort', rejectAbort);
     const elapsed = Math.max(0, now() - start);
     stats.handoffMs += elapsed;
@@ -214,7 +140,7 @@ const ROW_CONCURRENCY = 6;
 function telemetryBlock() {
   return { total: 0, levels: Object.fromEntries(OFFICIAL_POSTING_LEVELS.map(level => [level, 0])),
     outcomes: Object.fromEntries(OFFICIAL_POSTING_OUTCOMES.map(outcome => [outcome, 0])), rejections: {},
-    handoffs: 0, handoffMs: 0, failed: 0, materialJdChange: 0, bridgeTimeout: 0, bridgeUnavailable: 0,
+    handoffs: 0, handoffMs: 0, failed: 0, materialJdChange: 0, workerTimeout: 0, workerUnavailable: 0,
     comparisons: 0, comparisonOptions: Object.fromEntries(Array.from({ length: 8 }, (_, index) => [index + 1, 0])),
     comparativeAgreements: 0, comparativeDisagreements: 0, comparativeInvalidRuns: 0,
     comparativeNone: 0, comparativeUnavailable: 0, comparativeMatches: 0,
@@ -224,8 +150,8 @@ function countPosting(stats, posting, comparison = null) {
   stats.total += 1;
   stats.levels[posting.level] += 1; stats.outcomes[posting.outcome] += 1;
   for (const code of new Set(posting.trail || [])) {
-    if (code === 'bridge-timeout') stats.bridgeTimeout += 1;
-    if (code === 'bridge-unavailable') stats.bridgeUnavailable += 1;
+    if (code === 'worker-timeout') stats.workerTimeout += 1;
+    if (code === 'worker-unavailable') stats.workerUnavailable += 1;
     if (!['comparative-match', 'comparative-equivalent'].includes(code) && REJECTION_CODES.includes(code)) stats.rejections[code] = (stats.rejections[code] || 0) + 1;
   }
   if (['found', 'link-only'].includes(posting.outcome) && posting.trail?.includes('comparative-match')) stats.comparativeMatches += 1;
@@ -275,7 +201,7 @@ async function parallelRows(members, operation) {
   }));
 }
 function abortTrail(signal) {
-  return OFFICIAL_POSTING_TRAIL.includes(signal?.reason?.code) ? signal.reason.code : 'bridge-aborted';
+  return OFFICIAL_POSTING_TRAIL.includes(signal?.reason?.code) ? signal.reason.code : 'worker-aborted';
 }
 
 /** Only host records bound to this scraped identity can settle an inline row.
@@ -321,7 +247,7 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
   };
   let passTelemetry = telemetryBlock();
   return async rows => {
-    if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
+    if (signal?.aborted) throw signal.reason || workerError('worker-aborted');
     const input = Array.isArray(rows) ? rows : [];
     const consumed = new Set();
     const planned = input.map(job => {
@@ -337,7 +263,7 @@ export function createOfficialPostingRecoveryPassResolver(resolveRows, { signal 
     const identities = fresh.map(({ job }) => ({ key: sourceJobKey(job), aliases: officialPostingAliases(job), inputHash: inputHash(job) }));
     if (fresh.length) {
       const resolved = await resolveRows(fresh.map(item => item.job));
-      if (signal?.aborted) throw signal.reason || bridgeError('bridge-aborted');
+      if (signal?.aborted) throw signal.reason || workerError('worker-aborted');
       if (!Array.isArray(resolved?.jobs)) throw new TypeError('Recovery resolution returned invalid rows.');
       const resolvedDrops = Array.isArray(resolved.officialDedupDrops) ? resolved.officialDedupDrops : [];
       if ((Number(resolved.officialDedupDropped) || 0) !== resolvedDrops.length) throw new TypeError('Recovery resolution needs every dedup receipt.');
@@ -456,14 +382,8 @@ async function recordJudgment(store, entry) {
 export async function resolveOfficialPostings(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
   store, now = Date.now, snapshotFetch = fetchOfficialPosting, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
-  priorOfficialRecords = [], timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS, bridgeAvailable = true,
-  waitForWorkers = false,
+  priorOfficialRecords = [], timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS,
   timeoutStartsOnAssignment,
-  bridgeStatus = getHandoffBridgeStatus,
-  bridgeSubscribe = subscribeHandoffBridgeStatus,
-  comparativeWorkerAvailable = null,
-  comparativeWorkerLaunching = null,
-  comparativeGraceMs = OFFICIAL_POSTING_COMPARATIVE_WORKER_GRACE_MS,
 } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
   const members = officialPostingChunks(rows).flat();
@@ -508,16 +428,10 @@ export async function resolveOfficialPostings(jobs, {
         comparison: result.comparison };
     }
   };
-  // Expose one extra request for demand-driven expansion while keeping the
-  // admitted queue proportional to live workers and launches actually running.
+  // The queue is admitted up to the Claude task worker's concurrency.
   const handoffQueue = [];
   let activeHandoffs = 0; let activeComparisons = 0; let discoveryPending = true; let draining = false;
-  const handoffCapacity = () => {
-    try {
-      return bridgeHandoffCapacity(bridgeStatus());
-    } catch { /* no trusted pool capacity */ }
-    return 1;
-  };
+  const handoffCapacity = () => CLAUDE_TASK_CONCURRENCY;
   const drainHandoffs = () => {
     if (draining) return;
     draining = true;
@@ -535,13 +449,7 @@ export async function resolveOfficialPostings(jobs, {
         item.cleanup(); activeHandoffs += 1;
         if (item.comparative) activeComparisons += 1;
         void item.dispatch(item.request, { call: item.comparative ? callMatch : callRaw, signal, timeoutMs,
-          manualAiRunId, nodeId, hints: item.hints, now: clock, stats, timeoutStartsOnAssignment, bridgeStatus, waitForWorkers,
-          ...(!waitForWorkers && (timeoutStartsOnAssignment ?? (item.comparative ? callMatch : callRaw) === callLLMRaw) ? {
-            workerAvailable: () => bridgeHandoffAvailability(bridgeStatus()).liveWorkers > 0,
-            workerLaunching: () => bridgeHandoffAvailability(bridgeStatus()).launchPending,
-            workerAutoLaunchAvailable: () => bridgeHandoffAvailability(bridgeStatus()).autoLaunchAvailable,
-          } : {}),
-          ...(!waitForWorkers && item.comparative ? { comparativeWorkerAvailable, comparativeWorkerLaunching, comparativeGraceMs } : {}) })
+          manualAiRunId, nodeId, hints: item.hints, now: clock, stats, timeoutStartsOnAssignment })
           .then(item.resolve, item.reject).finally(() => {
             activeHandoffs -= 1;
             if (item.comparative) activeComparisons -= 1;
@@ -551,15 +459,15 @@ export async function resolveOfficialPostings(jobs, {
     } finally { draining = false; }
   };
   const handoff = (request, hints, comparative) => new Promise((resolve, reject) => {
-    if (signal?.aborted) { reject(signal.reason || bridgeError('bridge-aborted')); return; }
-    // Bridge publications execute under the publisher's async context, which
+    if (signal?.aborted) { reject(signal.reason || workerError('worker-aborted')); return; }
+    // Worker publications execute under the publisher's async context, which
     // can have no IPC owner or belong to another canvas/run. Preserve the
     // enqueueing invoke's sender and durable run identity per handoff.
     const item = { request, hints, comparative, resolve, reject, dispatch: AsyncLocalStorage.bind(cappedHandoff) };
     const onAbort = () => {
       const index = handoffQueue.indexOf(item);
       if (index >= 0) handoffQueue.splice(index, 1);
-      item.cleanup(); reject(signal.reason || bridgeError('bridge-aborted'));
+      item.cleanup(); reject(signal.reason || workerError('worker-aborted'));
     };
     item.cleanup = () => signal?.removeEventListener('abort', onAbort);
     signal?.addEventListener('abort', onAbort, { once: true });
@@ -574,8 +482,8 @@ export async function resolveOfficialPostings(jobs, {
     const chunks = officialPostingChunks([...byId.values()].map(([first]) => first.job));
     for (const [batch, chunk] of chunks.entries()) {
       const chunkMembers = chunk.flatMap(({ id }) => byId.get(id) || []);
-      if (signal?.aborted || (!bridgeAvailable && !waitForWorkers)) {
-        for (const member of chunkMembers) settle(member, unresolved(member, [signal?.aborted ? abortTrail(signal) : 'bridge-unavailable']));
+      if (signal?.aborted) {
+        for (const member of chunkMembers) settle(member, unresolved(member, [abortTrail(signal)]));
         continue;
       }
       try {
@@ -596,8 +504,8 @@ export async function resolveOfficialPostings(jobs, {
       }
     }
   };
-  // Each judge keeps its own transport identity and correction state. Only
-  // trusted observed capacity enables overlap; with one live worker the judges run in turn.
+  // Each judge keeps its own transport identity and correction state. The two
+  // judges overlap when the worker runs more than one task at a time.
   const judgePair = async (member, leads, round, snapshots) => {
     const counts = discovery.get(member);
     counts.judgeRounds += 1;
@@ -605,16 +513,14 @@ export async function resolveOfficialPostings(jobs, {
       const request = buildOfficialPostingJudgeRequest({ job: member.job, leads, run, round, snapshots });
       const attempts = callMatch === callLLMRaw ? 1 : 2;
       let correction = {}; let failure = null; let failureClass = null; let failureCause = null; let answer;
-      // Comparative judgments select MCP even if availability prevents their
-      // admission. The registry reports the actual restored/adopted route if
-      // reached, including why a legacy manual state blocked admission.
+      // The registry reports the actual restored/adopted route if reached,
+      // including why a legacy manual state blocked admission.
       let route = 'mcp'; let manualRoutingReason = null;
       const onRoute = value => {
         route = value.route;
         manualRoutingReason = value.manualRoutingReason;
       };
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        if (!bridgeAvailable && !waitForWorkers) { failure = 'bridge-unavailable'; failureClass = failure; counts.failureCodes.push(failureClass); break; }
         try {
           counts.judgeCalls += 1;
           answer = validateOfficialPostingJudgeResponse(await handoff({ ...request, ...correction,
@@ -645,13 +551,7 @@ export async function resolveOfficialPostings(jobs, {
         ...(failureCause ? { failureCause } : {}) });
       return { run, answer, failure };
     };
-    let parallel = false;
-    try {
-      const status = bridgeStatus();
-      parallel = bridgeWorkerPoolActive(status) && bridgeComparisonAvailable(status, () => hasLiveObservedWorker(2));
-    } catch { /* no trusted evidence of two live observed workers */ }
-    // The handoff absence timer deliberately still uses the one-live-worker
-    // predicate above. A busy worker is live while its sibling waits in queue.
+    const parallel = CLAUDE_TASK_CONCURRENCY >= 2;
     const runs = parallel ? await Promise.all(['A', 'B'].map(runJudge)) : [await runJudge('A')];
     if (!parallel && !runs[0].failure) runs.push(await runJudge('B'));
     // Assemble in A/B order, independent of response completion order. A's
@@ -659,7 +559,7 @@ export async function resolveOfficialPostings(jobs, {
     const answers = {}; const valid = { A: false, B: false };
     for (const result of runs) if (!result.failure) { answers[result.run] = result.answer; valid[result.run] = true; }
     const failure = runs.find(result => result.failure)?.failure;
-    if (failure) return { answers, failed: { ...unresolved(member, ['bridge-research', ...officialPostingComparativeTrail({ validA: valid.A, validB: valid.B,
+    if (failure) return { answers, failed: { ...unresolved(member, ['worker-research', ...officialPostingComparativeTrail({ validA: valid.A, validB: valid.B,
       choiceA: answers.A?.choice, choiceB: answers.B?.choice }), signal?.aborted ? abortTrail(signal) : failure]),
     comparison: { optionCount: leads.length, validA: valid.A, validB: valid.B, invalidRuns: Number(!valid.A) + Number(!valid.B),
       unavailable: failure === 'comparative-unavailable' } } };
@@ -667,7 +567,7 @@ export async function resolveOfficialPostings(jobs, {
   };
   const judge = async member => {
     const { leads, total } = judgeLeadsFor(member, found.get(member) || []);
-    if (!leads.length) return unresolved(member, ['bridge-research', 'research-miss']);
+    if (!leads.length) return unresolved(member, ['worker-research', 'research-miss']);
     // One download of every lead, shared by both rounds: it is the judges' main input, since WebFetch cannot run JavaScript.
     const snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, signal });
     const counts = discovery.get(member);
@@ -735,11 +635,6 @@ export async function resolveOfficialPostings(jobs, {
   // One invocation shares successful/in-flight downloads across rows. Failure
   // results never outlive their subscribers, and a later lookup starts fresh.
   const snapshotSession = createOfficialPostingFetchSession({ fetch: snapshotFetch, signal, cacheFailures: false, hostBreaker: false });
-  const unsubscribeStatus = bridgeSubscribe(drainHandoffs);
-  // UI-owned launch/retry state can change without a controller publication.
-  // Poll as a fallback, including injected status providers used by replays.
-  const capacityTimer = setInterval(() => { if (handoffQueue.length) drainHandoffs(); }, 250);
-  capacityTimer.unref?.();
   try {
     progress();
     if (store) await parallelRows(members.filter(member => !member.bypassCache), async member => {
@@ -782,8 +677,6 @@ export async function resolveOfficialPostings(jobs, {
     if (telemetry && typeof telemetry === 'object') telemetry.officialPosting = stats;
     return { jobs: resolved, telemetry: stats, expiryCandidates: rows.map(() => []) };
   } finally {
-    clearInterval(capacityTimer);
-    unsubscribeStatus();
     await Promise.allSettled(judgmentTasks);
     snapshotSession.dispose();
   }

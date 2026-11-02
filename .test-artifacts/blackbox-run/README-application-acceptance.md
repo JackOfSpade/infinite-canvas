@@ -32,10 +32,6 @@ node --import ./scripts/test-stubs/register.mjs .test-artifacts/blackbox-run/one
 
 Quit the packaged app before `restore`. The harness removes only its run-owned canvas, PDF bundle, `.local-ai` job and Application Sync entry after drift checks pass. Verify those four residues are absent. It does not rewrite the bridge lane store while the runtime may own it; the live bridge retires its own stale lane. If preparation failed after reservation and scoped rollback failed, use the harness's `recover --run-id <id> --execute` command after quitting the app, then inspect residue again. Never manually delete lanes from the user's bridge state.
 
-## Offline simulator
-
-`.test-artifacts/blackbox-run/offline-simulator.mjs` runs the same v2 host transitions in an isolated profile. With `--application-protocol v2`, it queues five candidates by default. It can initialize a synthetic career or a saved card's approved snapshot, serve handoffs through CLI or spool transport, and submit recorded responses. The simulator does not replace the packaged-app bridge acceptance: it cannot establish live ChatGPT delivery, page-image review, or actual wall-clock timing. Keep simulator and panel evidence in ignored run folders; tracked tests may contain only synthetic careers and postings.
-
 ## Local gates
 
 Before final live acceptance, run `npm test`, `npm run lint`, the oracle leak gate (only `ngram` findings count), `npm run build`, and `codesign --verify --deep --strict` on the packaged app. A valid live pair requires both cards within five points of their references, zero confirmed hard truth claims, zero hygiene failures, and a green suite. Restore each run and verify residue before reporting completion.

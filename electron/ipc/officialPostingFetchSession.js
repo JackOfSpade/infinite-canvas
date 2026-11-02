@@ -11,7 +11,7 @@ export const OFFICIAL_FETCH_RETRY_AFTER_CAP_MS = 30_000;
 
 function aborted(signal) {
   return signal?.reason instanceof OfficialPostingFetchError ? signal.reason
-    : new OfficialPostingFetchError(signal?.reason?.code === 'fetch-timeout' ? 'fetch-timeout' : 'bridge-aborted');
+    : new OfficialPostingFetchError(signal?.reason?.code === 'fetch-timeout' ? 'fetch-timeout' : 'worker-aborted');
 }
 function waitFor(promise, signal) {
   if (!signal) return promise;
@@ -43,7 +43,7 @@ function retryAfterMs(value, now) {
 // many employers. Such an outcome neither adds to nor clears the consecutive-failure count.
 const PER_URL_OUTCOMES = new Set(['closed', 'unsupported-content-type', 'oversize', 'invalid-text', 'unsafe-url', 'unsafe-address']);
 function hostFailure(error) {
-  if (error.code === 'bridge-aborted' || PER_URL_OUTCOMES.has(error.code)) return false;
+  if (error.code === 'worker-aborted' || PER_URL_OUTCOMES.has(error.code)) return false;
   const status = error.statusCode;
   return !Number.isInteger(status) || status >= 500 || status === 408 || status === 429;
 }

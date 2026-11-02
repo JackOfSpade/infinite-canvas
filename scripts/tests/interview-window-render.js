@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 
 const DISPLAY = {
   version: 1, snapshotId: 'a'.repeat(64),

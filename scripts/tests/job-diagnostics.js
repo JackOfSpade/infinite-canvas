@@ -180,12 +180,12 @@ export default [
         title: 'PRIVATE_TITLE', company: 'PRIVATE_COMPANY', snippet: 'PRIVATE_LISTING_TEXT',
         officialPosting: { level: 'L5', outcome: 'failed', employer: 'PRIVATE_EMPLOYER',
           sourceUrl: 'https://private.example.test/listing?private=PRIVATE_QUERY',
-          trail: ['fetch-failed', 'bridge-research'], fetchedAt: '2026-10-28T20:00:00.000Z',
+          trail: ['fetch-failed', 'worker-research'], fetchedAt: '2026-10-28T20:00:00.000Z',
           fetchFailures: [{ url: 'https://private.example.test/PRIVATE_PATH', code: 'fetch-failed', reason: 'access-denied', statusCode: 403 }],
           semanticMatch: { version: 1, inputHash: 'a'.repeat(64) } },
       } }, { id: 'synthetic-official-group', type: 'group', data: { canvasData: { nodes: [
         { id: 'synthetic-official-nested', type: 'jobcard', hidden: true, data: {
-          officialPosting: { level: 'L5', outcome: 'not-found', employer: '', trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
+          officialPosting: { level: 'L5', outcome: 'not-found', employer: '', trail: ['worker-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
         } },
         { id: 'synthetic-official-absent', type: 'jobcard', data: {} },
         { id: 'synthetic-official-invalid', type: 'jobcard', data: { officialPosting: { level: 'PRIVATE_LEVEL' } } },
@@ -236,7 +236,7 @@ export default [
       try {
         for (const key of Object.keys(telemetry)) delete telemetry[key];
         const nodes = [{ id: 'synthetic-restarted-official', type: 'jobcard', hidden: true, data: {
-          officialPosting: { level: 'L5', outcome: 'failed', employer: '', trail: ['bridge-unavailable'] },
+          officialPosting: { level: 'L5', outcome: 'failed', employer: '', trail: ['worker-unavailable'] },
         } }];
         const snapshot = collectOfficialPostingReport(nodes, { flat: true });
         const filter = applyBugReportCode(['unrelated', 'official-posting research failed'], {}, 'OFFICIAL');
@@ -247,7 +247,7 @@ export default [
             nodeInternals: [], nodeComponentStates: [], eventLogs: [],
           }).markdown;
           assert(report.includes('Official Posting Card Audit (OFFICIAL)') && report.includes('1 inspected')
-            && report.includes('trail bridge-unavailable') && report.includes('retryable yes'));
+            && report.includes('trail worker-unavailable') && report.includes('retryable yes'));
           assert(report.includes('this live snapshot does not prove a disk save'),
             'retained card evidence must not imply a successful workspace save');
         }

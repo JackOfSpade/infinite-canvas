@@ -1,7 +1,7 @@
 // One shared view of the Claude worker's status for every component that shows
 // it. A closed dock asks for nothing.
 const POLL_MS = 5000;
-const IDLE = Object.freeze({ active: false, paused: false, pauseCode: null });
+const IDLE = Object.freeze({ paused: false, pauseCode: null });
 
 let snapshot = IDLE;
 const listeners = new Set();
@@ -17,9 +17,9 @@ export function getClaudeTaskStatus() { return snapshot; }
 
 export function applyClaudeTaskStatus(raw) {
   const next = raw && typeof raw === 'object'
-    ? Object.freeze({ active: raw.active === true, paused: raw.paused === true, pauseCode: typeof raw.pauseCode === 'string' ? raw.pauseCode : null })
+    ? Object.freeze({ paused: raw.paused === true, pauseCode: typeof raw.pauseCode === 'string' ? raw.pauseCode : null })
     : IDLE;
-  if (next.active === snapshot.active && next.paused === snapshot.paused && next.pauseCode === snapshot.pauseCode) return snapshot;
+  if (next.paused === snapshot.paused && next.pauseCode === snapshot.pauseCode) return snapshot;
   snapshot = next;
   for (const listener of [...listeners]) { try { listener(); } catch { /* one subscriber cannot stop the rest */ } }
   return snapshot;

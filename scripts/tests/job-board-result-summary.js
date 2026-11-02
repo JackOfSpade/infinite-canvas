@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { attachProtectedCards, consolidateJobLocations } from '../../src/utils/jobLocationConsolidation.js';
 import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';

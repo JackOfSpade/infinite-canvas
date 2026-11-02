@@ -12,7 +12,6 @@ import {
   officialExpiryCandidatesConfirmedClosed,
 } from '../../electron/ipc/listingLivenessStore.js';
 
-const linked = () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active: false } } });
 const page = (extra = {}) => ({
   board: 'linkedin', ruleKey: 'linkedin', requestedUrl: 'https://www.linkedin.com/jobs/view/123',
   finalUrl: 'https://www.linkedin.com/jobs/view/123', finalHostClass: 'aggregator',
@@ -34,11 +33,11 @@ const answerFor = (count, verdict = 'open', quote = 'Applications are open for t
 const contextRun = callback => __runWithIpcRequestContextForTests({ livenessEvidence: new Map() }, callback);
 const record = (rows, evidence = page()) => rows.forEach(item => assert.equal(recordListingEvidence(item, evidence), true));
 // A direct callLLMText mock represents a request that the host has assigned
-// immediately. The run-mode regression below opts into an unassigned wait and
+// immediately. The run-mode regression below opts into an unassigned wait (holdAssignment) and
 // drives this callback explicitly after advancing its fake clock.
-const createListingLivenessSearchSession = ({ callText, waitForWorkers = false, ...options }) =>
-  createSearchSession({ ...options, waitForWorkers, callText: (prompt, requestOptions) => {
-    if (!waitForWorkers) requestOptions?.manualHandoff?.onAssigned?.();
+const createListingLivenessSearchSession = ({ callText, holdAssignment = false, ...options }) =>
+  createSearchSession({ ...options, callText: (prompt, requestOptions) => {
+    if (!holdAssignment) requestOptions?.manualHandoff?.onAssigned?.();
     return callText(prompt, requestOptions);
   } });
 async function withCalibrationStore(run) {
@@ -55,7 +54,7 @@ const firedEvidence = (ruleId, extra = {}) => page({
 export default [
   { name: 'deferred expiry candidate pages use the liveness AI with quote validation and keep open or unclear candidates unconfirmed', run: () => contextRun(async () => {
     const targets = ['closed', 'open', 'unclear'].map((verdict, index) => row(`expiry-${index}`, 'closed', 'structural', {
-      officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research', 'closed'] },
+      officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['worker-research', 'closed'] },
     }));
     for (const [index, target] of targets.entries()) {
       const url = `https://careers.northwind.example.test/jobs/expiry-${index}`;
@@ -67,7 +66,7 @@ export default [
       }) }]), true);
     }
     let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async (_prompt, options) => {
         calls++;
         return options.responseValidator({ rows: [
@@ -84,7 +83,7 @@ export default [
   }) },
   { name: 'deferred expiry overflow and invalid AI quotes never turn candidate pages into confirmed closed copies', run: () => contextRun(async () => {
     const target = row('expiry-overflow', 'closed', 'structural', { officialPosting: {
-      level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['bridge-research', 'closed'],
+      level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: ['worker-research', 'closed'],
     } });
     const candidates = Array.from({ length: 9 }, (_, index) => {
       const url = `https://careers.northwind.example.test/jobs/overflow-${index}`;
@@ -93,7 +92,7 @@ export default [
     });
     assert.equal(recordOfficialExpiryCandidates(target, candidates), true);
     let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async () => { calls++; return answerFor(1); } });
     await session.classifyExpiryCandidates([target]);
     assert.equal(calls, 0, 'structural HTTP closure needs no AI');
@@ -105,19 +104,18 @@ export default [
       requestedUrl: url, finalUrl: url, chromeText: 'This job is no longer available. '.repeat(5),
       jsonLd: { validThrough: '2000-01-01T00:00:00Z', isListed: null },
     }) }]);
-    const invalid = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const invalid = createListingLivenessSearchSession({
       callText: async () => ({ rows: [{ id: 'r1', verdict: 'closed', quote: 'A fabricated closure quote.' }] }) });
     await invalid.classifyExpiryCandidates([single]);
     assert.equal(officialExpiryCandidatesConfirmedClosed(single), false);
     assert.equal(invalid.telemetry().listingLiveness.linkedin.expiryCandidatesNotConfirmed, 1);
   }) },
-  { name: 'liveness search uses one linked-status read, serial sorted chunks of at most eight, and accepts reordered answer ids', run: () => contextRun(async () => {
+  { name: 'liveness search uses serial sorted chunks of at most eight, and accepts reordered answer ids', run: () => contextRun(async () => {
     const rows = Array.from({ length: 9 }, (_unused, index) => row(9 - index));
     record(rows);
-    let statusReads = 0; let active = 0; let peak = 0;
+    let active = 0; let peak = 0;
     const calls = [];
     const session = createListingLivenessSearchSession({
-      bridgeStatus: async () => { statusReads++; return linked(); },
       callText: async (_prompt, opts) => {
         active++; peak = Math.max(peak, active);
         calls.push({ ...opts.hints });
@@ -129,7 +127,6 @@ export default [
       }, now: Date.now,
     });
     const stamped = await session.classifyPrimary(rows);
-    assert.equal(statusReads, 1);
     assert.equal(peak, 1);
     assert.deepEqual(calls.map(call => [call.itemCount, call.batch, call.batchTotal]), [[8, 1, 2], [1, 2, 2]]);
     assert.ok(stamped.every(item => item.listingLiveness.verdict === 'open' && item.listingLiveness.basis === 'ai'));
@@ -137,28 +134,24 @@ export default [
     assert.equal(session.telemetry().listingLiveness.linkedin.aiChecked, 9);
     assert.equal(session.telemetry().handoffStats.handoffs, 2);
   }) },
-  { name: 'liveness search invalid first chunk trips the request breaker and leaves later seam pending', run: () => contextRun(async () => {
+  { name: 'liveness search invalid first chunk trips the session breaker and leaves later chunks pending', run: () => contextRun(async () => {
     const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1));
     record(rows);
     let calls = 0;
-    const options = { bridgeStatus: linked, callText: async (_prompt, opts) => {
+    const options = { callText: async (_prompt, opts) => {
       calls++; return answerFor(opts.hints.itemCount, 'closed', 'This quote was not on the supplied page.');
     } };
     const first = createListingLivenessSearchSession(options);
     assert.ok((await first.classifyPrimary(rows)).every(item => item.listingLiveness.verdict === 'pending'));
     assert.equal(calls, 1);
-    assert.equal(isListingLivenessBreakerTripped(), true);
     assert.equal(first.telemetry().listingLiveness.linkedin.aiPending, 9);
-    const second = createListingLivenessSearchSession(options);
-    assert.ok((await second.classifyPrimary(rows)).every(item => item.listingLiveness.verdict === 'pending'));
-    assert.equal(calls, 1);
   }) },
   { name: 'liveness search local breaker stops later chunks if request evidence storage disappears', run: async () => {
     const context = { livenessEvidence: new Map() };
     await __runWithIpcRequestContextForTests(context, async () => {
       const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1)); record(rows);
       let calls = 0;
-      const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+      const session = createListingLivenessSearchSession({
         callText: async (_prompt, options) => {
           calls++;
           context.livenessEvidence = null;
@@ -169,19 +162,10 @@ export default [
       assert.ok(checked.every(item => item.listingLiveness.verdict === 'pending'));
     });
   } },
-  { name: 'liveness search not-linked status trips breaker without sending to a worker', run: () => contextRun(async () => {
-    const rows = [row(1)]; record(rows);
-    let reads = 0; let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: () => { reads++; return { enabled: true, link: { state: 'pairing' } }; },
-      callText: async () => { calls++; return answerFor(1); } });
-    assert.equal((await session.classifyPrimary(rows))[0].listingLiveness.verdict, 'pending');
-    assert.equal(reads, 1); assert.equal(calls, 0); assert.equal(isListingLivenessBreakerTripped(), true);
-  }) },
   { name: 'liveness search gives a later chunk its own budget after a long worker absence', run: () => contextRun(async () => {
     const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1)); record(rows);
     let clock = 0; let calls = 0; let abortedAfterAssignment = null;
-    const session = createListingLivenessSearchSession({ waitForWorkers: true,
-      bridgeStatus: () => ({ enabled: true, serving: 'live', link: { state: 'linked' } }), now: () => clock,
+    const session = createListingLivenessSearchSession({ holdAssignment: true, now: () => clock,
       callText: async (_prompt, opts) => {
         calls++;
         opts.manualHandoff.onAssigned();
@@ -203,8 +187,7 @@ export default [
   { name: 'liveness search does not spend its ten-minute budget while an unassigned worker is absent', run: () => contextRun(async () => {
     const target = row('unassigned-budget'); record([target]);
     let clock = 0; let optionsSeen = null; let resolveCall; let settled = false;
-    const session = createListingLivenessSearchSession({ waitForWorkers: true,
-      bridgeStatus: () => ({ enabled: true, serving: 'live', link: { state: 'linked' } }), now: () => clock,
+    const session = createListingLivenessSearchSession({ holdAssignment: true, now: () => clock,
       callText: (_prompt, options) => {
         optionsSeen = options;
         return new Promise(resolve => { resolveCall = resolve; });
@@ -227,7 +210,7 @@ export default [
   { name: 'liveness search run abort rethrows its reason and returns no stamped rows or memo', run: () => contextRun(async () => {
     const rows = [row(1)]; record(rows);
     const controller = new AbortController(); const reason = new Error('synthetic run reset');
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked, signal: controller.signal,
+    const session = createListingLivenessSearchSession({ signal: controller.signal,
       callText: async (_prompt, opts) => { controller.abort(reason); return answerFor(opts.hints.itemCount); } });
     await assert.rejects(session.classifyPrimary(rows), error => error === reason);
     assert.equal(rows[0].listingLiveness.verdict, 'pending');
@@ -236,7 +219,7 @@ export default [
   { name: 'liveness search second seam uses request memo without another handoff or calibration write', run: () => contextRun(async () => {
     const rows = [row(1)]; record(rows);
     let calls = 0; let calibrations = 0;
-    const options = { bridgeStatus: linked, callText: async (_prompt, opts) => { calls++; return answerFor(opts.hints.itemCount); },
+    const options = { callText: async (_prompt, opts) => { calls++; return answerFor(opts.hints.itemCount); },
       calibrationStore: { recordAiAnswer: async () => { calibrations++; return { promoted: [], demoted: [] }; } } };
     assert.equal((await createListingLivenessSearchSession(options).classifyPrimary(rows))[0].listingLiveness.verdict, 'open');
     assert.equal((await createListingLivenessSearchSession(options).classifyPrimary(rows))[0].listingLiveness.verdict, 'open');
@@ -246,7 +229,7 @@ export default [
     const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1, 'open', 'open-marker'));
     record(rows, page({ openSignals: [{ ruleId: 'linkedin-enabled-apply', state: 'active' }] }));
     const invocations = []; const demotions = []; let calibrationCalls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async (_prompt, opts) => {
         invocations.push(opts.hints.itemCount);
         return invocations.length === 1
@@ -270,7 +253,7 @@ export default [
     assert.equal(counts.auditChecked, 10); assert.equal(counts.auditDisagreed, 1);
     assert.equal(counts.ruleDemoted, 1); assert.equal(counts.aiChecked, 10);
     let reasks = 0;
-    const again = createListingLivenessSearchSession({ bridgeStatus: linked, callText: async () => { reasks++; return answerFor(1); } });
+    const again = createListingLivenessSearchSession({ callText: async () => { reasks++; return answerFor(1); } });
     const memoed = await again.classifyPrimary(rows);
     assert.equal(reasks, 0);
     assert.equal(memoed[0].listingLiveness.verdict, 'closed');
@@ -281,7 +264,7 @@ export default [
     const rows = Array.from({ length: 9 }, (_unused, index) => row(index + 1, 'pending', 'neither', { officialPosting: posting }));
     record(rows);
     let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked, callText: async (_prompt, opts) => {
+    const session = createListingLivenessSearchSession({ callText: async (_prompt, opts) => {
       calls++;
       if (calls === 1) throw Object.assign(new Error('Synthetic transport interruption'), { code: 'NETWORK_INTERRUPTED' });
       return answerFor(opts.hints.itemCount);
@@ -301,7 +284,7 @@ export default [
       fetchedAt: '2026-10-26T12:00:00.000Z', contentHash: 'a'.repeat(64), trail: ['careers-page'] };
     const rows = [row(1, 'pending', 'closed-marker', { officialPosting: posting })]; record(rows);
     let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async () => { calls++; return answerFor(1); } });
     assert.equal((await session.classifyPrimary(rows))[0].listingLiveness.verdict, 'pending');
     assert.equal(calls, 0);
@@ -312,7 +295,7 @@ export default [
     const controller = new AbortController(); const reason = new Error('synthetic reset');
     let entered;
     const started = new Promise(resolve => { entered = resolve; });
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked, signal: controller.signal,
+    const session = createListingLivenessSearchSession({ signal: controller.signal,
       callText: (_prompt, options) => {
         entered();
         return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
@@ -331,7 +314,7 @@ export default [
     for (const item of rows) assert.equal(recordListingEvidence(item, page({ expectedTitle: item.title,
       title: item.title, h1: item.title, requestedUrl: item.url, finalUrl: item.url })), true);
     const prompts = [];
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async (prompt, options) => { prompts.push(prompt); return answerFor(options.hints.itemCount); } });
     await session.classifyPrimary(rows);
     assert.equal(prompts.length, 2);
@@ -355,7 +338,7 @@ export default [
       fetchedAt: '2026-10-26T12:00:00.000Z', contentHash: 'a'.repeat(64), trail: ['careers-page'] };
     const target = row('official-audit', 'open', 'open-marker', { officialPosting }); record([target]);
     let calls = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async () => { calls++; return answerFor(1); } });
     assert.equal((await session.classifyPrimary([target]))[0].listingLiveness.verdict, 'open');
     assert.equal(calls, 0);
@@ -368,7 +351,7 @@ export default [
       requestedUrl: item.url, finalUrl: item.url, expectedTitle: item.title, title: item.title, h1: item.title,
     })), true);
     const prompts = [];
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async (prompt, options) => { prompts.push(prompt); return answerFor(options.hints.itemCount); } });
     const checked = await session.classifyPrimary([aiOpen, missing, marker]);
     assert.equal(prompts.length, 1);
@@ -382,7 +365,7 @@ export default [
     const target = row('pending-active', 'pending', 'neither');
     record([target], page({ openSignals: [{ ruleId: 'linkedin-enabled-apply', state: 'active' }] }));
     let demotions = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async () => ({ rows: [{ id: 'r1', verdict: 'closed', quote: 'Recruitment is complete for this position.' }] }),
       calibrationStore: { recordAiAnswer: async () => ({ promoted: [], demoted: [] }),
         demoteRule: async () => { demotions++; return {}; } } });
@@ -396,7 +379,7 @@ export default [
     for (const item of rows) assert.equal(recordListingEvidence(item, page({ requestedUrl: item.url,
       finalUrl: item.url, expectedTitle: item.title, title: item.title, h1: item.title })), true);
     const prompts = [];
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async (prompt, options) => { prompts.push(prompt); return answerFor(options.hints.itemCount); } });
     await session.classifyPrimary(rows);
     assert.equal(prompts.length, 1);
@@ -425,7 +408,7 @@ export default [
     const indeedRows = Array.from({ length: 7 }, (_unused, index) => make('indeed', index + 1));
     const linkedinRows = Array.from({ length: 8 }, (_unused, index) => make('linkedin', index + 1));
     const prompts = []; let demotions = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async (prompt, options) => {
         prompts.push({ prompt, count: options.hints.itemCount });
         if (prompts.length === 1) {
@@ -454,7 +437,7 @@ export default [
     const target = row('empty-quote', 'open', 'open-marker');
     record([target], page({ openSignals: [{ ruleId: 'linkedin-enabled-apply', state: 'active' }] }));
     let demotions = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async () => ({ rows: [{ id: 'r1', verdict: 'closed', quote: '' }] }),
       calibrationStore: { recordAiAnswer: async () => ({ promoted: [], demoted: [] }),
         demoteRule: async () => { demotions++; return {}; } } });
@@ -470,7 +453,7 @@ export default [
     const target = row('shadow-signal', 'open', 'open-marker');
     record([target], page({ openSignals: [{ ruleId: 'linkedin-enabled-apply', state: 'shadow' }] }));
     let demotions = 0;
-    const session = createListingLivenessSearchSession({ bridgeStatus: linked,
+    const session = createListingLivenessSearchSession({
       callText: async () => ({ rows: [{ id: 'r1', verdict: 'closed', quote: 'Recruitment is complete for this position.' }] }),
       calibrationStore: { recordAiAnswer: async () => ({ promoted: [], demoted: [] }),
         demoteRule: async () => { demotions++; return {}; } } });
@@ -530,7 +513,7 @@ export default [
       await contextRun(async () => {
         const target = row('real-store-audit', 'open', 'open-marker');
         record([target], page({ openSignals: [{ ruleId, state: 'active' }] }));
-        const session = createListingLivenessSearchSession({ bridgeStatus: linked, calibrationStore: store, now: () => at,
+        const session = createListingLivenessSearchSession({ calibrationStore: store, now: () => at,
           callText: async () => ({ rows: [{ id: 'r1', verdict: 'closed', quote: 'Recruitment is complete for this position.' }] }) });
         assert.equal((await session.classifyPrimary([target]))[0].listingLiveness.verdict, 'closed');
       });

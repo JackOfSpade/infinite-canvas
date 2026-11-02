@@ -14,7 +14,6 @@ const sourceUrl = 'https://northwind.test/jobs/dispatch';
 const row = (extra = {}) => ({ title: 'Software Engineer at Northwind Labs', company: 'Acme Talent Partners', location,
   snippet: `Our client is hiring. ${description}`, url: 'https://mirror.example/jobs/dispatch', sourceJobKey: 'r4-dispatch', ...extra });
 const args = job => ({ job, nodeId: 'r4-board', cardId: 'r4-card', manualAiRunId: 'r4-generation-run' });
-const status = active => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active } } });
 const posting = (extra = {}) => ({ level: 'L2', outcome: 'found', employer: 'Northwind Labs', title: 'Software Engineer',
   sourceUrl, officialApplyUrl: sourceUrl, location: { display: location, remote: false, workMode: '', remoteCountry: '', remoteRegion: '' },
   salary: { text: '', provenance: 'unknown' }, trail: ['description-anchor'], ...extra });
@@ -34,7 +33,7 @@ async function withStore(run, options) {
 }
 async function assertPreserved(store, job, before, fetch) {
   const input = JSON.stringify(job);
-  const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch, bridgeStatus: () => status(true) });
+  const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch });
   const trusted = getPreparedOfficialPosting(result.resolutionId, job);
   assert.equal(JSON.stringify(job), input);
   for (const key of ['level', 'outcome', 'employer', 'sourceUrl', 'officialApplyUrl', 'contentHash', 'alternatives']) {
@@ -69,7 +68,7 @@ export default [
           assert.equal(officialPostingLookupStatus(result.officialPosting).label, 'Previously verified official posting');
         }
         const recovered = await prepareOfficialPostingForGeneration(args(job), {
-          store, bridgeStatus: () => status(true), fetch: async target => { assert.equal(target, sourceUrl); return page(html()); },
+          store, fetch: async target => { assert.equal(target, sourceUrl); return page(html()); },
         });
         const saved = await store.find(job);
         for (const current of [recovered.officialPosting, saved.officialPosting]) {
@@ -92,7 +91,7 @@ export default [
       await withStore(async store => {
         const job = row(); await store.save(job, { officialPosting: posting(), description });
         let research = 0;
-        const options = { store, bridgeStatus: () => status(true),
+        const options = { store,
           fetch: async () => { throw Object.assign(new Error('transient'), { code: 'fetch-timeout' }); },
           resolve: async jobs => { research++; return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L5', outcome: 'not-found', employer: value.company, trail: [] } })) }; } };
         const first = await prepareOfficialPostingForGeneration(args(job), options);
@@ -110,7 +109,7 @@ export default [
         const before = await store.save(job, { officialPosting: posting({ trail: ['description-anchor', partial, ...(failedRecheck ? ['reverify-failed'] : [])] }), description });
         let calls = 0; let reads = 0; let saves = 0;
         const counted = { ...store, save: async (...values) => { saves++; return store.save(...values); } };
-        const result = await prepareOfficialPostingForGeneration(args(job), { store: counted, bridgeStatus: () => status(true),
+        const result = await prepareOfficialPostingForGeneration(args(job), { store: counted,
           fetch: async () => { reads++; return page(html()); },
           resolve: async jobs => { calls++; if (resolverFails) throw Object.assign(new Error('failed'), { code: 'fetch-failed' });
             return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L5', outcome: 'not-found', employer: value.company, trail: [] } })) }; } });
@@ -124,22 +123,17 @@ export default [
     },
   },
   {
-    name: 'Generate retries unavailable research through a linked single chat without requiring an active pool',
+    name: 'Generate retries unavailable research on the Claude worker',
     async run() {
       for (const legacy of [false, true]) await withStore(async store => {
         const job = row(); let calls = 0;
         if (legacy) await store.save(job, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: ['bridge-unavailable'] } });
         const fetch = async () => { throw Object.assign(new Error('unavailable'), { code: 'fetch-failed' }); };
         const callRaw = async (prompt, options) => { calls++; const raw = missResponse(prompt); options.responseValidator(raw); return raw; };
-        if (!legacy) {
-          const idle = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => ({ enabled: false }) });
-          assert.equal(calls, 0); assert.ok(idle.officialPosting.trail.includes('bridge-unavailable'));
-          assert.equal(await store.find(job), null, 'a research-free idle click does not save a miss');
-        }
-        const active = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => status(false) });
-        assert.equal(calls, 2, legacy ? 'old unavailable misses retry' : 'a later linked single chat researches with one extra search');
+        const active = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw });
+        assert.equal(calls, 2, legacy ? 'old unavailable misses retry' : 'a fresh click researches with one extra search');
         assert.equal(active.officialPosting.trail.includes('recent-miss'), false);
-        assert.ok(active.officialPosting.trail.includes('bridge-research'));
+        assert.ok(active.officialPosting.trail.includes('worker-research'));
       });
     },
   },
@@ -182,7 +176,7 @@ export default [
       for (const unnamed of [false, true]) for (const code of [404, 410]) for (const throws of [false, true]) await withStore(async store => {
         const job = row(); await store.save(job, { officialPosting: posting({ level: 'L4', outcome: 'link-only', employer: unnamed ? '' : 'Northwind Labs' }) });
         let calls = 0;
-        const result = await prepareOfficialPostingForGeneration(args(job), { store, bridgeStatus: () => status(true), fetch: async url => {
+        const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch: async url => {
           calls++; assert.equal(url, sourceUrl);
           if (throws) throw Object.assign(new Error('closed'), { statusCode: code, code: 'closed' });
           return page('', { statusCode: code });
@@ -221,7 +215,7 @@ export default [
           : page(board.raw || JSON.stringify(board.body), { url: board.direct ? url : api, contentType: 'application/json', ...(board.statusCode ? { statusCode: board.statusCode } : {}),
             ...(board.requestedUrl ? { requestedUrl: board.requestedUrl } : {}) }); };
         if (board.closed) {
-          const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch, bridgeStatus: () => status(true) });
+          const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch });
           assert.equal(result.officialPosting.outcome, 'closed'); assert.equal(result.officialPosting.officialApplyUrl, undefined);
         } else await assertPreserved(store, job, before, fetch);
         assert.deepEqual(calls, board.direct ? [url] : [url, api]);
@@ -242,7 +236,7 @@ export default [
           ? page('<footer>Powered by <a href="https://www.teamtailor.com/">Teamtailor</a></footer>', { url: board.url })
           : page(board.body, { url: board.api, contentType: board.contentType || 'application/json' }); };
         if (board.closed) {
-          const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch, bridgeStatus: () => status(true) });
+          const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch });
           assert.equal(result.officialPosting.outcome, 'closed');
         } else await assertPreserved(store, job, before, fetch);
         assert.deepEqual(calls, [board.url, board.api]);
@@ -255,7 +249,7 @@ export default [
       for (const level of ['L1', 'L2', 'L3']) for (const changed of [false, true]) await withStore(async store => {
         const job = row(); const before = await store.save(job, { officialPosting: posting({ level }), description });
         const current = changed ? `${description} The current role also reviews release schedules.` : description;
-        const result = await prepareOfficialPostingForGeneration(args(job), { store, bridgeStatus: () => status(true), fetch: async () => page(html(current)) });
+        const result = await prepareOfficialPostingForGeneration(args(job), { store, fetch: async () => page(html(current)) });
         assert.equal(result.officialPosting.level, level); assert.ok(result.officialPosting.trail.includes('reverified'));
         assert.equal(result.officialPosting.trail.includes('reverify-failed'), false);
         assert.equal(result.officialPosting.contentHash === before.officialPosting.contentHash, !changed);
@@ -277,18 +271,18 @@ export default [
           assert.equal(hash, before.officialPosting.contentHash); return description;
         }, save: async (...values) => { writes++; return store.save(...values); } };
         const pending = prepareOfficialPostingForGeneration(args(job), { store: cachedStore, signal: controller.signal,
-          timeoutMs: stop ? 60_000 : 2, bridgeStatus: () => status(true), fetch: () => {
+          timeoutMs: stop ? 60_000 : 2, fetch: () => {
             fetches++; markFetching(); return new Promise(() => {});
           }, callRaw: () => { throw new Error('A stored proof never needs a handoff.'); } });
         await fetching;
         if (stop) {
-          const reason = Object.assign(new Error('user stop'), { code: 'bridge-aborted' }); controller.abort(reason);
+          const reason = Object.assign(new Error('user stop'), { code: 'worker-aborted' }); controller.abort(reason);
           await assert.rejects(pending, error => error === reason);
         } else {
           const keepAlive = setTimeout(() => {}, 30);
           const result = await pending; clearTimeout(keepAlive);
           assert.equal(result.officialPosting.level, 'L2'); assert.equal(result.officialPosting.contentHash, before.officialPosting.contentHash);
-          assert.ok(result.officialPosting.trail.includes('reverify-failed')); assert.ok(result.officialPosting.trail.includes('bridge-timeout'));
+          assert.ok(result.officialPosting.trail.includes('reverify-failed')); assert.ok(result.officialPosting.trail.includes('worker-timeout'));
           assert.equal(getPreparedOfficialPosting(result.resolutionId, job).description, description);
         }
         assert.equal(fetches, 1); assert.equal(writes, 0); assert.deepEqual(await store.find(job), before);
@@ -302,10 +296,10 @@ export default [
       await withStore(async store => {
         const job = row(); const alternatives = [{ url: 'https://northwind.test/jobs/one', title: 'Software Engineer' },
           { url: 'https://northwind.test/jobs/two', title: 'Software Engineer' }];
-        await store.save(job, { officialPosting: { level: 'L6', outcome: 'ambiguous', employer: '', trail: ['bridge-research', 'ambiguous', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], alternatives } });
+        await store.save(job, { officialPosting: { level: 'L6', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'ambiguous', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], alternatives } });
         let calls = 0;
-        const options = { store, now: () => time, bridgeStatus: () => status(true), fetch: () => { throw new Error('A fresh miss cannot fetch.'); },
-          resolve: async jobs => { calls++; return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: ['bridge-research'] } })) }; } };
+        const options = { store, now: () => time, fetch: () => { throw new Error('A fresh miss cannot fetch.'); },
+          resolve: async jobs => { calls++; return { jobs: jobs.map(value => ({ ...value, officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: ['worker-research'] } })) }; } };
         const recent = await prepareOfficialPostingForGeneration(args(job), options);
         assert.equal(calls, 0); assert.deepEqual(recent.officialPosting.alternatives, alternatives); assert.ok(recent.officialPosting.trail.includes('recent-miss'));
         time += 24 * 60 * 60 * 1000;
@@ -323,7 +317,7 @@ export default [
         const job = row({ title: 'Dispatch Engineer', company: 'Northwind Labs', snippet: official, sourceJobKey: 'r4-judge' });
         const offline = async () => { throw Object.assign(new Error('offline test'), { code: 'fetch-failed' }); };
         const calls = [];
-        const prepared = await prepareOfficialPostingForGeneration(args(job), { store, fetch: offline, bridgeStatus: () => status(true),
+        const prepared = await prepareOfficialPostingForGeneration(args(job), { store, fetch: offline,
           callRaw: async (prompt, options) => {
             assert.equal(options.task, 'job-official-posting-research');
             const ids = prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ');

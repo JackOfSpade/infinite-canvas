@@ -219,8 +219,7 @@ export default [{
     assert.deepEqual(registered.map(row => row.channel), ['check-application-generation-gate']);
     const read = file => fs.readFile(new URL(`../../${file}`, import.meta.url), 'utf8');
     const count = (text, needle) => text.split(needle).length - 1;
-    for (const file of ['electron/ipc/llm.js', 'electron/ipc/nonApiAi.js', 'electron/ipc/handoffBridge/controller.js',
-      'electron/ipc/handoffBridge/engine.js', 'electron/ipc/handoffBridge/telemetry.js']) {
+    for (const file of ['electron/ipc/llm.js', 'electron/ipc/nonApiAi.js']) {
       const text = await read(file);
       const gap = count(text, "'job-gap-review'");
       assert(gap > 0, `${file} still lists job-gap-review`);

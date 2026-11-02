@@ -97,7 +97,7 @@ import official_posting_nuxt_data from './tests/official-posting-nuxt-data.js';
 import official_posting_paylocity_links from './tests/official-posting-paylocity-links.js';
 import official_posting_ssg_navigation from './tests/official-posting-ssg-navigation.js';
 import official_posting_read_only_search from './tests/official-posting-read-only-search.js';
-import official_posting_bridge from './tests/official-posting-bridge.js';
+import official_posting_research_request from './tests/official-posting-research-request.js';
 import official_posting_service from './tests/official-posting-service.js';
 import official_posting_search from './tests/official-posting-search.js';
 import official_posting_consumers from './tests/official-posting-consumers.js';
@@ -115,7 +115,6 @@ import claude_application_sdk_stage from './tests/claude-application-sdk-stage.j
 import application_editorial_plan from './tests/application-editorial-plan.js';
 import application_editorial_plan_archive from './tests/application-editorial-plan-archive.js';
 import claude_application_diagnostics from './tests/claude-application-diagnostics.js';
-import handoff_bridge_application_executor from './tests/handoff-bridge-application-executor.js';
 import application_claude_dock from './tests/application-claude-dock.js';
 import claude_job_progress from './tests/claude-job-progress.js';
 import application_v2_writer_shortlist from './tests/application-v2-writer-shortlist.js';
@@ -179,25 +178,8 @@ import application_handoff_dock from './tests/application-handoff-dock.js';
 import paste_identity_guard from './tests/paste-identity-guard.js';
 import paste_review_delta from './tests/paste-review-delta.js';
 import event_log_deletion_batching from './tests/event-log-deletion-batching.js';
-import handoff_bridge_inert from './tests/handoff-bridge-inert.js';
-import handoff_bridge_http from './tests/handoff-bridge-http.js';
-import handoff_bridge_mcp from './tests/handoff-bridge-mcp.js';
-import handoff_bridge_oauth from './tests/handoff-bridge-oauth.js';
-import handoff_bridge_engine from './tests/handoff-bridge-engine.js';
-import handoff_bridge_application from './tests/handoff-bridge-application.js';
-import handoff_bridge_push from './tests/handoff-bridge-push.js';
-import non_api_ai_bridge_seam from './tests/non-api-ai-bridge-seam.js';
-import handoff_bridge_store from './tests/handoff-bridge-store.js';
-import handoff_bridge_tunnel from './tests/handoff-bridge-tunnel.js';
-import handoff_bridge_controls from './tests/handoff-bridge-controls.js';
-import handoff_bridge_ipc from './tests/handoff-bridge-ipc.js';
-import handoff_bridge_privacy from './tests/handoff-bridge-privacy.js';
-import handoff_bridge_hostile from './tests/handoff-bridge-hostile.js';
-import handoff_bridge_source_scan from './tests/handoff-bridge-source-scan.js';
-import handoff_bridge_ui from './tests/handoff-bridge-ui.js';
-import handoff_chat_launcher from './tests/handoff-chat-launcher.js';
-import handoff_bridge_render from './tests/handoff-bridge-render.js';
-import handoff_bridge_canvas_orphan from './tests/handoff-bridge-canvas-orphan.js';
+import non_api_ai_worker_seam from './tests/non-api-ai-worker-seam.js';
+import practice_connector_tunnel from './tests/practice-connector-tunnel.js';
 import issue_reporter from './tests/issue-reporter.js';
 import search_bar_render from './tests/search-bar-render.js';
 import network_rolling_scheduler from './tests/network-rolling-scheduler.js';
@@ -209,10 +191,6 @@ import quit_autosave from './tests/quit-autosave.js';
 import autosave_recovery from './tests/autosave-recovery.js';
 import job_tree_user_arranged_layout from './tests/job-tree-user-arranged-layout.js';
 import job_card_bundle_indicator from './tests/job-card-bundle-indicator.js';
-import handoff_bridge_application_pool_growth from './tests/handoff-bridge-application-pool-growth.js';
-import application_bridge_page from './tests/application-bridge-page.js';
-import application_bridge_page_render from './tests/application-bridge-page-render.js';
-import application_bridge_page_dock from './tests/application-bridge-page-dock.js';
 import application_authority_workflow from './tests/application-authority-workflow.js';
 import one_card_live_acceptance from './tests/one-card-live-acceptance.js';
 import pointer_occlusion_probe from './tests/pointer-occlusion-probe.js';
@@ -256,6 +234,7 @@ import interview_application_folders from './tests/interview-application-folders
 import career_writing_core from './tests/career-writing-core.js';
 import interview_qa from './tests/interview-qa.js';
 import interview_practice from './tests/interview-practice.js';
+import practice_connector from './tests/practice-connector.js';
 import career_recovery_resume from './tests/career-recovery-resume.js';
 import adaptability_skills from './tests/adaptability-skills.js';
 import adaptability_metrics from './tests/adaptability-metrics.js';
@@ -289,7 +268,6 @@ import gapfix_v17_resume_dispositions from './tests/gapfix-v17-resume-dispositio
 import gapfix_v17_letter_dispositions from './tests/gapfix-v17-letter-dispositions.js';
 import gapfix_v17_truth_recall from './tests/gapfix-v17-truth-recall.js';
 import expense_outcome_contractions from './tests/expense-outcome-contractions.js';
-import offline_simulator from './tests/offline-simulator.js';
 import oracle_leak_gate from './tests/oracle-leak-gate.js';
 
 // Keep the file name beside its group so omissions and stale registrations
@@ -388,7 +366,7 @@ const testGroups = [
   ['official-posting-paylocity-links.js', official_posting_paylocity_links],
   ['official-posting-ssg-navigation.js', official_posting_ssg_navigation],
   ['official-posting-read-only-search.js', official_posting_read_only_search],
-  ['official-posting-bridge.js', official_posting_bridge],
+  ['official-posting-research-request.js', official_posting_research_request],
   ['official-posting-service.js', official_posting_service],
   ['official-posting-search.js', official_posting_search],
   ['official-posting-consumers.js', official_posting_consumers],
@@ -410,7 +388,6 @@ const testGroups = [
   ['application-editorial-plan.js', application_editorial_plan],
   ['application-editorial-plan-archive.js', application_editorial_plan_archive],
   ['claude-application-diagnostics.js', claude_application_diagnostics],
-  ['handoff-bridge-application-executor.js', handoff_bridge_application_executor],
   ['application-claude-dock.js', application_claude_dock],
   ['claude-job-progress.js', claude_job_progress],
   ['application-v2-writer-shortlist.js', application_v2_writer_shortlist],
@@ -475,25 +452,8 @@ const testGroups = [
   ['paste-identity-guard.js', paste_identity_guard],
   ['paste-review-delta.js', paste_review_delta],
   ['event-log-deletion-batching.js', event_log_deletion_batching],
-  ['handoff-bridge-inert.js', handoff_bridge_inert],
-  ['handoff-bridge-http.js', handoff_bridge_http],
-  ['handoff-bridge-mcp.js', handoff_bridge_mcp],
-  ['handoff-bridge-oauth.js', handoff_bridge_oauth],
-  ['handoff-bridge-engine.js', handoff_bridge_engine],
-  ['handoff-bridge-application.js', handoff_bridge_application],
-  ['handoff-bridge-push.js', handoff_bridge_push],
-  ['non-api-ai-bridge-seam.js', non_api_ai_bridge_seam],
-  ['handoff-bridge-store.js', handoff_bridge_store],
-  ['handoff-bridge-tunnel.js', handoff_bridge_tunnel],
-  ['handoff-bridge-controls.js', handoff_bridge_controls],
-  ['handoff-bridge-ipc.js', handoff_bridge_ipc],
-  ['handoff-bridge-privacy.js', handoff_bridge_privacy],
-  ['handoff-bridge-hostile.js', handoff_bridge_hostile],
-  ['handoff-bridge-source-scan.js', handoff_bridge_source_scan],
-  ['handoff-bridge-ui.js', handoff_bridge_ui],
-  ['handoff-chat-launcher.js', handoff_chat_launcher],
-  ['handoff-bridge-render.js', handoff_bridge_render],
-  ['handoff-bridge-canvas-orphan.js', handoff_bridge_canvas_orphan],
+  ['non-api-ai-worker-seam.js', non_api_ai_worker_seam],
+  ['practice-connector-tunnel.js', practice_connector_tunnel],
   ['issue-reporter.js', issue_reporter],
   ['search-bar-render.js', search_bar_render],
   ['network-rolling-scheduler.js', network_rolling_scheduler],
@@ -505,10 +465,6 @@ const testGroups = [
   ['autosave-recovery.js', autosave_recovery],
   ['job-tree-user-arranged-layout.js', job_tree_user_arranged_layout],
   ['job-card-bundle-indicator.js', job_card_bundle_indicator],
-  ['handoff-bridge-application-pool-growth.js', handoff_bridge_application_pool_growth],
-  ['application-bridge-page.js', application_bridge_page],
-  ['application-bridge-page-render.js', application_bridge_page_render],
-  ['application-bridge-page-dock.js', application_bridge_page_dock],
   ['application-authority-workflow.js', application_authority_workflow],
   ['one-card-live-acceptance.js', one_card_live_acceptance],
   ['pointer-occlusion-probe.js', pointer_occlusion_probe],
@@ -552,6 +508,7 @@ const testGroups = [
   ['career-writing-core.js', career_writing_core],
   ['interview-qa.js', interview_qa],
   ['interview-practice.js', interview_practice],
+  ['practice-connector.js', practice_connector],
   ['career-recovery-resume.js', career_recovery_resume],
   ['adaptability-skills.js', adaptability_skills],
   ['adaptability-metrics.js', adaptability_metrics],
@@ -585,7 +542,6 @@ const testGroups = [
   ['gapfix-v17-letter-dispositions.js', gapfix_v17_letter_dispositions],
   ['gapfix-v17-truth-recall.js', gapfix_v17_truth_recall],
   ['expense-outcome-contractions.js', expense_outcome_contractions],
-  ['offline-simulator.js', offline_simulator],
   ['oracle-leak-gate.js', oracle_leak_gate],
 ];
 

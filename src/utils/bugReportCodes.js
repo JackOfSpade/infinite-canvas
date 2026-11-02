@@ -178,13 +178,13 @@ export const CODE_DEFINITIONS = {
   OFFICIAL: {
     label: 'Official Posting Lookups',
     description: 'Current job cards: official-posting level, outcome, retryability, bounded failure/trail codes and semantic-proof presence, including collapsed cards and nested canvases restored after a restart. Included automatically in FULL. Omits listing identities, URLs, prose and proof hashes; does not prove a disk save.',
-    logFilter: line => /official[- ]?posting|job-official-posting|employer.*(?:verification|site)|bridge/i.test(line),
+    logFilter: line => /official[- ]?posting|job-official-posting|employer.*(?:verification|site)/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
   OFFDISC: {
     label: 'Official Posting Discovery',
-    description: 'Process-local latest lookup per source input: discovered candidates, eligible sources, fixed source-rejection reasons and comparison counts; ChatGPT finder and judge calls, final unsettled reason codes and snapshot read/failure/truncation counts. Distinguishes no research leads from candidates rejected before comparison. Included automatically in FULL; no listing text, URLs or source/proof hashes.',
+    description: 'Process-local latest lookup per source input: discovered candidates, eligible sources, fixed source-rejection reasons and comparison counts; AI finder and judge calls, final unsettled reason codes and snapshot read/failure/truncation counts. Distinguishes no research leads from candidates rejected before comparison. Included automatically in FULL; no listing text, URLs or source/proof hashes.',
     logFilter: line => /official[- ]?posting|job-official-posting|OfficialPosting/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
@@ -343,8 +343,8 @@ export const CODE_DEFINITIONS = {
 
   APPVALIDATION: {
     label: 'Application Validation',
-    description: 'Application outcomes (saved versus stopped), closed review-stop codes, response rejection checks, fixed envelope-field mismatch codes, correction stages, durable rejection history and final save verification. Includes bridge launch outcomes. Included automatically in FULL; no prompts, answers or checksum values are exported.',
-    logFilter: line => /LocalAI|HandoffBridge|validation|handoff|JobApplication|ApplicationSync/i.test(line),
+    description: 'Application outcomes (saved versus stopped), closed review-stop codes, response rejection checks, fixed envelope-field mismatch codes, correction stages, durable rejection history and final save verification. Included automatically in FULL; no prompts, answers or checksum values are exported.',
+    logFilter: line => /LocalAI|validation|handoff|JobApplication|ApplicationSync/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
@@ -438,50 +438,6 @@ export const CODE_DEFINITIONS = {
     // Keep `nodes`, `edges`, and `nodeComponentStates`; only unrelated bulky
     // visual/layout payloads are omitted.
     excludeSections: ['drawings', 'nodeInternals', 'imageState', 'mediaState', 'jobAuditDetail'],
-  },
-
-  BRIDGE: {
-    label: 'ChatGPT Bridge & OAuth',
-    description: 'ChatGPT bridge setup, tunnel, pairing, OAuth, MCP handoff, and starter/Continue copy diagnostics — including discovered push hubs, default selection and explicit exclusions, exact MCP claim/handback, closed cross-origin refusal, and copy-interaction receipts. Use after plugin pairing, authorization, tunnel, discover/claim/release, or starter-copy failures. Included automatically in FULL; drops heavy canvas/media dumps while retaining the bridge timeline.',
-    logFilter: line =>
-      /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
-  },
-
-  BRIDGESUBMIT: {
-    label: 'Application Submission Failures',
-    description: 'Bridge submission retry/commit failures with closed exception classes, codes, application stage and app-module source positions. Excludes exception text, stack paths and answer content. Included automatically in FULL.',
-    logFilter: line => /\[HandoffBridge\]|submit|retry|commit|LocalAI/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
-  },
-
-  BRIDGEFOCUS: {
-    label: 'Open Worker Chat',
-    description: 'Closed outcomes for Open worker chat: revealed, reopened, missing tab, expired worker, or Chrome activation failure. No chat URLs, window IDs or conversation content. Included automatically in FULL.',
-    logFilter: line => /\[HandoffBridge\]|worker|launch|approval|reconnect/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
-  },
-
-  BRIDGECHATMODE: {
-    label: 'Worker Chat Mode',
-    description: 'Worker launch mode verification and refusal receipts. Included automatically in FULL; reports only Chat, Work, or unknown, never conversation text.',
-    logFilter: line => /HandoffBridge|worker|chat.mode|Pause.*save/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
-  },
-
-  BRIDGELAUNCH: {
-    label: 'ChatGPT Worker Launch',
-    description: 'Automatic Chrome worker launch outcomes, retries, model-menu failures and tool-approval waits. Keeps the last 20 closed outcomes even after a bundle is discarded. Included automatically in FULL.',
-    logFilter: line => /\[HandoffBridge\]|handoff[ -]?bridge|worker|launch|approval/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
-  },
-
-  BRIDGEWORKERS: {
-    label: 'ChatGPT Bridge Workers',
-    description: 'Bounded ChatGPT worker-pool and poll-pressure evidence: plan/forecast, auto-expansion, first and last safe call/result timing, aggregate submit verdicts, claim counts, authenticated MCP rate-limit count/latest Retry-After, explicit waiting-then-polling silence, replacement-starter count, and recent pool close receipts. Unanswered work remains active regardless of answer age. Use when a worker stopped after waiting, hit a rate limit, needs replacement, or a completed pool seems to disappear. Included automatically in FULL.',
-    logFilter: line =>
-      /\[HandoffBridge\]|worker_pool|worker_restarted|get-waiting|get-empty|queue-empty|waiting_limit|rate.?limit|epoch_closed|session-ended/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
   MARKET: {

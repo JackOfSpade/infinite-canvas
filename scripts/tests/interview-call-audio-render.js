@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { assert } from './testHelpers.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 
 const EMPTY = { version: 1, snapshotId: 'a'.repeat(64), question: '', plan: null, answerCard: null, briefing: { role: { title: 'Engineer', company: 'Example' } } };
 const ANSWER = { ...EMPTY, question: 'Tell me about a project.', plan: { status: 'supported', question: 'Tell me about a project.', currentStep: 0, message: '', missingComponents: [], steps: [{ id: 'project', label: 'PROJECT', cue: 'Built a saved example.', roleAttribution: 'Engineer · Example' }] } };

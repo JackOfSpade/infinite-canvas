@@ -3,14 +3,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
-import { withTimeout } from './fixtures/handoff-bridge/harness.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
+import { withTimeout } from './fixtures/practice-connector/harness.js';
 import { PRACTICE_CODE_RE, PRACTICE_FINISH_TOOL, buildPracticeInterviewPrompt, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
 import { addInterviewQaCard, findInterviewPracticeSession, listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
-import { PRACTICE_MCP_PATH, createPracticeMcpHandler, createPracticeRequestHandler, isPracticeRequest } from '../../electron/ipc/handoffBridge/practiceMcp.js';
+import { PRACTICE_MCP_PATH, createPracticeMcpHandler, createPracticeRequestHandler, isPracticeRequest } from '../../electron/ipc/practiceConnector/practiceMcp.js';
 import { CLAUDE_NEW_CHAT_URL, createPracticeChatLauncher } from '../../electron/ipc/interviewPracticeLauncher.js';
-import { practiceBridgeReadiness, registerInterviewPreparationHandlers } from '../../electron/ipc/interviewPreparation.js';
+import { practiceConnectorReadiness, registerInterviewPreparationHandlers } from '../../electron/ipc/interviewPreparation.js';
 
 async function userData(run) {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-practice-'));
@@ -212,20 +212,20 @@ export default [
     await userData(async dir => {
       const handlers = new Map(); const launches = []; const notices = [];
       let launchResult = { ok: true, tab: { windowId: '1', tabId: '2' } };
-      let status = { config: { hostname: 'bridge.example.com' }, enabled: true, serving: 'live' };
+      let status = { hostname: 'bridge.example.com', serving: 'live' };
       const inputs = { careerSnapshotId: 'd'.repeat(64), jobUrlSha256: (await import('node:crypto')).createHash('sha256').update('https://jobs.example/1').digest('hex'), applicationArtifactId: 'a'.repeat(64), applicationArtifactDigest: 'b'.repeat(64) };
       const brief = { inputs, role: { title: 'Product Engineer', company: 'Discord', summary: 'Own features.' }, roleThemes: ['voice'], companyFacts: [{ fact: 'Discord runs on Elixir.' }], recentContext: [] };
       registerInterviewPreparationHandlers({ appInstance: { getPath: () => dir }, registerHandler: (channel, handler) => handlers.set(channel, handler),
         practiceRegistry: createInterviewPracticeRegistry({ userDataPath: dir }), practiceLauncher: { launch: async ({ prompt }) => { launches.push(prompt); return launchResult; } },
-        bridgeStatus: () => status, broadcast: event => notices.push(event), loadPreparedBrief: async ({ briefRecordId }) => (briefRecordId === 'c'.repeat(64) ? brief : null) });
+        connectorStatus: () => status, broadcast: event => notices.push(event), loadPreparedBrief: async ({ briefRecordId }) => (briefRecordId === 'c'.repeat(64) ? brief : null) });
       const nodeId = 'interview-helper-1';
       await addInterviewQaCard({ userDataPath: dir, nodeId, scope: 'company', card: { question: 'Why Discord?', headline: 'Because voice.' } });
       const startArgs = { nodeId, briefRecordId: 'c'.repeat(64), snapshotId: 'd'.repeat(64), canonicalJobUrl: 'https://jobs.example/1', bundleArtifactId: 'a'.repeat(64), bundleArtifactDigest: 'b'.repeat(64) };
       const load = await handlers.get('load-interview-practice')({}, { nodeId });
       assert.equal(load.session, null); assert.equal(load.bridge.connectorUrl, 'https://bridge.example.com/practice/mcp');
-      status = { config: { hostname: null } };
+      status = { hostname: null, serving: 'off' };
       assert.equal((await handlers.get('start-interview-practice')({}, startArgs, new AbortController().signal)).reason, 'no_hostname');
-      status = { config: { hostname: 'bridge.example.com' }, enabled: true, serving: 'live' };
+      status = { hostname: 'bridge.example.com', serving: 'live' };
       await assert.rejects(handlers.get('start-interview-practice')({}, { ...startArgs, snapshotId: 'e'.repeat(64) }, new AbortController().signal), /Prepare this interview/u, 'a brief bound to other inputs is refused');
       const started = await handlers.get('start-interview-practice')({}, startArgs, new AbortController().signal);
       assert.equal(started.ok, true); assert.equal(started.session.status, 'armed'); assert.equal(started.session.questionCount, 1);
@@ -269,9 +269,9 @@ export default [
   { name: 'practice plan order and bridge readiness', async run() {
     const ordered = orderPracticeQuestions([{ question: 'B?' }, { question: 'A?' }, { question: 'a?' }, { question: 'C?' }], ['A?', 'Missing?', 'C?']);
     assert.deepEqual(ordered.map(card => card.question), ['A?', 'C?', 'B?']);
-    assert.deepEqual(practiceBridgeReadiness({ config: { hostname: 'bridge.example.com' }, enabled: true, serving: 'live' }), { ready: true, hostname: 'bridge.example.com', connectorUrl: 'https://bridge.example.com/practice/mcp', connectorName: 'Infinite Canvas Practice', reason: null });
-    assert.equal(practiceBridgeReadiness({ config: { hostname: null } }).reason, 'no_hostname');
-    assert.equal(practiceBridgeReadiness({ config: { hostname: 'h.example.com' }, enabled: false }).reason, 'bridge_off');
-    assert.equal(practiceBridgeReadiness({ config: { hostname: 'h.example.com' }, enabled: true, serving: 'paused' }).reason, 'not_serving');
+    assert.deepEqual(practiceConnectorReadiness({ hostname: 'bridge.example.com', serving: 'live' }), { ready: true, hostname: 'bridge.example.com', connectorUrl: 'https://bridge.example.com/practice/mcp', connectorName: 'Infinite Canvas Practice', reason: null });
+    assert.equal(practiceConnectorReadiness({ hostname: null, serving: 'off' }).reason, 'no_hostname');
+    assert.equal(practiceConnectorReadiness({ hostname: 'h.example.com', serving: 'off' }).reason, 'not_serving');
+    assert.equal(practiceConnectorReadiness({ hostname: 'h.example.com', serving: 'starting' }).reason, 'not_serving');
   } },
 ];

@@ -11,7 +11,6 @@ const AVAILABILITY_DECISION_LIMIT = 50;
 const AVAILABILITY_STAGES = Object.freeze(['absence-abort', 'launch-refused']);
 const AVAILABILITY_REASONS = Object.freeze([
   'ready', 'disposed', 'launcher-unavailable', 'auto-launch-disabled', 'pool-ended',
-  'bridge-paused', 'held', 'no-window', 'user-action-required', 'no-eligible-worker',
 ]);
 const LAUNCH_REFUSAL_REASONS = Object.freeze([
   'approval_required', 'plugin_missing', 'reconnect_required', 'usage_limit', 'safety_block',
@@ -21,7 +20,7 @@ const LAUNCH_REFUSAL_REASONS = Object.freeze([
 const PLANNER_REASONS = Object.freeze(['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers']);
 const OUTCOMES = new Set(['found', 'link-only', 'not-found', 'ambiguous', 'closed', 'unreadable', 'failed']);
 export const OFFICIAL_POSTING_HANDOFF_FAILURE_CODES = Object.freeze([
-  'bridge-timeout', 'bridge-aborted', 'bridge-unavailable', 'comparative-unavailable', 'comparative-invalid',
+  'worker-timeout', 'worker-aborted', 'worker-unavailable', 'comparative-unavailable', 'comparative-invalid',
   'worker-lost', 'worker-replaced', 'comparison-contaminated', 'fresh-context-required', 'requeue-exhausted',
   'renderer-unavailable', 'sender-destroyed', 'renderer-stopped', 'renderer-navigated', 'request-timeout',
   'type-error', 'syntax-error', 'range-error', 'abort-error', 'unexpected-error',
@@ -31,10 +30,10 @@ const HANDOFF_ERROR_CODES = new Map([
   ['OFFICIAL_POSTING_COMPARATIVE_UNAVAILABLE', 'comparative-unavailable'],
   ['OFFICIAL_POSTING_COMPARATIVE_INVALID', 'comparative-invalid'],
   ['OFFICIAL_POSTING_RESPONSE_INVALID', 'comparative-invalid'],
-  ['BRIDGE_WORKER_LOST', 'worker-lost'], ['BRIDGE_WORKER_REPLACED', 'worker-replaced'],
-  ['BRIDGE_COMPARISON_CONTAMINATED', 'comparison-contaminated'],
-  ['BRIDGE_FRESH_CONTEXT_REQUIRED', 'fresh-context-required'], ['BRIDGE_REQUEUE_EXHAUSTED', 'requeue-exhausted'],
-  ['BRIDGE_RENDERER_UNAVAILABLE', 'renderer-unavailable'], ['IPC_SENDER_DESTROYED', 'sender-destroyed'],
+  ['WORKER_WORKER_LOST', 'worker-lost'], ['WORKER_WORKER_REPLACED', 'worker-replaced'],
+  ['WORKER_COMPARISON_CONTAMINATED', 'comparison-contaminated'],
+  ['WORKER_FRESH_CONTEXT_REQUIRED', 'fresh-context-required'], ['WORKER_REQUEUE_EXHAUSTED', 'requeue-exhausted'],
+  ['WORKER_RENDERER_UNAVAILABLE', 'renderer-unavailable'], ['IPC_SENDER_DESTROYED', 'sender-destroyed'],
   ['IPC_RENDERER_STOPPED', 'renderer-stopped'], ['IPC_RENDERER_NAVIGATED', 'renderer-navigated'],
   ['IPC_REQUEST_TIMEOUT', 'request-timeout'],
 ]);
@@ -94,7 +93,7 @@ function chatCounts(value) {
 /** Closed error classes only: arbitrary codes, messages and names may contain private data. */
 export function officialPostingHandoffFailureCode(error, signal) {
   try {
-    if (signal?.aborted) return HANDOFF_ERROR_CODES.get(signal.reason?.code) || 'bridge-aborted';
+    if (signal?.aborted) return HANDOFF_ERROR_CODES.get(signal.reason?.code) || 'worker-aborted';
     if (HANDOFF_ERROR_CODES.has(error?.code)) return HANDOFF_ERROR_CODES.get(error.code);
     if (Array.isArray(error?.correctionDetails)) return 'comparative-invalid';
     return HANDOFF_ERROR_NAMES.get(error?.name) || 'unexpected-error';

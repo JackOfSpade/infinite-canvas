@@ -5,7 +5,7 @@ import { APPLICATION_ROUTE_CLAUDE_RUNNER } from './applicationRuleTally.js';
 // headless mode: the latest Opus writes, judges and fact-checks, the latest
 // Sonnet converts and repairs (CLAUDE_STAGE_PROFILES). Each handoff lane
 // (the main lane of a job, or one parallel task) keeps one persisted Claude Code
-// session per chat: correction rounds resume it, and the bridge's new-chat rule
+// session per chat: correction rounds resume it, and the fresh-session rule
 // (freshContextRequired / freshContextKey) decides when a fresh session starts.
 // Failures are final until the user retries: there is no automatic retry, no
 // fallback and no waiting. This module is pure Node (no 'electron' import);
@@ -515,7 +515,7 @@ function freshContextKeyOf(handoff) {
   return typeof key === 'string' && FRESH_CONTEXT_KEY_RE.test(key) ? key : null;
 }
 
-/** Mirrors the bridge engine's requiresFreshContextBoundary rule for one lane. */
+/** Whether a lane must start a fresh session at this handoff (requiresFreshContextBoundary rule). */
 function needsFreshSession(lane, handoff, key) {
   if (!lane.started) return true;
   if (handoff?.freshContextRequired !== true) return false;
@@ -573,7 +573,6 @@ export function createClaudeApplicationRunner({
   runStage = null,
   stateFile,
   workspaceDir,
-  isBridgeLaned = () => false,
   notify = () => {},
   logger = console,
   concurrency = CLAUDE_RUNNER_CONCURRENCY,
@@ -1188,9 +1187,6 @@ export function createClaudeApplicationRunner({
     if (existing?.status === 'failed' || existing?.status === 'done') return { ...existing };
     if (drivers.has(jobId)) return existing ? { ...existing } : { status: 'running', stage: null };
     if (shuttingDown) return { status: 'stopped' };
-    let laned = false;
-    try { laned = isBridgeLaned(jobId) === true; } catch { laned = false; }
-    if (laned) return { status: 'bridge' };
     return startDriver(jobId, canvasFilePath);
   }
 

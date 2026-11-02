@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import {
   COL_X,
   computeJobTreeView,

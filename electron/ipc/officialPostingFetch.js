@@ -112,7 +112,7 @@ export async function fetchOfficialPosting(value, {
   let timer = setTimeout(timeout, OFFICIAL_FETCH_TIMEOUT_MS);
   timer.unref?.();
   const interrupted = () => controller.signal.reason instanceof OfficialPostingFetchError
-    ? controller.signal.reason : new OfficialPostingFetchError('bridge-aborted');
+    ? controller.signal.reason : new OfficialPostingFetchError('worker-aborted');
   const bounded = promise => new Promise((resolve, reject) => {
     const cleanup = () => controller.signal.removeEventListener('abort', onAbort);
     const onAbort = () => { cleanup(); reject(interrupted()); };

@@ -103,7 +103,7 @@ export default [
     name: 'Official posting bundle: incomplete lookup reasons survive inert JSON and agree across cards, Markdown and HTML',
     run() {
       const cases = [
-        ['bridge-unavailable', /research unavailable/u], ['bridge-timeout', /research timed out/u],
+        ['worker-unavailable', /research unavailable/u], ['worker-timeout', /research timed out/u],
         ['fetch-timeout', /Employer site verification timed out/u], ['crawl-budget', /search coverage limited/u],
         ['fetch-failed', /Employer site verification incomplete/u], ['semantic-uncertain', /match uncertain/u],
         ['comparative-invalid', /match uncertain/u], ['official-text-missing', /posting could not be read/u],
@@ -111,7 +111,7 @@ export default [
       for (const level of ['L5', 'L6']) for (const [code, reason] of cases) {
         const officialPosting = { level, outcome: 'not-found', employer: level === 'L6' ? '' : 'Northwind',
           sourceUrl: 'https://careers.northwind.example/unverified-candidate',
-          trail: ['bridge-research', code], fetchedAt: '2026-10-01T12:00:00.000Z', scrapedListingSha256: 'b'.repeat(64) };
+          trail: ['worker-research', code], fetchedAt: '2026-10-01T12:00:00.000Z', scrapedListingSha256: 'b'.repeat(64) };
         const value = { ...job, officialPosting, postingVariants: [], applyUrl: '' };
         const status = officialPostingLookupStatus(officialPosting);
         assert.equal(status.state, 'incomplete'); assert.equal(status.retryable, true);
@@ -143,7 +143,7 @@ export default [
     run() {
       const fetchFailure = { url: 'https://careers.northwind.example/jobs/one', code: 'fetch-failed', reason: 'access-denied', statusCode: 403 };
       const officialPosting = { level: 'L5', outcome: 'not-found', employer: 'Northwind',
-        trail: ['bridge-research', 'fetch-failed'], fetchFailures: [fetchFailure] };
+        trail: ['worker-research', 'fetch-failed'], fetchFailures: [fetchFailure] };
       const value = { ...job, officialPosting, postingVariants: [], applyUrl: '' };
       const status = officialPostingLookupStatus(officialPosting);
       assert.equal(status.state, 'incomplete');
@@ -211,7 +211,7 @@ export default [
     name: 'Official posting bundle: completed no-match, ambiguity and closure stay distinct from interrupted research',
     run() {
       for (const [outcome, trail, state, label] of [
-        ['not-found', ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], 'not-found', 'No exact official posting found'],
+        ['not-found', ['worker-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], 'not-found', 'No exact official posting found'],
         ['ambiguous', ['comparative-disagree', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL], 'ambiguous', 'Several official postings match'],
         ['closed', ['closed'], 'closed', 'Official posting closed'],
       ]) {
@@ -255,7 +255,7 @@ export default [
       assert.equal(normalized.sourceUrl, 'https://careers.northwind.example/jobs/one');
       for (const failed of [
         { ...legacy, outcome: 'failed', employer: 'Northwind', trail: ['fetch-timeout'] },
-        { ...legacy, level: 'L5', outcome: 'not-found', employer: 'Northwind', trail: ['bridge-unavailable'] },
+        { ...legacy, level: 'L5', outcome: 'not-found', employer: 'Northwind', trail: ['worker-unavailable'] },
       ]) {
         const saved = normaliseResumeDownloadBundle({ officialPosting: failed }).officialPosting;
         assert.deepEqual(saved, normalizeOfficialPosting(failed));

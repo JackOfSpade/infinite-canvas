@@ -4,22 +4,11 @@ import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy,
 import { ConfirmDialog } from './ConfirmDialog';
 import { useModalStackCount } from './modalStack';
 import { EventLogger } from '../utils/EventLogger';
-// Read-only: which jobIds the ChatGPT bridge already holds. Same hook
-// HandoffBridgePanel uses, no new IPC channel — see isBridgeHeldApplication
-// below for the one thing this dock does with it.
-import { useHandoffBridgeStatus } from '../hooks/useHandoffBridgeStatus';
 import { CareerCompilationProgress } from './CareerCompilationProgress';
 import { careerCompilationProgressForRequest, recordCareerCompilationProgress } from '../utils/careerCompilationProgress';
-import { BridgeProgress } from './BridgeProgress';
-import { ClaudeProgress } from './ClaudeProgress';
+import { ClaudeProgress, ClaudeWorkingRow } from './ClaudeProgress';
 import { ClaudePauseNotice } from './ClaudePauseNotice';
-import { BridgeApplicationsPage } from './BridgeApplicationsPage';
-// The bridge-held rule is shared with the job card so the two cannot disagree.
-import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
 import { isJobSearchPauseEligible } from '../utils/jobHubManualAiOwnership';
-// Which bridge-held bundles share ONE page instead of one chip/page each.
-import { buildDockNav, isGroupOnlyNav } from '../utils/applicationBridgePage';
-import { isBridgeHeldPush } from '../utils/bridgeHeldPush';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
 import { assessPastedResponse, responseFingerprint } from '../utils/pasteIdentityGuard';
 import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals, forgetApplicationDraftWrite, mergeDockQueue, registerApplicationDraftFlusher, requestApplicationHandoffRefresh, setDismissedApplicationBundles, subscribeApplicationHandoffFocus, subscribeApplicationHandoffs, trackApplicationDraftWrite, usesPushHandoffCode } from '../utils/applicationHandoffDock';
@@ -74,7 +63,7 @@ const PREFERENCE_RESEARCH_RESPONSE_INVALID_CODES = new Set([
 
 const COMPENSATION_RESPONSE_INVALID_CODE = 'JOB_COMPENSATION_RESPONSE_INVALID';
 
-const BRIDGE_RETURN_LINES = {
+const WORKER_RETURN_LINES = {
   rejection_cap: 'The same rule failed in 5 answers from Claude.',
   worker_restart_cap: 'Claude was blocked 3 times without an answer.',
 };
@@ -211,13 +200,6 @@ const dockItemSummary = (request) => {
   }
   return requestLabel(request);
 };
-
-// The header line of the shared page that every bridge-held application lives
-// on. The open request's own stage/subject would name ONE bundle on a page that
-// is about all of them.
-const applicationsPageSummary = (count) => (
-  `${count} ${count === 1 ? 'application' : 'applications'} with ChatGPT`
-);
 
 // Single source of truth for "which check ids does this escalation actually
 // name" — every caller below (the gate, the headline, and the singular/plural
@@ -406,11 +388,6 @@ export function NonApiAiDialog() {
   // prompt, and filing it where it belongs is the repair — so only an answer
   // accepted SOMEWHERE ELSE is proof of a duplicate.
   const [submittedResponses, setSubmittedResponses] = useState([]);
-  // The bridge's own live status, including which jobIds it currently holds
-  // (status.queue.jobs). Subscribed unconditionally like every other hook
-  // here — the render below reads it only for application items, but Rules
-  // of Hooks forbids calling it conditionally.
-  const bridgeStatus = useHandoffBridgeStatus();
   const dockButtonRef = useRef(null);
   const hadPendingRequestsRef = useRef(false);
   const copiedTimerRef = useRef(null);
@@ -461,30 +438,6 @@ export function NonApiAiDialog() {
       : applicationItems.filter(item => !dismissedBrokenRequestIds.has(item.requestId))
   ), [applicationItems, dismissedBrokenRequestIds]);
   const mergedRequests = useMemo(() => mergeDockQueue(requests, visibleApplicationItems), [requests, visibleApplicationItems]);
-  // Every application the ChatGPT bridge holds shares ONE page (its rows carry
-  // each bundle's own evidence-plan -> resume -> ... progress, and its worker
-  // block is the single place to spawn workers). Only requests that still need
-  // the person (manual paste, kept, handed back, broken, blocked) keep a chip.
-  const dockNav = useMemo(() => buildDockNav(mergedRequests, bridgeStatus), [mergedRequests, bridgeStatus]);
-  const groupEntryByRequestId = useMemo(() => new Map(dockNav.flatMap(entry => (
-    entry.type === 'applications' ? entry.requests.map(request => [request.requestId, entry]) : []
-  ))), [dockNav]);
-  const applicationsPageOnly = isGroupOnlyNav(dockNav);
-  // A bug report cannot otherwise tell "one shared page" from "N separate
-  // pages" — the layout is derived from live bridge status and is not
-  // persisted — so record the composition whenever it changes.
-  const sharedPageRows = groupEntryByRequestId.size;
-  const separateChipCount = mergedRequests.length - sharedPageRows;
-  const dockLayoutShapeRef = useRef(null);
-  useEffect(() => {
-    if (sharedPageRows + separateChipCount === 0) return;
-    const rowShape = sharedPageRows > 0 ? 'rows-present' : 'no-rows';
-    const chipShape = separateChipCount === 0 ? '0' : separateChipCount <= 2 ? '1-2' : 'more';
-    const shape = `${rowShape}|${chipShape}`;
-    if (dockLayoutShapeRef.current === shape) return;
-    dockLayoutShapeRef.current = shape;
-    EventLogger.log(`[Manual AI] dock layout shape: shared application page ${rowShape} · separate chips ${chipShape}`);
-  }, [sharedPageRows, separateChipCount]);
   // Run before paint: after a manual Minimize, a newly populated queue must
   // not flash its compact button for one frame before reopening.
   useLayoutEffect(() => {
@@ -500,8 +453,6 @@ export function NonApiAiDialog() {
   const activeRequest = mergedRequests.find(request => request.requestId === selectedRequestId) || mergedRequests[0] || null;
   const activeRequestId = activeRequest?.requestId || null;
   const activeCareerProgress = careerCompilationProgressForRequest(activeRequest, careerProgressByRun);
-  // The shared application page, when the open request is one of its rows.
-  const activeGroupEntry = activeRequestId ? groupEntryByRequestId.get(activeRequestId) || null : null;
   // Async clipboard/IPC completions must never update whichever queued prompt
   // happened to become active while they were in flight.
   activeRequestIdRef.current = activeRequestId;
@@ -513,30 +464,12 @@ export function NonApiAiDialog() {
   const activeValidationDetails = activeError || formatValidationDiagnostic(activeRequest?.validationDiagnostic);
 
   const isApplicationRequest = activeRequest?.kind === 'application';
-  // True only when the connected ChatGPT bridge actually HOLDS THIS exact
-  // application bundle's work: its jobId is in status.queue.jobs in a phase
-  // where ChatGPT is the one to answer it (unread, awaiting, host) — never for
-  // a push item, and never for an application item the bridge has not taken.
-  // A lane the bridge kept for the person (held, e.g. "Keep for me"), handed
-  // back (needs_user) or finished with (gone, done) keeps the normal paste UI.
-  // App commit failures stay on the worker page: pasting cannot fix them.
-  // Degrades to false, never throws, if bridgeStatus/queue/jobs is missing
-  // or malformed (bridge disabled, preload still connecting, or an older
-  // main process): Array.isArray guards the .some() below, and optional
-  // chaining guards every step reaching it.
-  const isBridgeHeldApplication = isApplicationRequest && isBridgeHeldJob(bridgeStatus, activeRequest?.jobId);
-  // Unlike application lanes, push work has no job lane. The random request
-  // claim id provides an exact correlation; task/node matching would hide
-  // sibling paste work and would silently turn application auto-release into
-  // push consent.
-  const isBridgeHeldPushRequest = !isApplicationRequest && isBridgeHeldPush(bridgeStatus, activeRequest?.bridgeClaimId);
-  // Push routes come from the main process at issue time. A stale/absent
-  // status snapshot (disabled, unlinked, paused, no chat, or between claims)
-  // cannot turn reviewed text work back into a paste task. Application
-  // bundles retain their established lane-owned route: only an exact held
-  // application lane hides their local handoff UI.
-  const isMcpRoutedRequest = !isApplicationRequest && activeRequest?.mcpEligible !== false;
-  const isBridgeHeldRequest = isBridgeHeldApplication || isBridgeHeldPushRequest;
+  // Push routes come from the main process at issue time: a handoff with
+  // workerOwned true is answered by the local Claude worker, so the dock shows
+  // a short "Claude is working" row for it and no paste controls. Only a
+  // handoff the worker returned to the person (workerOwned false) keeps the
+  // paste UI. Application bundles use their own claudeRun state below.
+  const isMcpRoutedRequest = !isApplicationRequest && activeRequest?.workerOwned !== false;
   const canPauseAndSaveJobSearch = isJobSearchPauseEligible(activeRequest);
   // The dock is deliberately not allowed to call the cancellation IPC: that
   // path clears the pending request before the Job Search has saved its exact
@@ -586,9 +519,8 @@ export function NonApiAiDialog() {
     : null;
   // The local Claude Code runner (main process) answering this bundle. Only
   // 'running' and 'failed' change this panel; every other runner status
-  // ('bridge', 'needs-review', none) renders exactly as before. A bundle the
-  // ChatGPT bridge holds keeps its own branch.
-  const activeClaudeRun = isApplicationRequest && !isBridgeHeldApplication ? (activeRequest.claudeRun || null) : null;
+  // ('needs-review', none) renders exactly as before.
+  const activeClaudeRun = isApplicationRequest ? (activeRequest.claudeRun || null) : null;
   const claudeRunState = activeClaudeRun?.status === 'running' || activeClaudeRun?.status === 'failed'
     ? activeClaudeRun.status
     : null;
@@ -818,8 +750,9 @@ export function NonApiAiDialog() {
   const correctionGuidance = isCorrection
     ? correctionGuidanceFor(validationCode, activeRequest?.validationDiagnostic)
     : '';
-  // Why a handoff the bridge was answering came back to this dock.
-  const bridgeReturnLine = BRIDGE_RETURN_LINES[activeRequest?.bridgeEscalation] || '';
+  // Why a handoff the Claude worker was answering came back to this dock.
+  // `workerEscalation` is the wire field the main process publishes.
+  const workerReturnLine = WORKER_RETURN_LINES[activeRequest?.workerEscalation] || '';
   // Set only for an application round whose correction prompt actually
   // carried an escalation block — never recomputed, only read off the item
   // applicationDockRequest copied it onto (see that function's own header).
@@ -995,7 +928,7 @@ export function NonApiAiDialog() {
     // mount effect, and this app-level dialog can remount while the same
     // renderer frame remains live. `receiveRequest` de-duplicates replays by
     // request id. The dock only presents MCP requests: losing or remounting
-    // this listener cannot cancel work being served by a bridge worker.
+    // this listener cannot cancel work being served by the Claude worker.
     const unsubscribeRequest = api.onNonApiAiRequest(receiveRequest);
     const unsubscribeSettled = api.onNonApiAiSettled(removeRequest);
     let disposed = false;
@@ -1752,14 +1685,12 @@ export function NonApiAiDialog() {
   // for manual/application queues, where selecting a specific item still has a
   // real purpose.
   const isAutomaticMcpQueue = mergedRequests.length > 0 && mergedRequests.every(request => (
-    request?.kind !== 'application' && request?.mcpEligible !== false
+    request?.kind !== 'application' && request?.workerOwned !== false
   ));
   const dockLabel = savingCount === 0
     ? (isAutomaticMcpQueue
       ? (waitingCount === 1 ? '1 handoff released now' : `${waitingCount} handoffs released now`)
-      : applicationsPageOnly
-        ? applicationsPageSummary(waitingCount)
-        : (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`))
+      : (waitingCount === 1 ? '1 handoff waiting' : `${waitingCount} handoffs waiting`))
     : waitingCount === 0
       ? (savingCount === 1 ? '1 bundle saving' : `${savingCount} bundles saving`)
       : `${waitingCount} waiting · ${savingCount} saving`;
@@ -1842,7 +1773,7 @@ export function NonApiAiDialog() {
                 <h2 id="non-api-ai-dialog-title" className="text-sm font-semibold text-white">
                   AI handoffs
                 </h2>
-                {activeRequest?.handoffCode && !isBridgeHeldRequest && !isMcpRoutedRequest && (
+                {activeRequest?.handoffCode && !isMcpRoutedRequest && (
                   <span className="inline-flex rounded border border-violet-400/30 bg-violet-500/15 px-2 py-0.5 font-mono text-xs font-semibold tracking-wider text-violet-200">
                     {activeRequest.handoffCode}
                   </span>
@@ -1854,7 +1785,7 @@ export function NonApiAiDialog() {
                     {ownerBadgeForNode(activeRequest.nodeId)}
                   </span>
                 )}
-                {activeGroupEntry ? applicationsPageSummary(activeGroupEntry.requests.length) : dockItemSummary(activeRequest)}
+                {dockItemSummary(activeRequest)}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -1873,41 +1804,10 @@ export function NonApiAiDialog() {
             </div>
           </div>
           <ClaudePauseNotice className="mt-3" />
-          {/* Bridge-held applications are rows of ONE page, so a queue made only
-              of them has nothing to choose between — same as an automatic queue. */}
-          {!isAutomaticMcpQueue && !applicationsPageOnly && (
+          {!isAutomaticMcpQueue && (
           <nav aria-label="Pending AI handoff batches" className="mt-3">
             <div className="grid grid-cols-5 gap-1 sm:grid-cols-10">
               {mergedRequests.map((request, index) => {
-                const groupEntry = groupEntryByRequestId.get(request.requestId);
-                if (groupEntry) {
-                  // One shared chip stands in for every bridge-held bundle. It
-                  // renders where the first of them sat, and only once.
-                  if (groupEntry.requestId !== request.requestId) return null;
-                  const groupSelected = activeGroupEntry === groupEntry;
-                  const groupDescription = `${applicationsPageSummary(groupEntry.requests.length)}: each application's progress and the worker chats share this page`;
-                  return (
-                    <button
-                      key="applications-page"
-                      type="button"
-                      onClick={() => {
-                        awaitingSuccessorRef.current = null;
-                        pendingFocusJobIdsRef.current.clear();
-                        setSelectedRequestId(groupEntry.requestId);
-                        EventLogger.log('[Manual AI] user selected the shared application page');
-                      }}
-                      disabled={!!cancelConfirmTarget}
-                      aria-current={groupSelected ? 'page' : undefined}
-                      aria-label={groupDescription}
-                      title={groupDescription}
-                      className={`col-span-2 inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-xs font-medium tabular-nums transition-colors ${groupSelected
-                        ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
-                        : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
-                    >
-                      <span className="truncate">{`ChatGPT · ${groupEntry.requests.length}`}</span>
-                    </button>
-                  );
-                }
                 const selected = request.requestId === activeRequestId;
                 const hasDraft = Boolean(drafts[request.requestId]?.trim());
                 const hasError = Boolean(errors[request.requestId]);
@@ -2043,21 +1943,6 @@ export function NonApiAiDialog() {
                 </button>
               </div>
             </div>
-          ) : activeGroupEntry ? (
-            // Every application the ChatGPT bridge holds is a row of this ONE
-            // page: its own evidence-plan -> resume -> ... progress, and its own
-            // Discard. The worker chats are managed once, in the block under the
-            // rows, instead of once per bundle. Nothing here can take a paste —
-            // a bundle that needs one stops being "held" and gets its own chip.
-            <BridgeApplicationsPage
-              status={bridgeStatus}
-              held={activeGroupEntry.requests}
-              ordinalFor={request => applicationOrdinalsRef.current.get(request.jobId) ?? null}
-              activeRequestId={activeRequestId}
-              discardingRequestIds={discardingRequestIds}
-              discardDisabled={!!cancelConfirmTarget}
-              onDiscard={requestApplicationDiscardConfirm}
-            />
           ) : applicationWorkingState ? (
             // The response was accepted and the app is finishing the bundle:
             // rendering it, measuring the pages, writing the files. Nothing
@@ -2095,8 +1980,7 @@ export function NonApiAiDialog() {
             // The local Claude runner is answering this stage itself. Copying
             // the prompt or pasting an answer would race it with a second,
             // disagreeing response, so only the status and Discard render.
-            // ClaudeProgress (the same four-step section the bridge shows)
-            // sits OUTSIDE the status div: its timer ticks every second and
+            // ClaudeProgress sits OUTSIDE the status div: its timer ticks every second and
             // must not re-announce through that live region.
             <>
             <ClaudeProgress run={activeClaudeRun} item={activeRequest} />
@@ -2151,60 +2035,11 @@ export function NonApiAiDialog() {
                 </div>
               </div>
             </div>
-          ) : isBridgeHeldRequest ? (
-            // The ChatGPT bridge already holds this exact bundle and is
-            // working it in its own chat. Offering this dock's copy/paste
-            // workflow too would invite a second, disagreeing answer for the
-            // same prompt, so none of that working area renders here — only
-            // a calm status line and the destructive control this dock still
-            // owns: discarding an application or cancelling a push task.
-            // BridgeProgress sits OUTSIDE the
-            // status div below: its timers tick every second and must not
-            // re-announce through that live region.
-            <>
-            <BridgeProgress
-              status={bridgeStatus}
-              item={activeRequest}
-              isPush={!isApplicationRequest}
-              canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}
-              onPauseAndSave={requestJobSearchPauseAndSave}
-            />
-            <div className="flex flex-wrap items-center justify-end gap-2">
-              {isBridgeHeldApplication ? (
-                <button
-                  type="button"
-                  onClick={requestApplicationDiscardConfirm}
-                  disabled={isDiscarding || !!cancelConfirmTarget}
-                  className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                  title="Delete this application bundle and its private job folder"
-                >
-                  {isDiscarding ? 'Discarding…' : 'Discard bundle'}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={requestCancelConfirm}
-                  disabled={isCancelling || !!cancelConfirmTarget}
-                  className="rounded-md border border-red-400/25 px-2.5 py-1.5 text-[11px] font-medium text-red-200/80 transition-colors hover:bg-red-500/15 disabled:cursor-not-allowed disabled:opacity-50"
-                  title="Cancel the job operation waiting for this AI response"
-                >
-                  {isCancelling ? 'Cancelling…' : 'Cancel task'}
-                </button>
-              )}
-            </div>
-            </>
           ) : (
             <>
               {isMcpRoutedRequest && (
                 <>
-                  <BridgeProgress
-                    status={bridgeStatus}
-                    item={activeRequest}
-                    isPush={!isApplicationRequest}
-                    awaitingClaim
-                    canPauseAndSave={canPauseAndSaveJobSearch && !activeCareerProgress}
-                    onPauseAndSave={requestJobSearchPauseAndSave}
-                  />
+                  <ClaudeWorkingRow />
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     {isApplicationRequest ? (
                       <button
@@ -2315,9 +2150,9 @@ export function NonApiAiDialog() {
                   ? 'The previous answer did not validate. Copy this correction prompt into the same AI chat, then replace the response below with the complete regenerated answer.'
                   : 'Copy this prompt into your AI chat, then paste its complete response below.'}
               </p>
-              {bridgeReturnLine && (
+              {workerReturnLine && (
                 <p className="text-xs leading-relaxed text-amber-100/80">
-                  {bridgeReturnLine} It is kept here for you to answer.
+                  {workerReturnLine} It is kept here for you to answer.
                 </p>
               )}
 

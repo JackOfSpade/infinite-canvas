@@ -2,9 +2,9 @@ import fsPromises from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
-import { withConsoleCollector } from './fixtures/handoff-bridge/renderHarness.js';
-import { withTimeout } from './fixtures/handoff-bridge/harness.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
+import { withConsoleCollector } from './fixtures/practice-connector/renderHarness.js';
+import { withTimeout } from './fixtures/practice-connector/harness.js';
 import { buildInterviewPlan } from '../../src/utils/interviewHelper.js';
 
 const SNAPSHOT_A = 'a'.repeat(64);

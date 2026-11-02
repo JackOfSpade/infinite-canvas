@@ -1730,7 +1730,6 @@ export async function evaluateJobPreferences({ jobs, jobPreferences, preferenceP
     ? AbortSignal.any([signal, listingAbort.signal])
     : listingAbort.signal;
   let cursor = 0;
-  let round = 0;
   let issuedBatches = 0;
   // A round remains a durable layout group capped by HANDOFF_CONCURRENCY:
   // every descriptor in that group shares the one recorded size/rate pair.
@@ -1755,7 +1754,6 @@ export async function evaluateJobPreferences({ jobs, jobPreferences, preferenceP
       position += 1;
     }
     issuedBatches += position;
-    round += 1;
   };
   const nextPlannedRootBatch = async () => {
     while (plannedRootBatches.length === 0 && cursor < pool.length) {

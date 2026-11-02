@@ -55,7 +55,7 @@ export default [
       const bare = normalizeClaudeRun({ status: 'failed' });
       assert(JSON.stringify(bare) === JSON.stringify({ status: 'failed', stage: '', code: '', message: '', updatedAt: null, lastActivityAt: null }),
         `missing optional fields become empty strings: ${JSON.stringify(bare)}`);
-      for (const status of ['running', 'failed', 'done', 'needs-review', 'bridge', 'invalid']) {
+      for (const status of ['running', 'failed', 'done', 'needs-review', 'invalid']) {
         assert(normalizeClaudeRun({ status })?.status === status, `${status} is a known status`);
       }
     },
@@ -160,8 +160,6 @@ export default [
         'Claude running means the stage is being worked, not awaiting a person');
       assert(applicationDockItemState('queued', normalizeClaudeRun({ status: 'failed', message: 'x' })) === 'waiting',
         'a failed run hands the stage back to a person');
-      assert(applicationDockItemState('queued', normalizeClaudeRun({ status: 'bridge' })) === 'waiting',
-        'bridge runs keep the existing classification');
       assert(applicationDockItemState('queued', null) === 'waiting', 'no runner state keeps the existing classification');
       // Running never masks a terminal or blocked status.
       assert(applicationDockItemState('saved', normalizeClaudeRun({ status: 'running' })) === 'idle', 'idle stays idle');

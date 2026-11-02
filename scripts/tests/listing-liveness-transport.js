@@ -1,9 +1,6 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import { getKnownTaskIds, taskMaxTokensFor } from '../../electron/ipc/llm.js';
-import { BRIDGE_RAW_RESEARCH_TASKS, BRIDGE_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
-import { PUSH_TASK_POLICY } from '../../electron/ipc/handoffBridge/sources/push.js';
-import { bridgeLinked, bridgeWorkerPoolActive } from '../../electron/ipc/handoffBridge/bridgeAvailability.js';
+import { WORKER_RAW_RESEARCH_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { cappedHandoff } from '../../electron/ipc/officialPostingService.js';
 import {
   LISTING_LIVENESS_TASK, LISTING_LIVENESS_RESPONSE_SCHEMA, buildListingLivenessRequest,
@@ -26,14 +23,6 @@ const member = {
   },
 };
 
-function closedVocabulary(path, declaration) {
-  const source = fs.readFileSync(new URL(path, import.meta.url), 'utf8');
-  const start = source.indexOf(`const ${declaration} = new Set([`);
-  const end = source.indexOf(']);', start);
-  assert.ok(start >= 0 && end > start, `${declaration} declaration exists`);
-  return new Set([...source.slice(start, end).matchAll(/'([a-z0-9-]+)'/gu)].map(match => match[1]));
-}
-
 export default [
   {
     name: 'listing liveness transport: JSON task is registered on release-one and absent from RAW routing',
@@ -42,22 +31,13 @@ export default [
       assert.ok(getKnownTaskIds().has(LISTING_LIVENESS_TASK));
       assert.equal(taskMaxTokensFor(LISTING_LIVENESS_TASK, { itemCount: 1 }), 1184);
       assert.equal(taskMaxTokensFor(LISTING_LIVENESS_TASK, { itemCount: 8 }), 2304);
-      assert.ok(BRIDGE_RELEASE_ONE_TASKS.includes(LISTING_LIVENESS_TASK));
-      assert.equal(BRIDGE_RAW_RESEARCH_TASKS.includes(LISTING_LIVENESS_TASK), false);
-      assert.deepEqual(PUSH_TASK_POLICY[LISTING_LIVENESS_TASK], { mode: 'release_one', bridgeable: true });
-      for (const [path, declaration] of [
-        ['../../electron/ipc/handoffBridge/controller.js', 'TASK_IDS'],
-        ['../../electron/ipc/handoffBridge/engine.js', 'STATUS_PUSH_TASKS'],
-        ['../../electron/ipc/handoffBridge/telemetry.js', 'QUEUE_PUSH_TASKS'],
-      ]) assert.ok(closedVocabulary(path, declaration).has(LISTING_LIVENESS_TASK), `${declaration} must name the task`);
+      assert.ok(WORKER_RELEASE_ONE_TASKS.includes(LISTING_LIVENESS_TASK));
+      assert.equal(WORKER_RAW_RESEARCH_TASKS.includes(LISTING_LIVENESS_TASK), false);
     },
   },
   {
-    name: 'listing liveness transport: linked single chat sends one JSON request through the exact response validator',
+    name: 'listing liveness transport: one JSON request is sent through the exact response validator',
     async run() {
-      const status = { enabled: true, link: { state: 'linked' }, chat: { pool: { active: false } } };
-      assert.equal(bridgeLinked(status), true);
-      assert.equal(bridgeWorkerPoolActive(status), false);
       const request = buildListingLivenessRequest([member], { batch: 2, batchTotal: 3 });
       assert.equal(request.task, LISTING_LIVENESS_TASK);
       assert.equal(request.format, 'json');

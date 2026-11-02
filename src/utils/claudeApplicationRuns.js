@@ -8,7 +8,7 @@
 import { normalizeApplicationProgress } from './applicationProgress.js';
 
 export const CLAUDE_RUN_STATUSES = Object.freeze([
-  'running', 'failed', 'done', 'needs-review', 'bridge', 'invalid',
+  'running', 'failed', 'done', 'needs-review', 'invalid',
 ]);
 
 const MESSAGE_LIMIT = 400;

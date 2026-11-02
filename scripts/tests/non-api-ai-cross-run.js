@@ -6,9 +6,9 @@ import electronPkg from 'electron';
 import { handleSafe } from '../../electron/ipc/ipcUtils.js';
 import { buildOfficialPostingJudgeRequest } from '../../electron/ipc/officialPostingJudge.js';
 import {
-  __reloadDurableStateForTests, flushNonApiAiPersistence, listBridgeableNonApiAiHandoffs,
-  readBridgeableNonApiAiHandoff, registerNonApiAiHandlers, requestNonApiAi,
-  requeueBridgeableNonApiAiHandoff, submitNonApiAiResponseForBridge,
+  __reloadDurableStateForTests, flushNonApiAiPersistence, listWorkerHandoffs,
+  readWorkerHandoff, registerNonApiAiHandlers, requestNonApiAi,
+  requeueWorkerHandoff, submitWorkerResponse,
 } from '../../electron/ipc/nonApiAi.js';
 
 const { app, ipcMain } = electronPkg;
@@ -63,16 +63,16 @@ function fixture() {
     return owner;
   };
   const args = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, allowTasks });
-  const read = (request, slot) => readBridgeableNonApiAiHandoff({ ...args(request), comparisonProvenance: {
-    version: 2, transport: 'bridge', observed: true, comparisonGroup: requests[slot].manualHandoff.comparisonGroup,
+  const read = (request, slot) => readWorkerHandoff({ ...args(request), comparisonProvenance: {
+    version: 2, transport: 'worker', observed: true, comparisonGroup: requests[slot].manualHandoff.comparisonGroup,
     comparisonRun: 'A', conversationKey: '4'.repeat(64), isolated: false,
   } });
-  const submit = (request, valid = true) => submitNonApiAiResponseForBridge({ ...args(request), response: JSON.stringify(valid ? {
+  const submit = (request, valid = true) => submitWorkerResponse({ ...args(request), response: JSON.stringify(valid ? {
     handoffCode: request.handoffCode, choice: 'uncertain', postingUrl: '', status: 'unknown', statusQuote: '',
     employerLinked: false, employerPageUrl: '', employerLinkQuote: '', title: '', employer: '', location: '',
     salary: '', description: '', evidence: [], conflicts: ['Synthetic page unavailable.'],
   } : { handoffCode: request.handoffCode, choice: 'invalid' }) });
-  const pending = runId => listBridgeableNonApiAiHandoffs({ allowTasks }).handoffs.filter(item => item.nodeId === nodeId && item.runId === runId);
+  const pending = runId => listWorkerHandoffs({ allowTasks }).handoffs.filter(item => item.nodeId === nodeId && item.runId === runId);
   const file = path.join(app.getPath('userData'), 'non-api-ai-handoffs.json');
   const disk = () => JSON.parse(fs.readFileSync(file, 'utf8'));
   const cleanup = async () => {
@@ -107,8 +107,8 @@ export default [
               assert.equal((await owner).failureCode, 'bridge-aborted');
             }
           } else if (slot === 2) {
-            for (let attempt = 0; attempt < 3; attempt++) assert(requeueBridgeableNonApiAiHandoff({ ...f.args(request), reason: 'worker-lost' }));
-            assert.equal((await owner).failureCode, 'BRIDGE_REQUEUE_EXHAUSTED');
+            for (let attempt = 0; attempt < 3; attempt++) assert(requeueWorkerHandoff({ ...f.args(request), reason: 'worker-lost' }));
+            assert.equal((await owner).failureCode, 'WORKER_REQUEUE_EXHAUSTED');
           } else {
             f.controllers.at(-1).abort(Object.assign(new Error('Synthetic prior run stopped'), { code: 'bridge-aborted' }));
             assert.equal((await owner).failureCode, 'bridge-aborted');
@@ -122,7 +122,7 @@ export default [
         // Simulate a legacy failed run with every suspected piece of transport
         // state. Even a matching row/prompt/step key must stay under its run id.
         Object.assign(saved.runs[f.oldRun].steps[oldRequests[3].stepKey], {
-          draft: 'Synthetic stale manual draft', bridgeEscalation: 'worker_restart_cap',
+          draft: 'Synthetic stale manual draft', workerEscalation: 'worker_restart_cap',
           comparisonGroup: 'f'.repeat(64), comparisonInvalidCount: 2,
           comparisonProof: { version: 1, transport: 'manual' },
           validationCorrectionDetails: ['Synthetic obsolete correction'],
@@ -136,7 +136,7 @@ export default [
         await until(() => f.attempted.filter(item => item.runId === f.newRun).length === owners.length);
         const current = f.attempted.filter(item => item.runId === f.newRun);
         assert.equal(f.pending(f.newRun).length, owners.length, 'all first presentations may fail together while the MCP batch remains pending');
-        assert(current.every(item => item.mcpEligible && item.initialResponse === '' && item.bridgeEscalation === null && !item.isCorrection));
+        assert(current.every(item => item.workerOwned && item.initialResponse === '' && item.workerEscalation === null && !item.isCorrection));
         assert.deepEqual(current.map(item => item.stepKey).sort(), oldRequests.map(item => item.stepKey).sort(), 'identical logical steps stay isolated by the new run id');
         for (const request of current) {
           const slot = oldRequests.findIndex(item => item.stepKey === request.stepKey);
@@ -156,7 +156,7 @@ export default [
         const originalOwner = f.invoke(f.oldRun, 0);
         const original = await until(() => f.attempted[0]);
         assert(f.read(original, 0).ok);
-        assert(requeueBridgeableNonApiAiHandoff({ ...f.args(original), reason: 'worker-replaced' }));
+        assert(requeueWorkerHandoff({ ...f.args(original), reason: 'worker-replaced' }));
         f.failDelivery(true);
         const adoptedOwner = f.invoke(f.oldRun, 0);
         const newOwner = f.invoke(f.newRun, 0);

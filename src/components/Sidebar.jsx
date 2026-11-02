@@ -77,9 +77,6 @@ export const Sidebar = React.memo(function Sidebar({ jobCardsCount = 0, sellHubs
 
         <div className="flex-1" />
 
-        {/* The bridge has no rail button of its own: handoffs surface in the
-            dock that already shows them, and its configuration lives in
-            Settings, which owns the panel and setup entry points. */}
         <button
           onClick={onReportBugClick}
           className="p-2.5 rounded-lg transition-all text-red-400/35 hover:text-red-400 hover:bg-red-400/10"

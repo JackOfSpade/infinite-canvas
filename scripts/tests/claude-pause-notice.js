@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
+import { withTimeout } from './fixtures/practice-connector/harness.js';
 import {
   CLAUDE_TASK_PAUSE_CODES,
   CLAUDE_TASK_STATUS_CHANNEL,
@@ -10,7 +15,6 @@ import {
 } from '../../electron/ipc/claudeTaskWorker.js';
 import { CLAUDE_PAUSE_COPY, claudePauseNotice } from '../../src/utils/claudeTaskPause.js';
 import { applyClaudeTaskStatus, getClaudeTaskStatus, subscribeClaudeTaskStatus } from '../../src/utils/claudeTaskStatusStore.js';
-import { deriveBridgePushProgress } from '../../src/utils/bridgeJobProgress.js';
 
 const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise(resolve => setImmediate(resolve)); };
 const source = path => fs.readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
@@ -20,10 +24,10 @@ export default [
     name: 'claude pause notice: the status view carries only a known pause code',
     run() {
       for (const code of CLAUDE_TASK_PAUSE_CODES) {
-        assert.deepEqual({ ...claudeTaskStatusView({ pauseCode: code }, true) }, { active: true, paused: true, pauseCode: code });
+        assert.deepEqual({ ...claudeTaskStatusView({ pauseCode: code }) }, { paused: true, pauseCode: code });
       }
-      assert.deepEqual({ ...claudeTaskStatusView({ pauseCode: 'CLAUDE_ERROR' }, true) }, { active: true, paused: false, pauseCode: null });
-      assert.deepEqual({ ...claudeTaskStatusView(undefined, false) }, { active: false, paused: false, pauseCode: null });
+      assert.deepEqual({ ...claudeTaskStatusView({ pauseCode: 'CLAUDE_ERROR' }) }, { paused: false, pauseCode: null });
+      assert.deepEqual({ ...claudeTaskStatusView(undefined) }, { paused: false, pauseCode: null });
       assert.equal(claudeTaskWorkerStatus().paused, false, 'a worker that never started is not paused');
     },
   },
@@ -109,19 +113,42 @@ export default [
     },
   },
   {
-    name: 'claude pause notice: push progress names Claude, never a ChatGPT chat or tunnel, when the worker answers',
-    run() {
-      for (const input of [
-        { chat: {}, bridge: {}, awaitingClaim: true },
-        { chat: { state: 'working', ordinal: 1 }, bridge: { enabled: true, serving: 'live', tunnelReachable: false }, awaitingClaim: false },
-        { chat: {}, bridge: { paused: true }, awaitingClaim: true },
-      ]) {
-        const view = deriveBridgePushProgress({ ...input, claudeWorker: true });
-        assert.equal(view.headline, 'Claude is working on this handoff');
-        assert.equal(view.tone, 'working');
-        assert(!/ChatGPT|tunnel|bridge/i.test(`${view.headline} ${view.detail}`));
+    name: 'claude pause notice: a handoff held by the worker renders as Claude working, with no controls',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-claude-working-'));
+      const entry = path.join(directory, 'WorkingProbe.jsx');
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { ClaudeWorkingRow } from ${JSON.stringify(path.resolve('src/components/ClaudeProgress.jsx'))};\nexport function WorkingProbe() { return React.createElement(ClaudeWorkingRow); }\n`);
+      const controller = new AbortController();
+      let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 8000);
+        await withDom(async window => {
+          const rootNode = bundle.module.createRoot(window.document.getElementById('root'));
+          try {
+            await bundle.module.act(async () => {
+              rootNode.render(bundle.module.React.createElement(bundle.module.WorkingProbe));
+              await Promise.resolve();
+            });
+            const region = window.document.querySelector('section[aria-label="Claude progress"]');
+            assert(region, 'the working row is a labelled Claude progress region');
+            assert.equal(region.textContent.trim(), 'Claude is working on this handoff');
+            assert.equal(window.document.querySelectorAll('button, a, input, select').length, 0, 'the row has no controls');
+          } finally { await bundle.module.act(async () => rootNode.unmount()); }
+        });
+      } finally {
+        controller.abort();
+        await bundle?.dispose();
+        await fsPromises.rm(directory, { recursive: true, force: true });
       }
-      assert.match(deriveBridgePushProgress({ chat: {}, bridge: {}, awaitingClaim: true }).headline, /ChatGPT|worker|bridge/i, 'without the worker the chat copy is unchanged');
+    },
+  },
+  {
+    name: 'claude pause notice: the dock answers every worker-routed handoff with the Claude working row, not a bridge panel',
+    run() {
+      const dock = source('src/components/NonApiAiDialog.jsx');
+      assert(dock.includes('<ClaudeWorkingRow />'), 'the dock renders the Claude working row');
+      assert(dock.indexOf('isMcpRoutedRequest && (') < dock.indexOf('<ClaudeWorkingRow />'), 'the row sits inside the worker-routed branch');
+      assert(!/ChatGPT|handoffBridge|BridgeProgress/.test(dock), 'the dock names no ChatGPT or bridge component');
     },
   },
 ];

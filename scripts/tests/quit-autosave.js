@@ -9,8 +9,6 @@ function fixture(overrides = {}) {
     windows,
     beginPause: win => events.push(`gate:${win}`),
     releasePause: win => events.push(`ungate:${win}`),
-    holdBridge: async () => { events.push('hold'); return { success: true }; },
-    resumeBridge: async () => { events.push('resume'); return { success: true }; },
     pauseRenderer: async win => { events.push(`pause:${win}`); return { success: true, requiresCanvasSave: win === 'first' }; },
     drainSender: async win => { events.push(`drain:${win}`); return { settled: true }; },
     flushPersistence: async () => { events.push('flush'); },
@@ -29,17 +27,17 @@ export default [
     async run() {
       const { events, attempt } = fixture();
       const running = attempt.run();
-      assert.deepEqual(events, ['gate:first', 'gate:second', 'hold']);
+      // Everything before the first await: both windows gated, then the first pause request.
+      assert.deepEqual(events, ['gate:first', 'gate:second', 'pause:first']);
       assert.equal(await running, true);
-      assert.deepEqual(events, ['gate:first', 'gate:second', 'hold', 'pause:first', 'pause:second',
+      assert.deepEqual(events, ['gate:first', 'gate:second', 'pause:first', 'pause:second',
         'drain:first', 'drain:second', 'flush', 'freeze:first', 'freeze:second', 'save:first:true', 'save:second:false']);
     },
   },
-  ...['bridge', 'pause', 'drain', 'flush', 'windows', 'freeze', 'save'].map(stage => ({
+  ...['pause', 'drain', 'flush', 'windows', 'freeze', 'save'].map(stage => ({
     name: `Quit autosave keeps windows recoverable and releases admissions after ${stage} failure`,
     async run() {
       const overrides = {
-        bridge: { holdBridge: async () => ({ success: false }) },
         pause: { pauseRenderer: async () => ({ success: false }) },
         drain: { drainSender: async () => ({ settled: false }) },
         flush: { flushPersistence: async () => { throw new Error('disk full'); } },
@@ -54,36 +52,23 @@ export default [
       const released = [...events];
       await attempt.release();
       assert.deepEqual(events, released, 'release is idempotent');
-      assert.ok(events.includes('ungate:first') && events.includes('ungate:second') && events.includes('resume'));
-      if (stage !== 'bridge') assert.ok(events.includes('release:first'), 'even an unacknowledged renderer is released');
+      assert.ok(events.includes('ungate:first') && events.includes('ungate:second'));
+      assert.ok(events.includes('release:first'), 'even an unacknowledged renderer is released');
       if (!['save'].includes(stage)) assert.ok(!events.some(event => event.startsWith('save:')));
     },
   })),
   {
-    name: 'Quit retry is exposed only after sender admissions and bridge restoration settle',
+    name: 'Quit retry is exposed only after sender admissions are released',
     async run() {
-      let finishResume;
-      const resumeGate = new Promise(resolve => { finishResume = resolve; });
-      const { attempt, events } = fixture({ resumeBridge: async () => {
-        events.push('resume-start');
-        await resumeGate;
-        events.push('resume-done');
-        return { success: true };
-      } });
+      const { attempt, events } = fixture();
       await attempt.run();
-      const release = attempt.release();
-      try {
-        await Promise.resolve();
-        assert.ok(events.includes('ungate:first') && events.includes('ungate:second'));
-        assert.ok(!events.some(event => event.startsWith('release:')),
-          'an unfrozen renderer can immediately retry Quit; host release must finish first');
-      } finally { finishResume(); }
-      await release;
-      assert.deepEqual(events.slice(-3), ['resume-done', 'release:first', 'release:second']);
+      await attempt.release();
+      assert.deepEqual(events.slice(-4), ['ungate:first', 'ungate:second', 'release:first', 'release:second'],
+        'an unfrozen renderer can immediately retry Quit; sender admissions must be released first');
     },
   },
   {
-    name: 'Quit cancellation releases other windows and bridge even if one renderer release throws',
+    name: 'Quit cancellation releases other windows even if one renderer release throws',
     async run() {
       const released = [];
       const { attempt, events } = fixture({ releaseRenderer: win => {
@@ -93,7 +78,7 @@ export default [
       await attempt.run();
       await assert.rejects(attempt.release());
       assert.deepEqual(released, ['first', 'second']);
-      assert.ok(events.includes('ungate:second') && events.includes('resume'));
+      assert.ok(events.includes('ungate:second'));
     },
   },
   {
@@ -106,15 +91,6 @@ export default [
       });
       await assert.rejects(attempt.run(), /changed while saving/);
       await attempt.release();
-    },
-  },
-  {
-    name: 'Quit cancellation surfaces a bridge restore refusal after releasing canvas gates',
-    async run() {
-      const { attempt, events } = fixture({ resumeBridge: async () => ({ success: false }) });
-      await attempt.run();
-      await assert.rejects(attempt.release());
-      assert.ok(events.includes('release:second') && events.includes('ungate:second'));
     },
   },
   {

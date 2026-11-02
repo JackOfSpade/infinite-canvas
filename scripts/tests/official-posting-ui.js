@@ -22,8 +22,6 @@ import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.
 import { cardOfficialPostingHubMarkerCleanup, isCardOfficialPostingRunId, isJobSearchPauseEligible } from '../../src/utils/jobHubManualAiOwnership.js';
 import { registerOfficialPostingRefreshHandler } from '../../electron/ipc/officialPostingRefresh.js';
 import { abortNodeTasksAndWait, snapshotActiveNodeTasks } from '../../electron/ipc/ipcUtils.js';
-import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
-import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 
 const copy = value => JSON.parse(JSON.stringify(value));
 const flushMicrotasks = async () => { for (let index = 0; index < 30; index++) await Promise.resolve(); };
@@ -216,16 +214,15 @@ export default [
     },
   },
   {
-    name: 'standalone card lookup routes through the selected parent bridge hub while retaining its card cancellation owner',
+    name: 'standalone card lookup routes through the selected parent hub while retaining its card cancellation owner',
     async run() {
       const sender = new EventEmitter(); sender.id = 9082; sender.isDestroyed = () => false; sender.send = () => {};
       const previous = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
       let signal; let nodeId; let markEntered;
       const entered = new Promise(resolve => { markEntered = resolve; });
-      let pending; let source;
+      let pending;
       try {
         registerOfficialPostingRefreshHandler({ projectJob: job => ({ ...job }), store: { find: async () => null },
-          bridgeStatus: () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active: true } } }),
           resolve: async (_jobs, options) => {
             signal = options.signal; nodeId = options.nodeId; markEntered();
             return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
@@ -236,22 +233,12 @@ export default [
         pending = test.callback(); await entered;
         assert.equal(nodeId, 'board');
         assert.deepEqual(snapshotActiveNodeTasks(sender.id).map(item => item.nodeId).sort(), ['board', 'lookup-card']);
-        const handoff = { requestId: 'synthetic-card-lookup', handoffCode: 'HANDOFF-ABCDEF',
-          bridgeClaimId: '22222222-2222-4222-8222-222222222222', windowId: sender.id, nodeId,
-          runId: test.calls[0].manualAiRunId, task: 'job-official-posting-research', promptChars: 24, codeEnforced: true };
-        source = createPushSource({ codeGuard: createHandoffCodeGuard(),
-          windows: new Map([[sender.id, { __canvasFilePath: '/synthetic/lookup-canvas.json' }]]),
-          hubKey: () => 'b'.repeat(64),
-          seam: { list: async () => ({ handoffs: [handoff], excluded: {}, pending: 1 }),
-            read: async () => ({ ok: true, requestId: handoff.requestId, handoffCode: handoff.handoffCode,
-              task: handoff.task, responseFormat: 'text', prompt: 'Synthetic lookup prompt.', attempt: 1 }) } });
-        assert.equal(source.selectHub({ windowId: sender.id, canvasFilePath: '/synthetic/lookup-canvas.json', nodeId: 'board' }), true);
-        assert.equal((await source.get()).status, 'served', 'a selected Board worker must receive the card lookup');
+        assert.equal(test.calls[0].nodeId, 'board', 'the card lookup runs under the selected parent hub');
         test.claim().cancel(); await pending;
         assert.equal(signal.aborted, true); assert.equal(test.updates.length, 0);
         assert.deepEqual(snapshotActiveNodeTasks(sender.id), []);
       } finally {
-        await abortNodeTasksAndWait('lookup-card', sender); await pending; source?.closeEpoch('default');
+        await abortNodeTasksAndWait('lookup-card', sender); await pending;
         if (previous) electronPkg.ipcMain.handle('refresh-official-postings', previous);
         else electronPkg.ipcMain.removeHandler('refresh-official-postings');
       }

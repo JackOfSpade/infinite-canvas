@@ -50,7 +50,7 @@ export function isJobBoardCareerOverrideRunId(value) {
     && value.startsWith(JOB_BOARD_CAREER_OVERRIDE_RUN_PREFIX);
 }
 
-// These independent workflows share the Board bridge hub but own their own
+// These independent workflows share the Board's AI handoff hub but own their own
 // lifecycle. In particular, card research uses the Board node id for routing
 // while its official-posting run id remains owned by the requesting card.
 export function isBoardIndependentManualAiRunId(runId) {

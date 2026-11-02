@@ -1,6 +1,6 @@
 /** Order the reversible part of Quit before any window is destroyed. */
 export function createQuitAutosaveAttempt({
-  windows, beginPause, releasePause, holdBridge, resumeBridge,
+  windows, beginPause, releasePause,
   pauseRenderer, drainSender, flushPersistence, freezeRenderer,
   saveRenderer, releaseRenderer, windowsAreCurrent,
 }) {
@@ -14,8 +14,6 @@ export function createQuitAutosaveAttempt({
         gated.add(win);
         beginPause(win);
       }
-      const held = await holdBridge();
-      if (held?.success !== true) throw new Error('Could not pause the application handoff bridge.');
       const paused = new Map();
       for (const win of windows) {
         attempted.add(win);
@@ -47,15 +45,11 @@ export function createQuitAutosaveAttempt({
       // including a timed-out request whose acknowledgement never arrived.
       const failures = [];
       // The renderer becomes interactive on release and can immediately retry
-      // Quit. Finish host admission/bridge restoration before advertising that
-      // readiness, otherwise the old in-flight attempt can swallow the retry.
+      // Quit. Release the senders before advertising that readiness, otherwise
+      // the old in-flight attempt can swallow the retry.
       for (const win of gated) {
         try { releasePause(win); } catch (error) { failures.push(error); }
       }
-      try {
-        const resumed = await resumeBridge();
-        if (resumed?.success !== true) throw new Error('The application handoff bridge is still paused.');
-      } catch (error) { failures.push(error); }
       for (const win of attempted) {
         try { releaseRenderer(win); } catch (error) { failures.push(error); }
       }

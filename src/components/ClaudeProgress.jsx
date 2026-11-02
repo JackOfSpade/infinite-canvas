@@ -1,8 +1,6 @@
 import React, { useEffect, useState, useSyncExternalStore } from 'react';
-import { BRIDGE_PROGRESS_COPY } from '../utils/handoffBridgeCopy';
-import { claudeProgressTimeLines, deriveClaudeJobProgress } from '../utils/claudeJobProgress';
+import { CLAUDE_PROGRESS_COPY, HEADLINE_CLASS, TONE_CLASS, claudeProgressTimeLines, deriveClaudeJobProgress } from '../utils/claudeJobProgress';
 import { getClaudeApplicationRun, subscribeClaudeApplicationRuns } from '../utils/claudeApplicationRuns';
-import { HEADLINE_CLASS, TONE_CLASS } from '../utils/bridgeProgressStyles';
 import { Loader2 } from 'lucide-react';
 
 // One current action, scoped candidate counts, and separately labelled clocks.
@@ -30,7 +28,7 @@ export function ClaudeProgress({ run, item }) {
     return () => clearInterval(timer);
   }, [ticking]);
 
-  const toneLabel = BRIDGE_PROGRESS_COPY.toneLabel[view.tone];
+  const toneLabel = CLAUDE_PROGRESS_COPY.toneLabel[view.tone];
 
   return (
     <section
@@ -55,6 +53,27 @@ export function ClaudeProgress({ run, item }) {
           {[lines.total, lines.elapsed, lines.heard].filter(Boolean).join(' · ')}
         </p>
       )}
+    </section>
+  );
+}
+
+// A handoff the local Claude worker is answering: one short status row, no
+// controls. Used by the dock for every handoff released to the worker.
+export function ClaudeWorkingRow() {
+  const [headline, detail] = CLAUDE_PROGRESS_COPY.working;
+  return (
+    <section
+      aria-label={CLAUDE_PROGRESS_COPY.region}
+      data-progress-kind="claude-working"
+      className={`min-w-0 rounded-lg border px-3 py-3 text-xs leading-relaxed ${TONE_CLASS.working}`}
+    >
+      <div role="status" aria-live="polite" aria-atomic="true">
+        <div className={`flex items-center gap-2 text-sm font-semibold ${HEADLINE_CLASS.working}`}>
+          <Loader2 size={14} className="shrink-0 animate-spin text-violet-300" aria-hidden="true" />
+          {headline}
+        </div>
+        {detail && <div className="mt-1 text-white/70">{detail}</div>}
+      </div>
     </section>
   );
 }

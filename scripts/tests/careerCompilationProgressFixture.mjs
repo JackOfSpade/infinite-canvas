@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { recordCareerCompilationProgress, careerCompilationProgressForRequest, deriveCareerCompilationProgress } from '../../src/utils/careerCompilationProgress.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 
 export default [
   {

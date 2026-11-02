@@ -1,6 +1,6 @@
 import { assert } from './testHelpers.js';
 import path from 'node:path';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { buildOverlayScript, linkDetailOverlayPages, overlayControlPage, overlayTabLayout, updateOverlay as paintScraperOverlay } from '../../electron/ipc/browser/scraperOverlay.js';

@@ -118,6 +118,6 @@ let registry = null;
 export function configureInterviewPracticeRegistry(options) { registry = createInterviewPracticeRegistry(options); return registry; }
 export function getInterviewPracticeRegistry() { return registry; }
 const UNAVAILABLE = Object.freeze({ status: 'unavailable', note: 'Infinite Canvas is not running its Interview Helper right now. Tell the person to open the app and start practice again.' });
-/** Bridge-facing ports: safe before the app has configured the registry. */
+/** Practice-connector-facing ports: safe before the app has configured the registry. */
 export const finishInterviewPractice = (code, payload) => (registry ? registry.finish(code, payload) : Promise.resolve(UNAVAILABLE));
 export const checkInterviewPractice = code => (registry ? registry.check(code) : Promise.resolve(UNAVAILABLE));

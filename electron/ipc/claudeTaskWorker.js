@@ -1,6 +1,6 @@
 // Runs every AI task outside application bundles on the local Claude Code CLI.
-// It serves pending handoffs through the same seam the ChatGPT bridge uses, so
-// validation, saved progress and correction rounds stay in nonApiAi.js. Each
+// It serves pending handoffs through the worker seam in nonApiAi.js, so
+// validation, saved progress and correction rounds stay there. Each
 // answer starts a fresh session from the full prompt, so nothing carries over.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -10,13 +10,13 @@ import { logger } from '../logger.js';
 import { claudeChildEnv, resolveClaudeBinary } from './claudeApplicationRunner.js';
 import { CLAUDE_TASK_IDS, claudeTaskProfile } from './claudeTaskProfiles.js';
 import {
-  listBridgeableNonApiAiHandoffs,
-  markBridgeableNonApiAiHandoffAssigned,
+  listWorkerHandoffs,
+  markWorkerHandoffAssigned,
   onNonApiAiEvent,
-  readBridgeableNonApiAiAttachments,
-  readBridgeableNonApiAiHandoff,
-  returnBridgeHandoffToPerson,
-  submitNonApiAiResponseForBridge,
+  readWorkerHandoff,
+  readWorkerHandoffAttachments,
+  returnHandoffToPerson,
+  submitWorkerResponse,
 } from './nonApiAi.js';
 
 export const CLAUDE_TASK_CONCURRENCY = 4;
@@ -30,12 +30,12 @@ const RESEARCH_MAX_TURNS = 16;
 const IMAGE_MAX_EDGE = 1568;
 
 const SEAM = Object.freeze({
-  list: listBridgeableNonApiAiHandoffs,
-  read: readBridgeableNonApiAiHandoff,
-  assigned: markBridgeableNonApiAiHandoffAssigned,
-  attachments: readBridgeableNonApiAiAttachments,
-  submit: submitNonApiAiResponseForBridge,
-  returnToPerson: returnBridgeHandoffToPerson,
+  list: listWorkerHandoffs,
+  read: readWorkerHandoff,
+  assigned: markWorkerHandoffAssigned,
+  attachments: readWorkerHandoffAttachments,
+  submit: submitWorkerResponse,
+  returnToPerson: returnHandoffToPerson,
   onEvent: onNonApiAiEvent,
 });
 
@@ -43,22 +43,16 @@ export const CLAUDE_TASK_STATUS_CHANNEL = 'get-claude-task-status';
 // Only these stops are shown to the person; anything else just retries quietly.
 export const CLAUDE_TASK_PAUSE_CODES = Object.freeze(['CLAUDE_USAGE_LIMIT', 'CLAUDE_NOT_SIGNED_IN', 'CLAUDE_CLI_MISSING']);
 
-let active = false;
 let current = null;
 
-/** Whether this process answers AI tasks with Claude rather than ChatGPT workers. */
-export function claudeTaskWorkerActive() {
-  return active;
-}
-
 /** What the dock may show: whether the worker is held up, and why. No task or prompt data. */
-export function claudeTaskStatusView(workerStatus, isActive) {
+export function claudeTaskStatusView(workerStatus) {
   const pauseCode = CLAUDE_TASK_PAUSE_CODES.includes(workerStatus?.pauseCode) ? workerStatus.pauseCode : null;
-  return Object.freeze({ active: isActive === true, paused: Boolean(pauseCode), pauseCode });
+  return Object.freeze({ paused: Boolean(pauseCode), pauseCode });
 }
 
 export function claudeTaskWorkerStatus() {
-  return claudeTaskStatusView(current?.status(), active);
+  return claudeTaskStatusView(current?.status());
 }
 
 /** Let the renderer ask whether AI work is paused. */
@@ -170,7 +164,7 @@ export function createClaudeTaskWorker({
 
   async function serve(entry, controller) {
     const comparisonProvenance = entry.comparisonGroup ? {
-      version: 2, transport: 'bridge', observed: true, comparisonGroup: entry.comparisonGroup, comparisonRun: entry.comparisonRun,
+      version: 2, transport: 'worker', observed: true, comparisonGroup: entry.comparisonGroup, comparisonRun: entry.comparisonRun,
       // Every answer is its own session, which is the isolation the comparison needs.
       conversationKey: crypto.randomBytes(32).toString('hex'), isolated: true,
     } : null;
@@ -243,7 +237,6 @@ export function startClaudeTaskWorker({ userData, nativeImage = null } = {}) {
       if (usageFile) void fs.promises.appendFile(usageFile, `${JSON.stringify(row)}\n`, { mode: 0o600 }).catch(() => {});
     },
   });
-  active = true;
   current = worker;
   worker.start();
   logger.info('[Claude tasks] Worker started.');

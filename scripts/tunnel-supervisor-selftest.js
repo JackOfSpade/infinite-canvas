@@ -7,10 +7,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { writeFakeCloudflaredLauncher } from './tests/fixtures/handoff-bridge/bridgeFixtures.js';
-import { spawnCloudflared } from '../electron/ipc/handoffBridge/tunnel/exec.js';
-import { reapOrphans } from '../electron/ipc/handoffBridge/tunnel/reap.js';
-import { parsePsRows } from '../electron/ipc/handoffBridge/tunnel/psParse.js';
+import { writeFakeCloudflaredLauncher } from './tests/fixtures/practice-connector/connectorFixtures.js';
+import { spawnCloudflared } from '../electron/ipc/practiceConnector/tunnel/exec.js';
+import { reapOrphans } from '../electron/ipc/practiceConnector/tunnel/reap.js';
+import { parsePsRows } from '../electron/ipc/practiceConnector/tunnel/psParse.js';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const isGone = pid => { try { process.kill(pid, 0); return false; } catch (error) { return error.code === 'ESRCH'; } };
@@ -68,7 +68,7 @@ if (process.platform !== 'darwin') {
     const terminated = await runDirect('ready', true);
     if (terminated.code !== 0 || terminated.termLatency > 500) throw new Error(`TERM-mid-sleep wrapper took ${terminated.termLatency}ms or returned ${terminated.code}`);
 
-    const fakePath = fileURLToPath(new URL('./tests/fixtures/handoff-bridge/fake-cloudflared.js', import.meta.url));
+    const fakePath = fileURLToPath(new URL('./tests/fixtures/practice-connector/fake-cloudflared.js', import.meta.url));
     const recordPath = path.join(fixture.directory, 'record.json');
     const recordProgram = path.join(fixture.directory, 'record-and-wait.mjs');
     const recordLauncher = path.join(fixture.directory, 'record-cloudflared');
@@ -94,7 +94,7 @@ if (process.platform !== 'darwin') {
       { name: 'owned-ignore', binaryPath: ownedLauncher, args: productionArgs },
       { name: 'spawn-child', binaryPath: fixture.launcher, args: ['spawn-child'] },
     ];
-    const execUrl = new URL('../electron/ipc/handoffBridge/tunnel/exec.js', import.meta.url).href;
+    const execUrl = new URL('../electron/ipc/practiceConnector/tunnel/exec.js', import.meta.url).href;
     const hostProgram = `import { spawnCloudflared } from ${JSON.stringify(execUrl)};\nconst env=${JSON.stringify(env)},cwd=${JSON.stringify(fixture.directory)},launches=${JSON.stringify(launches)};\nfor(let i=0;i<launches.length;i++)setTimeout(()=>{const item=launches[i];const child=spawnCloudflared({binaryPath:item.binaryPath,args:item.args,cwd,env,onLine:line=>process.stdout.write('LINE:'+line+'\\n')});process.stdout.write('PID:'+child.pid+':'+item.name+'\\n');},i*333);\nsetInterval(()=>{},1000);`;
     const hostLines = []; let hostPending = '';
     host = spawn(process.execPath, ['--input-type=module', '--eval', hostProgram], { stdio: ['ignore', 'pipe', 'pipe'] });

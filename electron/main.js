@@ -35,7 +35,6 @@ import { createInterviewWindowController, isTrustedInterviewNavigation } from '.
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, stopLocalApplicationJob, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
 import { createClaudeApplicationRunner, registerClaudeApplicationRunnerHandlers } from './ipc/claudeApplicationRunner.js';
-import { getHandoffBridgeStatus } from './ipc/handoffBridge/index.js';
 import { registerApplicationGenerationGateHandlers } from './ipc/applicationGenerationGate.js';
 import { registerApplicationBundleWatchHandlers } from './ipc/applicationBundleWatch.js';
 import { startApplicationSyncServer, stopApplicationSyncServer } from './ipc/applicationSync.js';
@@ -50,19 +49,11 @@ import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
 import { registerClaudeTaskStatusHandler, startClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
-import { __runWithIpcRequestContextForTests, beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
-import { buildCareerCleanLayer, produceCareerCleanLayer, readCareerCleanLayer } from './ipc/careerCleanLayer.js';
-import { approvedCareerEvidenceCatalog, careerSnapshotStorageRoot, readCareerSnapshot } from './ipc/careerSnapshot.js';
-import { callLLMText } from './ipc/llm.js';
-import { holdHandoffBridgeForQuit, registerHandoffBridgeHandlers, resumeHandoffBridgeAfterQuitCancel, scheduleHandoffBridgeLaunch, startHandoffBridge, stopHandoffBridge } from './ipc/handoffBridge/index.js';
-import { IPC_EVENTS as HANDOFF_BRIDGE_IPC_EVENTS } from './ipc/handoffBridge/contracts.js';
-import { readTunnelState, writeTunnelState } from './ipc/handoffBridge/tunnel/files.js';
-import { prepareBinary } from './ipc/handoffBridge/tunnel/binary.js';
-import { inspectCredentials } from './ipc/handoffBridge/tunnel/credentials.js';
-import { reapOrphans } from './ipc/handoffBridge/tunnel/reap.js';
+import { beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
+import { startPracticeConnector, stopPracticeConnector } from './ipc/practiceConnector/index.js';
 import fs from 'fs';
 import { Readable } from 'node:stream';
-import { execFile as execFileCb, execFileSync, spawnSync } from 'node:child_process';
+import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isBackgroundE2E as isBackgroundE2ERuntime, runBackgroundE2EShutdownCleanup } from './utils/backgroundE2e.js';
 import { acceptanceActivationPolicy, shouldSuppressNativeApplicationMenu } from './utils/acceptanceNoNativeMenu.js';
@@ -71,288 +62,12 @@ import { createQuitAutosaveAttempt } from './utils/quitAutosave.js';
 
 const execFile = promisify(execFileCb);
 
-// The bridge smoke exercises copy-starter flows. Its Electron process shares
-// the person's system clipboard by default, so a synthetic starter could
-// survive the test and be pasted into a real ChatGPT chat later. Keep that
-// capability entirely in memory in the deliberately narrow, unpackaged smoke
-// environment. Production and ordinary development always receive Electron's
-// real clipboard below.
-function createBridgeSmokeClipboard() {
-  let text = '';
-  return Object.freeze({
-    writeText(value) { text = String(value ?? ''); },
-    readText() { return text; },
-    clear() { text = ''; },
-  });
-}
-
-function bridgeSmokeClipboardFor(appInstance, env = process.env) {
-  if (env?.INFINITE_CANVAS_E2E !== '1'
-    || env?.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST !== '1'
-    || appInstance?.isPackaged === true) return null;
-  return createBridgeSmokeClipboard();
-}
-const handoffBridgeSetupSessions = new Map();
-const HANDOFF_BRIDGE_ERROR_NAMES = new Set(['Error', 'TypeError', 'RangeError', 'ReferenceError', 'SyntaxError']);
-
-function handoffBridgeRegistrationErrorKind(error) {
-  let name;
-  try { name = error?.name; } catch { return 'unknown'; }
-  return typeof name === 'string' && HANDOFF_BRIDGE_ERROR_NAMES.has(name) ? name : 'unknown';
-}
-
-// A persisted autoStart may create a listener and a cloudflared child. That
-// work is valid only after every renderer IPC route registered successfully;
-// otherwise the bridge stays hard-off instead of becoming an unreachable
-// background service. Keeping this tiny gate injectable makes the boot
-// ordering testable without starting Electron or a tunnel.
-export function scheduleRegisteredHandoffBridgeLaunch({ registered = false, schedule = scheduleHandoffBridgeLaunch, options = {} } = {}) {
-  if (registered !== true || typeof schedule !== 'function') return null;
-  return schedule(options);
-}
-
-// Setup paths come solely from Electron's native file chooser. Every accepted
-// partial selection is immediately persisted to tunnel.json; presentation
-// facts stay in memory and config.json never receives either class of value.
-export function createHandoffBridgeTunnelSetup(userData, {
-  readTunnelStateImpl = readTunnelState,
-  writeTunnelStateImpl = writeTunnelState,
-  prepareBinaryImpl = prepareBinary,
-  inspectCredentialsImpl = inspectCredentials,
-  reapOrphansImpl = reapOrphans,
-  statSync = fs.statSync,
-  now = Date.now,
-  xattrImpl = null,
-  codesignImpl = null,
-  versionImpl = null,
-} = {}) {
-  const existing = handoffBridgeSetupSessions.get(userData);
-  // Every setup port for one user-data root shares both the staged fields and
-  // one mutation queue.  Native chooser callbacks can overlap, and a writer
-  // must never snapshot half of another callback's transaction then roll that
-  // newer state back after its own durable write fails.
-  const session = existing || { setup: {}, mutationTail: Promise.resolve(), hydrated: false };
-  const setup = session.setup;
-  handoffBridgeSetupSessions.set(userData, session);
-  const presentationFields = ['binarySourcePath', 'binarySize', 'signature', 'binaryVersion', 'tunnelId', 'credentialsMode'];
-  const cloneSetup = () => Object.fromEntries(Object.entries(setup));
-  const replaceSetup = next => {
-    for (const key of Object.keys(setup)) delete setup[key];
-    for (const [key, value] of Object.entries(next || {})) setup[key] = value;
-  };
-  const applyStoredSetup = (stored, presentationSource = setup) => {
-    const presentation = Object.fromEntries(presentationFields
-      .filter(key => Object.hasOwn(presentationSource, key))
-      .map(key => [key, presentationSource[key]]));
-    const next = { ...presentation };
-    if (typeof stored?.binaryPath === 'string') {
-      next.binaryPath = stored.binaryPath;
-      next.pin = stored.pin;
-      next.approvedAt = Number.isFinite(stored.approvedAt) ? stored.approvedAt : null;
-    }
-    if (typeof stored?.credentialsPath === 'string') next.credentialsPath = stored.credentialsPath;
-    // Trust is a derived property of the freshly re-read durable result, never
-    // a bit a caller can carry forward from staged memory.
-    next.binaryTrusted = stored?.binaryTrusted === true;
-    replaceSetup(next);
-  };
-  // Registration must stay read-inert. Load durable setup only in direct
-  // response to a setup IPC; the separate three-second launch path owns its
-  // one pidfile stat and config read.
-  const hydrate = () => {
-    if (session.hydrated) return setup;
-    session.hydrated = true;
-    try {
-      const stored = readTunnelStateImpl(userData) || null;
-      if (stored) applyStoredSetup(stored);
-    } catch { /* setup remains empty */ }
-    return setup;
-  };
-  const persist = async candidateSetup => {
-    const candidate = {};
-    if (typeof candidateSetup.binaryPath === 'string' && typeof candidateSetup.pin === 'string') {
-      candidate.binaryPath = candidateSetup.binaryPath;
-      candidate.pin = candidateSetup.pin;
-      candidate.approvedAt = Number.isFinite(candidateSetup.approvedAt) ? candidateSetup.approvedAt : null;
-    }
-    if (typeof candidateSetup.credentialsPath === 'string') candidate.credentialsPath = candidateSetup.credentialsPath;
-    if (!candidate.binaryPath && !candidate.credentialsPath) return { ok: false, code: 'STATE_UNREADABLE' };
-    try {
-      const stored = await writeTunnelStateImpl(userData, candidate);
-      if (!stored) return { ok: false, code: 'STATE_UNREADABLE' };
-      return { ok: true, stored };
-    } catch { return { ok: false, code: 'STATE_UNREADABLE' }; }
-  };
-  const enqueueSessionMutation = operation => {
-    // Keep the tail fulfilled after every result so a rejected write cannot
-    // strand later chooser actions. `operation` owns its own fixed failure
-    // result, but this second guard also protects future maintenance changes.
-    const queued = session.mutationTail.then(operation, operation);
-    session.mutationTail = queued.then(() => undefined, () => undefined);
-    return queued;
-  };
-  const persistMutation = async mutate => {
-    hydrate();
-    // The staged candidate is deliberately not published to `setup` until
-    // the write returns a newly parsed durable record. Reads and queued
-    // approvals therefore see only the last committed selection.
-    const candidate = cloneSetup();
-    try {
-      mutate(candidate);
-      const persisted = await persist(candidate);
-      if (!persisted?.ok) return persisted || { ok: false, code: 'STATE_UNREADABLE' };
-      applyStoredSetup(persisted.stored, candidate);
-      return { ok: true };
-    } catch {
-      return { ok: false, code: 'STATE_UNREADABLE' };
-    }
-  };
-  // These ports have fixed executable names/arguments and never incorporate a
-  // renderer string. prepareBinary performs the authoritative filesystem and
-  // hash checks; this supplies the macOS provenance/version facts it requires.
-  const xattr = xattrImpl || (target => {
-    try {
-      const value = String(execFileSync('/usr/bin/xattr', ['-p', 'com.apple.quarantine', target], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })).trim();
-      return { present: value.length > 0 };
-    } catch (error) {
-      // Absence is the one benign error.  Tool absence, a permissions failure,
-      // and any unrecognised platform output are provenance failures.
-      const output = `${String(error?.stdout || '')}\n${String(error?.stderr || '')}`;
-      if (error?.status === 1 && /(No such xattr|attribute not found)/i.test(output)) return { present: false };
-      throw error;
-    }
-  });
-  const codesign = codesignImpl || (target => {
-    try {
-      execFileSync('/usr/bin/codesign', ['--verify', '--strict', target], { stdio: 'ignore' });
-      // codesign writes its descriptive output to stderr even on success, so
-      // execFileSync's return value is insufficient for a truthful summary.
-      const inspected = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', target], {
-        encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 5_000, maxBuffer: 64 * 1024,
-      });
-      const details = inspected.status === 0 && !inspected.error
-        ? `${String(inspected.stdout || '')}\n${String(inspected.stderr || '')}`
-        : '';
-      const summary = !details ? 'unavailable'
-        : /Signature=adhoc/i.test(details) ? 'ad-hoc signed'
-          : /Authority=Developer ID/i.test(details) ? 'Developer ID signed'
-            : 'other signed';
-      return { verified: true, summary };
-    } catch { return { verified: false, summary: 'unsigned' }; }
-  });
-  const version = versionImpl || (target => {
-    try { return String(execFileSync(target, ['--version'], { encoding: 'utf8', timeout: 5_000, maxBuffer: 64 * 1024, env: { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' } })).trim(); } catch { return ''; }
-  });
-  return Object.freeze({
-    async chooseBinary(sourcePath) {
-      if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return { ok: false, code: 'INVALID' };
-      // Copy/hash/signature inspection is part of the selection transaction,
-      // not a speculative prelude.  Two native chooser completions can arrive
-      // in either order; queue the work itself so commit order follows request
-      // order and Forget cannot overtake an already initiated selection.
-      return enqueueSessionMutation(async () => {
-        hydrate();
-        let prepared;
-        try { prepared = await prepareBinaryImpl({ userData, sourcePath, pin: null }, { xattr, codesign, version }); } catch { prepared = null; }
-        if (!prepared?.ok) return { ok: false, code: 'INVALID' };
-        let size = null; try { size = statSync(sourcePath).size; } catch { /* copy is authoritative; display falls back safely */ }
-        let signature; try { signature = codesign(prepared.copyPath); } catch { signature = null; }
-        if (signature?.verified !== true) return { ok: false, code: 'INVALID' };
-        const persisted = await persistMutation(candidate => {
-          candidate.binaryPath = prepared.copyPath;
-          candidate.pin = prepared.sha256;
-          candidate.approvedAt = null;
-          candidate.binaryTrusted = false;
-          candidate.binaryVersion = prepared.version;
-          candidate.binarySourcePath = sourcePath;
-          candidate.binarySize = Number.isSafeInteger(size) ? size : null;
-          candidate.signature = signature.summary;
-        });
-        return persisted?.ok ? { ok: true } : persisted;
-      });
-    },
-    async getApprovalDetails() {
-      return enqueueSessionMutation(() => {
-        hydrate();
-        if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
-        return {
-          ok: true,
-          sourcePath: typeof setup.binarySourcePath === 'string' ? setup.binarySourcePath : null,
-          version: typeof setup.binaryVersion === 'string' && /^[0-9A-Za-z._-]{1,48}$/.test(setup.binaryVersion) ? setup.binaryVersion : null,
-          size: Number.isSafeInteger(setup.binarySize) && setup.binarySize >= 0 ? setup.binarySize : null,
-          sha256: setup.pin,
-          sha256Prefix: setup.pin.slice(0, 12),
-          signature: ['ad-hoc signed', 'Developer ID signed', 'other signed', 'unsigned'].includes(setup.signature) ? setup.signature : 'unavailable',
-          pinLimits: 'This pin detects that the file changed; it cannot prove the file is genuine cloudflared: the Homebrew build is ad-hoc signed with no Team ID',
-        };
-      });
-    },
-    async approveBinary(expectedPin) {
-      if (typeof expectedPin !== 'string' || !/^[0-9a-f]{64}$/.test(expectedPin)) return { ok: false, code: 'INVALID' };
-      return enqueueSessionMutation(async () => {
-        hydrate();
-        if (!setup.binaryPath || !/^[0-9a-f]{64}$/.test(setup.pin || '')) return { ok: false, code: 'NOT_READY' };
-        // The native approval sheet names this exact digest.  A later chooser
-        // result must never let that sheet approve a different binary.
-        if (setup.pin !== expectedPin) return { ok: false, code: 'NOT_READY' };
-        let approvedAt;
-        try { approvedAt = Number(now()); } catch { approvedAt = NaN; }
-        if (!Number.isFinite(approvedAt) || approvedAt < 0) return { ok: false, code: 'STATE_UNREADABLE' };
-        return persistMutation(candidate => {
-          candidate.approvedAt = approvedAt;
-          // `persist` replaces this with the trusted bit from readTunnelState.
-          candidate.binaryTrusted = false;
-        });
-      });
-    },
-    async chooseCredentials(sourcePath) {
-      if (typeof sourcePath !== 'string' || !path.isAbsolute(sourcePath)) return { ok: false, code: 'INVALID' };
-      // Match binary selection's transaction scope: inspect and persist under
-      // the shared queue, so the durable state reflects invocation order.
-      return enqueueSessionMutation(() => {
-        hydrate();
-        let inspected; try { inspected = inspectCredentialsImpl(sourcePath); } catch { inspected = null; }
-        if (!inspected?.ok) return { ok: false, code: 'INVALID' };
-        return persistMutation(candidate => {
-          candidate.credentialsPath = inspected.credentialsPath;
-          candidate.tunnelId = inspected.tunnelId;
-          candidate.credentialsMode = inspected.credentialsMode;
-        }).then(persisted => persisted?.ok ? { ok: true } : persisted);
-      });
-    },
-    restart: async () => ({ ok: false, code: 'NOT_READY' }),
-    // This intentionally takes no arguments. The renderer can request a
-    // bounded reap, but only this main-owned setup port supplies userData and
-    // the generated config path to the process-table implementation.
-    async reapOrphans() {
-      let result;
-      try {
-        result = await reapOrphansImpl({
-          userData,
-          configPath: path.join(userData, 'handoff-bridge', 'tunnel', 'config.yml'),
-        });
-      } catch { return { ok: false, code: 'NOT_FOUND' }; }
-      return Number.isInteger(result?.reaped) && result.reaped > 0
-        ? { ok: true, reaped: result.reaped }
-        : { ok: false, code: 'NOT_FOUND' };
-    },
-    getLog: async () => [],
-    clearSession: () => enqueueSessionMutation(() => {
-      // Forget clears only this cache. The registered main-process adapter is
-      // reused after Forget, so retain its shared queue and let the next setup
-      // call rehydrate the durable tunnel state it intentionally did not erase.
-      replaceSetup({});
-      session.hydrated = false;
-      return true;
-    }),
-  });
-}
 // Electron smoke runs must remain invisible to the person using the desktop.
 // This is intentionally a separate flag from INFINITE_CANVAS_E2E: lightweight
 // automation can still opt into normal windows, whereas the Playwright smoke
 // explicitly requests a background-only renderer.
 const isBackgroundE2E = isBackgroundE2ERuntime();
-// Unlike background smoke this remains a visible, focusable, fully bridged
+// Unlike background smoke this remains a visible, focusable, fully featured
 // application.  It suppresses only the native menu for the disposable
 // computer-use acceptance fixture (see acceptanceNoNativeMenu.js).
 const suppressNativeApplicationMenu = shouldSuppressNativeApplicationMenu({ isBackgroundE2E, commandLine: process.argv });
@@ -1704,13 +1419,6 @@ if (!gotTheLock) {
         },
         stateFile: path.join(claudeRunnerRoot, 'state.json'),
         workspaceDir: path.join(claudeRunnerRoot, 'workspace'),
-        isBridgeLaned: jobId => {
-          try {
-            return (getHandoffBridgeStatus()?.queue?.jobs || []).some(lane => lane?.jobId === jobId && lane?.phase !== 'done' && lane?.phase !== 'gone');
-          } catch {
-            return false;
-          }
-        },
         logger,
         notify: state => claudeRunnerNotify(state),
       });
@@ -1728,11 +1436,6 @@ if (!gotTheLock) {
     startApplicationSyncServer().catch((err) => logger.warn(`[main] Application sync service failed to start: ${err?.message || err}`));
     registerMarketplaceHandlers();
     registerAccountsHandlers();
-    // Capture Electron's packaging state once at main-process boot and pass it
-    // through every bridge entrypoint.
-    const bridgeBootContext = Object.freeze({ app, isPackaged: Boolean(app.isPackaged) });
-    let bridgeRegistered = false;
-    let bridgeUserData = '';
     registerBugReportHandlers();
     registerNetworkHandlers({
       onNodeDeleted: (sender, nodeId) => (
@@ -1744,72 +1447,6 @@ if (!gotTheLock) {
     // Every AI task is answered by the local Claude Code CLI.
     startClaudeTaskWorker({ userData: app.getPath('userData'), nativeImage: electronPkg.nativeImage });
     registerClaudeTaskStatusHandler({ ipcMain: electronPkg.ipcMain });
-    // A synthetic, isolated-profile bridge smoke must start the real in-app
-    // LLM task from this bundled module graph. Importing source modules from
-    // the driver would create a second pending-handoff registry.
-    if (!app.isPackaged && process.env.INFINITE_CANVAS_HANDOFF_BRIDGE_TEST === '1'
-      && isBackgroundE2ERuntime(process.env)) {
-      const readCleanFixture = async snapshotId => {
-        const root = careerSnapshotStorageRoot(app.getPath('userData'));
-        const snapshot = await readCareerSnapshot(root, snapshotId);
-        if (!snapshot) throw new Error('Synthetic approved snapshot missing from isolated profile.');
-        return { root, catalog: approvedCareerEvidenceCatalog(snapshot) };
-      };
-      globalThis.__icCareerCleanBridgeProbe = {
-        state: null,
-        async start(snapshotId) {
-          const { root, catalog } = await readCleanFixture(snapshotId);
-          const sender = [...canvasWindows][0]?.webContents;
-          if (!sender) throw new Error('Synthetic canvas window missing.');
-          this.state = { state: 'pending', catalogCount: catalog.length };
-          void __runWithIpcRequestContextForTests({
-            sender, nodeId: 'synthetic-career-clean-node', channel: 'synthetic-career-clean-probe',
-            manualAiRunId: 'synthetic-career-clean-run',
-          }, () => produceCareerCleanLayer({ snapshotId, catalog, root, callText: callLLMText }))
-            .then(value => { this.state = { state: 'done', catalogCount: catalog.length,
-              reused: value.reused, changed: value.layer?.items?.filter((item, index) => item.clean !== catalog[index].quote).length }; },
-            error => { this.state = { state: 'error', message: String(error?.message || error) }; });
-          return { catalogCount: catalog.length };
-        },
-        async verify(snapshotId, response) {
-          const { root, catalog } = await readCleanFixture(snapshotId);
-          const actual = await readCareerCleanLayer(root, snapshotId, catalog);
-          const expected = buildCareerCleanLayer(snapshotId, catalog, [response]);
-          return { present: Boolean(actual), sameAsDirectVerifier: JSON.stringify(actual?.layer) === JSON.stringify(expected),
-            changed: actual?.layer?.items?.filter((item, index) => item.clean !== catalog[index].quote).length ?? null,
-            rejections: actual?.layer?.rejections?.length ?? null };
-        },
-      };
-    }
-    try {
-      bridgeUserData = app.getPath('userData');
-      const tunnelSetup = createHandoffBridgeTunnelSetup(bridgeUserData);
-      const bridgeSmokeClipboard = bridgeSmokeClipboardFor(app);
-      bridgeRegistered = registerHandoffBridgeHandlers({ ipcMain: electronPkg.ipcMain, deps: {
-        ...bridgeBootContext,
-        getCanvasWindows: () => [...canvasWindows], readTunnelState,
-        ...(bridgeSmokeClipboard ? { clipboard: bridgeSmokeClipboard } : {}),
-        // The bridge factory receives the app logger through its composed
-        // dependency graph, so both direct and scheduled starts share the
-        // production bug-report ring without a second logger import.
-        appLogger: logger,
-        tunnelSetup,
-        // Application bundles are answered by the local Claude Code runner
-        // (claudeApplicationRunner.js); the bridge keeps every other task.
-        applicationExecutor: 'claude-code',
-      } });
-      if (bridgeRegistered) {
-        logger.info(`[HandoffBridge] boot packaged=${bridgeBootContext.isPackaged ? 'yes' : 'no'} registered=yes`);
-      } else {
-        logger.warn('[HandoffBridge] registration_failed reason=incomplete');
-      }
-    } catch (error) {
-      bridgeRegistered = false;
-      // The bridge is optional at boot, but its failure must be diagnosable in
-      // a FULL report without leaking an error message, path, or environment.
-      logger.warn(`[HandoffBridge] registration_failed reason=exception kind=${handoffBridgeRegistrationErrorKind(error)}`);
-    }
-
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by an external design source and replaced
     // wholesale from time to time; this never throws or blocks startup — its
@@ -1831,32 +1468,14 @@ if (!gotTheLock) {
       const win = BrowserWindow.fromWebContents(event.sender);
       if (win && !win.isDestroyed()) {
         win.__canvasFilePath = filePath || null;
-        // A restored canvas may finish identifying its BrowserWindow after
-        // the dock's first bridge publication. That early publication is
-        // deliberately rejected because main cannot yet bind it to this
-        // window; ask the publisher to replay only after the binding exists.
-        // The event has no path/job payload, so it cannot turn renderer data
-        // into authority or expose the window's filesystem state.
-        if (typeof filePath === 'string' && filePath) {
-          try { win.webContents?.send?.(HANDOFF_BRIDGE_IPC_EVENTS.CANVAS_FILE_READY); } catch { /* the renderer may be closing */ }
-        }
       }
     });
 
     setupApplicationMenu();
     createWindow(initialCanvasWindowSpec(process.argv));
-    scheduleRegisteredHandoffBridgeLaunch({
-      registered: bridgeRegistered,
-      options: {
-        userData: bridgeUserData,
-        stat: fs.promises.stat,
-        reapOrphans: () => reapOrphans({ userData: bridgeUserData, configPath: path.join(bridgeUserData, 'handoff-bridge', 'tunnel', 'config.yml') }),
-        start: ({ reason, loadedConfig }) => startHandoffBridge({ reason, deps: {
-          ...bridgeBootContext,
-          enabled: true, activate: true, tunnelState: readTunnelState(bridgeUserData), readTunnelState,
-          loadedConfig, getCanvasWindows: () => [...canvasWindows],
-        } }),
-      },
+    // The practice-interview connector owns the tunnel and its hostname.
+    startPracticeConnector({ userData: app.getPath('userData') }).catch(error => {
+      logger.warn(`[PracticeConnector] start failed: ${error?.message || error}`);
     });
 
     if (process.env.INFINITE_CANVAS_E2E !== '1') {
@@ -1920,7 +1539,7 @@ app.on('before-quit', async (event) => {
       closeAllPages,
       closeStealthBrowser,
       stopApplicationSyncServer,
-      stopHandoffBridge,
+      stopPracticeConnector,
     });
     try {
       await Promise.allSettled([shutdownClaudeApplicationRunner()]);
@@ -1959,8 +1578,6 @@ app.on('before-quit', async (event) => {
     windows: commitWindows,
     beginPause: win => beginSenderQuitPause(win.webContents),
     releasePause: win => releaseSenderQuitPause(win.webContents),
-    holdBridge: holdHandoffBridgeForQuit,
-    resumeBridge: resumeHandoffBridgeAfterQuitCancel,
     pauseRenderer: requestQuitPauseAndWait,
     // An admitted bundle import can spend a minute verifying PDFs. Give its
     // durable transaction time to finish before treating the quit as failed.
@@ -1997,7 +1614,7 @@ app.on('before-quit', async (event) => {
     // Cleanup with safety timeout
     try {
       const cleanup = async () => {
-        const handoffBridgeStop = stopHandoffBridge();
+        const practiceConnectorStop = stopPracticeConnector();
         const claudeRunnerStop = shutdownClaudeApplicationRunner();
         // Visible login/native-auth windows own the same persistent profile.
         // Close and await them first so the singleton cannot race their final
@@ -2007,7 +1624,7 @@ app.on('before-quit', async (event) => {
           closeAllPages(),
           closeStealthBrowser(true),
           stopApplicationSyncServer(),
-          handoffBridgeStop,
+          practiceConnectorStop,
           claudeRunnerStop,
         ]);
       };

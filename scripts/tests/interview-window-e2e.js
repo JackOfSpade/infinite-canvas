@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { createInterviewWindowE2EFixture } from '../fixtures/interview-window-e2e.mjs';
 import { runInterviewWindowE2E } from '../interview-window-e2e.mjs';
 import { createInterviewWindowController, projectInterviewDisplay } from '../../electron/interviewWindow.js';

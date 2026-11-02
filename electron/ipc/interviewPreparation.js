@@ -40,8 +40,7 @@ import { factCheckInterviewCards } from './interviewQaFactCheck.js';
 import { PRACTICE_CONNECTOR_NAME, buildPracticeInterviewPrompt, orderPracticeQuestions, planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
 import { PRACTICE_LAUNCH_NOTES, createPracticeChatLauncher } from './interviewPracticeLauncher.js';
-import { PRACTICE_MCP_PATH } from './handoffBridge/practiceMcp.js';
-import { getHandoffBridgeStatus } from './handoffBridge/index.js';
+import { PRACTICE_MCP_PATH, getPracticeConnectorStatus } from './practiceConnector/index.js';
 import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, loadInterviewQaLiveCards, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
 import { isRendererPrivateAppPath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
@@ -757,13 +756,12 @@ function validatePracticeStartArgs(args) {
   // to this helper's snapshot, job URL and captured application bundle.
   try { validateInterviewPreparedBriefLoadArgs(args); } catch { throw new TypeError('Interview practice requires a valid request.'); }
 }
-/** The practice connector needs the handoff bridge's public hostname and a live tunnel. */
-export function practiceBridgeReadiness(status) {
-  const hostname = typeof status?.config?.hostname === 'string' && status.config.hostname ? status.config.hostname : null;
-  const serving = status?.serving;
-  const live = !!hostname && status?.enabled === true && serving === 'live';
+/** The practice connector needs its public hostname and a live tunnel. */
+export function practiceConnectorReadiness(status) {
+  const hostname = typeof status?.hostname === 'string' && status.hostname ? status.hostname : null;
+  const live = !!hostname && status?.serving === 'live';
   return { ready: live, hostname, connectorUrl: hostname ? `https://${hostname}${PRACTICE_MCP_PATH}` : null, connectorName: PRACTICE_CONNECTOR_NAME,
-    reason: !hostname ? 'no_hostname' : status?.enabled !== true ? 'bridge_off' : serving !== 'live' ? 'not_serving' : null };
+    reason: !hostname ? 'no_hostname' : !live ? 'not_serving' : null };
 }
 function validateSelectionArgs(args) { strictKeys(args, ['nodeId'], 'Interview preparation requires a valid request.'); if (!isInterviewHelperNodeId(args.nodeId)) throw new TypeError('Interview preparation requires a valid request.'); }
 export function validateInterviewPreparationLoadArgs(args) {
@@ -1381,7 +1379,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
-  practiceLauncher = null, bridgeStatus = getHandoffBridgeStatus, practiceRegistry = null, broadcast = null, loadPreparedBrief = loadInterviewPreparedBrief,
+  practiceLauncher = null, connectorStatus = getPracticeConnectorStatus, practiceRegistry = null, broadcast = null, loadPreparedBrief = loadInterviewPreparedBrief,
   logWarning = message => console.warn(message) } = {}) {
   if (!appInstance || typeof appInstance.getPath !== 'function' || typeof registerHandler !== 'function') throw new TypeError('Interview preparation IPC registration is unavailable.');
   registerHandler('select-interview-preparation-bundle', async (_event, args, signal) => {
@@ -1444,18 +1442,18 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   // ---------------------------------------------------------- practice --
   // Practice runs in the person's Claude chat; the app arms a one-shot
   // session, places the starter and reads the feedback back from the
-  // bridge's practice connector.
+  // practice connector.
   const registry = practiceRegistry || getInterviewPracticeRegistry() || configureInterviewPracticeRegistry({ userDataPath: appInstance.getPath('userData') });
   const launcher = practiceLauncher || createPracticeChatLauncher();
   const sendPracticeUpdate = broadcast || (event => { try { for (const contents of electronPkg.webContents?.getAllWebContents?.() || []) { if (!contents.isDestroyed?.()) contents.send?.('interview-practice:updated', event); } } catch { /* renderer notice is best effort */ } });
   registry.subscribe(event => sendPracticeUpdate({ nodeId: event.nodeId, kind: event.kind }));
-  const practiceView = async nodeId => ({ ...(await registry.status(nodeId)), bridge: practiceBridgeReadiness(bridgeStatus()) });
+  const practiceView = async nodeId => ({ ...(await registry.status(nodeId)), bridge: practiceConnectorReadiness(connectorStatus()) });
   registerHandler('load-interview-practice', async (_event, args) => { validatePracticeArgs(args); return practiceView(args.nodeId); }, { validateArgs: validatePracticeArgs });
   registerHandler('cancel-interview-practice', async (_event, args) => { validatePracticeArgs(args); await registry.cancel(args.nodeId); return practiceView(args.nodeId); }, { validateArgs: validatePracticeArgs });
   registerHandler('start-interview-practice', async (_event, args, signal) => {
     validatePracticeStartArgs(args); throwIfAborted(signal);
-    const bridge = practiceBridgeReadiness(bridgeStatus());
-    if (!bridge.ready) return { ok: false, reason: bridge.reason, note: bridge.reason === 'no_hostname' ? 'Set the handoff bridge hostname first (Settings → Handoff bridge).' : 'Turn the handoff bridge on first; practice feedback arrives through its public hostname.', ...(await practiceView(args.nodeId)) };
+    const bridge = practiceConnectorReadiness(connectorStatus());
+    if (!bridge.ready) return { ok: false, reason: bridge.reason, note: bridge.reason === 'no_hostname' ? 'The practice connector is not set up on this computer.' : 'The practice connector is not running; practice feedback arrives through its public hostname.', ...(await practiceView(args.nodeId)) };
     const userDataPath = appInstance.getPath('userData');
     const brief = await loadPreparedBrief({ briefRecordId: args.briefRecordId, userDataPath });
     if (!brief || brief.inputs?.careerSnapshotId !== args.snapshotId

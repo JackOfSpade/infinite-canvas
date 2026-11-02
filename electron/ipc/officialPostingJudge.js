@@ -291,7 +291,7 @@ export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?
   const truncated = Number(totalLeads) > ordered.length;
   const comparison = { optionCount: ordered.length, preCapCount: Math.max(ordered.length, Number(totalLeads) || 0), truncated, validA: true, validB: true,
     choiceA, choiceB, agreement: false, disagreement: false, none: false, unavailable: false, accepted: false, invalidRuns: 0 };
-  const trail = ['bridge-research', ...comparativeTrail({ validA: true, validB: true, choiceA, choiceB })];
+  const trail = ['worker-research', ...comparativeTrail({ validA: true, validB: true, choiceA, choiceB })];
   const alternatives = ordered.map(lead => ({ url: lead.url, title: `${lead.employer || 'Official'} ${lead.kind === 'posting' ? 'posting' : 'careers page'} lead` }));
   const unsettled = code => ({ ...fallback(job, { outcome: 'ambiguous', trail: [...trail, code], alternatives }), comparison });
   const stamp = (posting, sourceHash) => ({ ...posting, semanticMatch: { version: 1, inputHash, ...(sourceHash ? { sourceHash } : {}) },

@@ -1340,7 +1340,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const activeManualAiRunIdRef = useRef(isCardOfficialPostingRunId(data.manualAiResume?.runId)
     ? null : data.manualAiResume?.runId || null);
   // Older renderers adopted card research as Search recovery because the card
-  // routes through this hub's bridge. Remove the copied markers without
+  // routes through this hub's handoff route. Remove the copied markers without
   // cancelling or retiring the card-owned request.
   useEffect(() => {
     const liveData = getNode(id)?.data || data;
@@ -9899,12 +9899,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [resetHandler]);
 
   const pauseAndSaveHandler = useCallback((e, options = {}) => {
-    // The bridge pause control is global: it turns away get *and* submit from
-    // every worker, including unrelated Job Searches and application lanes.
     // This control is only for this exact Job Search. `resetHandler` performs
     // its node/run-scoped, durable pause-before-cancel transaction, which is
-    // the authority that fences this handoff without stranding the whole
-    // bridge in a paused state after this Search is continued.
+    // the authority that fences this handoff without pausing unrelated Job
+    // Searches or application work.
     e?.stopPropagation();
     EventLogger.log(`[JobSearch][${id}] Pause & save requested from AI handoff (cause=user-stopped); awaiting durable manual recovery acknowledgement`);
     // Source-card Resolve/Skip can start scoring before the parent reacquires
@@ -9921,7 +9919,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     });
   }, [getEdges, getNode, getNodes, id, stopHandler]);
 
-  // The app-level ChatGPT handoff dock has no authority to cancel a Job
+  // The app-level AI handoff dock has no authority to cancel a Job
   // Search directly: only this mounted owner knows whether its exact run is
   // still active and can enter the acknowledged recovery transaction above.
   // Keep the event node/run-scoped so a stale dock card, sibling hub, or

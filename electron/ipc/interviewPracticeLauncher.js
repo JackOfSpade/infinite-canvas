@@ -2,11 +2,10 @@
  * Opens the person's own Chrome on a new claude.ai chat with the practice
  * starter already in the composer. Nothing is sent: the person picks the
  * model, presses Enter and switches to voice mode themselves. The tab is
- * brought to the front, unlike the background ChatGPT worker tabs.
+ * brought to the front.
  *
- * Same transport as the ChatGPT launcher: JXA against the person's Chrome by
- * process id (View → Developer → Allow JavaScript from Apple Events must be
- * on). The starter is inserted through execCommand, never put in a URL.
+ * Transport: JXA against the person's Chrome by process id (View → Developer →
+ * Allow JavaScript from Apple Events must be on). The starter is inserted through execCommand, never put in a URL.
  */
 import { isAppleEventsJsDisabledError, runUserChromeScript } from './browser/appleEvents.js';
 

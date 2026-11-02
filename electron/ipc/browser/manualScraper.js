@@ -7671,7 +7671,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                 });
               } else {
                 reprobeFailedThisPage = true;
-                if (probeAttempted === 0) {
+                if (Math.max(0, Number(detailResult.attemptedCount) || 0) === 0) {
                   sourceDetailBlockCode = reprobeOfCode;
                   sourceDetailBlockAt = Date.now();
                 }

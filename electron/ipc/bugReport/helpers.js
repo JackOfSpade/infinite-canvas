@@ -4,9 +4,9 @@ import crypto from 'crypto';
 // least two snapshot builders (jobs, marketplace, persisted-workspace), so
 // they live here rather than being duplicated or buried in one module.
 
-// Bridge setup lives in the main process while reports may be assembled long
-// after a particular bridge runtime stopped. Keep the hostname list here,
-// rather than teaching each report builder about bridge configuration.
+// Connector setup lives in the main process while reports may be assembled long
+// after a particular connector runtime stopped. Keep the hostname list here,
+// rather than teaching each report builder about connector configuration.
 let reportRedactedHosts = new Set();
 let reportRedactedHostPatterns = [];
 
@@ -62,7 +62,7 @@ function redactConfiguredReportHosts(value) {
   if (reportRedactedHostPatterns.length === 0) return value;
   let redacted = value;
   for (const pattern of reportRedactedHostPatterns) {
-    redacted = redacted.replace(pattern, (_match, prefix) => `${prefix}<bridge-host>`);
+    redacted = redacted.replace(pattern, (_match, prefix) => `${prefix}<connector-host>`);
   }
   return redacted;
 }
@@ -73,7 +73,7 @@ function redactedReportOrigin(parsed) {
   // whether a report may show the origin.
   const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
   if (!reportRedactedHosts.has(hostname)) return parsed.origin;
-  return `${parsed.protocol}//<bridge-host>${parsed.port ? `:${parsed.port}` : ''}`;
+  return `${parsed.protocol}//<connector-host>${parsed.port ? `:${parsed.port}` : ''}`;
 }
 
 /**

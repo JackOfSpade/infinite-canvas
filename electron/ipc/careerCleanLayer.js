@@ -219,7 +219,7 @@ export async function produceCareerCleanLayer({ snapshotId, catalog, root, callT
   }
   // Pages are independent (each answers only its own ids), so they share one
   // bounded roster instead of waiting on each other: six pages took 3 min
-  // one at a time on 2026-10-23 while nine bridge workers sat idle.
+  // one at a time on 2026-10-23 while nine workers sat idle.
   const responses = await mapAutomaticHandoffs(
     careerCleanLayerPages(pending),
     HANDOFF_CONCURRENCY,

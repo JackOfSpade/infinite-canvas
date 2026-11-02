@@ -6170,7 +6170,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   useEffect(() => {
     const onManualAiNodeCancelled = (event) => {
       // Career imports and card research own their own cancellation, even when
-      // they use this Board as their bridge hub.
+      // they use this Board as their handoff hub.
       if (!isBoardCombineManualAiRunId(event.detail?.runId)) return;
       const cancelledNodeId = event.detail?.nodeId || null;
       const childPlan = getNode(id)?.data?.boardScanResume || null;
@@ -6280,7 +6280,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const onPending = (event) => {
       const detail = event.detail || {};
       if (!detail.runId) return;
-      // Card research and career imports share the bridge hub, but never own
+      // Card research and career imports share the handoff hub, but never own
       // Combine recovery or superseded-Combine retirement.
       if (!isBoardCombineManualAiRunId(detail.runId)) return;
       const liveData = getNode(id)?.data || {};

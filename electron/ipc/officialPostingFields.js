@@ -18,7 +18,7 @@ export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
 export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
   'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
-  'bridge-research', 'bridge-timeout', 'bridge-unavailable', 'bridge-aborted', 'research-miss',
+  'worker-research', 'worker-timeout', 'worker-unavailable', 'worker-aborted', 'research-miss',
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'source-unproven', 'poster-tenant',
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
@@ -39,7 +39,7 @@ export function officialPostingComparativeTrail({ validA = false, validB = false
     ...(validA === true && validB === true && a && a === b ? [`comparative-choice-${a}`] : [])];
 }
 
-const DURABILITY_TRAIL_CODES = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+const DURABILITY_TRAIL_CODES = new Set(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor', 'reverify-failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
@@ -132,6 +132,12 @@ export function normalizeOfficialLocation(value) {
   return { display: value.display, workMode: remote ? 'remote' : suppliedMode, remote, remoteCountry, remoteRegion };
 }
 
+// Records saved by earlier versions carry these trail codes on disk.
+const SAVED_TRAIL_CODES = Object.freeze({
+  'bridge-research': 'worker-research', 'bridge-timeout': 'worker-timeout',
+  'bridge-unavailable': 'worker-unavailable', 'bridge-aborted': 'worker-aborted',
+});
+
 export function normalizeOfficialPosting(value) {
   const keys = ['level', 'outcome', 'employer', 'title', 'location', 'salary', 'sourceUrl', 'officialApplyUrl',
     'ats', 'tenant', 'fetchedAt', 'contentHash', 'scrapedListingSha256', 'trail', 'alternatives', 'semanticMatch', 'fetchFailures'];
@@ -167,8 +173,10 @@ export function normalizeOfficialPosting(value) {
     result.fetchedAt = value.fetchedAt;
   }
   if (value.trail !== undefined) {
-    if (!Array.isArray(value.trail) || value.trail.length > 32 || value.trail.some(item => !OFFICIAL_POSTING_TRAIL.includes(item))) return null;
-    result.trail = [...new Set(value.trail)];
+    if (!Array.isArray(value.trail) || value.trail.length > 32) return null;
+    const trail = value.trail.map(item => SAVED_TRAIL_CODES[item] || item);
+    if (trail.some(item => !OFFICIAL_POSTING_TRAIL.includes(item))) return null;
+    result.trail = [...new Set(trail)];
   }
   if (value.fetchFailures !== undefined) {
     if (!Array.isArray(value.fetchFailures) || value.fetchFailures.length > OFFICIAL_FETCH_FAILURE_LIMIT) return null;
@@ -256,7 +264,7 @@ export function listingStateRank(job) {
 
 // Trail codes meaning the research step did not run, did not finish, or hit a
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
-export const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+export const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
@@ -271,7 +279,7 @@ export function officialResearchSettled(value) {
     && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.inputHash || '') && /^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash || '');
   if (!['L5', 'L6'].includes(posting.level) && !officialClosed) return false;
   if (posting.fetchFailures?.length || trail.some(code => RESEARCH_UNSETTLED_TRAIL.includes(code))) return false;
-  return posting.outcome === 'closed' || trail.includes('bridge-research')
+  return posting.outcome === 'closed' || trail.includes('worker-research')
     || trail.includes('comparative-none') || trail.includes('comparative-disagree');
 }
 
@@ -314,9 +322,9 @@ export function officialPostingLookupStatus(value) {
   if (trail.has('storage-failed')) return result('incomplete', 'Official posting check could not be saved', retained, true);
   if (trail.has('source-unproven')) return result('incomplete', 'Employer source verification incomplete',
     `Possible postings were found, but their employer ownership could not be verified. ${retained}`, true);
-  if (trail.has('bridge-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Claude research was unavailable. Retry the official posting lookup in the app.', true);
-  if (trail.has('bridge-timeout')) return result('incomplete', 'Official lookup incomplete: research timed out', retry, true);
-  if (trail.has('bridge-aborted')) return result('incomplete', 'Official lookup incomplete: research interrupted', retry, true);
+  if (trail.has('worker-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Claude research was unavailable. Retry the official posting lookup in the app.', true);
+  if (trail.has('worker-timeout')) return result('incomplete', 'Official lookup incomplete: research timed out', retry, true);
+  if (trail.has('worker-aborted')) return result('incomplete', 'Official lookup incomplete: research interrupted', retry, true);
   if (trail.has('fetch-timeout')) return result('incomplete', 'Employer site verification timed out', fetchDetail(), true);
   if (trail.has('crawl-budget') || trail.has('crawl-partial')) return result('incomplete', 'Official lookup incomplete: search coverage limited', retry, true);
   if (FETCH_FAILURE_CODES.some(code => trail.has(code)) || posting.fetchFailures?.length) return result('incomplete', 'Employer site verification incomplete', fetchDetail(), true);

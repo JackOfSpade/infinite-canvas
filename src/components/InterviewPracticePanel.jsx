@@ -65,7 +65,7 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     const timer = setInterval(() => { void reload(); }, 60_000);
     return () => clearInterval(timer);
   }, [armed, reload]);
-  // Turning the handoff bridge on in Settings sends no event either.
+  // The practice connector coming up after launch sends no event either.
   const bridgeNotReady = !!view && !view.bridge?.ready;
   useEffect(() => {
     if (!bridgeNotReady) return undefined;
@@ -107,7 +107,7 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   return <section className="space-y-2 border-t border-white/10 pt-3" aria-label="Practice interview">
     <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
     <p className="text-[11px] text-white/60">A Claude chat plays the interviewer on a virtual call: small talk, your prepared questions reworded, follow-ups and curveballs of its own. Written feedback on the whole call comes back here.</p>
-    {bridge && !bridge.ready && <p role="status" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{bridge.reason === 'no_hostname' ? 'Set the handoff bridge hostname in Settings; feedback arrives through it.' : 'Turn the handoff bridge on; feedback arrives through its public hostname.'}</p>}
+    {bridge && !bridge.ready && <p role="status" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{bridge.reason === 'no_hostname' ? 'The practice connector is not set up; feedback arrives through it.' : 'The practice connector is not running; feedback arrives through its public hostname.'}</p>}
     {bridge?.connectorUrl && <div className="rounded-md border border-white/10 bg-black/20 p-1.5 text-[10px] text-white/55">
       <p>Once, in claude.ai → Settings → Connectors → Add custom connector (no OAuth), name it “{bridge.connectorName}” with this URL:</p>
       <p className="mt-0.5 flex items-center gap-1"><code className="truncate text-white/80" title={bridge.connectorUrl}>{bridge.connectorUrl}</code><button type="button" className="nodrag rounded border border-white/10 px-1 py-0.5 text-[10px] hover:bg-white/5" onClick={copyUrl} aria-label="Copy practice connector URL"><Copy size={10} className="mr-0.5 inline" />{copied ? 'Copied' : 'Copy'}</button></p>

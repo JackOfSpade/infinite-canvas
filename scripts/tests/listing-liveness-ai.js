@@ -3,7 +3,6 @@ import {
   buildListingLivenessRequest, LISTING_LIVENESS_CORRECTION_TEMPLATES,
   LISTING_LIVENESS_RESPONSE_SCHEMA, LISTING_LIVENESS_TASK, validateListingLivenessResponse,
 } from '../../electron/ipc/listingLivenessAi.js';
-import { bridgeLinked, bridgeWorkerPoolActive } from '../../electron/ipc/handoffBridge/bridgeAvailability.js';
 
 const fixture = (extra = {}) => ({ row: { source: 'linkedin', title: 'Platform Engineer',
   company: 'Northwind Labs', location: 'Remote' }, evidence: {
@@ -110,15 +109,8 @@ export default [
       descriptionText: 'Applications are open for this position.' })];
     rejectRule(answer('open', 'Applications are o\u200bpen for this position.'), inDescription, 'LIVENESS_QUOTE_IN_DESCRIPTION');
   } },
-  { name: 'listing liveness templates and strict bridge readiness are available', run: () => {
+  { name: 'listing liveness templates are available', run: () => {
     assert.ok(Object.isFrozen(LISTING_LIVENESS_CORRECTION_TEMPLATES));
     assert.equal(Object.keys(LISTING_LIVENESS_CORRECTION_TEMPLATES).length, 13);
-    const linked = { enabled: true, link: { state: 'linked' }, chat: { pool: { active: false } } };
-    assert.equal(bridgeLinked(linked), true);
-    assert.equal(bridgeWorkerPoolActive(linked), false);
-    assert.equal(bridgeWorkerPoolActive({ ...linked, chat: { pool: { active: true } } }), true);
-    assert.equal(bridgeLinked({ ...linked, enabled: false }), false);
-    assert.equal(bridgeLinked({ ...linked, link: { state: 'pairing' } }), false);
-    assert.equal(bridgeWorkerPoolActive({ ...linked, link: { state: 'pairing' }, chat: { pool: { active: true } } }), false);
   } },
 ];

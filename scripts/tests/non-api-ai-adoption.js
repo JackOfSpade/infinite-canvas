@@ -4,9 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import electronPkg from 'electron';
 import { handleSafe, abortNodeTasksAndWait, nodeCancellationError } from '../../electron/ipc/ipcUtils.js';
-import { requestNonApiAi, registerNonApiAiHandlers, listBridgeableNonApiAiHandoffs, markBridgeableNonApiAiHandoffAssigned, submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
-import { createPushSource } from '../../electron/ipc/handoffBridge/sources/push.js';
-import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
+import { requestNonApiAi, registerNonApiAiHandlers, listWorkerHandoffs, markWorkerHandoffAssigned, readWorkerHandoff, submitWorkerResponse } from '../../electron/ipc/nonApiAi.js';
 
 const { ipcMain, app } = electronPkg;
 let sequence = 0;
@@ -42,10 +40,10 @@ function fixture(task = 'job-scoring') {
   }) }));
   const invoke = (sender, slot = 0) => ipcMain.__getInvokeHandler(channel)({ sender }, { nodeId, manualAiRunId: runId, slot });
   const requests = sender => sender.sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
-  const pending = () => listBridgeableNonApiAiHandoffs({ allowTasks: new Set([task]) }).handoffs.filter(item => item.nodeId === nodeId);
+  const pending = () => listWorkerHandoffs({ allowTasks: new Set([task]) }).handoffs.filter(item => item.nodeId === nodeId);
   const bridgeArgs = request => ({ requestId: request.requestId, handoffCode: request.handoffCode, allowTasks: new Set([task]) });
   const response = (request, answer = 'one accepted answer') => JSON.stringify({ handoffCode: request.handoffCode, answer });
-  const submit = (request, answer) => submitNonApiAiResponseForBridge({ ...bridgeArgs(request), response: response(request, answer) });
+  const submit = (request, answer) => submitWorkerResponse({ ...bridgeArgs(request), response: response(request, answer) });
   const complete = () => ipcMain.__getInvokeHandler('complete-non-api-ai-run')({ sender: resumed }, { runId });
   const durable = () => JSON.parse(fs.readFileSync(path.join(app.getPath('userData'), 'non-api-ai-handoffs.json'), 'utf8')).runs[runId];
   const cleanup = async () => {
@@ -64,16 +62,12 @@ export default [
       try {
         const oldCall = f.invoke(f.first);
         const original = await until(() => f.requests(f.first)[0]);
-        const windows = new Map([[f.first.id, { __canvasFilePath: '/tmp/adoption.canvas' }]]);
-        const push = createPushSource({ codeGuard: createHandoffCodeGuard(), hubKey: () => 'e'.repeat(64), windows, graceMs: 0, pollMs: 0 });
-        assert(push.selectHub({ windowId: f.first.id, canvasFilePath: '/tmp/adoption.canvas', nodeId: f.nodeId }));
-        const served = await push.get({ epoch: 'adopt', worker: 'worker-1' });
-        assert.equal(served.status, 'served');
+        assert(readWorkerHandoff(f.bridgeArgs(original)).ok, 'a worker reads the pending handoff');
+        assert(markWorkerHandoffAssigned(f.bridgeArgs(original)), 'the worker claims the handoff');
         let display = f.first;
         if (cause === 'new-window') {
           f.first.isDestroyed = () => true;
           f.first.emit('destroyed');
-          windows.delete(f.first.id);
           display = f.resumed;
         } else {
           f.first.emit('did-start-navigation', {}, 'file:///canvas/index.html', false, true);
@@ -84,10 +78,9 @@ export default [
         assert.equal(f.pending().length, 1);
         assert(f.requests(display).every(request => request.requestId === original.requestId && request.handoffCode === original.handoffCode));
         assert.deepEqual(f.assignments.slice(0, 2), [1, 1], 'adopting an assigned record immediately starts the new caller response deadline');
-        const other = await push.get({ epoch: 'adopt', worker: 'worker-2' });
-        assert.equal(other.status, 'waiting', 'a second worker cannot serve the adopted step');
-        const accepted = await push.submit({ epoch: 'adopt', worker: 'worker-1', handoffCode: original.handoffCode, response: f.response(original) });
-        assert.equal(accepted.status, 'accepted', 'the original worker can deliver its late answer after adoption');
+        assert.equal(f.pending().length, 1, 'the adopted step stays a single pending handoff');
+        const accepted = await f.submit(original);
+        assert.equal(accepted.outcome, 'accepted', 'the original worker can deliver its late answer after adoption');
         const [oldResult, newResult] = await Promise.all([oldCall, newCall]);
         assert.equal(oldResult.success, true);
         assert.deepEqual(oldResult, newResult);
@@ -121,8 +114,8 @@ export default [
         const request = await until(() => f.requests(f.resumed)[0]);
         assert.equal(f.pending().length, 1);
         assert.equal(f.requests(f.first)[0].requestId, request.requestId);
-        assert(markBridgeableNonApiAiHandoffAssigned(f.bridgeArgs(request)));
-        assert(markBridgeableNonApiAiHandoffAssigned(f.bridgeArgs(request)));
+        assert(markWorkerHandoffAssigned(f.bridgeArgs(request)));
+        assert(markWorkerHandoffAssigned(f.bridgeArgs(request)));
         assert.deepEqual(f.assignments.slice(0, 2), [1, 1], 'assignment notifies both waiting callers exactly once');
         assert.equal((await f.submit(request)).outcome, 'accepted');
         assert.deepEqual(await oldCall, await newCall);

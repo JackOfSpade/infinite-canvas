@@ -27,8 +27,6 @@ import {
   requestApplicationHandoffFocus,
   requestApplicationHandoffRefresh,
 } from '../utils/applicationHandoffDock';
-import { useBridgeHeldKey } from '../hooks/useBridgeHeldKey';
-import { bridgeHeldCardLine } from '../utils/bridgeHeldApplication';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
@@ -471,20 +469,11 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     || hasLinkedLocalApplicationOutput(data.localApplication);
   const bundleIndicator = applicationBundleIndicator(localApplication);
   const bundleTone = bundleIndicator ? APPLICATION_BUNDLE_TONES[bundleIndicator.tone] : null;
-  // Whether the ChatGPT bridge holds this card's application (the dock's own
-  // rule, see bridgeHeldApplication.js). A primitive-snapshot subscription to
-  // the shared status store: no IPC, and this card re-renders only when its own
-  // held state changes.
-  const bridgeHeldKey = useBridgeHeldKey(localApplication?.id);
-  const isPasteApplication = localApplication?.mode === 'paste' || localApplication?.transport === 'paste';
-  const bridgeHeldLine = localApplication
-    ? bridgeHeldCardLine(bridgeHeldKey, { pasteTransport: isPasteApplication, awaitingPaste: applicationAwaitsPaste(localApplication.status) })
-    : null;
   const listingGenerationPaused = !hasLinkedApplicationOutput && !hasApplicationRun && !localJobPending
     && Boolean(data.listingGenerationNotice?.message || data.listingHold === true);
   const listingOverrideAvailable = listingGenerationPaused && !['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis);
-  const localApplicationNeedsAttention = Boolean(bridgeHeldLine || (localApplication
-    && ['failed', 'invalid', 'blocked', 'render-retry-required', 'revision-required', 'revision-exhausted', 'status-error'].includes(localApplication.status)));
+  const localApplicationNeedsAttention = Boolean(localApplication
+    && ['failed', 'invalid', 'blocked', 'render-retry-required', 'revision-required', 'revision-exhausted', 'status-error'].includes(localApplication.status));
   const postingDisplay = useMemo(() => officialPostingDisplay(data), [data]);
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(postingDisplay.salary, postingDisplay.location),
@@ -2064,13 +2053,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             }`} />
             <div className="min-w-0 text-white/55">
               <div className="font-medium text-white/70">
-                {bridgeHeldLine ? bridgeHeldLine.title : localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
+                {localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
                   localApplication.status === 'importing' ? 'Importing Local AI result…' :
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'status-error' ? 'Local AI reconnecting…' :
                       localApplication.status === 'completed' ? 'Local AI result ready' : 'Local AI needs attention'}
               </div>
-              <div className="mt-0.5 text-white/35">{bridgeHeldLine ? bridgeHeldLine.detail : localApplication.message || (localApplication.status === 'queued'
+              <div className="mt-0.5 text-white/35">{localApplication.message || (localApplication.status === 'queued'
                 ? (localApplication.mode === 'paste' || localApplication.transport === 'paste'
                   ? 'Open the AI handoff, copy its self-contained prompt into your local AI chat, and paste back the requested JSON. Review prompts ask the AI to make edits in that same response; the app reviews again afterwards.'
                   : 'Open this canvas’s .local-ai job folder and run LOCAL_AI_PROMPT.md with a local coding agent. This card checks for its result automatically.')
@@ -2094,7 +2083,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               onClick={(e) => { e.stopPropagation(); requestApplicationHandoffFocus(localApplication.id); }}
               className={localApplicationNeedsAttention ? GENERATION_RECOVERY_SMALL_BUTTON_CLASS : "mt-2 rounded-md border border-emerald-400/25 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-500/15"}
             >
-              {bridgeHeldLine ? bridgeHeldLine.openLabel : 'Continue AI handoff'}
+              Continue AI handoff
             </button>
           )}
           {localApplication.id && window.electronAPI?.openLocalApplicationFolder && !['saved', 'failed'].includes(localApplication.status) && (
@@ -2248,7 +2237,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
           }`}
           title={localJobPending
-            ? bridgeHeldLine ? bridgeHeldLine.pendingTitle : 'A Local AI job is waiting for the local-agent routine or is being imported.'
+            ? 'A Local AI job is waiting for the local-agent routine or is being imported.'
             : officialPostingLookup || boardPostingPreparation ? 'An official posting lookup is running for this card or its Job Board.'
             : displayedApplicationRun.state === 'resolving'
             ? 'Finding the official posting. Cancel to stop this preparation.'
@@ -2262,7 +2251,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         >
           <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
           {localJobPending
-            ? localApplication.status === 'importing' ? 'Importing…' : bridgeHeldLine ? bridgeHeldLine.pendingLabel : 'Local AI queued'
+            ? localApplication.status === 'importing' ? 'Importing…' : 'Local AI queued'
             : displayedApplicationRun.state === 'queued'
             ? `Queued · #${displayedApplicationRun.position}`
             : displayedApplicationRun.state === 'resolving' ? 'Finding official posting…'

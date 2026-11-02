@@ -10,7 +10,7 @@ const OFFICIAL_POSTING_BATCH_SIZE = 12;
 export { adapterUrl as officialPostingAdapterUrl, readableDescription as readableOfficialPostingDescription, verifiedApplyUrl as verifiedOfficialPostingApplyUrl };
 
 const canonical = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
-const RETRYABLE_MISS_TRAIL = new Set(['bridge-aborted', 'bridge-timeout', 'bridge-unavailable', 'research-miss',
+const RETRYABLE_MISS_TRAIL = new Set(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text',
   'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed', 'source-unproven']);
 const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mismatch', 'employer-mismatch',
@@ -41,7 +41,7 @@ export function shouldPersistOfficialPostingResult(value, { signal, researchRan 
     return ['found', 'link-only'].includes(posting.outcome) && (!partial || identityProof);
   }
   if (posting.outcome === 'failed' || posting.fetchFailures?.length || trail.some(code => RETRYABLE_MISS_TRAIL.has(code))) return false;
-  return researchRan || trail.includes('bridge-research') || posting.outcome === 'closed'
+  return researchRan || trail.includes('worker-research') || posting.outcome === 'closed'
     || trail.some(code => DEFINITIVE_MISS_TRAIL.has(code));
 }
 

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import electronPkg from 'electron';
 import { handleSafe, abortNodeTasksAndWait, nodeCancellationError } from '../../electron/ipc/ipcUtils.js';
 import { callLLMRaw, callLLMText } from '../../electron/ipc/llm.js';
-import { requestNonApiAi, registerNonApiAiHandlers, returnBridgeHandoffToPerson } from '../../electron/ipc/nonApiAi.js';
+import { requestNonApiAi, registerNonApiAiHandlers, returnHandoffToPerson } from '../../electron/ipc/nonApiAi.js';
 
 const { ipcMain } = electronPkg;
 const schema = { type: 'object', additionalProperties: false, required: ['answer'], properties: { answer: { type: 'string' } } };
@@ -63,7 +63,7 @@ export default [
         const routes = [];
         await assert.rejects(call('SYNTHETIC missing context', { ...options,
           manualHandoff: { onRoute: route => { routes.push(route); throw new Error('Synthetic observer failure'); } },
-        }), { code: 'BRIDGE_RENDERER_UNAVAILABLE' });
+        }), { code: 'WORKER_RENDERER_UNAVAILABLE' });
         assert.deepEqual(routes, [{ route: 'mcp', manualRoutingReason: null }]);
       }
     },
@@ -79,7 +79,7 @@ export default [
       ]) {
         const routes = [];
         await assert.rejects(requestNonApiAi({ prompt: 'SYNTHETIC private prompt', ...options,
-          onHandoffRoute: route => routes.push(route) }), { code: 'BRIDGE_RENDERER_UNAVAILABLE' });
+          onHandoffRoute: route => routes.push(route) }), { code: 'WORKER_RENDERER_UNAVAILABLE' });
         assert.deepEqual(routes, [{ route: 'manual', manualRoutingReason: reason }]);
       }
     },
@@ -137,7 +137,7 @@ export default [
         await until(() => f.requests()[1]);
         assert.equal(f.requests()[1].requestId, request.requestId);
         assert.deepEqual(f.routes[1].at(-1), { route: 'mcp', manualRoutingReason: null });
-        assert.equal(returnBridgeHandoffToPerson({ requestId: request.requestId, reason: 'worker_restart_cap' }), true);
+        assert.equal(returnHandoffToPerson({ requestId: request.requestId, reason: 'worker_restart_cap' }), true);
         for (const routes of f.routes) assert.deepEqual(routes.at(-1), { route: 'manual', manualRoutingReason: 'worker_restart_cap' });
         assert.equal((await f.submit(request)).accepted, true);
         const results = await Promise.all([first, adopted]);

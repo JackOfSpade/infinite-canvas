@@ -76,7 +76,7 @@ function validateConfirmation(value, expectedPairs) {
 /**
  * Ask AI to verify the deterministic ≥75% near-match candidates. Batches use
  * the same automatic handoff queue as scoring/taxonomy. That queue is consumed
- * by the bridge's standing worker pool, so any worker that became idle during
+ * by the standing worker pool, so any worker that became idle during
  * the preceding stage can claim a confirmation immediately; this code neither
  * starts nor reserves a separate worker pool.
  */

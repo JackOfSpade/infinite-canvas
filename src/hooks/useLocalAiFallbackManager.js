@@ -410,7 +410,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
 
     // Discard a failed folder no card has owned for the whole retire window.
     // The discard is the app's own bundle-removal chokepoint, so it also frees
-    // the bundle's handoff bridge lane.
+    // the bundle's handoff lane.
     const retireFailedOrphan = async (jobId, canvasFilePath, generation) => {
       const decision = failedOrphanRetireDecision(failedOrphanSinceRef.current.get(jobId), Date.now());
       if (decision === 'track') failedOrphanSinceRef.current.set(jobId, Date.now());

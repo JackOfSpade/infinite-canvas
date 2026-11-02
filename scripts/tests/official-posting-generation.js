@@ -24,7 +24,6 @@ const posting = (extra = {}) => ({ level: 'L1', outcome: 'found', employer: 'Nor
   location: { display: place, remote: false, workMode: '', remoteCountry: '', remoteRegion: '' },
   salary: { text: '', provenance: 'unknown' }, sourceUrl: officialUrl, officialApplyUrl: officialUrl,
   ats: '', tenant: '', trail: ['description-anchor'], ...extra });
-const status = () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active: true } } });
 function page(description = text, extra = {}) { return `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting',
   title: 'Software Engineer', hiringOrganization: { name: 'Northwind Labs' }, description,
   jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } }, ...extra })}</script>`; }
@@ -67,12 +66,12 @@ export default [
       const resolve = async rows => {
         captures.push(structuredClone(rows[0]));
         return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company,
-          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'] } })) };
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'semantic-match-v1'] } })) };
       };
       const store = { find: async () => null };
       await refreshOfficialPostingEntries({ nodeId: 'source-board', manualAiRunId: 'refresh-source-fields',
-        entries: [{ cardId: 'source-card', job: original }] }, { store, resolve, bridgeStatus: status, projectJob: projectProductionJob });
-      const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, resolve, bridgeStatus: status,
+        entries: [{ cardId: 'source-card', job: original }] }, { store, resolve, projectJob: projectProductionJob });
+      const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, resolve,
         projectJob: projectProductionJob, listingProbe: { probe: async () => ({ unknown: 'synthetic-unavailable' }) } });
       const receipt = getPreparedOfficialPosting(prepared.resolutionId, expected);
       assert.ok(receipt);
@@ -101,7 +100,7 @@ export default [
           officialPosting: { ...saved, ...(mode === 'failed-recheck' ? { trail: [...saved.trail, 'reverify-failed', 'fetch-failed'] } : {}) } };
         let fetches = 0; let research = 0;
         const result = await refreshOfficialPostingEntries({ nodeId: 'board-cache', manualAiRunId: `refresh-cache:${mode}`, force: false,
-          entries: [{ cardId: 'cache-card', job: current }] }, { store, bridgeStatus: status,
+          entries: [{ cardId: 'cache-card', job: current }] }, { store,
           snapshotFetch: async () => { fetches++; throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
           callRaw: async prompt => { research++; return prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
             .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'); },
@@ -122,11 +121,11 @@ export default [
       await withStore(async store => {
         const original = job();
         const miss = { level: 'L5', outcome: 'not-found', employer: original.company,
-          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'] };
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'semantic-match-v1'] };
         await store.save(original, { officialPosting: miss });
         let research = 0;
         const refresh = () => refreshOfficialPostingEntries({ nodeId: 'board-miss-cache', manualAiRunId: 'refresh-miss-cache', force: false,
-          entries: [{ cardId: 'miss-card', job: { ...original, officialPosting: miss } }] }, { store, now: () => clock, bridgeStatus: status,
+          entries: [{ cardId: 'miss-card', job: { ...original, officialPosting: miss } }] }, { store, now: () => clock,
           snapshotFetch: async () => { throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
           callRaw: async prompt => { research++; return prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
             .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'); } });
@@ -149,7 +148,7 @@ export default [
         { cardId: 'card-a', job: first }, { cardId: 'card-b', job: second }, { cardId: 'card-c', job: first },
       ] };
       const before = structuredClone(request); const progress = [];
-      const refreshed = await refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => null },
+      const refreshed = await refreshOfficialPostingEntries(request, { store: { find: async () => null },
         projectJob: row => ({ title: row.title, company: row.company, location: row.location, snippet: row.snippet, url: row.url, sourceJobKey: row.sourceJobKey }),
         resolve: async (rows, options) => {
           assert.equal(options.bypassCache, true);
@@ -159,7 +158,7 @@ export default [
           for (const row of rows) { assert.equal(row.officialPosting, undefined); assert.equal(row.score, undefined); }
           options.onProgress({ completed: 2 });
           return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company,
-            semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'] } })), telemetry: { total: rows.length } };
+            semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'semantic-match-v1'] } })), telemetry: { total: rows.length } };
         }, onProgress: value => progress.push(value) });
       assert.deepEqual(refreshed.entries.map(entry => entry.cardId), ['card-a', 'card-b', 'card-c']);
       assert.deepEqual(Object.keys(refreshed).sort(), ['entries', 'telemetry']);
@@ -176,21 +175,21 @@ export default [
       const request = { nodeId: 'board-refresh', manualAiRunId: 'official-refresh:failure', entries: [{ cardId: 'card-a', job: original }] };
       for (const legacy of [false, true]) {
         const prior = { aliases: officialPostingAliases(original), officialPosting: legacy ? posting() : semanticPosting(original) };
-        const refreshed = await refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => prior },
+        const refreshed = await refreshOfficialPostingEntries(request, { store: { find: async () => prior },
           resolve: async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'failed', employer: row.company,
-            trail: ['bridge-research', 'fetch-failed'], fetchFailures: [{ url: officialUrl, code: 'fetch-failed', reason: 'access-denied', statusCode: 403 }] } })) }) });
+            trail: ['worker-research', 'fetch-failed'], fetchFailures: [{ url: officialUrl, code: 'fetch-failed', reason: 'access-denied', statusCode: 403 }] } })) }) });
         assert.equal(refreshed.entries[0].officialPosting.sourceUrl, officialUrl);
         assert.ok(refreshed.entries[0].officialPosting.trail.includes('reverify-failed'));
         assert.equal(refreshed.entries[0].officialPosting.fetchFailures[0].statusCode, 403);
         assert.equal(refreshed.entries[0].postedBy, original.company);
       }
-      const closed = await refreshOfficialPostingEntries(request, { bridgeStatus: status,
+      const closed = await refreshOfficialPostingEntries(request, { 
         store: { find: async () => ({ aliases: officialPostingAliases(original), officialPosting: semanticPosting(original) }) },
         resolve: async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'closed', employer: row.company,
-          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: ['bridge-research', 'closed', 'semantic-match-v1'] } })) }) });
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(row) }, trail: ['worker-research', 'closed', 'semantic-match-v1'] } })) }) });
       assert.equal(closed.entries[0].officialPosting.outcome, 'closed');
       assert.equal(closed.entries[0].officialPosting.sourceUrl, undefined);
-      const foreign = await refreshOfficialPostingEntries(request, { bridgeStatus: status,
+      const foreign = await refreshOfficialPostingEntries(request, { 
         store: { find: async () => ({ aliases: officialPostingAliases(job({ title: 'Unrelated Supervisor' })), officialPosting: posting() }) },
         resolve: async (rows, options) => { assert.deepEqual(options.priorOfficialRecords, [null]); assert.deepEqual(options.candidateUrlsByRow, [[]]);
           return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'failed', employer: row.company, trail: ['fetch-failed'] } })) }; } });
@@ -198,16 +197,12 @@ export default [
     },
   },
   {
-    name: 'official refresh fails visibly before publishing unavailable, incomplete, reordered or unproved results',
+    name: 'official refresh fails visibly before publishing incomplete, reordered or unproved results',
     async run() {
       const request = { nodeId: 'board-refresh', manualAiRunId: 'official-refresh:invalid', entries: [{ cardId: 'card-a', job: job() }] };
-      let calls = 0;
-      await assert.rejects(refreshOfficialPostingEntries(request, { bridgeStatus: () => ({ enabled: false }),
-        resolve: async () => { calls++; }, store: { find: async () => null } }), error => error.code === 'OFFICIAL_POSTING_RESEARCH_UNAVAILABLE');
-      assert.equal(calls, 0);
       for (const result of [() => ({ jobs: [] }), rows => ({ jobs: [{ ...rows[0], title: 'Foreign role', officialPosting: { level: 'L5', outcome: 'failed', employer: rows[0].company, trail: ['failed'] } }] }),
-        rows => ({ jobs: [{ ...rows[0], officialPosting: posting() }] }), rows => ({ jobs: [{ ...rows[0], officialPosting: { level: 'L5', outcome: 'not-found', employer: rows[0].company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'] } }] })]) {
-        await assert.rejects(refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => null }, resolve: async rows => result(rows) }),
+        rows => ({ jobs: [{ ...rows[0], officialPosting: posting() }] }), rows => ({ jobs: [{ ...rows[0], officialPosting: { level: 'L5', outcome: 'not-found', employer: rows[0].company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research'] } }] })]) {
+        await assert.rejects(refreshOfficialPostingEntries(request, { store: { find: async () => null }, resolve: async rows => result(rows) }),
           error => /^OFFICIAL_POSTING_REFRESH_(?:INCOMPLETE|INVALID)$/u.test(error.code));
       }
     },
@@ -236,7 +231,7 @@ export default [
       const previous = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
       const entered = deferred();
       try {
-        registerOfficialPostingRefreshHandler({ projectJob: row => ({ ...row }), bridgeStatus: status, store: { find: async () => null },
+        registerOfficialPostingRefreshHandler({ projectJob: row => ({ ...row }), store: { find: async () => null },
           resolve: async (_rows, { signal, onProgress }) => { onProgress({ completed: 2 }); entered.resolve();
             return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })); } });
         const invoke = electronPkg.ipcMain.__getInvokeHandler('refresh-official-postings');
@@ -269,7 +264,7 @@ export default [
           calls.push({ title: prompt.includes('Engineer One') ? 'Engineer One' : 'Engineer Two', leads: leads.map(lead => lead.url).sort() });
           throw new Error('Synthetic judge failure.');
         } });
-      assert.equal(result.jobs.length, 2); assert.equal(calls.length, 4, 'each row reaches its judge with its own leads, twice for the injected retry');
+      assert.equal(result.jobs.length, 2); assert.equal(calls.length, 8, 'each row reaches both parallel judges with its own leads, twice each for the injected retry');
       for (const call of calls) assert.deepEqual(call.leads, ['https://shared.test/careers', call.title === 'Engineer One' ? 'https://one.test/job' : 'https://two.test/job'].sort());
     },
   },
@@ -283,9 +278,9 @@ export default [
         await store.save(original, { officialPosting: semanticPosting(original), description: text });
         let probes = 0;
         const prepared = await prepareSemanticOfficialPostingForGeneration({ ...args(original), listingOverride: true }, {
-          store, bridgeStatus: status,
+          store,
           resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
-            officialPosting: { level: 'L5', outcome: 'closed', employer: row.company, trail: ['bridge-research', 'closed'] } })) }),
+            officialPosting: { level: 'L5', outcome: 'closed', employer: row.company, trail: ['worker-research', 'closed'] } })) }),
           listingProbe: { probe: async () => { probes++; throw new Error('Closed official source cannot reopen through board links.'); } },
         });
         assert.equal(prepared.listingCheck.action, 'refuse-final');
@@ -304,7 +299,7 @@ export default [
       await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
         const replacement = 'https://northwind.test/jobs/replacement';
-        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store,
           resolve: async rows => {
             const record = await store.save(original, { officialPosting: posting({ level: 'L4', outcome: 'link-only',
               sourceUrl: replacement, officialApplyUrl: replacement,
@@ -326,14 +321,14 @@ export default [
         officialPosting: posting({ sourceUrl: 'https://foreign-cache.test/jobs/one' }) };
       let calls = 0;
       const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
-        store: { find: async () => foreign }, bridgeStatus: status,
+        store: { find: async () => foreign },
         resolve: async (rows, options) => {
           calls++; assert.equal(options.bypassCache, true);
           assert.deepEqual(options.candidateUrls, [cardUrl, `${cardUrl}/apply`]);
           assert.equal(options.priorOfficialRecords, undefined);
           assert.equal(rows[0].officialPosting, undefined, 'renderer official facts cannot reach fresh identity authority');
           return { jobs: rows.map(row => ({ ...row,
-            officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'] } })) };
+            officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research'] } })) };
         },
       });
       assert.equal(calls, 1);
@@ -345,7 +340,7 @@ export default [
     name: 'official preparation store drain stays bounded when an injected store never returns',
     async run() {
       const started = deferred(); let released = false; let guard;
-      const pending = prepareSemanticOfficialPostingForGeneration(args(), { bridgeStatus: status, timeoutMs: 5,
+      const pending = prepareSemanticOfficialPostingForGeneration(args(), { timeoutMs: 5,
         slots: { acquire: async () => () => { released = true; } },
         store: { find: async () => { started.resolve(); return new Promise(() => {}); } },
       });
@@ -356,7 +351,7 @@ export default [
         })]);
         assert.equal(released, true);
         assert.equal(result.listingCheck.action, 'refuse-retry');
-        assert.ok(result.officialPosting.trail.includes('bridge-timeout'));
+        assert.ok(result.officialPosting.trail.includes('worker-timeout'));
       } finally { clearTimeout(guard); }
     },
   },
@@ -365,7 +360,7 @@ export default [
     async run() {
       const started = deferred(); const finish = deferred(); const controller = new AbortController();
       let settled = false; let resolutions = 0;
-      const pending = prepareSemanticOfficialPostingForGeneration(args(), { signal: controller.signal, bridgeStatus: status,
+      const pending = prepareSemanticOfficialPostingForGeneration(args(), { signal: controller.signal,
         store: { find: async () => { started.resolve(); await finish.promise; return null; } },
         resolve: async rows => { resolutions++; return fallbackResolve(rows); },
       });
@@ -380,7 +375,7 @@ export default [
     name: 'official preparation cancellation never waits for an uncooperative research promise',
     async run() {
       const started = deferred(); const controller = new AbortController(); let settled = false;
-      const pending = prepareSemanticOfficialPostingForGeneration(args(), { signal: controller.signal, bridgeStatus: status,
+      const pending = prepareSemanticOfficialPostingForGeneration(args(), { signal: controller.signal,
         store: { find: async () => null }, resolve: async () => { started.resolve(); return new Promise(() => {}); },
       });
       const rejected = assert.rejects(pending, /synthetic cancellation/u).then(() => { settled = true; });
@@ -395,32 +390,32 @@ export default [
         const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-cached-miss',
           listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
         await store.save(original, { officialPosting: { level: 'L5', outcome: 'not-found', employer: original.company,
-          trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'],
+          trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'semantic-match-v1'],
           semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(original) } } });
         let calls = 0;
         const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
-          store, bridgeStatus: () => ({ enabled: false }),
+          store,
           resolve: async (rows, options) => {
             calls++; assert.equal(options.bypassCache, true);
             return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company,
-              trail: ['bridge-unavailable'] } })) };
+              trail: ['worker-unavailable'] } })) };
           },
         });
         assert.equal(calls, 1);
         assert.equal(prepared.listingCheck.action, 'refuse-retry');
         assert.equal(prepared.officialPosting.trail.includes('recent-miss'), false);
-        assert.equal(prepared.officialPosting.trail.includes('bridge-unavailable'), true);
+        assert.equal(prepared.officialPosting.trail.includes('worker-unavailable'), true);
       });
     },
   },
   {
     name: 'production generation refuses incomplete official research even with an open original listing and an override',
     async run() {
-      for (const trail of [['bridge-unavailable'], ['fetch-timeout'], ['crawl-budget'], ['comparative-invalid'], []]) {
+      for (const trail of [['worker-unavailable'], ['bridge-unavailable'], ['fetch-timeout'], ['crawl-budget'], ['comparative-invalid'], []]) {
         const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-retry',
           listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
         const prepared = await prepareSemanticOfficialPostingForGeneration({ ...args(original), listingOverride: true }, {
-          store: { find: async () => null }, bridgeStatus: status,
+          store: { find: async () => null },
           resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
             officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail } })) }),
         });
@@ -438,26 +433,26 @@ export default [
       const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-complete',
         listingLiveness: { board: 'linkedin', verdict: 'open', basis: 'open-marker', at: new Date().toISOString() } });
       const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), {
-        store: { find: async () => null }, bridgeStatus: () => ({ ...status(), chat: { pool: { active: false } } }),
+        store: { find: async () => null },
         resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
-          officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'comparative-none'] } })) }),
+          officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'comparative-none'] } })) }),
       });
       assert.equal(prepared.listingCheck.action, 'proceed');
       assert.equal(prepared.officialPosting.level, 'L5');
-      assert.equal(prepared.officialPosting.trail.includes('bridge-unavailable'), false);
+      assert.equal(prepared.officialPosting.trail.includes('worker-unavailable'), false);
     },
   },
   {
-    name: 'official-posting prepare re-extracts changed host text, marks unavailable bridge and binds an opaque immutable record to exact scraped identity and aliases',
+    name: 'official-posting prepare re-extracts changed host text and binds an opaque immutable record to exact scraped identity and aliases',
     async run() {
       await withStore(async store => {
         const original = job(); const before = JSON.stringify(original);
         const old = await store.save(original, { officialPosting: posting(), description: text });
         const changed = `${text} The current posting also includes reviewing route access policies.`;
-        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: () => ({ enabled: false }), fetch: network({ [officialUrl]: page(changed) }) });
+        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, fetch: network({ [officialUrl]: page(changed) }) });
         assert.equal(JSON.stringify(original), before); assert.match(prepared.resolutionId, /^[a-f0-9-]{36}$/u);
         assert.equal(prepared.officialPosting.level, 'L1'); assert.equal(prepared.postedBy, original.company);
-        assert.ok(prepared.officialPosting.trail.includes('bridge-unavailable')); assert.ok(prepared.officialPosting.trail.includes('reverified'));
+        assert.ok(prepared.officialPosting.trail.includes('reverified'));
         assert.notEqual(prepared.officialPosting.contentHash, old.officialPosting.contentHash);
         const trusted = getPreparedOfficialPosting(prepared.resolutionId, original);
         assert.equal(trusted.description, changed); assert.equal(trusted.applyUrl, officialUrl); assert.equal(trusted.scrapedJob.company, original.company);
@@ -479,7 +474,7 @@ export default [
           ? { url: 'https://elsewhere.example/jobs/foreign', body: page() }
           : page(text, kind === 'expired' ? { validThrough: '2000-01-01T00:00:00Z' } : { title: 'Staff Engineer' }) };
         const read = network(fetched);
-        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch: kind === 'closed'
+        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, fetch: kind === 'closed'
           ? async () => { throw Object.assign(new Error('closed'), { code: 'closed', statusCode: 404 }); } : read });
         assert.equal(prepared.officialPosting.level, kind === 'closed' ? 'L6' : 'L1', kind);
         assert.equal(prepared.officialPosting.officialApplyUrl, kind === 'closed' ? undefined : officialUrl, kind);
@@ -499,7 +494,7 @@ export default [
         const now = Date.parse('2026-10-26T12:00:00Z');
         let aiCalls = 0; let boardVisits = 0;
         const prepared = await prepareOfficialPostingForGeneration(args(original), {
-          store, now: () => now, bridgeStatus: status,
+          store, now: () => now,
           fetch: network({ [officialUrl]: livenessPage({ notice: 'Applications for this opening have ended.',
             extra: { validThrough: '2000-01-01T00:00:00Z' } }) }),
           callText: async (_prompt, request) => {
@@ -525,7 +520,7 @@ export default [
       await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: posting(), description: text });
         let calls = 0;
-        const result = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const result = await prepareOfficialPostingForGeneration(args(original), { store,
           fetch: network({ [officialUrl]: livenessPage({ notice: 'This position has been filled.' }) }),
           callText: async () => { calls += 1; return { rows: [{ id: 'r1', verdict: 'closed', quote: 'This position has been filled.' }] }; } });
         assert.equal(calls, 1); assert.equal(result.officialPosting.level, 'L6'); assert.equal(result.officialPosting.outcome, 'closed');
@@ -539,7 +534,7 @@ export default [
               : kind === 'unreadable' ? '<main><h1>Software Engineer</h1><p>This position has been filled.</p></main>'
                 : { statusCode: 503, body: livenessPage({ notice: 'This position has been filled.' }) };
         let calls = 0;
-        const result = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const result = await prepareOfficialPostingForGeneration(args(original), { store,
           fetch: network({ [officialUrl]: value }), callText: async () => { calls += 1; return { rows: [{ id: 'r1', verdict: 'closed', quote: 'This position has been filled.' }] }; } });
         assert.equal(calls, 0, kind); assert.equal(result.officialPosting.level, 'L1', kind);
         assert.notEqual(result.officialPosting.outcome, 'closed', kind);
@@ -549,23 +544,23 @@ export default [
   {
     name: 'official-page unconfirmed expiry preserves the prior proof with a bounded liveness audit fact',
     async run() {
-      for (const kind of ['unavailable', 'unclear', 'no-quote', 'description-quote', 'json-only-quote', 'timeout']) await withStore(async store => {
+      for (const kind of ['unclear', 'no-quote', 'description-quote', 'json-only-quote', 'timeout']) await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: posting(), description: text });
         let calls = 0;
         const body = kind === 'json-only-quote'
           ? `<html><body>${page(text, { validThrough: '2000-01-01T00:00:00Z' })}<main><h1>Software Engineer</h1><p>${'Candidates can read the application steps and learn about the hiring process. '.repeat(4)}</p></main></body></html>`
           : livenessPage({ extra: { validThrough: '2000-01-01T00:00:00Z' } });
         const prepared = await prepareOfficialPostingForGeneration(args(original), {
-          store, bridgeStatus: kind === 'unavailable' ? () => ({ enabled: false }) : status,
+          store,
           fetch: network({ [officialUrl]: body }),
           callText: async () => {
             calls += 1;
-            if (kind === 'timeout') throw Object.assign(new Error('timed out'), { code: 'bridge-timeout' });
+            if (kind === 'timeout') throw Object.assign(new Error('timed out'), { code: 'worker-timeout' });
             return { rows: [{ id: 'r1', verdict: kind === 'unclear' ? 'unclear' : 'closed',
               quote: ['description-quote', 'json-only-quote'].includes(kind) ? 'Engineers design clear interfaces' : '' }] };
           },
         });
-        assert.equal(calls, kind === 'unavailable' ? 0 : 1, kind);
+        assert.equal(calls, 1, kind);
         assert.equal(prepared.officialPosting.level, 'L1', kind);
         assert.ok(prepared.officialPosting.trail.includes('reverify-failed'), kind);
         assert.ok(prepared.officialPosting.trail.includes('official-liveness-unconfirmed'), kind);
@@ -584,7 +579,6 @@ export default [
       const visits = [];
       const prepared = await prepareOfficialPostingForGeneration(args(original), {
         store: { find: async () => null }, resolve: fallbackResolve,
-        bridgeStatus: () => ({ enabled: false }),
         listingProbe: { probe: async url => { visits.push(url);
           if (url === closedUrl) return { requestedUrl: url, finalUrl: url, httpStatus: 404,
             board: 'linkedin', ruleKey: 'linkedin', title: 'Page not found', chromeText: 'Page not found' };
@@ -607,7 +601,7 @@ export default [
       for (const foreign of [false, true]) await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: posting({ level: 'L2', ats: 'ashby', tenant: 'northwind', sourceUrl: url, officialApplyUrl: url }), description: text });
         const calls = []; const changed = `${text} Additional responsibilities include reviewing shared release checklists.`;
-        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch: network({
+        const prepared = await prepareOfficialPostingForGeneration(args(original), { store, fetch: network({
           [url]: '<main>A JavaScript application loads the role.</main>', [api]: { contentType: 'application/json', body: JSON.stringify({ jobs: [{ id: 'req-one', title: 'Software Engineer',
             location: place, isListed: true, descriptionPlain: changed, jobUrl: foreign ? 'https://jobs.ashbyhq.com/other/req-one' : url, applyUrl: url }] }) },
         }, calls) });
@@ -619,17 +613,17 @@ export default [
     },
   },
   {
-    name: 'official-posting prepare preserves recent misses without research, retries expired misses and checks actual bridge status before slot/store work',
+    name: 'official-posting prepare preserves recent misses without research, retries expired misses and takes a slot before store work',
     async run() {
       let time = Date.parse('2026-01-01T00:00:00Z');
       await withStore(async store => {
-        const original = job(); await store.save(original, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research'] } });
+        const original = job(); await store.save(original, { officialPosting: { level: 'L6', outcome: 'not-found', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research'] } });
         let calls = 0; const order = [];
         const options = { store: { ...store, find: async row => { order.push('store'); return store.find(row); } }, now: () => time,
-          bridgeStatus: () => { order.push('status'); return status(); }, slots: { acquire: async () => { order.push('slot'); return () => {}; } },
+          slots: { acquire: async () => { order.push('slot'); return () => {}; } },
           resolve: async (rows, options) => { calls++; assert.equal(options.manualAiRunId, args().manualAiRunId); assert.equal(options.nodeId, 'board-one'); return fallbackResolve(rows); } };
         const recent = await prepareOfficialPostingForGeneration(args(original), options);
-        assert.equal(calls, 0); assert.ok(recent.officialPosting.trail.includes('recent-miss')); assert.deepEqual(order, ['status', 'slot', 'store']);
+        assert.equal(calls, 0); assert.ok(recent.officialPosting.trail.includes('recent-miss')); assert.deepEqual(order, ['slot', 'store']);
         time += 24 * 60 * 60 * 1000;
         await prepareOfficialPostingForGeneration(args(original), options); assert.equal(calls, 1);
       }, { now: () => time });
@@ -642,17 +636,17 @@ export default [
         const slots = createOfficialPostingPrepareSemaphore(); const releases = []; let running = 0; let peak = 0;
         const resolve = async rows => { running++; peak = Math.max(peak, running); const gate = deferred(); releases.push(gate);
           await gate.promise; running--; return fallbackResolve(rows); };
-        const prepare = index => prepareOfficialPostingForGeneration(args(job({ url: `https://mirror.example/jobs/${index}`, sourceJobKey: String(index) }), `card-${index}`), { store, slots, bridgeStatus: status, resolve });
+        const prepare = index => prepareOfficialPostingForGeneration(args(job({ url: `https://mirror.example/jobs/${index}`, sourceJobKey: String(index) }), `card-${index}`), { store, slots, resolve });
         const pending = [prepare(1), prepare(2), prepare(3), prepare(4)]; await waitFor(() => releases.length === 3);
         assert.equal(releases.length, 3); assert.equal(peak, 3);
         releases[0].resolve(); await waitFor(() => releases.length === 4); assert.equal(releases.length, 4);
         releases.slice(1).forEach(gate => gate.resolve()); await Promise.all(pending); assert.equal(peak, 3);
         const single = createOfficialPostingPrepareSemaphore(1); const release = await single.acquire();
         let invoked = false;
-        const timed = prepareOfficialPostingForGeneration(args(job({ sourceJobKey: 'waiting' })), { store, slots: single, bridgeStatus: status,
+        const timed = prepareOfficialPostingForGeneration(args(job({ sourceJobKey: 'waiting' })), { store, slots: single,
           timeoutMs: 5, resolve: async rows => { invoked = true; return fallbackResolve(rows); } });
         const keepAlive = setTimeout(() => {}, 25); const result = await timed; clearTimeout(keepAlive); release();
-        assert.equal(invoked, false); assert.ok(result.officialPosting.trail.includes('bridge-timeout'));
+        assert.equal(invoked, false); assert.ok(result.officialPosting.trail.includes('worker-timeout'));
       });
     },
   },
@@ -663,7 +657,7 @@ export default [
         const previous = electronPkg.ipcMain.__getInvokeHandler('prepare-official-posting-for-generation');
         const sender = new EventEmitter(); sender.id = 9071; sender.isDestroyed = () => false;
         try {
-          registerOfficialPostingGenerationHandlers({ projectJob: row => ({ ...row }), store, bridgeStatus: status,
+          registerOfficialPostingGenerationHandlers({ projectJob: row => ({ ...row }), store,
             resolve: async (_rows, { signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true })) });
           const invoke = electronPkg.ipcMain.__getInvokeHandler('prepare-official-posting-for-generation');
           const first = invoke({ sender }, args(job(), 'card-a'));
@@ -688,7 +682,7 @@ export default [
       for (const reject of [false, true]) await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: posting(), description: text });
         let calls = 0; let fetches = 0;
-        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store,
           fetch: async () => { fetches++; throw new Error('Legacy proof is not eligible for direct reverify.'); },
           resolve: async (rows, options) => {
             calls++; assert.equal(options.semanticMatching, true); assert.equal(options.bypassCache, true);
@@ -715,7 +709,7 @@ export default [
         const requests = []; const comparisons = [];
         const fetch = network({ [officialUrl]: page(), 'https://northwind.test/': '<title>Northwind Labs</title>' }, requests);
         for (let attempt = 0; attempt < 2; attempt++) {
-          const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch,
+          const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, fetch,
             callRaw: async prompt => prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
               .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: 'https://northwind.test/', postingUrl: officialUrl,
                 employer: 'Northwind Labs', employerDomain: 'https://northwind.test', ats: '' })}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'),
@@ -749,7 +743,7 @@ export default [
         { identifier: { value: 'REQ-NEW' } }]) await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
         let resolutions = 0;
-        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store,
           fetch: network({ [officialUrl]: page(text, extra) }), resolve: async (rows, options) => {
             resolutions++; assert.equal(options.semanticMatching, true); assert.equal(options.bypassCache, true);
             assert.deepEqual(options.candidateUrls, [officialUrl]); return fallbackResolve(rows);
@@ -766,7 +760,7 @@ export default [
         const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
         const changed = `${text} The role also owns route planning.`; const changedPage = page(changed, { title: 'Platform Developer' });
         let resolutions = 0;
-        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store,
           fetch: network({ [officialUrl]: changedPage }), resolve: async rows => {
             resolutions++; const record = await store.save(original, { officialPosting: semanticPosting(original, changedPage), description: changed });
             return { jobs: [{ ...rows[0], officialPosting: record.officialPosting }] };
@@ -783,13 +777,13 @@ export default [
       for (const outcome of ['closed', 'failed']) await withStore(async store => {
         const original = job(); const before = await store.save(original, { officialPosting: semanticPosting(original), description: text });
         let resolutions = 0; let directFetches = 0;
-        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status,
+        const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store,
           fetch: async () => { directFetches++; throw new Error('Only the shared process may decide fresh source status.'); },
           resolve: async (rows, options) => {
             resolutions++; assert.equal(options.bypassCache, true);
             assert.deepEqual(options.priorOfficialRecords[0].officialPosting, before.officialPosting);
             return { jobs: rows.map(row => ({ ...row, officialPosting: { level: 'L5', outcome, employer: row.company,
-              trail: outcome === 'closed' ? ['bridge-research', 'closed'] : ['fetch-failed'] } })) };
+              trail: outcome === 'closed' ? ['worker-research', 'closed'] : ['fetch-failed'] } })) };
           } });
         assert.equal(resolutions, 1); assert.equal(directFetches, 0);
         assert.equal(prepared.officialPosting.level, 'L5');
@@ -805,13 +799,13 @@ export default [
       await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
         const started = deferred();
-        const pending = prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, timeoutMs: 30,
+        const pending = prepareSemanticOfficialPostingForGeneration(args(original), { store, timeoutMs: 30,
           fetch: network({ [officialUrl]: page(`${text} Changed source facts.`) }),
           resolve: async () => { started.resolve(); return new Promise(() => {}); } });
         await started.promise; const keepAlive = setTimeout(() => {}, 50);
         const prepared = await pending; clearTimeout(keepAlive);
         assert.equal(prepared.officialPosting.level, 'L6'); assert.equal(prepared.officialPosting.officialApplyUrl, undefined);
-        assert.equal(prepared.officialPosting.trail.includes('bridge-timeout'), true);
+        assert.equal(prepared.officialPosting.trail.includes('worker-timeout'), true);
       });
     },
   },

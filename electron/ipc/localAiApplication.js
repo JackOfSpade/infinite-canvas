@@ -37,7 +37,6 @@ import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { pruneEmptyApplicationParents } from '../utils/emptyApplicationFolders.js';
 import { FROZEN_CAREER_DATA, FROZEN_COMPLETED_PACKAGE, FROZEN_EVIDENCE_PLAN, FROZEN_JOB_LISTING, FROZEN_JOB_MANIFEST, FROZEN_JOB_RECORD, LOCAL_AI_JOB_INTEGRITY_CODE, LocalAiJobIntegrityError, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, assertFrozenEvidencePlan, assertFrozenTrustedIdentity, frozenSourceQuoteTest, frozenState, gradeFrozenSource, isJobIntegrityFault, normalizeBoundDocumentText } from './pasteApplicationAssembly.js';
 import { assertTrustedSourceRoles, occursInQuotedCareerEvidence, careerQuoteHasDeterministicRoleScope, formatRoleDateForPresentation, projectContactChannels, projectTrustedIdentity, CAREER_DATA_ROLE_SECTION_RULE, CAREER_SECTION_OPENING_BLOCK_RULE, CAREER_TERM_OVERLAP_RULE, isUnsafeControlCharacter, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_RULE, PROJECT_JOB_RELEVANCE_RULE_TEXT, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, SKILL_ITEM_FILTERABLE_RULE, SKILL_ITEM_GROUNDING_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS, structuredResumeRoleEvidenceGaps, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, POSTING_NAMED_SKILLS_RULE, postingNamedAttestedSkillTerms, careerAttestedSkillTerms, requiredCareerAttestedSkillTerms, MAX_REQUIRED_CAREER_SKILL_TERMS, SKILLS_BLOCK_PRESENCE_RULE, CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, validateStructuredApplicationResume } from './structuredResume.js';
-import { removeChatGptContentReferenceArtifacts } from './jsonRepair.js';
 import { applyPasteDocumentPatches, mergePasteReviewDelta, requiredPasteReviewDeltaEntries, TARGET_FORMS_RULE as PASTE_REVIEW_DELTA_TARGET_FORMS_RULE, VALID_OPS as PASTE_REVIEW_DELTA_VALID_OPS } from './pasteReviewDelta.js';
 import { recordPasteHandoffDiagnostic } from './pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSnapshotStorageRoot, isCareerSkillIndexEligible, projectApprovedCareerSnapshotForApplication, projectLegacyCareerProfile, readCareerSnapshot, readPinnedCareerSnapshot, vettedCareerSkillInventory } from './careerSnapshot.js';
@@ -1192,15 +1191,12 @@ function isTruncatedJsonPaste(error, source) {
   return Number.isFinite(offset) && offset >= source.length && hasUnclosedJsonStructure(source);
 }
 
-function pasteJsonSyntaxError(error, source, contentReferenceCount = 0) {
+function pasteJsonSyntaxError(error, source) {
   const position = String(error?.message || '').match(/(?:at\s+)?position\s+(\d+)/i);
   const offset = position ? Math.max(0, Math.min(Number(position[1]), source.length)) : null;
   const before = offset === null ? '' : source.slice(0, offset);
   const line = offset === null ? null : before.split('\n').length;
   const column = offset === null ? null : offset - before.lastIndexOf('\n');
-  const artifactHint = contentReferenceCount > 0
-    ? ' A ChatGPT content-reference annotation was removed, but the remaining JSON is still invalid.'
-    : '';
   const truncated = isTruncatedJsonPaste(error, source);
   // A cut-off reply is not a malformed paste, and telling the person to
   // "paste one valid JSON object" again sends them back to re-paste the same
@@ -1218,10 +1214,10 @@ function pasteJsonSyntaxError(error, source, contentReferenceCount = 0) {
   // output, so naming either as the cause would state as fact something
   // nothing here observed, and send someone looking in the wrong place.
   const message = truncated
-    ? `This paste stops before the JSON object closes, so what arrived is incomplete rather than malformed. Either the reply ran into its own output-length limit, or only part of it was copied — the two look identical here. Check the reply in the chat: if it is complete, copy the whole of it again; if it stopped early, ask it to continue until the JSON object closes, or to answer more concisely so the whole object fits in one reply.${artifactHint}`
-    : `Paste one valid JSON object (a single JSON code fence is also accepted).${line === null ? '' : ` JSON parsing stopped near line ${line}, column ${column}.`}${artifactHint}`;
+    ? `This paste stops before the JSON object closes, so what arrived is incomplete rather than malformed. Either the reply ran into its own output-length limit, or only part of it was copied — the two look identical here. Check the reply in the chat: if it is complete, copy the whole of it again; if it stopped early, ask it to continue until the JSON object closes, or to answer more concisely so the whole object fits in one reply.`
+    : `Paste one valid JSON object (a single JSON code fence is also accepted).${line === null ? '' : ` JSON parsing stopped near line ${line}, column ${column}.`}`;
   const failure = new Error(message);
-  failure.pasteDiagnostic = { syntaxLine: line, syntaxColumn: column, artifactCandidates: contentReferenceCount, truncated };
+  failure.pasteDiagnostic = { syntaxLine: line, syntaxColumn: column, truncated };
   return failure;
 }
 
@@ -1240,19 +1236,6 @@ function parsePasteResponse(value) {
       if (!isJsonObject(parsed)) throw new Error('invalid JSON object');
       return parsed;
     } catch (strictError) {
-      // ChatGPT can add this exact UI annotation to a copied string value. It
-      // contains unescaped quotes, so only retry after removing the known
-      // artifact from inside a JSON string and parsing strictly once more.
-      const artifactRepair = removeChatGptContentReferenceArtifacts(json);
-      if (artifactRepair.count > 0) {
-        try {
-          const parsed = JSON.parse(artifactRepair.cleaned);
-          if (!isJsonObject(parsed)) throw new Error('invalid JSON object');
-          return parsed;
-        } catch (repairedError) {
-          throw pasteJsonSyntaxError(repairedError, artifactRepair.cleaned, artifactRepair.count);
-        }
-      }
       throw pasteJsonSyntaxError(strictError, json);
     }
   }
@@ -1263,7 +1246,7 @@ function parsePasteResponse(value) {
   return value;
 }
 
-// The prompt spells out the wire values, but ChatGPT may still turn these two
+// The prompt spells out the wire values, but a model may still turn these two
 // source labels into the context-property spelling or use the ordinary word
 // "medium" for the supported tier. Normalize only those exact aliases before
 // the existing frozen-source and enum validators run. All provenance, quotes,
@@ -16409,7 +16392,7 @@ async function goneJobPhase({ jobId, canvasFilePath } = {}) {
 }
 
 // A Local AI bundle can be removed while another subsystem still holds a
-// reference to it (the ChatGPT handoff bridge releases a lane per bundle).
+// reference to it (the Claude task worker releases a lane per bundle).
 // This is the single closed-bundle lifecycle chokepoint: explicit discard and
 // pruning paths, plus a fully cleaned terminal save, all notify here. A
 // subscriber sees the closure exactly once without this module importing it.
@@ -16555,7 +16538,7 @@ async function performLocalApplicationDiscard(normalizedJobId, canvas) {
     // Success used to be silent, so a bug report could not show that a discard
     // ran. Closed fields only: a short job id and booleans, never a path.
     logger.info(`[LocalAI] discarded job=${normalizedJobId.slice(0, 8)} removedJob=${removedJob} removedReceipt=${removedReceipt} stamp=${stampWritten ? 'written' : 'failed'}`);
-    // Subscribers (the handoff bridge) may only be told about a bundle that is
+    // Subscribers (the Claude task worker) may only be told about a bundle that is
     // genuinely gone from THIS canvas. An idempotent request from another
     // canvas leaves the owning canvas's folder in place and must not free the
     // lane of a job that still exists.
@@ -16573,12 +16556,7 @@ async function performLocalApplicationDiscard(normalizedJobId, canvas) {
   return publicResult;
 }
 
-// `options.absentRootIsGone` is for a caller that already OWNS the job (the
-// handoff bridge's lane was released from this exact canvas): a canvas that is
-// intact but has no `.local-ai/jobs` folder at all then means the bundle is
-// gone (the folder was deleted by hand), not "another canvas's job". Every
-// other caller keeps the ownership rejection below.
-async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {}) {
+async function localApplicationStatusUnlocked(jobId, canvasFilePath) {
   // A successful bundle save deliberately removes the private job directory.
   // The renderer can briefly retain a pre-save card snapshot across a reload,
   // so probing that removed directory is an expected terminal condition—not an
@@ -16607,7 +16585,7 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
       if (receipt) {
         // Receipt publication deliberately comes before private-workspace
         // cleanup.  While that registered save still owns the old pathname,
-        // reporting "saved" would let a bridge status probe retire its lane
+        // reporting "saved" would let a status probe treat the job as closed
         // before the final hash/cleanup fence has completed.  The receipt is
         // durable evidence of the destination bundle, but not yet permission
         // to close this handoff.
@@ -16651,7 +16629,7 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
         };
       }
     }
-    if (error?.code === 'ENOENT' && (jobRootExists || options?.absentRootIsGone === true)) {
+    if (error?.code === 'ENOENT' && jobRootExists) {
       // A discard (discardLocalApplicationJob), age-based retention pruning
       // (pruneAndCountLocalAiJobs), and an aborted or failed import all reach
       // this same ENOENT-with-no-receipt state, and this surface used to be
@@ -16930,49 +16908,7 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath, options = {
   };
 }
 
-/**
- * Classifies a released job whose canvas could not be opened (ENOENT), using
- * only filesystem shape, never file content. Closed result:
- *   'present'     - the canvas file exists again (the ENOENT was transient);
- *   'orphaned'    - the canvas's own folder is reachable, the canvas file is
- *                   absent AND that folder holds no private job state for this
- *                   job (no `.local-ai/jobs/<jobId>`): nothing that could ever
- *                   be served is left at the released location;
- *   'unavailable' - anything else: the folder itself is missing (an unmounted
- *                   volume or a moved project folder), the job state is still
- *                   present (the canvas file alone was moved or renamed), a
- *                   symlinked app folder, malformed input, or any fs error.
- *                   These can come back, so they are never reported orphaned.
- * The handoff bridge may retire a released lane only after repeated orphaned
- * observations across its confirmation window. An unavailable result never
- * authorizes automatic retirement.
- */
-export async function localApplicationCanvasPresence({ jobId, canvasFilePath } = {}) {
-  if (typeof jobId !== 'string' || !JOB_ID_RE.test(jobId)
-    || typeof canvasFilePath !== 'string' || canvasFilePath.includes('\0')
-    || !path.isAbsolute(canvasFilePath) || path.resolve(canvasFilePath) !== canvasFilePath) return 'unavailable';
-  const lstatOrNull = target => fs.promises.lstat(target).catch(error => {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
-  });
-  try {
-    if (await lstatOrNull(canvasFilePath) !== null) return 'present';
-    const folder = path.dirname(canvasFilePath);
-    if (!(await fs.promises.stat(folder)).isDirectory()) return 'unavailable';
-    const appRoot = path.dirname(localJobsRoot(folder));
-    const appStat = await lstatOrNull(appRoot);
-    if (appStat === null) return 'orphaned';
-    if (!appStat.isDirectory() || appStat.isSymbolicLink()) return 'unavailable';
-    const jobsStat = await lstatOrNull(localJobsRoot(folder));
-    if (jobsStat === null) return 'orphaned';
-    if (!jobsStat.isDirectory() || jobsStat.isSymbolicLink()) return 'unavailable';
-    return await lstatOrNull(jobDirectory(jobId, folder).dir) === null ? 'orphaned' : 'unavailable';
-  } catch {
-    return 'unavailable';
-  }
-}
-
-export async function localApplicationStatus(jobId, canvasFilePath, options = {}) {
+export async function localApplicationStatus(jobId, canvasFilePath) {
   // Opening a current-authority store is not a passive read: a held journal
   // is reconciled against the manifest receipt and may restore the previous
   // root or finalize the next one. Keep the manifest read and that recovery in
@@ -16984,7 +16920,7 @@ export async function localApplicationStatus(jobId, canvasFilePath, options = {}
   if (!JOB_ID_RE.test(normalizedJobId)) throw new Error('Invalid Local AI job id.');
   return withLocalAiJobMutationLock(
     normalizedJobId,
-    () => localApplicationStatusUnlocked(normalizedJobId, canvasFilePath, options),
+    () => localApplicationStatusUnlocked(normalizedJobId, canvasFilePath),
   );
 }
 

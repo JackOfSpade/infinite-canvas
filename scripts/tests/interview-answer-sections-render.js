@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { assert } from './testHelpers.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 
 const CARD = {
   id: 'guide', question: 'Tell me about a project.', headline: 'I simplified a team guide.',

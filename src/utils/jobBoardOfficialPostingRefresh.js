@@ -108,7 +108,7 @@ export async function refreshBoardOfficialPostingJobs(jobs, {
     try { response = await refresh({ nodeId, manualAiRunId, entries }); }
     catch (error) {
       active();
-      if (error?.name === 'AbortError' || ['bridge-aborted', 'APP_QUIT_PAUSED', 'JOB_OFFICIAL_REFRESH_CANCELLED'].includes(error?.code)) {
+      if (error?.name === 'AbortError' || ['worker-aborted', 'APP_QUIT_PAUSED', 'JOB_OFFICIAL_REFRESH_CANCELLED'].includes(error?.code)) {
         throw failure('Official posting refresh was cancelled.', 'JOB_OFFICIAL_REFRESH_CANCELLED');
       }
       throw error;

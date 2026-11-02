@@ -354,7 +354,7 @@ function stampedResult(job, posting, verdict, basis, at, listingOverride) {
 
 /** Official-first Generate decision, with a single-row AI handoff when useful. */
 export async function checkListingForGeneration({
-  job, posting, probe, callText = callLLMText, bridgeAvailable = false, calibrationStore,
+  job, posting, probe, callText = callLLMText, calibrationStore,
   signal, now = Date.now, deadline = null,
   manualAiRunId = null, nodeId = null, listingOverride = false,
 } = {}) {
@@ -437,7 +437,7 @@ export async function checkListingForGeneration({
     board, verdict: 'pending', basis: classification.basis, now: new Date(now()),
   });
   const remaining = expiresAt - now();
-  if (!bridgeAvailable || remaining < AI_MIN_REMAINING_MS || typeof callText !== 'function') {
+  if (remaining < AI_MIN_REMAINING_MS || typeof callText !== 'function') {
     return finish(pending, 'pending', classification.basis);
   }
   const members = [{ row: pending, evidence }];
@@ -466,7 +466,7 @@ export async function checkListingForGeneration({
 /** Keep variant links unless this visit confirms that exact variant is closed.
  * The primary listing decision is deliberately outside this helper. */
 export async function checkPostingVariantsForGeneration({
-  job, variants = job?.postingVariants, probe, callText = callLLMText, bridgeAvailable = false,
+  job, variants = job?.postingVariants, probe, callText = callLLMText,
   calibrationStore, signal, now = Date.now, deadline = null, manualAiRunId = null, nodeId = null,
 } = {}) {
   if (!job || typeof job !== 'object') throw new TypeError('Variant check requires a job.');
@@ -506,7 +506,7 @@ export async function checkPostingVariantsForGeneration({
       classification = classifyListingLiveness(evidence, rules);
     } catch { retained.push(variant); continue; }
     if (classification.verdict === 'closed') continue;
-    if (classification.verdict !== 'needs-ai' || !bridgeAvailable || typeof callText !== 'function'
+    if (classification.verdict !== 'needs-ai' || typeof callText !== 'function'
       || expiresAt - now() < AI_MIN_REMAINING_MS) {
       retained.push(variant);
       continue;

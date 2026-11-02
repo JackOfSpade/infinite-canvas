@@ -5,7 +5,7 @@ import {
   CLAUDE_TASK_PROFILES,
 } from '../../electron/ipc/claudeTaskProfiles.js';
 import { cachedPromptParts, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
-import { BRIDGE_ENABLED_ATTACHMENT_TASKS, BRIDGE_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
+import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { answeringModel, buildClaudeInputMessage } from '../../electron/ipc/claudeApplicationRunner.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -47,7 +47,7 @@ export default [
   {
     name: 'claude task worker: every ChatGPT-carried task has a profile',
     run() {
-      const expected = [...BRIDGE_RELEASE_ONE_TASKS, ...BRIDGE_ENABLED_ATTACHMENT_TASKS].sort();
+      const expected = [...WORKER_RELEASE_ONE_TASKS, ...WORKER_ENABLED_ATTACHMENT_TASKS].sort();
       assert.deepEqual([...CLAUDE_TASK_IDS].sort(), expected);
       for (const profile of Object.values(CLAUDE_TASK_PROFILES)) {
         assert(['haiku', 'sonnet', 'opus'].includes(profile.model), 'only the latest of these three models');

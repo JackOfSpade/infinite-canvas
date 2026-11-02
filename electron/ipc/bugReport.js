@@ -21,7 +21,6 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
-import { CONSTANTS as HANDOFF_BRIDGE_CONSTANTS } from './handoffBridge/constants.js';
 import { closeReportDiagnostic, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, eventHistoryHeading, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
@@ -58,8 +57,6 @@ import {
 import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils/hubDropEligibility.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
-import { getApplicationSubmitFailures, getBridgeChatOpenDiagnostic, getBridgeLaunchDiagnostic, getBridgeChatCopyDiagnostic, getBridgeQueueDiagnostic, getBridgeMetadataDiagnostic, getClientAuthDiagnostic, getFailedStartDiagnostic, getMcpRateLimitDiagnostic, getOAuthRejectionDiagnostic, getSourceRejectionDiagnostic } from './handoffBridge/telemetry.js';
-import { getHandoffBridgeBootstrapDiagnostic } from './handoffBridge/index.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 
 // Captured at module load: the moment this code first ran in the main process.
@@ -668,10 +665,9 @@ function getNewestRendererMtimes() {
 /**
  * Captures the local non-api-ai registry that owns every task lifecycle.
  * Requests normally surface in the copy/paste dock; an eligible task can also
- * be released from a selected hub to the locally hosted MCP bridge. That is a
- * delivery route into the same registry, not a provider/API/model selection.
- * The actual pass/fail evidence for a specific handoff lives in the lifecycle
- * and bridge sections below.
+ * be served by the Claude task worker. That is a delivery route into the
+ * same registry, not a provider/API/model selection. The actual pass/fail
+ * evidence for a specific handoff lives in the lifecycle section below.
  */
 function buildAIConfigSnapshot() {
   let knownTaskIds = [];
@@ -2113,7 +2109,6 @@ ${stealthLine}${profileReservationLine}${launchCollisionLine}${argsSection}${res
 }
 
 const AIHANDOFF_MAIN_PROCESS_LOG_PATTERN = /non-api ai|non-api-ai|manual ai|manual handoff|handoff code|validation|jsonrepair/i;
-const BRIDGE_MAIN_PROCESS_LOG_PATTERN = /\[HandoffBridge\]|handoff[ -]?bridge|\b(?:oauth|pairing|cloudflared|tunnel|mcp)\b/i;
 const OFFICIAL_POSTING_MAIN_PROCESS_LOG_PATTERN = /official[- ]?posting|job-official-posting|OfficialPosting/i;
 
 function buildRecentMainProcessLogLines({ filter } = {}) {
@@ -2155,298 +2150,11 @@ function buildAIConfigurationMarkdown() {
   const aiConfig = buildAIConfigSnapshot();
   const aiConfigMarkdown = `
 ## AI Configuration
-- The local \`${aiConfig.transport}\` registry owns every AI handoff and normally presents it in the human copy/paste dock. An eligible task from a released, selected hub may instead be served to a linked ChatGPT session through the local MCP bridge, then submitted back to that same registry.
-- Neither route selects a live API provider, API key, or model. Use Handoff Bridge Diagnostics for bridge scope/discovery/selection evidence and Non-API AI Handoff Lifecycle for the individual handoff outcome.
+- The local \`${aiConfig.transport}\` registry owns every AI handoff and normally presents it in the human copy/paste dock. An eligible task may instead be served by the Claude task worker, then submitted back to that same registry.
+- Neither route selects a live API provider, API key, or model. Use Non-API AI Handoff Lifecycle for the individual handoff outcome.
 - Known task ids (${aiConfig.knownTaskCount}): ${aiConfig.knownTaskIds.length ? aiConfig.knownTaskIds.map(id => `\`${id}\``).join(', ') : '(unresolved)'}
 `;
   return aiConfigMarkdown;
-}
-
-function buildHandoffBridgeDiagnosticsMarkdown() {
-  const bootstrap = getHandoffBridgeBootstrapDiagnostic();
-  const diagnostic = getFailedStartDiagnostic();
-  const oauthRejection = getOAuthRejectionDiagnostic();
-  const sourceRejection = getSourceRejectionDiagnostic();
-  const clientAuth = getClientAuthDiagnostic();
-  const metadataFetches = getBridgeMetadataDiagnostic();
-  const mcpRateLimit = getMcpRateLimitDiagnostic();
-  const failedStart = diagnostic?.telemetry === true;
-  const rejectedOrigin = oauthRejection?.telemetry === true;
-  const rejectedSource = sourceRejection?.telemetry === true;
-  const observedClientAuth = clientAuth?.telemetry === true;
-  const observedMcpRateLimit = mcpRateLimit?.telemetry === true;
-  const queue = getBridgeQueueDiagnostic();
-  const chatCopies = getBridgeChatCopyDiagnostic();
-  const submitFailures = getApplicationSubmitFailures();
-  const submitFailuresMarkdown = submitFailures.length === 0 ? '' : `
-- Application host submission failures: ${submitFailures.length} retained (newest last; error text and content withheld)
-${submitFailures.map(entry => `  - ${new Date(entry.at).toISOString()} · stage \`${entry.stage || 'unknown'}\` · class \`${entry.name}\` · code \`${entry.code}\`${entry.line === null ? '' : ` · application module line ${entry.line}:${entry.column}`}`).join('\n')}`;
-  const chatOpens = getBridgeChatOpenDiagnostic();
-  const chatOpenMarkdown = chatOpens.length === 0 ? '' : `
-- Open worker chat interactions: ${chatOpens.length} retained (newest last; no URLs or tab identifiers)
-${chatOpens.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${entry.workerOrdinal} · outcome \`${entry.outcome}\` · reason \`${entry.reason || 'none'}\``).join('\n')}`;
-  const launches = getBridgeLaunchDiagnostic();
-  const launchMarkdown = launches.length === 0 ? '' : `
-- Automatic worker launch outcomes: ${launches.length} retained (newest last; no chat content)
-${launches.map(entry => `  - ${new Date(entry.at).toISOString()} · worker ${entry.workerOrdinal} · stage \`${entry.stage}\` · reason \`${entry.reason || 'none'}\` · mode \`${entry.mode || 'unknown'}\` · retry ${entry.attempt}`).join('\n')}`;
-  const bootstrapMarkdown = `
-- Bridge bootstrap: config \`${bootstrap.config}\` · consent \`${bootstrap.consent}\` · configured auto-start \`${bootstrap.autoStart}\` · enabled \`${bootstrap.enabled}\` · runtime \`${bootstrap.runtime}\` · tunnel \`${bootstrap.tunnel}\`
-- Setup readiness: hostname \`${bootstrap.setup.hostname}\` · binary \`${bootstrap.setup.binary}\` · credentials \`${bootstrap.setup.credentials}\` · public tunnel \`${bootstrap.setup.tunnelReachable}\`
-- Live tunnel health: last exit \`${bootstrap.tunnelRuntime.lastExit}\` · crash count ${bootstrap.tunnelRuntime.restarts} · public probe \`${bootstrap.tunnelRuntime.probeState}\` · reason \`${bootstrap.tunnelRuntime.probeReason}\` · consecutive failures ${bootstrap.tunnelRuntime.failures}
-- Startup policy: decision \`${bootstrap.startup.decision}\` · refusal \`${bootstrap.startup.refusal}\``;
-  let queueMarkdown = '';
-  if (queue) {
-    const laneAge = seconds => seconds === null ? 'unknown' : seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
-    const liveLanes = queue.liveLanes;
-    const laneRows = queue.lanes.map(lane => `  - job \`${lane.job}\` · phase \`${lane.phase}\` · stage \`${lane.stage || 'none'}\` · reason \`${lane.reason || 'none'}\` · served to current chat \`${lane.servedToChat ? 'yes' : 'no'}\` · in this phase ${laneAge(lane.ageSeconds)}`).join('\n');
-    const exactTime = value => Number.isFinite(value) ? new Date(value).toISOString() : 'not recorded';
-    const pushObservation = (outcome, at, seconds) => outcome === 'none'
-      ? 'no result recorded'
-      : `latest \`${outcome}\` at ${exactTime(at)} (${laneAge(seconds)} ago)`;
-    const pushTasks = queue.push.tasks.length
-      ? queue.push.tasks.map(item => `\`${item.task}\` ${item.pending}`).join(' · ')
-      : '(none observed)';
-    const exclusions = Object.entries(queue.push.exclusions).filter(([, count]) => count > 0)
-      .map(([reason, count]) => `\`${reason}\` ${count}`).join(' · ') || '(none observed)';
-    const pushOwnership = queue.push.served === 0
-      ? 'no outstanding MCP handoffs'
-      : `${queue.push.served} outstanding MCP handoff${queue.push.served === 1 ? '' : 's'}`;
-    const dockReason = queue.push.selectedPending === 0
-      ? 'no_selected_push'
-      : queue.chat.state === 'none'
-        ? 'no_chat'
-        : queue.push.selectedPolls === 0
-          ? 'no_mcp_poll'
-          : queue.push.claimed > 0
-            ? 'claimed'
-            : queue.push.available > 0
-              ? 'awaiting_claim'
-              : 'not_available';
-    const activityRows = (Array.isArray(queue.activity) ? queue.activity : []).map(item => {
-      const outcome = item.outcome ? ` · outcome \`${item.outcome}\`` : '';
-      return `  - ${exactTime(item.at)} · \`${item.kind}\`${outcome}`;
-    }).join('\n');
-    // `workers` is the planned pool size, not evidence that every worker is
-    // connected or currently processing. Keep those states separate so a
-    // report can explain a stale-looking copy control without implying that a
-    // worker stopped when the dock moved to a later batch.
-    const rawWorkerPool = queue.chat.pool && typeof queue.chat.pool === 'object' ? queue.chat.pool : {};
-    const boundedCount = value => Number.isSafeInteger(value) && value >= 0 ? Math.min(999999, value) : 0;
-    const workerStates = {
-      available: 'awaiting starter copy',
-      ready: 'starter copied; awaiting first call',
-      working: 'processing',
-      quiet: 'needs recovery',
-      waiting: 'connected; awaiting work',
-      idle: 'connected; idle',
-    };
-    const plannedWorkers = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawWorkerPool.workers));
-    const workerRoster = (Array.isArray(rawWorkerPool.roster) ? rawWorkerPool.roster : []).flatMap(worker => {
-      if (!worker || typeof worker !== 'object' || !Number.isSafeInteger(worker.ordinal)
-        || worker.ordinal < 1 || worker.ordinal > plannedWorkers || !Object.hasOwn(workerStates, worker.state)
-        || !Number.isSafeInteger(worker.completed) || worker.completed < 0) return [];
-      return [{
-        ordinal: worker.ordinal, state: worker.state, completed: Math.min(999999, worker.completed),
-        firstCallAt: Number.isFinite(worker.firstCallAt) ? worker.firstCallAt : null,
-        lastCallAt: Number.isFinite(worker.lastCallAt) ? worker.lastCallAt : null,
-        lastCallKind: ['get', 'submit'].includes(worker.lastCallKind) ? worker.lastCallKind : null,
-        lastOutcome: ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(worker.lastOutcome) ? worker.lastOutcome : null,
-        lastOutcomeAt: Number.isFinite(worker.lastOutcomeAt) ? worker.lastOutcomeAt : null,
-        quietReason: ['polling_stopped', 'answer_silent'].includes(worker.quietReason) ? worker.quietReason : null,
-        restarts: boundedCount(worker.restarts),
-      }];
-    }).sort((left, right) => left.ordinal - right.ordinal).slice(0, HANDOFF_BRIDGE_CONSTANTS.MAX_LANES);
-    const closedPoolHistory = (Array.isArray(rawWorkerPool.history) ? rawWorkerPool.history : []).slice(-3).flatMap(pool => {
-      if (!pool || !['drained', 'source_ended', 'continued', 'rotated', 'link_changed', 'revoked', 'quit', 'disabled', 'other'].includes(pool.reason)
-        || !Number.isFinite(pool.endedAt) || !Number.isSafeInteger(pool.workerCount) || pool.workerCount < 1 || pool.workerCount > HANDOFF_BRIDGE_CONSTANTS.MAX_LANES) return [];
-      const workers = (Array.isArray(pool.workers) ? pool.workers : []).flatMap(worker => {
-        if (!worker || !Number.isSafeInteger(worker.ordinal) || worker.ordinal < 1 || worker.ordinal > pool.workerCount
-          || !Object.hasOwn(workerStates, worker.state) || !Number.isSafeInteger(worker.completed) || worker.completed < 0) return [];
-        return [{ ordinal: worker.ordinal, state: worker.state, completed: Math.min(999999, worker.completed),
-          lastCallAt: Number.isFinite(worker.lastCallAt) ? worker.lastCallAt : null,
-          lastOutcome: ['served', 'waiting', 'queue_empty', 'paused', 'session_full', 'needs_user', 'retry', 'accepted', 'rejected', 'held', 'unknown_handoff', 'session_ended'].includes(worker.lastOutcome) ? worker.lastOutcome : null,
-          quietReason: ['polling_stopped', 'answer_silent'].includes(worker.quietReason) ? worker.quietReason : null,
-          restarts: boundedCount(worker.restarts) }];
-      }).sort((left, right) => left.ordinal - right.ordinal).slice(0, HANDOFF_BRIDGE_CONSTANTS.MAX_LANES);
-      return [{ endedAt: pool.endedAt, reason: pool.reason, workerCount: pool.workerCount, workers }];
-    });
-    const observedWorkers = workerRoster.length;
-    const workerStatusCount = value => Math.min(plannedWorkers, boundedCount(value));
-    const workerCounts = {
-      readyToCopy: workerStatusCount(rawWorkerPool.readyToCopy),
-      starterCopied: workerStatusCount(rawWorkerPool.starterCopied),
-      connected: workerStatusCount(rawWorkerPool.connected),
-      working: workerStatusCount(rawWorkerPool.working),
-      quiet: workerStatusCount(rawWorkerPool.quiet),
-      waiting: workerStatusCount(rawWorkerPool.waiting),
-      idle: workerStatusCount(rawWorkerPool.idle),
-      completed: boundedCount(rawWorkerPool.completed),
-      unreported: workerStatusCount(rawWorkerPool.unreported),
-    };
-    const rawPoolPlan = rawWorkerPool.plan && typeof rawWorkerPool.plan === 'object' ? rawWorkerPool.plan : {};
-    const poolPlanRecommended = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawPoolPlan.recommended));
-    const poolPlanQueued = boundedCount(rawPoolPlan.queued);
-    const poolPlanMaterialized = Math.min(poolPlanQueued, boundedCount(rawPoolPlan.materialized));
-    const poolPlanExpandBy = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawPoolPlan.expandBy));
-    const poolPlanReason = ['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers'].includes(rawPoolPlan.reason)
-      ? rawPoolPlan.reason
-      : 'empty';
-    const poolExpansionCount = Math.min(999, boundedCount(rawPoolPlan.expansionCount));
-    const poolLastExpansionAt = Number.isFinite(rawPoolPlan.lastExpansionAt) ? rawPoolPlan.lastExpansionAt : null;
-    const poolLastExpansionAdded = Math.min(HANDOFF_BRIDGE_CONSTANTS.MAX_LANES, boundedCount(rawPoolPlan.lastExpansionAdded));
-    const workerPoolPlan = rawWorkerPool.active !== true
-      ? 'no active worker pool'
-      : `current ${plannedWorkers} · recommended ${poolPlanRecommended} · materialized now ${poolPlanMaterialized} · total forecast ${poolPlanQueued} · expandable ${poolPlanExpandBy} · reason \`${poolPlanReason}\`${poolExpansionCount ? ` · automatic expansion ${poolExpansionCount} at ${exactTime(poolLastExpansionAt)} (+${poolLastExpansionAdded})` : ''}`;
-    const workerLifecycle = rawWorkerPool.active !== true
-      ? closedPoolHistory.length
-        ? `no active pool · ${closedPoolHistory.length} recent worker pool${closedPoolHistory.length === 1 ? '' : 's'} retained below`
-        : 'legacy single chat'
-      : plannedWorkers === 0
-        ? 'worker pool active; worker plan unavailable'
-        : observedWorkers === 0
-          ? `${plannedWorkers} worker chat${plannedWorkers === 1 ? '' : 's'} planned · per-worker lifecycle not yet reported`
-          : [
-            `${plannedWorkers} worker chat${plannedWorkers === 1 ? '' : 's'} planned`,
-            `${workerCounts.connected} connected`,
-            `${workerCounts.working} processing`,
-            workerCounts.quiet > 0 ? `${workerCounts.quiet} ${workerCounts.quiet === 1 ? 'worker needs recovery' : 'workers need recovery'}` : null,
-            `${workerCounts.completed} completed`,
-            workerCounts.readyToCopy > 0 ? `${workerCounts.readyToCopy} awaiting starter copy` : null,
-            workerCounts.starterCopied > 0 ? `${workerCounts.starterCopied} starter copied; awaiting first call` : null,
-            workerCounts.waiting > 0 ? `${workerCounts.waiting} connected; awaiting work` : null,
-            workerCounts.idle > 0 ? `${workerCounts.idle} connected; idle` : null,
-            workerCounts.unreported > 0 ? `${workerCounts.unreported} worker status${workerCounts.unreported === 1 ? '' : 'es'} not reported` : null,
-          ].filter(Boolean).join(' · ');
-    const workerDetail = worker => [
-      worker.lastCallAt === null ? null : `last call ${exactTime(worker.lastCallAt)}`,
-      worker.lastCallKind ? worker.lastCallKind : null,
-      worker.lastOutcome ? `result ${worker.lastOutcome}` : null,
-      worker.quietReason === 'polling_stopped'
-        ? 'stopped polling after a requested wait'
-        : worker.quietReason === 'answer_silent'
-          ? 'no MCP response since this handoff was served for at least 5 min; response may still be generating or this worker may have stopped'
-          : null,
-      worker.restarts > 0 ? `${worker.restarts} replacement${worker.restarts === 1 ? '' : 's'}` : null,
-    ].filter(Boolean).join(' · ');
-    const workerRosterRows = workerRoster.length === 0 ? '' : `\n${workerRoster.map(worker =>
-      `  - worker ${worker.ordinal}: ${workerStates[worker.state]} · ${worker.completed} completed${workerDetail(worker) ? ` · ${workerDetail(worker)}` : ''}`).join('\n')}`;
-    const closedPoolRows = closedPoolHistory.length === 0 ? '' : `\n- Recent closed worker pools (bounded to 3):\n${closedPoolHistory.map(pool =>
-      `  - ${exactTime(pool.endedAt)} · close \`${pool.reason}\` · ${pool.workerCount} worker${pool.workerCount === 1 ? '' : 's'}${pool.workers.length ? ` · ${pool.workers.map(worker => `#${worker.ordinal} ${worker.state}/${worker.completed}${worker.lastOutcome ? `/${worker.lastOutcome}` : ''}${worker.quietReason ? `/${worker.quietReason}` : ''}${worker.restarts ? `/restarted-${worker.restarts}` : ''}`).join(', ')}` : ''}`).join('\n')}`;
-    const byteBudget = `${queue.chat.bytes} bytes (diagnostic only; no bridge rollover)`;
-    queueMarkdown = `
-- Application lanes (as of ${new Date(queue.at).toISOString()}): bridge \`${queue.enabled ? 'enabled' : 'disabled'}\` · serving \`${queue.serving}\` · auto-release \`${queue.autoRelease ? 'on' : 'off'}\` · paused \`${queue.paused || 'no'}\` · fault \`${queue.fault || 'none'}\`
-- Delivery readiness: tunnel \`${queue.readiness.tunnelReachable ? 'reachable' : 'not-reachable'}\` · ChatGPT link \`${queue.readiness.linked ? 'linked' : 'not-linked'}\` · chat \`${queue.chat.state}\` · selected-text route \`${dockReason}\` · auto-release applies to application bundles only; selecting text work does not itself start a ChatGPT MCP client.
-- MCP chat calls: ${queue.chat.calls} in the current chat · ${queue.chat.lifetimeCalls} lifetime calls in this app process · started ${exactTime(queue.chat.startedAt)} · first tool call ${exactTime(queue.chat.firstCallAt)} · latest ${queue.chat.lastCallKind ? `\`${queue.chat.lastCallKind}\` at ${exactTime(queue.chat.lastCallAt)}` : 'none recorded'}
-- Application lanes: ready ${queue.applications.ready} · working ${queue.applications.working} · needs you ${queue.applications.needsYou} (held ${queue.applications.held}) · finished ${queue.applications.done} · live lanes ${liveLanes}/${queue.liveLaneCapacity}
-- Chat delivery: \`${queue.chat.state}\` · traffic ${byteBudget} · application bundles assigned ${queue.chat.jobsAssigned} (no per-chat assignment cap)
-- Worker lifecycle: ${workerLifecycle}${workerRosterRows}${closedPoolRows}
-- Worker pool planner: ${workerPoolPlan}
-- Push/MCP consent: scoring \`${queue.scope.scoring ? 'on' : 'off'}\` · marketplace \`${queue.scope.marketplace ? 'on' : 'off'}\` · application lanes \`${queue.scope.applications ? 'on' : 'off'}\`
-- Push discovery: ${queue.push.discoveredHubs} hub${queue.push.discoveredHubs === 1 ? '' : 's'} discovered · ${queue.push.selectedHubs} selected (${queue.push.selectedDiscoveredHubs} still in the latest inventory) · ${queue.push.optedOutHubs} explicitly unselected · pending ${queue.push.discoveredPending} total / ${queue.push.selectedPending} selected / ${queue.push.unselectedPending} left in unselected hubs
-- Push delivery routes: local registry has ${queue.push.selectedPending} selected pending · MCP-delivered and awaiting an answer ${pushOwnership} · active MCP claim${queue.push.claimed === 1 ? '' : 's'} ${queue.push.claimed} · selected and available for the next MCP get ${queue.push.available} · returned to local manual dock ${queue.push.held}
-- Bridge submit outcomes: accepted ${queue.counts.submitAccepted} · rejected ${queue.counts.submitRejected} · duplicate ${queue.counts.submitDuplicate} · invalid ${queue.counts.submitJunk + queue.counts.submitTooLarge} · superseded/misrouted ${queue.counts.submitSuperseded + queue.counts.submitMisrouted} · held ${queue.counts.submitHeld}
-- Pending push tasks: ${pushTasks}
-- Push exclusions from the latest \`${queue.push.exclusionScope}\` inventory: ${exclusions}
-- Push refresh evidence: all-hub discovery ${queue.push.refreshAttempts} call(s), ${queue.push.refreshFailures} failure(s), ${pushObservation(queue.push.lastRefresh, queue.push.lastRefreshAt, queue.push.lastRefreshAgeSeconds)} · selected-hub MCP polls ${queue.push.selectedPolls}, ${queue.push.selectedPollFailures} failure(s), ${pushObservation(queue.push.lastSelectedPoll, queue.push.lastSelectedPollAt, queue.push.lastSelectedPollAgeSeconds)}
-- Recent bridge activity: ${activityRows ? `${queue.activity.length} event(s), oldest first (bounded to 20)\n${activityRows}` : 'none recorded'}
-- Unrecognised chat keys: ${queue.keys.unrecognisedRecent} in the last ${queue.keys.unrecognisedWindowMinutes} min (last at ${queue.keys.lastUnrecognisedAt === null ? 'none recorded' : new Date(queue.keys.lastUnrecognisedAt).toISOString()})
-- Ended-chat keys: ${queue.keys.ended}
-- Lane lifecycle counters: release calls ${queue.counts.releaseCalls} (added nothing: ${queue.counts.releaseNoops}) · Unrelease ${queue.counts.unreleaseCalls} · lanes dropped by the app ${queue.counts.lanesDropped} (discard event ${queue.counts.droppedDiscarded} · prune event ${queue.counts.droppedPruned} · status probe found the bundle gone ${queue.counts.droppedMissing} · status probe reported it saved ${queue.counts.droppedSaved})${laneRows ? `\n${laneRows}` : '\n  - (no lanes)'}`;
-  }
-  let failedStartMarkdown = '';
-  if (failedStart) {
-    const elapsed = Number.isFinite(diagnostic.elapsedMs) ? `${diagnostic.elapsedMs} ms` : 'not recorded';
-    const at = Number.isFinite(diagnostic.at) ? new Date(diagnostic.at).toISOString() : 'not recorded';
-    const tunnel = diagnostic.tunnel && typeof diagnostic.tunnel === 'object' ? diagnostic.tunnel : {};
-    const probe = tunnel.probe && typeof tunnel.probe === 'object' ? tunnel.probe : {};
-    const readiness = tunnel.readiness && typeof tunnel.readiness === 'object' ? tunnel.readiness : {};
-    failedStartMarkdown = `
-- Failed start: phase \`${diagnostic.phase || 'unknown'}\` · cause \`${diagnostic.cause || 'unknown'}\`
-- Tunnel: state \`${tunnel.state || 'unknown'}\` · last exit \`${tunnel.lastExit || 'none'}\`
-- Configuration validation: ${readiness.configurationValidated === true ? 'passed' : 'not completed'} · environment check: ${readiness.environmentHealthy === true ? 'healthy' : 'not observed'} · local readiness: ${readiness.localReadinessPassed === true ? 'passed' : 'not confirmed'} · observed registered tunnel connections: ${Number.isFinite(readiness.registeredConnectionCount) ? Math.max(0, Math.min(8, readiness.registeredConnectionCount)) : 0}
-- Public probe: state \`${probe.state || 'unknown'}\` · reason \`${probe.reason || 'unknown'}\` · consecutive failures ${Number.isFinite(probe.consecutiveFailures) ? probe.consecutiveFailures : 0}
-- Recorded: ${at} · elapsed ${elapsed}`;
-  }
-  let oauthRejectionMarkdown = '';
-  if (rejectedOrigin) {
-    const last = oauthRejection.last && typeof oauthRejection.last === 'object' ? oauthRejection.last : {};
-    const count = Number.isFinite(oauthRejection.count) ? Math.max(1, Math.min(999, Math.floor(oauthRejection.count))) : 1;
-    const at = Number.isFinite(oauthRejection.at) ? new Date(oauthRejection.at).toISOString() : 'not recorded';
-    oauthRejectionMarkdown = `
-- OAuth cross-origin refusals: ${count} · last route \`${last.route || 'unknown'}\` · method \`${last.method || 'unknown'}\` · stage \`${last.stage || 'unknown'}\` · reason \`${last.reason || 'unknown'}\` · fetch site \`${last.fetchSite || 'unknown'}\` · fetch mode \`${last.fetchMode || 'unknown'}\` · fetch destination \`${last.fetchDest || 'unknown'}\` · Origin shape \`${last.originShape || 'unknown'}\` · consent action \`${last.consentAction || 'unknown'}\` · transaction \`${last.hasTxn || 'unknown'}\` · consent policy \`${last.consentPolicyVersion || 'unknown'}\` · status ${last.status === 403 ? 403 : 'unknown'} · recorded ${at}`;
-  }
-  let sourceRejectionMarkdown = '';
-  if (rejectedSource) {
-    const last = sourceRejection.last && typeof sourceRejection.last === 'object' ? sourceRejection.last : {};
-    const count = Number.isFinite(sourceRejection.count) ? Math.max(1, Math.min(999, Math.floor(sourceRejection.count))) : 1;
-    const at = Number.isFinite(sourceRejection.at) ? new Date(sourceRejection.at).toISOString() : 'not recorded';
-    // The wire answer for these is a generic 401 invalid_token, so state the
-    // real cause plainly here; otherwise this reads as an expired credential.
-    sourceRejectionMarkdown = `
-- Refused caller networks: ${count} · last route \`${last.route || 'unknown'}\` · policy \`${last.mode || 'unknown'}\` · caller network class \`${last.sourceClass || 'unknown'}\` · active links \`${last.links || 'unknown'}\` · answered 401 \`invalid_token\` · recorded ${at}
-  - The caller was refused for its NETWORK, not its token: the request came from a network this link was not paired from and outside the pinned connector ranges. A token that is otherwise valid still gets a generic 401 here.
-  - Recovery: Disconnect the existing link FIRST, then pair again. Re-pairing without disconnecting fails, because the token exchange is itself checked against the old link's pinned network.`;
-  }
-  let clientAuthMarkdown = '';
-  if (observedClientAuth) {
-    const at = Number.isFinite(clientAuth.at) ? new Date(clientAuth.at).toISOString() : 'not recorded';
-    const count = Number.isFinite(clientAuth.count) ? Math.max(1, Math.min(999, Math.floor(clientAuth.count))) : 1;
-    // The refresh grant is the decisive one: client authentication runs for it
-    // too, so pinning on a code-exchange observation alone would kill the link
-    // at the first refresh.
-    // Any assertion_* outcome other than ok means the connector DID sign; only
-    // verification failed. Saying "did not sign" there misdirects the fix.
-    const outcome = typeof clientAuth.outcome === 'string' ? clientAuth.outcome : 'unknown';
-    const signedButUnverified = outcome.startsWith('assertion_') && outcome !== 'assertion_ok';
-    const verdict = clientAuth.refreshSigned === true
-      ? 'a signed refresh has been seen, so AS_AUTH_METHODS can be pinned to private_key_jwt'
-      : clientAuth.method === 'assertion'
-        ? 'only the authorization_code exchange has been seen signed — NOT yet enough to pin, because client authentication also runs for refresh_token'
-        : outcome === 'assertion_jwks_unavailable'
-          ? `the connector signed, but ChatGPT's signing keys could not be fetched and none were saved; the exchange was ${clientAuth.accepted === true ? 'accepted under the key-outage policy' : 'rejected'}`
-          : signedButUnverified
-            ? `the connector signed, but the signature could not be verified (\`${outcome}\`), so the exchange was rejected`
-            : 'the connector did not sign, so pinning private_key_jwt would break the link';
-    const accepted = clientAuth.accepted === true ? 'yes' : clientAuth.accepted === false ? 'no' : 'unknown';
-    clientAuthMarkdown = `
-- Client authentication observed: ${count} token exchange(s) · last grant \`${clientAuth.grant || 'unknown'}\` · method \`${clientAuth.method || 'unknown'}\` · outcome \`${clientAuth.outcome || 'unknown'}\` · signed refresh seen \`${clientAuth.refreshSigned === true ? 'yes' : 'no'}\` · accepted \`${accepted}\` · recorded ${at}
-  - ${verdict}.`;
-  }
-  // Closed enums and timestamps only; no URL, kid, key or document content.
-  const metadataPart = (receipt, label, savedLabel) => {
-    if (!receipt) return `${label} \`not recorded\``;
-    const when = Number.isFinite(receipt.at) ? new Date(receipt.at).toISOString() : 'not recorded';
-    return `${label} \`${receipt.outcome || 'unknown'}\` (${savedLabel} \`${receipt.fallback || 'unknown'}\`) at ${when}`;
-  };
-  if (metadataFetches?.client || metadataFetches?.jwks) {
-    clientAuthMarkdown += `
-- ChatGPT metadata fetches: ${metadataPart(metadataFetches.client, 'client document', 'saved copy')} · ${metadataPart(metadataFetches.jwks, 'signing keys', 'saved keys')}`;
-  }
-  let mcpRateLimitMarkdown = '';
-  if (observedMcpRateLimit) {
-    const count = Number.isFinite(mcpRateLimit.count) ? Math.max(1, Math.min(999999, Math.floor(mcpRateLimit.count))) : 1;
-    const at = Number.isFinite(mcpRateLimit.at) ? new Date(mcpRateLimit.at).toISOString() : 'not recorded';
-    const retryAfterSeconds = Number.isSafeInteger(mcpRateLimit.retryAfterSeconds) && mcpRateLimit.retryAfterSeconds >= 1
-      ? Math.min(3600, mcpRateLimit.retryAfterSeconds)
-      : null;
-    mcpRateLimitMarkdown = `
-- Authenticated MCP rate limits: ${count} · latest Retry-After ${retryAfterSeconds === null ? 'not recorded' : `${retryAfterSeconds}s`} · recorded ${at}
-  - Aggregate-only telemetry: no grant, session, token, caller address, request, or handoff content is retained. This receipt is retained separately from the ordinary bridge activity ring, so repeated waiting polls cannot erase it.`;
-  }
-  const chatCopyMarkdown = chatCopies.length === 0 ? '' : `
-- Starter/Continue interactions retained: ${chatCopies.length} (newest last; closed metadata only)
-${chatCopies.map(entry => {
-    const at = Number.isFinite(entry.at) ? new Date(entry.at).toISOString() : 'not recorded';
-    const restart = entry.restartPath === 'ui-ack' || entry.restartPath === 'native'
-      ? ` · restart acknowledgement \`${entry.restartPath}\`` : '';
-    const ordinal = Number.isSafeInteger(entry.chatOrdinal) && entry.chatOrdinal >= 1 && entry.chatOrdinal <= 999
-      ? ` · chat ${entry.chatOrdinal}` : '';
-    return `  - ${at} · action \`${entry.action}\` · outcome \`${entry.outcome}\`${restart}${ordinal}`;
-  }).join('\n')}`;
-  return `
-## Handoff Bridge Diagnostics
-${bootstrapMarkdown}${submitFailuresMarkdown}${chatOpenMarkdown}${launchMarkdown}${queueMarkdown}${failedStartMarkdown}${oauthRejectionMarkdown}${sourceRejectionMarkdown}${clientAuthMarkdown}${mcpRateLimitMarkdown}${chatCopyMarkdown}
-`;
 }
 
 export function generateMarkdown(payload, reportWindowId = null, options = {}) {
@@ -2555,10 +2263,6 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   let activeTasksMarkdown = '';
   try { activeTasksMarkdown = buildActiveTasksMarkdown(reportWindowId); }
   catch { /* never break the report on diagnostic failure */ }
-
-  let handoffBridgeDiagnosticsMarkdown = '';
-  if (isFullReport || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) try { handoffBridgeDiagnosticsMarkdown = buildHandoffBridgeDiagnosticsMarkdown(); }
-  catch { /* a diagnostic receipt must never block the report */ }
 
   // Same guard as every other section builder: a malformed row in the renderer
   // payload should cost this one section, not the whole report.
@@ -2723,16 +2427,15 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   // hit stdout (which users never see) are surfaced here. Skip lines older
   // than this process start so we don't drag in stale logs from a previous
   // run that happened to share the ring buffer state.
-  // AIHANDOFF, BRIDGE and OFFDISC are intentionally focused lenses. Their renderer Event History is
+  // AIHANDOFF and OFFDISC are intentionally focused lenses. Their renderer Event History is
   // already filtered by the code vocabulary; apply the equivalent predicate to
   // the otherwise-global main-process ring as well. FULL remains byte-for-byte
   // global even when combined with a focused code.
-  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT') || reportCodes.has('OFFDISC'))
+  const mainProcessLogFilter = !isFullReport && (reportCodes.has('AIHANDOFF') || reportCodes.has('OFFDISC'))
     ? entry => {
       const message = String(entry?.message || '');
       return (reportCodes.has('AIHANDOFF') && AIHANDOFF_MAIN_PROCESS_LOG_PATTERN.test(message))
-        || (reportCodes.has('OFFDISC') && OFFICIAL_POSTING_MAIN_PROCESS_LOG_PATTERN.test(message))
-        || ((reportCodes.has('BRIDGE') || reportCodes.has('BRIDGEWORKERS') || (reportCodes.has('BRIDGELAUNCH') || reportCodes.has('BRIDGECHATMODE')) || reportCodes.has('BRIDGEFOCUS') || reportCodes.has('BRIDGESUBMIT')) && BRIDGE_MAIN_PROCESS_LOG_PATTERN.test(message));
+        || (reportCodes.has('OFFDISC') && OFFICIAL_POSTING_MAIN_PROCESS_LOG_PATTERN.test(message));
     }
     : null;
   let mainProcessLogLines = [];
@@ -2742,7 +2445,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 
   // ── AI configuration snapshot ─────────────────────────────────────────────
   // The local non-api-ai registry owns every task; its normal dock route and
-  // the optional MCP bridge route are both described here. It is rendered unconditionally on every
+  // the Claude task worker route are both described here. It is rendered unconditionally on every
   // report — unlike almost every other section here, it was never guarded, so
   // a throw anywhere in that chain took down the entire report instead of
   // just this section.
@@ -3165,7 +2868,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${handoffBridgeDiagnosticsMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${(isFullReport || reportCodes.has('BTABS')) ? browserTabRestoreDiagnosticsMarkdown() : ''}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${(isFullReport || reportCodes.has('BTABS')) ? browserTabRestoreDiagnosticsMarkdown() : ''}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

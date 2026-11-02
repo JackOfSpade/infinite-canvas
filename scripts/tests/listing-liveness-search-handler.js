@@ -15,8 +15,6 @@ const AT = '2026-10-25T12:00:00.000Z';
 const DESCRIPTION = 'Build reliable platform services, review incidents, and document service recovery with the engineering team. '.repeat(8);
 const CLOSED_NOTICE = 'This posting has closed.';
 const OPEN_NOTICE = 'Applications are open.';
-const linked = () => ({ enabled: true, link: { state: 'linked' }, chat: { pool: { active: false } } });
-const unlinked = () => ({ enabled: true, link: { state: 'unlinked' }, chat: { pool: { active: false } } });
 
 function job({ source = 'remoteok', key, title = 'Synthetic Engineer', company = 'Example Works', url,
   snippet = DESCRIPTION, verdict = 'pending', basis = 'closed-marker', extra = {} } = {}) {
@@ -57,7 +55,7 @@ async function withSearchHarness(run) {
 }
 
 async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, evidence = new Map(),
-  officialPosting = missed, callListingLiveness, handoffBridgeStatus = linked,
+  officialPosting = missed, callListingLiveness,
   listingLivenessCalibrationStore, settleBoardClosedRowsForTests, memos = new Map(), expiryCandidatesForRow = null } = {}) {
   const authority = await claimJobAnalysisOperationAuthority({ canvasFilePath, hubId: nodeId, operationId: `op-${nodeId}`,
     semanticBase: { kind: 'search', careerSnapshotId, runId: null, fingerprint: `synthetic-${nodeId}`,
@@ -96,7 +94,6 @@ async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, evide
       }), telemetry: { total: jobs.length } }),
     getOfficialPostingView: async row => ({ description: '', officialPosting: row.officialPosting }),
     callListingLiveness,
-    handoffBridgeStatus,
     ...(listingLivenessCalibrationStore ? { listingLivenessCalibrationStore } : {}),
     ...(settleBoardClosedRowsForTests ? { settleBoardClosedRowsForTests } : {}),
   });
@@ -156,30 +153,20 @@ export default [
     },
   },
   {
-    name: 'listing liveness handler: run waits while unlinked, then checks pending L5 when the bridge reconnects',
+    name: 'listing liveness handler: checks a pending L5 row and spares the row with an official posting',
     async run() {
-      for (const [name, initiallyLinked] of [['linked', true], ['unlinked', false]]) await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
-        const pending = job({ key: `synthetic-${name}-pending`, title: `Synthetic ${name} Engineer` });
-        const official = job({ key: `synthetic-${name}-official`, title: `Synthetic ${name} Official`, basis: 'neither' });
+      await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
+        const pending = job({ key: 'synthetic-pending', title: 'Synthetic Engineer' });
+        const official = job({ key: 'synthetic-official', title: 'Synthetic Official', basis: 'neither' });
         const evidence = new Map([[pending.jobkey, evidenceFor(pending, {
           chromeText: `${OPEN_NOTICE} ${'This synthetic job is accepting applications. '.repeat(4)}`, closed: false,
         })], [official.jobkey, evidenceFor(official, { closed: false })]]);
         let calls = 0;
-        const link = { linked: initiallyLinked };
-        let complete = false;
-        const running = runSearch({ canvasFilePath, careerSnapshotId,
-          nodeId: `synthetic-liveness-${name}`, rows: [pending, official], evidence,
+        const { result, telemetry } = await runSearch({ canvasFilePath, careerSnapshotId,
+          nodeId: 'synthetic-liveness-pending', rows: [pending, official], evidence,
           officialPosting: row => row.jobkey === official.jobkey ? found(row) : missed(row),
-          handoffBridgeStatus: () => link.linked ? linked() : unlinked(),
           callListingLiveness: async (...args) => { calls += 1; return answer(['open'])(...args); },
-        }).then(value => { complete = true; return value; });
-        if (!initiallyLinked) {
-          await new Promise(resolve => setTimeout(resolve, 30));
-          assert.equal(calls, 0, 'an unlinked run does not dispatch or finish the pending lookup');
-          assert.equal(complete, false, 'the search remains pending while its bridge is unlinked');
-          link.linked = true;
-        }
-        const { result, telemetry } = await running;
+        });
         assert.equal(result.success, true, result.error);
         assert.equal(calls, 1);
         assert.equal(result.jobs.find(row => row.jobkey === pending.jobkey)?.listingLiveness?.verdict, 'open');

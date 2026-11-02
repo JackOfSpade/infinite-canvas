@@ -7,8 +7,8 @@ import {
 } from '../../src/utils/jobBoardOfficialPostingRefresh.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../src/utils/officialPostingPreparation.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
-import { bundleComponent, withDom } from './fixtures/handoff-bridge/mountComponent.js';
-import { withConsoleCollector } from './fixtures/handoff-bridge/renderHarness.js';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
+import { withConsoleCollector } from './fixtures/practice-connector/renderHarness.js';
 
 const job = (index = 0, extra = {}) => ({ title: `Synthetic Role ${index}`, company: 'Synthetic Employer',
   location: 'Synthetic City, Canada', source: 'linkedin', url: `https://listing.example.test/${index}`,
@@ -146,9 +146,8 @@ export default [
         const result = await refreshOfficialPostingEntries({ nodeId: 'board', manualAiRunId: 'official-posting:retained',
           entries: [{ cardId: 'card', job: source }] }, {
           store: { find: async () => ({ aliases: officialPostingAliases(source), officialPosting: prior }) },
-          bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
           resolve: async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: {
-            level: 'L5', outcome: 'ambiguous', employer: 'Synthetic Employer', trail: ['bridge-research', 'source-unproven'], alternatives,
+            level: 'L5', outcome: 'ambiguous', employer: 'Synthetic Employer', trail: ['worker-research', 'source-unproven'], alternatives,
           } })) }),
         });
         const retained = result.entries[0].officialPosting;
@@ -190,14 +189,14 @@ export default [
     name: 'Mounted Board refresh distinguishes settled outcomes from incomplete attempts in its toast and private-safe event summary',
     async run() {
       const settled = [posting(0),
-        { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
-        { level: 'L5', outcome: 'ambiguous', employer: 'Synthetic Employer', trail: ['bridge-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
+        { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['worker-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
+        { level: 'L5', outcome: 'ambiguous', employer: 'Synthetic Employer', trail: ['worker-research', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL] },
         posting(3, { outcome: 'closed', trail: ['closed', 'semantic-match-v1'] })];
       for (const incomplete of [false, true]) {
         await withRefreshHook(async probe => {
           await probe.start();
           const tail = incomplete ? [posting(4, { trail: ['semantic-match-v1', 'reverify-failed', 'fetch-failed'] }),
-            { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['bridge-research', 'crawl-budget'] }]
+            { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['worker-research', 'crawl-budget'] }]
             : [posting(4), posting(5)];
           const results = [...settled, ...tail];
           await probe.complete({ success: true, entries: probe.requests[0].entries.map(({ cardId }, index) => ({ cardId,
@@ -225,7 +224,7 @@ export default [
       const results = [job(0, { officialPosting: posting(0) }),
         job(1, { officialPosting: posting(1, { trail: ['semantic-match-v1', 'reverify-failed', 'fetch-failed'] }) }),
         job(2), job(3, { officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer',
-          trail: ['bridge-research', 'oversize'] } })];
+          trail: ['worker-research', 'oversize'] } })];
       const before = structuredClone(results); freeze(results);
       assert.deepEqual(summarizeBoardOfficialPostingChecks(results), {
         checked: 4, verified: 1, notFound: 0, ambiguous: 0, closed: 0, retryable: 3,
@@ -467,7 +466,7 @@ function BoardProbe({ navigation, capture, addToast }) {
   {
     name: 'Board lookup carry overlays exact-source metadata while preserving source and protected application fields',
     run() {
-      const source = job(1, { officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['bridge-research'] },
+      const source = job(1, { officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['worker-research'] },
         notes: 'Live synthetic notes', localApplication: { id: 'live-application', status: 'saved' },
         careerSnapshotId: 'live-career', postingVariants: [] });
       const saved = card({ ...source, officialPosting: posting(1), postedBy: '', notes: 'Older synthetic notes',
@@ -531,7 +530,7 @@ function BoardProbe({ navigation, capture, addToast }) {
         inputHash: 'a'.repeat(64), version: 1 } }, postedBy: '' }, 'equal');
       assert.deepEqual(carryBoardOfficialPostingResults([source], [first, equal])[0].officialPosting, posting(4));
       const settledMiss = { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer',
-        trail: ['bridge-research', 'semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64) } };
+        trail: ['worker-research', 'semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64) } };
       assert.deepEqual(carryBoardOfficialPostingResults([source], [card({ ...source, officialPosting: settledMiss })])[0].officialPosting, settledMiss);
     },
   },
@@ -539,7 +538,7 @@ function BoardProbe({ navigation, capture, addToast }) {
     name: 'Board failed-recheck and conflicting-card hints force fresh host work even when Combine permits cache reuse',
     async run() {
       const { refreshOfficialPostingEntries } = await import('../../electron/ipc/officialPostingRefresh.js');
-      const source = job(44, { officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['bridge-research'] } });
+      const source = job(44, { officialPosting: { level: 'L5', outcome: 'not-found', employer: 'Synthetic Employer', trail: ['worker-research'] } });
       const failed = card({ ...source, officialPosting: posting(44, { trail: ['semantic-match-v1', 'reverify-failed', 'fetch-failed'] }) });
       const conflictA = card({ ...source, officialPosting: posting(45) }, 'conflict-a');
       const conflictB = card({ ...source, officialPosting: posting(46) }, 'conflict-b');
@@ -548,7 +547,7 @@ function BoardProbe({ navigation, capture, addToast }) {
       const before = structuredClone(source); let hostCalls = 0;
       await refreshBoardOfficialPostingJobs(carried, { nodeId: 'board-retry', manualAiRunId: 'official-posting:retry-hints', force: true,
         refresh: async args => ({ success: true, ...await refreshOfficialPostingEntries({ ...args, force: false }, {
-          store: { find: async () => null }, bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
+          store: { find: async () => null },
           resolve: async (rows, options) => {
             hostCalls++; assert.equal(options.bypassCache, false);
             assert.deepEqual(options.bypassCacheByRow, [true, true], 'per-row retry hints override cache permission');

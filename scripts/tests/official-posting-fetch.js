@@ -157,7 +157,7 @@ export default [
       });
       controller.abort();
       await assert.rejects(pending, error => {
-        assert.equal(error.code, 'bridge-aborted'); assert.equal(error.reason, undefined); return true;
+        assert.equal(error.code, 'worker-aborted'); assert.equal(error.reason, undefined); return true;
       });
       assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
     },
@@ -249,7 +249,7 @@ export default [
       const pending = fetchOfficialPosting('https://careers.northwind.test/job', {
         lookup: () => new Promise(() => {}), signal: controller.signal,
       });
-      controller.abort(); await assert.rejects(pending, /bridge-aborted/u);
+      controller.abort(); await assert.rejects(pending, /worker-aborted/u);
     },
   },
   {
@@ -274,7 +274,7 @@ export default [
           return req;
         };
         await assert.rejects(fetchOfficialPosting('https://careers.northwind.test/job', { lookup: publicLookup, request, signal: controller.signal }),
-          canceled ? /bridge-aborted/u : /fetch-failed/u);
+          canceled ? /worker-aborted/u : /fetch-failed/u);
         assert.equal(response.destroyed, true); assert.equal(destroys, 1);
         assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
       }

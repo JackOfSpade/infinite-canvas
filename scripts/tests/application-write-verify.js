@@ -19,13 +19,8 @@ import {
   assertApplicationV2PromptLimit, assertApplicationV2ReplyLimit,
 } from '../../electron/ipc/applicationV2Limits.js';
 import { extractEditorialPlanSource } from '../../electron/ipc/applicationEditorialPlan.js';
-import { classifySubmission } from '../../electron/ipc/handoffBridge/preflight.js';
-import { createSyntheticPreflightSource } from '../../electron/ipc/handoffBridge/sources/syntheticPreflight.js';
-import { createHandoffCodeGuard } from '../../electron/ipc/handoffBridge/lanes.js';
 import { __persistedValidatorBuildForTests, __setApplicationValidatorStampForTests, applicationValidatorStamp, pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
 import { writeVerifyLengthBudgetForStructure, writeVerifyLengthBudgets } from '../../electron/ipc/applicationV2LengthBudget.js';
-import { makeServedBody } from '../../electron/ipc/handoffBridge/framing.js';
-import { normalizeCurrentHandoff } from '../../electron/ipc/handoffBridge/lanes.js';
 import { __pasteUnitGroundingErrorsForTests } from '../../electron/ipc/localAiApplication.js';
 import { buildApplicationCareerAuthority } from '../../electron/ipc/applicationCareerAuthority.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED } from '../../electron/ipc/careerSnapshot.js';
@@ -974,10 +969,7 @@ export default [
         { candidateId: 'candidate-3', document: 'cover-letter', mimeType: 'image/png', data: 'aGVsbG8=' },
         { candidateId: 'candidate-5', document: 'resume', mimeType: 'image/png', data: 'aGVsbG8=' },
         { candidateId: 'candidate-5', document: 'cover-letter', mimeType: 'image/png', data: 'aGVsbG8=' }];
-      const current = normalizeCurrentHandoff({ code: 'code', stage: 'pick', prompt, pageImages: images });
-      const served = makeServedBody({ lane: { current }, remaining: {} });
-      assert.deepEqual(served.pageImageOrder, images.map(({ candidateId, document }) => ({ candidateId, document })));
-      assert.deepEqual([...new Set(served.pageImageOrder.map(row => row.candidateId))], acceptedWriteVerifyCandidates(state).map(row => row.id));
+      assert.deepEqual([...new Set(images.map(row => row.candidateId))], acceptedWriteVerifyCandidates(state).map(row => row.id));
     },
   },
   {
@@ -1025,21 +1017,16 @@ export default [
     },
   },
   {
-    name: 'v2 prompt, transport, and plain-text bridge limits are explicit',
+    name: 'v2 prompt, transport, and plain-text transport limits are explicit',
     run() {
       assert.equal(APPLICATION_V2_LIMITS.chatReplyTokens, undefined, 'no ChatGPT reply size is carried');
       assert.equal(APPLICATION_V2_LIMITS.chatPromptChars, 250_000);
-      assert.equal(APPLICATION_V2_LIMITS.bridgeRequestBytes, 2 * 1024 * 1024);
-      assert.equal(APPLICATION_V2_LIMITS.bridgeToolResultBytes, 8 * 1024 * 1024);
-      assert.equal(APPLICATION_V2_LIMITS.bridgeToolTextBytes, 2 * 1024 * 1024);
+      assert.equal(APPLICATION_V2_LIMITS.requestBytes, 2 * 1024 * 1024);
+      assert.equal(APPLICATION_V2_LIMITS.toolResultBytes, 8 * 1024 * 1024);
+      assert.equal(APPLICATION_V2_LIMITS.toolTextBytes, 2 * 1024 * 1024);
       assert.equal(assertApplicationV2PromptLimit('x'.repeat(250_000)).chars, 250_000);
       assert.throws(() => assertApplicationV2PromptLimit('x'.repeat(250_001)), ApplicationV2LimitError);
       assert.throws(() => assertApplicationV2ReplyLimit('x'.repeat(2 * 1024 * 1024)), ApplicationV2LimitError);
-      const plain = 'Résumé\nA concise role accomplishment.\nCover letter\nA sourced argument for the role.';
-      const lane = { jobId: 'job-1', current: { stage: 'write', code: 'code-1' }, acceptedFingerprints: new Set() };
-      assert.equal(classifySubmission({ response: plain, lane }), 'pass');
-      lane.current.stage = 'convert';
-      assert.equal(classifySubmission({ response: plain, lane }), 'junk');
     },
   },
   {
@@ -1061,27 +1048,6 @@ export default [
       assert.deepEqual(variants, [roleHeavy, writeVerifyLengthBudgetForStructure({ roles: 3, education: 1, skillsRows: 1, projects: 1 })]);
       assert.deepEqual(writeVerifyLengthBudgets({ education: [{}], skills: [{}], projects: [{ roleId: 'r1' }] }, [{}]).length, 1);
       assert.throws(() => writeVerifyLengthBudgetForStructure({ roles: -1, education: 0, skillsRows: 0, projects: 0 }));
-    },
-  },
-  {
-    name: 'v2 synthetic checksum ramp is inaccessible outside test mode and never claims an application job',
-    async run() {
-      assert.throws(() => createSyntheticPreflightSource({ testMode: false, codeGuard: createHandoffCodeGuard() }), /requires test mode/);
-      const probe = createSyntheticPreflightSource({ testMode: true, codeGuard: createHandoffCodeGuard() });
-      const lane = { jobId: probe.jobId, canvasFilePath: probe.canvasFilePath };
-      for (const size of [140_000, 200_000, 300_000]) {
-        const read = await probe.source.read(lane);
-        assert.equal(read.kind, 'open');
-        assert.ok(read.handoff.prompt.includes('NO APPLICATION JOB'));
-        assert.ok(read.handoff.prompt.length > size);
-        const digest = /SHA256=([a-f0-9]{64})$/.exec(read.handoff.prompt)?.[1];
-        assert.ok(digest);
-        const rejected = await probe.source.submit(lane, { code: read.handoff.code, text: 'SHA256=wrong' });
-        assert.equal(rejected.kind, 'rejected');
-        const accepted = await probe.source.submit(lane, { code: read.handoff.code, text: `SHA256=${digest}` });
-        assert.equal(accepted.kind, 'accepted');
-      }
-      assert.equal(probe.progress().completed, 3);
     },
   },
 ];
