@@ -9,21 +9,6 @@
     "code": "VALIDATION_FAILED",
     "diagnostic": null
   },
-  "inventory": {
-    "message": "Every scoring requirement must cite its exact listing evidence and priority.",
-    "code": null,
-    "diagnostic": null
-  },
-  "page evidence": {
-    "message": "Evidence assessment has an unknown, duplicate, or invalid requirement id/status.",
-    "code": null,
-    "diagnostic": null
-  },
-  "synthesis": {
-    "message": "A requirement with documented support cannot become a global documentation gap.",
-    "code": null,
-    "diagnostic": null
-  },
   "gap review": {
     "message": "Invalid job-gap-review response: job 0, row wrong: this id is not among the listed gap row ids for this job",
     "code": "VALIDATION_FAILED",
@@ -43,24 +28,6 @@
     "message": "Job Preference evaluation must return the exact listingId for each local listing index exactly once.",
     "code": null,
     "diagnostic": null
-  },
-  "listing legacy true": {
-    "message": "Job Preference evaluation returned an unknown, duplicate, or invalid preference outcome.",
-    "code": null,
-    "diagnostic": null
-  },
-  "listing legacy false": {
-    "message": "Job Preference evaluation returned an unknown, duplicate, or invalid preference outcome.",
-    "code": null,
-    "diagnostic": null
-  },
-  "research single": {
-    "message": "Confirmed or conflicting Job Preference research requires a verbatim grounded evidence quote.",
-    "code": "JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID",
-    "diagnostic": {
-      "stage": "research-assessment",
-      "reason": "ASSESSMENT_QUOTE_NOT_GROUNDED"
-    }
   },
   "research batch": {
     "message": "Confirmed or conflicting batched Job Preference research requires a verbatim quote from its own research section.",

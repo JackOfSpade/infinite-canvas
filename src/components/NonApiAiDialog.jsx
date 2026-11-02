@@ -12,6 +12,7 @@ import { CareerCompilationProgress } from './CareerCompilationProgress';
 import { careerCompilationProgressForRequest, recordCareerCompilationProgress } from '../utils/careerCompilationProgress';
 import { BridgeProgress } from './BridgeProgress';
 import { ClaudeProgress } from './ClaudeProgress';
+import { ClaudePauseNotice } from './ClaudePauseNotice';
 import { BridgeApplicationsPage } from './BridgeApplicationsPage';
 // The bridge-held rule is shared with the job card so the two cannot disagree.
 import { isBridgeHeldJob } from '../utils/bridgeHeldApplication';
@@ -74,8 +75,8 @@ const PREFERENCE_RESEARCH_RESPONSE_INVALID_CODES = new Set([
 const COMPENSATION_RESPONSE_INVALID_CODE = 'JOB_COMPENSATION_RESPONSE_INVALID';
 
 const BRIDGE_RETURN_LINES = {
-  rejection_cap: 'The same rule failed in 5 answers from ChatGPT.',
-  worker_restart_cap: 'The worker chat was replaced 3 times without an answer.',
+  rejection_cap: 'The same rule failed in 5 answers from Claude.',
+  worker_restart_cap: 'Claude was blocked 3 times without an answer.',
 };
 const correctionGuidanceFor = (validationCode, validationDiagnostic) => {
   if (validationCode === COMPENSATION_RESPONSE_INVALID_CODE) {
@@ -1302,7 +1303,7 @@ export function NonApiAiDialog() {
       // MCP-routed work never reaches this function from the render path.
       if (!isApplicationRequest) {
         const claim = await window.electronAPI?.claimNonApiAiManual?.(requestId);
-        if (claim?.claimed !== true || claim?.copied !== true) throw new Error('This handoff could not switch to manual copy. Check its ChatGPT status and try again.');
+        if (claim?.claimed !== true || claim?.copied !== true) throw new Error('This handoff could not switch to manual copy. Try again.');
       } else {
         if (!navigator.clipboard?.writeText) throw new Error('Clipboard access is unavailable.');
         // Whatever is on screen is what gets copied — for an application item
@@ -1796,6 +1797,8 @@ export function NonApiAiDialog() {
         className={`pointer-events-auto fixed bottom-[5.5rem] right-4 ${yieldsToModal ? 'z-[9999]' : 'z-[11001]'} w-[min(32rem,calc(100vw-2rem))]`}
       >
         {!isExpanded ? (
+          <>
+          <ClaudePauseNotice className="mb-2" />
           <button
             ref={dockButtonRef}
             type="button"
@@ -1814,6 +1817,7 @@ export function NonApiAiDialog() {
               Expand <ChevronUp size={15} aria-hidden="true" />
             </span>
           </button>
+          </>
         ) : (
       <section
         id="non-api-ai-handoff-panel"
@@ -1868,6 +1872,7 @@ export function NonApiAiDialog() {
               </button>
             </div>
           </div>
+          <ClaudePauseNotice className="mt-3" />
           {/* Bridge-held applications are rows of ONE page, so a queue made only
               of them has nothing to choose between — same as an automatic queue. */}
           {!isAutomaticMcpQueue && !applicationsPageOnly && (

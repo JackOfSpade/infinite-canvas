@@ -3,12 +3,11 @@ import { performance } from 'node:perf_hooks';
 import { matchInterviewAnswerCard } from '../src/utils/interviewAnswerMatching.js';
 import { createInterviewAiTransport } from './interviewAiTransports.js';
 import { selectInterviewCallQuestion } from './interviewCallQuestionDetector.js';
-export { INTERVIEW_AI_MATCH_SCHEMA } from './interviewAiSelectionSchema.js';
 
 export const INTERVIEW_AI_MATCH_DEFAULTS = Object.freeze({
   // Real 13-card / 63-utterance benchmark: 100% top-1/none recall;
   // quiet p95 950–996 ms, loaded p95 904–969 ms. High effort adds no quality.
-  transport: 'claude-warm', model: 'opus', effort: 'default',
+  model: 'opus', effort: 'default',
   timeoutMs: 2_500, initTimeoutMs: 10_000, latencyThresholdMs: 2_500,
   minConfidence: 0.55,
 });
@@ -23,7 +22,7 @@ export function interviewMatchPoolSize(value = 4) {
 
 export function interviewAiMatcherConfigFromEnv(env = process.env) {
   const result = {};
-  for (const [key, name] of [['transport', 'INTERVIEW_MATCH_TRANSPORT'], ['model', 'INTERVIEW_MATCH_MODEL'], ['effort', 'INTERVIEW_MATCH_EFFORT'], ['claudeBin', 'INTERVIEW_MATCH_CLAUDE_BIN'], ['codexBin', 'INTERVIEW_MATCH_CODEX_BIN']]) {
+  for (const [key, name] of [['model', 'INTERVIEW_MATCH_MODEL'], ['effort', 'INTERVIEW_MATCH_EFFORT'], ['claudeBin', 'INTERVIEW_MATCH_CLAUDE_BIN']]) {
     if (typeof env[name] === 'string' && env[name].trim() && env[name].length <= 512 && !/[\p{Cc}\p{Cf}]/u.test(env[name])) result[key] = env[name].trim();
   }
   for (const [key, name] of [['timeoutMs', 'INTERVIEW_MATCH_TIMEOUT_MS'], ['initTimeoutMs', 'INTERVIEW_MATCH_INIT_TIMEOUT_MS'], ['latencyThresholdMs', 'INTERVIEW_MATCH_LATENCY_THRESHOLD_MS']]) {
@@ -111,13 +110,8 @@ async function bounded(operation, milliseconds, signal, onTimeout) {
   finally { clearTimeout(timer); signal?.removeEventListener('abort', cancel); }
 }
 
-function createSession({ bank, config = {}, transportFactory = createInterviewAiTransport, request, context = {}, now = () => performance.now() } = {}) {
+function createSession({ bank, config = {}, transportFactory = createInterviewAiTransport, context = {}, now = () => performance.now() } = {}) {
   const settings = { ...INTERVIEW_AI_MATCH_DEFAULTS, ...config };
-  // Explicit alternate providers keep their own model defaults.
-  if (['chatgpt-bridge', 'codex'].includes(settings.transport)) {
-    settings.model = config.model ?? null;
-    settings.effort = config.effort ?? null;
-  }
   settings.timeoutMs = positive(settings.timeoutMs, INTERVIEW_AI_MATCH_DEFAULTS.timeoutMs);
   settings.initTimeoutMs = positive(settings.initTimeoutMs, INTERVIEW_AI_MATCH_DEFAULTS.initTimeoutMs);
   settings.latencyThresholdMs = positive(settings.latencyThresholdMs, INTERVIEW_AI_MATCH_DEFAULTS.latencyThresholdMs);
@@ -127,7 +121,6 @@ function createSession({ bank, config = {}, transportFactory = createInterviewAi
   const extensions = context.extensions || [];
   const instructions = interviewAiMatchInstructions(cards, extensions);
   const lifetime = new AbortController();
-  const fallbackTransports = new Set();
   const transportClosures = new WeakMap();
   const pendingClosures = new Set();
   const samples = [];
@@ -181,7 +174,7 @@ function createSession({ bank, config = {}, transportFactory = createInterviewAi
       initialization = new AbortController();
       starting = bounded(async signal => {
         if (!cards.length) throw failure('NO_PREPARED_CARDS');
-        const opened = await transportFactory(settings, { request, context });
+        const opened = await transportFactory(settings, { context });
         if (closed || signal.aborted || startedGeneration !== generation) { void closeTransport(opened); throw abortError(); }
         transport = opened;
         await opened.start?.({ cards, extensions, instructions, signal });
@@ -193,21 +186,6 @@ function createSession({ bank, config = {}, transportFactory = createInterviewAi
       starting.catch(() => {});
     }
     return starting;
-  }
-  async function coldFallback(question, previousCardId, previousQuestion, previousCardQuestion, previousPlanLocked, partial, signal) {
-    const cold = await transportFactory({ ...settings, transport: 'claude-cold', model: 'opus', effort: 'default' }, { request, context });
-    if (closed || signal.aborted) { void closeTransport(cold); throw abortError(); }
-    fallbackTransports.add(cold);
-    const cancel = () => { if (fallbackTransports.delete(cold)) void closeTransport(cold); };
-    signal.addEventListener('abort', cancel, { once: true });
-    try {
-      await cold.start?.({ cards, extensions, instructions, signal });
-      if (closed || signal.aborted) throw abortError();
-      return await cold.match({ question, previousCardId, previousQuestion, previousCardQuestion, previousPlanLocked, partial, signal });
-    } finally {
-      signal.removeEventListener('abort', cancel);
-      cancel();
-    }
   }
   async function match(question, { previousCardId = null, previousQuestion = '', previousCardQuestion = '', previousPlanLocked = false, partial = false, signal } = {}) {
     if (closed || signal?.aborted) throw abortError();
@@ -239,20 +217,10 @@ function createSession({ bank, config = {}, transportFactory = createInterviewAi
       if (active) throw failure('MATCH_BUSY');
       active = true; ownsActive = true;
       result = await bounded(async callSignal => {
-        try {
-          await start();
-          if (callSignal.aborted) throw abortError();
-          requestGeneration = generation;
-          const response = await transport.match({ question, previousCardId, previousQuestion, previousCardQuestion, previousPlanLocked, partial, signal: callSignal });
-          return parseSelection(response);
-        } catch (error) {
-          if (closed || callSignal.aborted || error?.code === 'CANCELLED' || settings.transport !== 'claude-warm' || error?.code === 'NO_PREPARED_CARDS') throw error;
-          if (error?.code !== 'INVALID_SELECTION') invalidateRequest();
-          requestGeneration = undefined;
-          // Speculation never spends a second provider call on a failed guess.
-          if (partial) throw error;
-          return parseSelection(await coldFallback(question, previousCardId, previousQuestion, previousCardQuestion, previousPlanLocked, partial, callSignal));
-        }
+        await start();
+        if (callSignal.aborted) throw abortError();
+        requestGeneration = generation;
+        return parseSelection(await transport.match({ question, previousCardId, previousQuestion, previousCardQuestion, previousPlanLocked, partial, signal: callSignal }));
       }, settings.timeoutMs, controller.signal, invalidateRequest);
       if (!partial && result.cardId !== 'none' && result.confidence < settings.minConfidence) result = {
         kind: result.kind === 'follow-up' ? 'not-question' : result.kind, cardId: 'none', confidence: result.confidence,
@@ -283,7 +251,7 @@ function createSession({ bank, config = {}, transportFactory = createInterviewAi
       if (closed) return closing || Promise.resolve();
       closed = true; lifetime.abort();
       clearTimeout(recoveryTimer); recoveryTimer = undefined;
-      closing = Promise.all([invalidateTransport(), ...[...fallbackTransports].map(value => closeTransport(value)), ...pendingClosures]);
+      closing = Promise.all([invalidateTransport(), ...pendingClosures]);
       return closing;
     },
   };

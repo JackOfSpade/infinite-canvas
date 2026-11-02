@@ -1,12 +1,24 @@
-import { compensationCohortAssessmentFits, MAX_ROLE_FAMILIES_PER_ASSESSMENT } from './resultCaps.js';
+import {
+  BATCH_OUTPUT_TOKEN_BUDGET,
+  compensationCohortAssessmentFits,
+  MAX_ROLE_FAMILIES_PER_ASSESSMENT,
+} from './resultCaps.js';
 
-// The chat transport exposes 16,384 output tokens, of which 15,360 are safely
-// usable.  A role ladder has a ~1,800-token research allowance, so seven fit
-// under the versioned raw-task formula. A salary cohort needs materially more
-// independent evidence (~3,000 tokens), so only four fit. These are output
-// safety limits, not input-context limits.
-export const ROLE_FAMILY_HANDOFF_BATCH_SIZE = 7;
-export const COMPENSATION_COHORT_HANDOFF_BATCH_SIZE = 4;
+// Claude's official output limit (see BATCH_OUTPUT_TOKEN_BUDGET in
+// resultCaps.js) bounds each call. A raw research call has a 2,048-token floor.
+// A role ladder has a ~1,800-token research allowance, and a salary cohort
+// needs materially more independent evidence (~3,000 tokens), so each batch
+// holds as many as fit the budget. These are output safety limits, not
+// input-context limits.
+const RAW_RESEARCH_BASE_TOKENS = 2048;
+const ROLE_FAMILY_RESEARCH_TOKENS = 1800;
+const COMPENSATION_COHORT_RESEARCH_TOKENS = 3000;
+export const ROLE_FAMILY_HANDOFF_BATCH_SIZE = Math.floor(
+  (BATCH_OUTPUT_TOKEN_BUDGET - RAW_RESEARCH_BASE_TOKENS) / ROLE_FAMILY_RESEARCH_TOKENS,
+);
+export const COMPENSATION_COHORT_HANDOFF_BATCH_SIZE = Math.floor(
+  (BATCH_OUTPUT_TOKEN_BUDGET - RAW_RESEARCH_BASE_TOKENS) / COMPENSATION_COHORT_RESEARCH_TOKENS,
+);
 
 function planRoleFamilyBatches(entries, batchSize) {
   const ordered = Array.isArray(entries) ? entries : [];
@@ -77,9 +89,9 @@ export function packCompensationAssessmentBatches(entries, { oneRawSectionPerRes
 }
 
 /**
- * Grounded market research has a different (four-cohort) output shape from
+ * Grounded market research has a different (cohort-count) output shape from
  * its compact, row-aware extraction. Keep this phase separate so a small
- * downstream assessment does not unnecessarily shrink a 14,048-token raw
+ * downstream assessment does not unnecessarily shrink a full raw
  * handoff. Duplicate row-parts of one market are deliberately separated: the
  * later part reuses the first accepted raw section instead of researching the
  * same market twice.

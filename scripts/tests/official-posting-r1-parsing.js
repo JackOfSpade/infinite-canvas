@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 import { walkJsonLdJobPostings } from '../../electron/extractors/jobPostingJsonLd.js';
 import { OFFICIAL_FETCH_MAX_BYTES } from '../../electron/ipc/officialPostingFetch.js';
-import { freeOfficialPostingLeads } from '../../electron/ipc/officialPostingResolver.js';
 
 const posting = extra => ({ '@type': ['Thing', 'https://schema.org/JobPosting'], title: 'Dispatch Engineer',
   hiringOrganization: [{ name: 'Northwind Labs', sameAs: ['https://northwind.example', 12] }],
@@ -65,20 +64,6 @@ export default [
       const large = Array.from({ length: 160_000 }, () => null);
       large.push({ mainEntity: posting() });
       assert.equal(walkJsonLdJobPostings(script(large))[0].title, 'Dispatch Engineer');
-    },
-  },
-  {
-    name: 'R1 free URL leads cap tokens before bounded punctuation removal without synthesizing clipped URLs',
-    run() {
-      const href = 'https://northwind.example/jobs/dispatch-1';
-      assert.deepEqual(freeOfficialPostingLeads({ snippet: `Read ${href}),.; and ${href}.` }), [href]);
-      const oversizedPath = `${href}/${'a'.repeat(2100)}`;
-      const start = performance.now();
-      assert.deepEqual(freeOfficialPostingLeads({ snippet: `${href}${','.repeat(3_000_000)} ${oversizedPath}` }), []);
-      const elapsed = performance.now() - start;
-      assert.ok(elapsed < 200, `overlong URL tokens took ${elapsed.toFixed(1)} ms`);
-      assert.deepEqual(freeOfficialPostingLeads({ snippet: `${oversizedPath} ${href};`, url: href }), [href]);
-      return { overlongTokenMs: Number(elapsed.toFixed(1)) };
     },
   },
 ];

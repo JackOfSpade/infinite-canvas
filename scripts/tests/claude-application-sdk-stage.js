@@ -315,6 +315,23 @@ export default [
     },
   },
   {
+    name: 'claude SDK: an assistant max_tokens stop raises CLAUDE_OUTPUT_TRUNCATED and returns no answer',
+    async run() {
+      const fake = fakeQuery([assistant(undefined, SONNET, { message: { model: SONNET, stop_reason: 'max_tokens', content: [{ type: 'text', text: 'partial' }] } }), result({ result: 'partial' })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_OUTPUT_TRUNCATED');
+      assert.deepEqual(error.detail.assistantStopReasons, ['max_tokens']);
+      assert.match(error.message, /output limit/);
+    },
+  },
+  {
+    name: 'claude SDK: a terminal max_tokens stop_reason raises CLAUDE_OUTPUT_TRUNCATED',
+    async run() {
+      const fake = fakeQuery([assistant(), result({ stop_reason: 'max_tokens', result: 'partial' })]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_OUTPUT_TRUNCATED');
+      assert.equal(error.detail.stopReason, 'max_tokens');
+    },
+  },
+  {
     name: 'claude SDK: terminal refusal stop_reason is fatal',
     async run() {
       const fake = fakeQuery([assistant(), result({ stop_reason: 'refusal' })]);

@@ -314,7 +314,7 @@ export function officialPostingLookupStatus(value) {
   if (trail.has('storage-failed')) return result('incomplete', 'Official posting check could not be saved', retained, true);
   if (trail.has('source-unproven')) return result('incomplete', 'Employer source verification incomplete',
     `Possible postings were found, but their employer ownership could not be verified. ${retained}`, true);
-  if (trail.has('bridge-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Reconnect ChatGPT research, then retry the official posting lookup in the app.', true);
+  if (trail.has('bridge-unavailable') || trail.has('comparative-unavailable')) return result('incomplete', 'Official lookup incomplete: research unavailable', 'Claude research was unavailable. Retry the official posting lookup in the app.', true);
   if (trail.has('bridge-timeout')) return result('incomplete', 'Official lookup incomplete: research timed out', retry, true);
   if (trail.has('bridge-aborted')) return result('incomplete', 'Official lookup incomplete: research interrupted', retry, true);
   if (trail.has('fetch-timeout')) return result('incomplete', 'Employer site verification timed out', fetchDetail(), true);

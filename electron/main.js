@@ -49,6 +49,7 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
+import { registerClaudeTaskStatusHandler, startClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
 import { __runWithIpcRequestContextForTests, beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
 import { buildCareerCleanLayer, produceCareerCleanLayer, readCareerCleanLayer } from './ipc/careerCleanLayer.js';
 import { approvedCareerEvidenceCatalog, careerSnapshotStorageRoot, readCareerSnapshot } from './ipc/careerSnapshot.js';
@@ -1740,6 +1741,9 @@ if (!gotTheLock) {
     });
     registerSettingsHandlers();
     registerNonApiAiHandlers();
+    // Every AI task is answered by the local Claude Code CLI.
+    startClaudeTaskWorker({ userData: app.getPath('userData'), nativeImage: electronPkg.nativeImage });
+    registerClaudeTaskStatusHandler({ ipcMain: electronPkg.ipcMain });
     // A synthetic, isolated-profile bridge smoke must start the real in-app
     // LLM task from this bundled module graph. Importing source modules from
     // the driver would create a second pending-handoff registry.

@@ -66,7 +66,7 @@ import {
   normalizeStructuredLocation,
   writeLastRemoteResidences,
 } from '../utils/jobSearchLocations';
-import { buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
+import { buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../utils/jobSearchQueries';
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
 import { CareerCanvasFileImportDialog } from '../components/CareerCanvasFileImportDialog';
 import { TRANSIENT_PROCESSING_HUB_STATES } from '../utils/persistenceTransientState';
@@ -296,7 +296,6 @@ function reanalysisRestorePatch(data) {
     // if the new evaluation is cancelled or fails, restore the prior plan
     // along with the prior cards rather than leaving a new brief paired with
     // old assessments.
-    activeTargetRole: data?.activeTargetRole,
     activeJobPreferences: data?.activeJobPreferences,
     jobPreferencePlan: data?.jobPreferencePlan,
     jobPreferencesInterpretation: data?.jobPreferencesInterpretation,
@@ -340,12 +339,7 @@ function reanalysisInputFingerprint(data) {
     careerDerivedSnapshotId: source.careerDerivedSnapshotId || null,
     preferenceCareerSnapshotId: source.preferenceCareerSnapshotId || null,
     scoringCareerSnapshotId: source.scoringCareerSnapshotId || null,
-    // targetRole: legacy-only (the standalone box is gone; nothing writes this
-    // anymore). Kept here so an unmigrated canvas that still carries one
-    // continues to invalidate the fingerprint the same way it always did.
-    // jobPreferences is the Search Brief field — the box's rename is
-    // label-only, so this is already folding the brief.
-    targetRole: source.targetRole || '',
+    // jobPreferences is the Search Brief field.
     jobPreferences: source.jobPreferences || '',
     locationSnapshot: source.locationSnapshot || null,
     searchLocation: source.searchLocation || null,
@@ -377,19 +371,11 @@ function reanalysisInputFingerprint(data) {
 // KEEPS the job. The asymmetry is the whole point — the gate this replaced
 // was removed for over-dropping, so the thing replacing it must never
 // discard a listing merely because the model could not tell.
-// A legacy `targetRole` (unmigrated canvas, no AI-plan concept — the
-// standalone Target role box that used to feed
-// search-jobs/search-jobs-single-source/resolve-job-source/resume-job-source
-// directly, see JobSourceCardNode.jsx) is a fallback only when no structured
-// plan titles exist. Old canvases can retain a joined targetRole alongside a
-// valid plan; the structured array is authoritative and is never comma-split.
-function deriveSearchTitles(targetRole, preferencePlan) {
-  const titles = Array.isArray(preferencePlan?.titles)
+// The structured plan titles are authoritative and are never comma-split.
+function deriveSearchTitles(preferencePlan) {
+  return Array.isArray(preferencePlan?.titles)
     ? preferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
     : [];
-  if (titles.length) return titles;
-  const role = String(targetRole || '').trim();
-  return role ? [role] : [];
 }
 
 // FIX 2 (defence-in-depth): `resolvedRoles.length > 0` used to be the lock-
@@ -553,8 +539,8 @@ function mergePreferenceEvaluations(existing, incoming) {
 
 // FIX 4: extract the role titles a saved-scrape snapshot was actually
 // searched under. See the call site (the getLastJobAnalysisSnapshot effect)
-// for why this reads the full snapshot's `jobPreferencePlan.titles` rather
-// than the curated `meta.targetRole` the recovery panel used to render.
+// for why this reads the full snapshot's `jobPreferencePlan.titles`, which
+// the curated `meta` omits.
 function savedAnalysisRoleTitles(snapshot) {
   return Array.isArray(snapshot?.jobPreferencePlan?.titles)
     ? snapshot.jobPreferencePlan.titles.filter(t => typeof t === 'string' && t.trim())
@@ -1160,7 +1146,6 @@ function boardRunRollbackPatch(previousData, nodeId) {
     // the abandoned run. Previous completed results are safe to restore, but
     // no paused/manual continuation may survive the rollback.
     pendingJobs: null,
-    pendingTargetRole: null,
     pendingCareerData: null,
     pendingCareerSnapshotId: null,
     pendingJobPreferences: null,
@@ -2536,7 +2521,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // callback's `[... evaluatePreferencesForRun]` dependency read this `const`
   // while it was still in its temporal dead zone, crashing every fresh hub.
   const evaluatePreferencesForRun = useCallback(async ({
-    jobs, profile, careerData, activeTargetRole, activeJobPreferences,
+    jobs, profile, careerData, activeJobPreferences,
     jobPreferencesInterpretation, locationSnapshot, manualAiRunId,
     careerSnapshotId = null,
     manualAiRecoveryMode = null,
@@ -2564,7 +2549,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       nodeId: id,
       manualAiRunId,
       manualAiRecoveryMode,
-      targetRole: activeTargetRole,
       jobPreferences: activeJobPreferences,
       jobPreferencePlan: jobPreferencesInterpretation,
       preferencePlan: jobPreferencesInterpretation,
@@ -2885,7 +2869,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         collectionLimits: refreshCollectionLimits,
         enabledSourceIds: refreshEnabledSourceIds,
         preferredLocation: (refreshData.canonicalLocation || refreshData.preferredLocation || '').trim(),
-        targetRole: (refreshData.activeTargetRole ?? refreshData.targetRole ?? '').trim(),
         jobPreferences: refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '',
         preferencePlan: refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null,
       };
@@ -3021,17 +3004,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Prefer the query-gen-normalized location (typo-safe) over the raw input
         // — USAJobs LocationName is an exact-ish match and won't tolerate "denvr".
         preferredLocation: (refreshData.canonicalLocation || refreshData.preferredLocation || '').trim(),
-        // `targetRole` is legacy-only data — an unmigrated canvas's
-        // standalone Target role box — sent for back-compat so USAJobs still
-        // searches exactly that one string. This late source belongs to the
-        // completed search generation, so this reads the frozen refreshData
-        // snapshot, never the live/editable hub value (which may already
-        // describe the *next* run). There is no post-search title gate
-        // anymore (see deriveSearchTitles above and the removed
-        // applyPinnedTitleGate in jobs.js) — role relevance for this source's
-        // rows is judged the same way as every other source's: the AI role
-        // screen inside per-listing preference evaluation.
-        targetRole: (refreshData.activeTargetRole ?? refreshData.targetRole ?? '').trim(),
+        // This late source belongs to the completed search generation, so
+        // this reads the frozen refreshData snapshot, never the live/editable
+        // hub value (which may already describe the *next* run). Role
+        // relevance for this source's rows is judged the same way as every
+        // other source's: the AI role screen inside per-listing preference
+        // evaluation.
         jobPreferences: refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '',
         preferencePlan: refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null,
         continuationIntentId: continuationIntent.intentId,
@@ -3127,7 +3105,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           });
 
           const profile = refreshData.resumeProfile;
-          const activeTargetRole = (refreshData.activeTargetRole ?? refreshData.targetRole ?? '').trim();
           const activeJobPreferences = refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '';
           const jobPreferencesInterpretation = refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null;
           const locationSnapshot = refreshData.locationSnapshot || {
@@ -3168,7 +3145,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             profile,
             careerData: refreshData.careerData,
             careerSnapshotId: refreshData.careerSnapshotId || null,
-            activeTargetRole,
             activeJobPreferences,
             jobPreferencesInterpretation,
             locationSnapshot,
@@ -3205,7 +3181,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 careerSnapshotId: refreshData.careerSnapshotId || null,
                 nodeId: currentId,
                 operationAuthority: operationAuthorityFor(refreshOperation),
-                targetRole: activeTargetRole,
                 jobPreferences: activeJobPreferences,
                 jobPreferencePlan: jobPreferencesInterpretation,
                 preferenceEvaluation: combinedPreferenceEvaluation,
@@ -3258,7 +3233,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             nodeId: currentId,
             manualAiRunId,
             manualAiRecoveryMode: 'append-scored-jobs',
-            targetRole: activeTargetRole,
             jobPreferences: activeJobPreferences,
             jobPreferencePlan: jobPreferencesInterpretation,
             preferenceEvaluation: combinedPreferenceEvaluation,
@@ -3312,7 +3286,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               careerSnapshotId: refreshData.careerSnapshotId || null,
               nodeId: currentId,
               operationAuthority: operationAuthorityFor(refreshOperation),
-              targetRole: activeTargetRole,
               jobPreferences: activeJobPreferences,
               jobPreferencePlan: jobPreferencesInterpretation,
               preferenceEvaluation: combinedPreferenceEvaluation,
@@ -4025,7 +3998,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // module, re-buckets the union, and displays the merged tree. Shared by the
   // real-time path (runScoringAndSpawn) and the async batch path (the poll
   // effect) so both leave the hub in the same done summary state. (`profile`,
-  // `originalPos`, `activeTargetRole` are still passed by callers but no longer
+  // `originalPos` is still passed by callers but no longer
   // needed here.)
   const finishScoringAndSpawn = useCallback(async ({
     scoredJobs, gatheredCount, scrapedCount, scrapeWarnings = [], collectionScopeCaveats = [],
@@ -4155,7 +4128,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       pendingJobs: null,
       pendingCareerData: null,
       pendingCareerSnapshotId: null,
-      pendingTargetRole: null,
       pendingJobPreferences: null,
       pendingJobPreferencePlan: null,
       pendingJobPreferencesInterpretation: null,
@@ -4179,7 +4151,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const runScoringAndSpawn = useCallback(async ({
     profile, careerData = data.careerData, jobs, gatheredCount,
     scrapedCount = Array.isArray(jobs) ? jobs.length : 0,
-    scrapeWarnings, collectionScopeCaveats = data.collectionScopeCaveats, activeTargetRole, originalPos,
+    scrapeWarnings, collectionScopeCaveats = data.collectionScopeCaveats, originalPos,
     jobRunId = null, cancelled, locationSnapshot = null, completeRun = true,
     manualAiRunId = null, resultMode = 'replace',
     appendBaseData = null, appendCanCommit = () => true,
@@ -4236,7 +4208,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       nodeId: currentId,
       manualAiRunId: effectiveManualAiRunId,
       manualAiRecoveryMode: resultMode === 'append' ? 'append-scored-jobs' : null,
-      targetRole: activeTargetRole,
       jobPreferences: activeJobPreferences,
       jobPreferencePlan: jobPreferencesInterpretation,
       preferencePlan: jobPreferencesInterpretation,
@@ -4306,7 +4277,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       scrapedCount,
       scrapeWarnings,
       collectionScopeCaveats,
-      activeTargetRole,
       originalPos,
       aiSkipped: !!scoreResult.aiSkipped,
       collectionOnly: !!scoreResult.collectionOnly,
@@ -4348,7 +4318,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
    * the score handoff (with each path's own gatheredCount) stay with the caller.
    */
   const handlePostSearchResult = useCallback(async ({
-    currentId, foundJobs, warnings, blockingWarnings, profile, activeTargetRole,
+    currentId, foundJobs, warnings, blockingWarnings, profile,
     activeJobPreferences = '', jobPreferencesInterpretation = null,
     careerData = data.careerData, canvasFilePath: cfp,
     careerSnapshotId = null,
@@ -4414,7 +4384,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             careerData,
             careerSnapshotId: admittedCareerSnapshotId,
             nodeId: currentId,
-            targetRole: activeTargetRole,
             jobPreferences: activeJobPreferences,
             jobPreferencePlan: jobPreferencesInterpretation,
             jobPreferencesInterpretation,
@@ -4500,7 +4469,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         hubState: 'sources-ready',
         pendingJobs: foundJobs,
         pendingCareerSnapshotId: admittedCareerSnapshotId,
-        pendingTargetRole: activeTargetRole,
         pendingJobPreferences: activeJobPreferences,
         pendingJobPreferencePlan: jobPreferencesInterpretation,
         pendingJobPreferencesInterpretation: jobPreferencesInterpretation,
@@ -4543,7 +4511,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerSnapshotId: admittedCareerSnapshotId,
           nodeId: currentId,
           operationAuthority: operationAuthorityFor(analysisOperation),
-          targetRole: activeTargetRole,
           snapshotContext: {
             sourceHubId: currentId,
             runId: jobRunId,
@@ -5125,18 +5092,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       sourceWarningOverridesDuringSearchRef.current.clear();
       updateGlobal(currentId, {
         pendingJobs: null,
-        pendingTargetRole: null,
         pendingCareerData: null,
         pendingCareerSnapshotId: null,
         pendingJobPreferences: null,
         pendingJobPreferencePlan: null,
         pendingJobPreferencesInterpretation: null,
-        activeTargetRole: null,
-        // Cleared alongside activeTargetRole — this run's own Step 2 (query
-        // construction) recomputes and re-freezes the real value via
-        // deriveSearchTitles before anything reads it. Without this, a
-        // pending Solve racing the very start of a fresh run could otherwise
-        // read the PRIOR run's title list for one tick.
+        // This run's own Step 2 (query construction) recomputes and
+        // re-freezes the real value via deriveSearchTitles before anything
+        // reads it. Without this clear, a pending Solve racing the very start
+        // of a fresh run could otherwise read the PRIOR run's title list for
+        // one tick.
         pinnedTitles: [],
         scrapeWarnings: [],
         jobRunId: null,
@@ -5329,7 +5294,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       }
 
       // Step 2: Query construction
-      const legacyTargetRole = String(laneTurnData.targetRole || '').trim();
       // Freeze the raw preference text and the AI's interpretation for this
       // run. A user may edit the textarea while scraping; that edit applies to
       // their next run, never halfway through this one. (In practice a locked
@@ -5396,24 +5360,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           },
         };
       }
-      // See deriveSearchTitles above: the locked plan's structured titles
-      // supersede a stale legacy target role. There is no separate gate
-      // list anymore, so this one derivation feeds both the search queries
+      // See deriveSearchTitles above: the locked plan's structured titles.
+      // There is no separate gate list, so this one derivation feeds both
+      // the search queries
       // and (via `pinnedTitles` below) display. `activeSearchTitles` is also
       // what's persisted as `data.pinnedTitles` — JobBoardNode's moduleLabel
       // falls back to it (display/label purposes only) for a hub that hasn't
       // locked resolvedRoles yet. Frozen here alongside
-      // activeTargetRole/activeJobPreferences and persisted so every later
+      // activeJobPreferences and persisted so every later
       // reader of this run (the USAJobs background refresh, a paused-source
       // Solve/Resume) sees the same list this run started with.
-      const activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation).length ? '' : legacyTargetRole;
-      const activeSearchTitles = deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation);
+      const activeSearchTitles = deriveSearchTitles(jobPreferencesInterpretation);
       let rolePlanCommitAccepted = false;
       updateGlobal(currentId, (node) => {
         if (cancelled() || !careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, pinnedCareerSnapshotId)) return null;
         rolePlanCommitAccepted = true;
         return {
-          hubState: 'querying', activeTargetRole, activeJobPreferences,
+          hubState: 'querying', activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           jobPreferencesInterpretation, pinnedTitles: activeSearchTitles,
           ...(freshRoleLockPatch || {}),
@@ -5451,42 +5414,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           queryModel: laneTurnData.queryModel || null,
         };
         EventLogger.log(`[JobSearch][${currentId}] Resume/query inputs unchanged — reusing stored search queries`);
-      } else if (activeTargetRole) {
-        // Do not pay a query-generation model to create work we do not want.
-        // Location correction/country inference is a separate, location-only
-        // operation; the scrape bundle itself is constructed deterministically.
-        const locationResult = await window.electronAPI.resolveJobSearchLocation({
-          profile,
-          careerSnapshotId: pinnedCareerSnapshotId,
-          nodeId: currentId,
-          manualAiRunId: effectiveManualAiRunId,
-          preferredLocation: activePreferredLocation,
-        });
-        if (cancelled()) return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
-        if (!pinnedCareerSnapshotStillCurrent()) return searchRunOutcome('superseded', { runId: jobRunIdRef.current });
-        if (!locationResult.success) {
-          const err = new Error(locationResult.error || 'Failed to resolve search location');
-          throw err;
-        }
-        queriesResult = {
-          success: true,
-          queries: buildExactTargetRoleQueryBundle(activeTargetRole),
-          queryModel: null,
-          canonicalLocation: locationResult.canonicalLocation,
-          canonicalCountry: locationResult.canonicalCountry || '',
-        };
-        EventLogger.log(`[JobSearch][${currentId}] Target role set — skipping query variation generation and searching exactly "${activeTargetRole}"`);
       } else if (activeSearchTitles.length > 0) {
-        // No target role, but Job Preferences interpretation already produced
+        // Job Preferences interpretation already produced
         // `titles` — either copied verbatim from the brief or worked out by
         // the AI from the brief + career profile (deriveSearchTitles doesn't
         // care which; both are searched the same way). Build the bundle
         // locally instead of paying for a second model call
         // (generateJobQueries): this removes one human copy/paste handoff
         // per brief-driven run, since every AI call in this app is a manual
-        // paste-back with no timeout. Still resolve the location exactly as
-        // the target-role branch above does — that is a separate,
-        // location-only operation.
+        // paste-back with no timeout. Still resolve the location separately
+        // — that is a location-only operation.
         const locationResult = await window.electronAPI.resolveJobSearchLocation({
           profile,
           careerSnapshotId: pinnedCareerSnapshotId,
@@ -5510,7 +5447,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         EventLogger.log(`[JobSearch][${currentId}] Job Preferences produced ${activeSearchTitles.length} title(s) — skipping query generation and searching them directly: ${activeSearchTitles.join(', ')}`);
       } else {
         queriesResult = await window.electronAPI.generateJobQueries({
-          profile, nodeId: currentId, targetRole: activeTargetRole, preferredLocation: activePreferredLocation,
+          profile, nodeId: currentId, preferredLocation: activePreferredLocation,
           careerData: activeCareerData,
           careerSnapshotId: pinnedCareerSnapshotId,
           jobPreferences: activeJobPreferences,
@@ -5596,11 +5533,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // longer sends a `pinnedTitles` parameter. Role relevance for every
         // source's gathered rows, gated or not before, is now judged the
         // same way: the AI role screen inside per-listing preference
-        // evaluation (main process, fails open). `targetRole` is still sent,
-        // but for back-compat/display only — it is legacy-only
-        // data.targetRole from an unmigrated canvas, never written by the
-        // current UI, and no longer used to filter anything here.
-        targetRole: activeTargetRole,
+        // evaluation (main process, fails open).
         jobPreferences: activeJobPreferences,
         jobPreferencePlan: jobPreferencesInterpretation,
         preferencePlan: jobPreferencesInterpretation,
@@ -5723,7 +5656,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // see handlePostSearchResult). Only proceed to score when neither fires.
       const postSearchResult = await handlePostSearchResult({
         currentId, foundJobs, warnings: effectiveWarnings, blockingWarnings,
-        profile, activeTargetRole, activeJobPreferences, jobPreferencesInterpretation,
+        profile, activeJobPreferences, jobPreferencesInterpretation,
         careerData: activeCareerData, careerSnapshotId: pinnedCareerSnapshotId, canvasFilePath,
         jobRunId: searchResult.runId || null,
         locationSnapshot: runLocationSnapshot,
@@ -5767,7 +5700,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerSnapshotId: pinnedCareerSnapshotId,
           nodeId: currentId,
           operationAuthority: operationAuthorityFor(analysisOperation),
-          targetRole: activeTargetRole,
           jobPreferences: activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           preferenceCandidatePool: foundJobs,
@@ -5803,7 +5735,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           pendingJobs: foundJobs,
           pendingCareerSnapshotId: pinnedCareerSnapshotId,
           pendingCareerData: activeCareerData,
-          pendingTargetRole: activeTargetRole,
           pendingJobPreferences: activeJobPreferences,
           pendingJobPreferencePlan: jobPreferencesInterpretation,
           pendingJobPreferencesInterpretation: jobPreferencesInterpretation,
@@ -5845,7 +5776,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile,
         careerData: activeCareerData,
         careerSnapshotId: pinnedCareerSnapshotId,
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
         locationSnapshot: runLocationSnapshot,
@@ -5928,7 +5858,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             careerSnapshotId: pinnedCareerSnapshotId,
             nodeId: currentId,
             operationAuthority: operationAuthorityFor(analysisOperation),
-            targetRole: activeTargetRole,
             jobPreferences: activeJobPreferences,
             jobPreferencePlan: jobPreferencesInterpretation,
             preferenceEvaluation: preferenceResult.evaluation,
@@ -6031,7 +5960,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         gatheredCount: visibleGatheredCount,
         scrapeWarnings: finalWarnings,
         collectionScopeCaveats: finalCollectionScopeCaveats,
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
         preferenceMatchedCount: preferenceResult.matchedCount,
@@ -6733,12 +6661,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // This is a real terminal zero-result run, not merely a paused state.
       // Replace the prior analysis snapshot before painting the result so
       // snapshot-only bug-report diagnostics cannot describe an earlier run.
-      // An empty target role is a deliberate frozen run input. `||` would
-      // replace it with a role edited while the source warning was paused.
-      const activeTargetRole = continuationData.pendingTargetRole
-        ?? continuationData.activeTargetRole
-        ?? continuationData.targetRole
-        ?? '';
       const locationSnapshot = continuationData.locationSnapshot || {
         searchLocation: getSearchLocation({
           searchLocation: continuationData.searchLocation,
@@ -6756,7 +6678,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerSnapshotId: continuationData.pendingCareerSnapshotId,
           nodeId: id,
           operationAuthority: pausedAuthority,
-          targetRole: activeTargetRole,
           snapshotContext: {
             sourceHubId: id,
             runId: activeJobRunId,
@@ -6799,7 +6720,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         resultCount: 0, totalScoredCount: 0, scrapedCount: 0, gatheredCount: pausedGatheredCount,
         scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
         pendingJobs: null,
-        pendingTargetRole: null,
         pendingJobPreferences: null,
         pendingJobPreferencePlan: null,
         pendingJobPreferencesInterpretation: null,
@@ -7023,12 +6943,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         reanalysisNotice: null,
       });
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
-      // Preserve a deliberately blank role from the paused run; only absent
-      // legacy state may fall back to the editable next-run control.
-      const activeTargetRole = continuationData.pendingTargetRole
-        ?? continuationData.activeTargetRole
-        ?? continuationData.targetRole
-        ?? '';
       const activeJobPreferences = continuationData.pendingJobPreferences
         ?? continuationData.jobPreferences
         ?? '';
@@ -7046,7 +6960,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile,
         careerData: pausedCareerData,
         careerSnapshotId: continuationData.careerSnapshotId || null,
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
         locationSnapshot,
@@ -7065,7 +6978,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerSnapshotId: continuationData.pendingCareerSnapshotId,
           nodeId: currentId,
           operationAuthority: operationAuthorityFor(continuationOperation),
-          targetRole: activeTargetRole,
           jobPreferences: activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           preferenceEvaluation: preferenceResult.evaluation,
@@ -7111,7 +7023,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerDerivedSnapshotId: admittedPausedCareerSnapshotId,
           pendingJobs: null, pendingCareerData: null,
           pendingCareerSnapshotId: null,
-          pendingTargetRole: null, pendingJobPreferences: null,
+          pendingJobPreferences: null,
           pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
           resultDisposition: 'preference-filtered',
           errorMessage: terminalFinalizationError(activeJobRunId, canvasFilePath, completion),
@@ -7149,7 +7061,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         jobs: preferenceResult.jobs,
         gatheredCount: pausedGatheredCount,
         scrapeWarnings: Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : [],
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
         preferenceMatchedCount: preferenceResult.matchedCount,
@@ -7599,8 +7510,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       || (typeof parentCancelled === 'function' && parentCancelled());
     // Resume semantics come exclusively from the sidecar that owns the staged
     // rows. Falling back to the editable hub values would silently apply a
-    // post-crash target role or Job Preferences edit to the interrupted run.
-    const activeTargetRole = typeof offer.targetRole === 'string' ? offer.targetRole : '';
+    // post-crash Job Preferences edit to the interrupted run.
     // A crash-resumed run must keep the preference contract it originally
     // started with. Editing the textarea while the offer is visible applies to
     // the next fresh run, not the staged search.
@@ -7892,7 +7802,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             careerSnapshotId: admittedResumeCareerSnapshotId,
             nodeId: currentId,
             manualAiRunId,
-            targetRole: activeTargetRole,
             jobPreferences: activeJobPreferences,
             searchLocation: liveData.locationSnapshot?.searchLocation || null,
             remoteResidences: liveData.locationSnapshot?.remoteResidences || null,
@@ -7911,7 +7820,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(currentId, {
         hubState: 'searching',
         providerPhaseAwaitingResume: false,
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencePlan: jobPreferencesInterpretation,
         jobPreferencesInterpretation,
@@ -7937,14 +7845,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         preferredLocation: liveData.canonicalLocation || liveData.preferredLocation || '',
         rawLocation: liveData.preferredLocation || '',
         profileLocations: profile?.locations || [],
-        // There is no post-search title gate to apply anymore — recovery
-        // just needs to keep scraping the same manifest-frozen bundle
-        // (`queries` above). `targetRole` is still sent from the manifest —
-        // the role THIS RUN was gathered under, never the hub's current
-        // value, so editing the target role after a crash can't retroactively
-        // relabel rows collected under the old one — but it is display/
-        // snapshot data only now, not a filter.
-        targetRole: offer.targetRole || '',
+        // Recovery just needs to keep scraping the same manifest-frozen
+        // bundle (`queries` above).
         jobPreferences: activeJobPreferences,
         preferencePlan: jobPreferencesInterpretation,
         countryScope: liveData.canonicalCountry || '',
@@ -8082,7 +7984,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       };
       const postSearchResult = await handlePostSearchResult({
         currentId, foundJobs, warnings, blockingWarnings,
-        profile, activeTargetRole, activeJobPreferences, jobPreferencesInterpretation, canvasFilePath: cfp,
+        profile, activeJobPreferences, jobPreferencesInterpretation, canvasFilePath: cfp,
         careerSnapshotId: admittedResumeCareerSnapshotId,
         jobRunId: resumedRunId,
         descriptionRecoveryJobs: Array.isArray(searchResult?.descriptionRecoveryJobs)
@@ -8117,7 +8019,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerSnapshotId: admittedResumeCareerSnapshotId,
           nodeId: currentId,
           operationAuthority: operationAuthorityFor(resumeOperation),
-          targetRole: activeTargetRole,
           jobPreferences: activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           preferenceCandidatePool: foundJobs,
@@ -8149,7 +8050,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           pendingJobs: foundJobs,
           pendingCareerSnapshotId: admittedResumeCareerSnapshotId,
           pendingCareerData: liveData.careerData,
-          pendingTargetRole: activeTargetRole,
           pendingJobPreferences: activeJobPreferences,
           pendingJobPreferencePlan: jobPreferencesInterpretation,
           pendingJobPreferencesInterpretation: jobPreferencesInterpretation,
@@ -8189,7 +8089,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile,
         careerData: liveData.careerData,
         careerSnapshotId: admittedResumeCareerSnapshotId,
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
         locationSnapshot,
@@ -8256,7 +8155,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile, jobs: preferenceResult.jobs,
         careerSnapshotId: admittedResumeCareerSnapshotId,
         gatheredCount: visibleGatheredCount,
-        scrapeWarnings: finalWarnings, collectionScopeCaveats: finalCollectionScopeCaveats, activeTargetRole, originalPos,
+        scrapeWarnings: finalWarnings, collectionScopeCaveats: finalCollectionScopeCaveats, originalPos,
         activeJobPreferences, jobPreferencesInterpretation,
         preferenceMatchedCount: preferenceResult.matchedCount,
         preferenceFilteredCount: preferenceResult.filteredCount,
@@ -9735,7 +9634,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             ? {
               ...(manualMarker || {}),
               runId: manualAiRunId,
-              task: manualMarker?.task || (live.resumeProfile ? 'job-search' : 'resume-parse'),
+              task: manualMarker?.task || (live.resumeProfile ? 'job-search' : 'career-profile-compile'),
               preSearchRecovery,
               // A pre-provider handoff has no manifest to show instead. Keep
               // it paused until the person explicitly resumes it; otherwise
@@ -9753,7 +9652,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             retryOperation: null,
             retryOperationFor: null,
             pendingJobs: null,
-            pendingTargetRole: null,
             pendingCareerData: null,
             pendingCareerSnapshotId: null,
             pendingJobPreferences: null,
@@ -9970,9 +9868,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       resultDisposition: null,
       preferenceMatchedCount: null, preferenceFilteredCount: null,
       preferenceEvaluation: null, preferenceCandidatePool: null,
-      activeTargetRole: null, activeJobPreferences: null, jobPreferencePlan: null, jobPreferencesInterpretation: null,
+      activeJobPreferences: null, jobPreferencePlan: null, jobPreferencesInterpretation: null,
       pinnedTitles: null,
-      pendingJobs: null, pendingTargetRole: null,
+      pendingJobs: null,
       pendingJobPreferences: null, pendingJobPreferencePlan: null, pendingJobPreferencesInterpretation: null,
       pendingCareerData: null,
       pendingCareerSnapshotId: null,
@@ -11910,7 +11808,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments',
         'materialGaps', 'strengths', 'experienceAssessment', 'confidence',
         'fitAssessment', 'rawScore', 'adjustedScore', 'adjustments', 'calibration',
-        'scoreStatus', 'scoringCoverageReceipt',
+        'scoreStatus',
         ...(!scoringOnlyRepair ? ['preferenceAssessment'] : []),
       ].forEach(field => delete listing[field]);
       return listing;
@@ -12069,7 +11967,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }),
         remoteResidences: normalizeRemoteResidences(runData.remoteResidences),
       };
-      let activeTargetRole = (runData.targetRole || '').trim();
       const activeJobPreferences = String(runData.jobPreferences || '').trim();
       admittedReanalysisCareerSnapshotId = normalizedJobCareerSnapshotId(runData.careerSnapshotId);
       const reanalysisSnapshotStillCurrent = () => careerSnapshotBindingMatches(
@@ -12101,7 +11998,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           nodeId: currentId,
           manualAiRunId,
           manualAiRecoveryMode,
-          targetRole: activeTargetRole,
           jobPreferences: activeJobPreferences,
           searchLocation: locationSnapshot.searchLocation,
           remoteResidences: locationSnapshot.remoteResidences,
@@ -12124,7 +12020,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             careerSnapshotId: normalizedJobCareerSnapshotId(runData.careerSnapshotId),
             roleAudit: resolveResult?.roleAudit || null,
           },
-          pinnedTitles: deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation),
+          pinnedTitles: deriveSearchTitles(jobPreferencesInterpretation),
         };
       } else if (activeJobPreferences && window.electronAPI?.interpretJobPreferences) {
         // Older preload bridges did not expose the two-pass resolver. Keep
@@ -12138,7 +12034,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           nodeId: currentId,
           manualAiRunId,
           manualAiRecoveryMode,
-          targetRole: activeTargetRole,
           jobPreferences: activeJobPreferences,
           searchLocation: locationSnapshot.searchLocation,
           remoteResidences: locationSnapshot.remoteResidences,
@@ -12162,18 +12057,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             careerSnapshotId: normalizedJobCareerSnapshotId(runData.careerSnapshotId),
             roleAudit: null,
           },
-          pinnedTitles: deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation),
+          pinnedTitles: deriveSearchTitles(jobPreferencesInterpretation),
         };
       } else if (activeJobPreferences) {
         throw new Error('Search Brief role generation is unavailable. Restart the app and try again.');
       }
-      activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation).length ? '' : activeTargetRole;
       let reanalysisRolePlanCommitAccepted = false;
       updateGlobal(currentId, (node) => {
         if (cancelled() || !canCommitAnalysisOperation(reanalysisOperation) || !careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, admittedReanalysisCareerSnapshotId)) return null;
         reanalysisRolePlanCommitAccepted = true;
         return {
-          activeTargetRole,
           activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           jobPreferencesInterpretation,
@@ -12197,7 +12090,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         profile: runData.resumeProfile,
         careerData: runData.careerData,
         careerSnapshotId: runData.careerSnapshotId || null,
-        activeTargetRole,
         activeJobPreferences,
         jobPreferencesInterpretation,
         locationSnapshot,
@@ -12225,7 +12117,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           careerData: runData.careerData,
           careerSnapshotId: runData.careerSnapshotId || null,
           nodeId: currentId,
-          targetRole: activeTargetRole,
           jobPreferences: activeJobPreferences,
           jobPreferencePlan: jobPreferencesInterpretation,
           preferencePlan: jobPreferencesInterpretation,
@@ -12308,7 +12199,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         nodeId: currentId,
         manualAiRunId,
         manualAiRecoveryMode,
-        targetRole: activeTargetRole,
         jobPreferences: activeJobPreferences,
         jobPreferencePlan: jobPreferencesInterpretation,
         preferencePlan: jobPreferencesInterpretation,
@@ -12710,7 +12600,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       jobCount: null, scoreRangeMin: null, scoreRangeMax: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
-      activeTargetRole: null,
       pinnedTitles: null,
       // ROLE LOCKING: Clear career data is the canonical unlock — the whole
       // reason the brief is safe to freeze read-only (see the Search Brief
@@ -12718,7 +12607,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // guaranteed way back to an editable brief. Must ship in the SAME
       // update as the career-data wipe above, never separately.
       searchBriefPlan: null, resolvedRoles: null, resolvedRolesMeta: null,
-      pendingJobs: null, pendingTargetRole: null, scrapeWarnings: [], dragHover: null,
+      pendingJobs: null, scrapeWarnings: [], dragHover: null,
       collectionScopeCaveats: [],
       ...buildJobHubCareerClearPatch({ jobAnalysisClearedAt, jobAnalysisClearedRunId }),
       savedJobsRescore: null,
@@ -12862,9 +12751,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           res.snapshot?.profile &&
           isSavedAnalysisForCurrentHub(res.snapshot, res.meta, id, canvasFilePath, data.careerSnapshotId, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId)
         ) {
-          // FIX 4: `meta.targetRole` (electron/ipc/jobs.js's curated subset of
-          // buildJobAnalysisSnapshot) is legacy-only and always '' under the
-          // current Search Brief UI. `res.snapshot.jobPreferencePlan.titles`
+          // FIX 4: `res.snapshot.jobPreferencePlan.titles`
           // (normalizeJobPreferencePlan's shape, electron/ipc/jobPreferences.js)
           // is what the main process actually persists for "what roles did
           // this saved scrape search" — `meta` itself omits jobPreferencePlan,
@@ -13214,7 +13101,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(currentId, { _boardRollbackSourceProgressFence: null });
       resetSourceProgress();
       const originalPos = getNode(currentId)?.position || { x: 0, y: 0 };
-      const activeTargetRole = String(snapshot.targetRole || '').trim();
       const activeJobPreferences = String(snapshot.jobPreferences ?? laneTurnData.jobPreferences ?? '').trim();
       const jobPreferencesInterpretation = snapshot.jobPreferencePlan
         ?? snapshot.preferencePlan
@@ -13232,7 +13118,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         testModeNote: null,
         ...(resultMode === 'append' ? {} : { resultDisposition: null }),
         pendingJobs: null,
-        pendingTargetRole: null,
         resumeProfile: profile,
         careerData,
         resumeFingerprint: normalizeResumeProfileFingerprint(snapshot.profileFingerprint) || null,
@@ -13241,7 +13126,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           skills: profile.skills,
           experience: profile.experience_years,
         },
-        targetRole: activeTargetRole,
         jobPreferences: activeJobPreferences,
         jobPreferencePlan: jobPreferencesInterpretation,
         };
@@ -13294,7 +13178,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         const preferenceResult = await evaluatePreferencesForRun({
           careerData,
           careerSnapshotId: admittedSavedCareerSnapshotId,
-          activeTargetRole,
           jobs: jobsToEvaluate,
           profile,
           activeJobPreferences,
@@ -13398,7 +13281,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           scrapeWarnings: resultMode === 'append'
             ? (Array.isArray(recoveryBaseData.scrapeWarnings) ? recoveryBaseData.scrapeWarnings : [])
             : [],
-          activeTargetRole,
           activeJobPreferences,
           jobPreferencesInterpretation,
           preferenceMatchedCount: preferenceResult.matchedCount,
@@ -14337,14 +14219,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // Jobs” action. Do not put a second, ambiguously named snapshot re-score
   // beside it; this compact panel is audit-only (prompt and/or warning).
   const hasCompactSavedRunTool = (!boardRecoveryOwnsActions && !!savedAnalysisMeta?.promptPath) || !!savedAnalysisWarning;
-  // FIX 4: prefer the resolved Search Brief titles (folded into meta by the
-  // getLastJobAnalysisSnapshot effect above — see savedAnalysisRoleTitles);
-  // fall back to the legacy meta.targetRole only for a snapshot saved before
-  // the Search Brief replaced the standalone Target role box.
+  // FIX 4: the resolved Search Brief titles (folded into meta by the
+  // getLastJobAnalysisSnapshot effect above — see savedAnalysisRoleTitles).
   const savedAnalysisRoleLabel = Array.isArray(savedAnalysisMeta?.resolvedRoleTitles)
-    && savedAnalysisMeta.resolvedRoleTitles.length > 0
     ? savedAnalysisMeta.resolvedRoleTitles.join(', ')
-    : String(savedAnalysisMeta?.targetRole || '').trim();
+    : '';
   const savedAnalysisPanel = shouldShowSavedAnalysisPanel && compactSavedRunTools && hasCompactSavedRunTool ? (
     <details className="mt-2 w-full rounded-md border border-white/10 bg-white/5 px-2 py-1.5 text-left">
       <summary className="cursor-pointer text-[9px] uppercase tracking-[0.14em] text-white/35">

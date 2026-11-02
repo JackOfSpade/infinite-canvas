@@ -57,19 +57,18 @@ const APPLICATION_STAGES = new Set([
 // may import, so the list is spelled out here and a test fails if it ever
 // drifts from the release_one rows of PUSH_TASK_POLICY.
 const TASK_IDS = new Set([
-  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match',
-  'bundle-price-synthesis', 'job-compensation-assessment', 'job-compensation-assessment-batch',
-  'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
-  'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
+  'bundle-price-synthesis', 'job-compensation-assessment-batch',
+  'job-compensation-research-batch', 'job-preference-evaluation',
+  'job-preference-interpretation',
   'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
   'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
-  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence', 'job-taxonomy-classify',
-  'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
-  'price-synthesis-batch', 'resume-parse',
-  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
-  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
+  'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment',
+  'price-synthesis-batch',
+  'vision-product-analysis', 'marketplace-hub-scan-batch',
 ]);
 const JOB_REASONS = new Set(['user_hold', 'human_advance', 'rejection_cap', 'worker_restart_cap', 'junk_cap', 'review_round_cap', 'job_broken', 'render_retry', 'app_fix_required', 'canvas_unavailable', 'canvas_missing', 'read_failed', 'write_failed', 'submit_stuck', 'host_silent', 'lapsed', 'restart', 'review_stop', 'app_only_handoffs', 'commit_failed', 'person_editing', 'hub_not_selected', 'task_disabled', 'integrity_fault', 'failed', 'render_retry_required', 'user', 'answered_in_dock']);
 const ALARM_KINDS = new Set(['unknown_key', 'unknown_handoff', 'refresh_reuse', 'code_reuse', 'rate_limited', 'held_caps']);

@@ -1,7 +1,7 @@
 import { CONSTANTS } from './handoffBridge/constants.js';
 
 // Application protocol v2 limits. These are our bridge's operational caps.
-// ChatGPT's 16,384-token output cap is documented. The live synthetic bridge
+// The live synthetic bridge
 // checksum ramp delivered and answered 300,000 characters intact (measurement:
 // .test-artifacts/blackbox-run/live-one-card/redesign-evidence/panel-runs/
 // write-then-verify-v2-ruling2-raw/bridge-ramp/result.json). 250,000 keeps
@@ -10,7 +10,6 @@ export const APPLICATION_V2_LIMITS = Object.freeze({
   bridgeRequestBytes: CONSTANTS.MCP_BODY_CAP_BYTES,
   bridgeToolResultBytes: CONSTANTS.MAX_TOOL_RESULT_BYTES,
   bridgeToolTextBytes: CONSTANTS.MAX_TOOL_TEXT_BYTES,
-  chatReplyTokens: 16_384,
   chatPromptChars: 250_000,
 });
 

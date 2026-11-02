@@ -21,7 +21,7 @@ const cases = [
   { id: 'l1', kind: 'lead-in', utterance: 'Great, that is helpful. Tell me about working with others.', label: 'team', previousCardId: 'project', previousUtterance: 'Describe a project.' },
   { id: 'r1', kind: 'not-question', utterance: "Great. So a bit about the team: we're about twelve engineers.", label: 'none', previousCardId: 'project', previousUtterance: 'Describe a project.' },
 ];
-const cold = { id: 'safe-cold', transport: 'claude-cold', model: 'synthetic-model', effort: 'low' };
+const baseConfig = { id: 'safe', model: 'synthetic-model', effort: 'low' };
 
 function answer(cardId, kind = 'question', confidence = 0.97) {
   return JSON.stringify({ kind, cardId, confidence });
@@ -37,7 +37,7 @@ function stubFactory(calls) {
       return {
         text: answer(unsafe ? 'project' : item.label, expectedTurnKind(item)),
         latencyMs: config.id === 'unsafe-fast' ? 100 : 1_000 + cases.indexOf(item) * 100,
-        ttftMs: config.transport === 'claude-warm' ? 200 : null,
+        ttftMs: 200,
       };
     },
     async close() {},
@@ -56,11 +56,11 @@ export default [
     async run() {
       return withOutput(async outDir => {
         const calls = [];
-        const configs = [cold, { ...cold, id: 'unsafe-fast' }];
+        const configs = [baseConfig, { ...baseConfig, id: 'unsafe-fast' }];
         const summary = await runBenchmark({ cards, cases, configs, outDir, createTransport: stubFactory(calls) });
-        const safe = summary.rows.find(row => row.configId === cold.id);
-        const unsafe = summary.rows.find(row => row.configId === 'unsafe-fast');
-        assert.equal(calls.length, cases.length * configs.length);
+        const safe = summary.rows.find(row => row.configId === baseConfig.id && row.pass === 1);
+        const unsafe = summary.rows.find(row => row.configId === 'unsafe-fast' && row.pass === 1);
+        assert.equal(calls.length, (1 + cases.length * 2) * configs.length, 'each configuration initializes once and runs two passes');
         assert.equal(safe.accuracy, 1);
         assert.equal(safe.clearAccuracy, 1);
         assert.equal(safe.kindAccuracy, 1);
@@ -74,11 +74,11 @@ export default [
         assert.equal(safe.eligible, true);
         assert.equal(unsafe.falseConfidentNone, 1);
         assert.equal(unsafe.eligible, false);
-        assert.equal(summary.recommendation.configId, cold.id, 'a faster confident false card must not win');
+        assert.equal(summary.recommendation.configId, baseConfig.id, 'a faster confident false card must not win');
         const markdown = renderMarkdown(summary);
         const csv = renderCsv(summary);
-        assert(markdown.includes(cold.id) && markdown.includes('unsafe-fast') && markdown.includes('|'));
-        assert(csv.includes('p50Ms') && csv.includes('nonePrecision') && csv.includes('kindAccuracy') && csv.includes(cold.id));
+        assert(markdown.includes(baseConfig.id) && markdown.includes('unsafe-fast') && markdown.includes('|'));
+        assert(csv.includes('p50Ms') && csv.includes('nonePrecision') && csv.includes('kindAccuracy') && csv.includes(baseConfig.id));
         return { calls: calls.length, recommended: summary.recommendation.configId };
       });
     },
@@ -87,11 +87,11 @@ export default [
     name: 'interview AI benchmark: parse failures remain in accuracy and cannot hide unsafe none results',
     run() {
       const records = cases.map(item => ({
-        configId: cold.id, pass: 1, caseId: item.id, status: item.kind === 'none' ? 'parse-error' : 'ok',
+        configId: baseConfig.id, pass: 1, caseId: item.id, status: item.kind === 'none' ? 'parse-error' : 'ok',
         prediction: item.kind === 'none' ? undefined : { cardId: item.label, confidence: 0.97, kind: expectedTurnKind(item) },
         latencyMs: 1_000,
       }));
-      const summary = scoreResults({ cases, records, configs: [cold] });
+      const summary = scoreResults({ cases, records, configs: [baseConfig] });
       const [row] = summary.rows;
       assert.equal(row.accuracy, (cases.length - 1) / cases.length);
       assert.equal(row.clearAccuracy, 1);
@@ -107,7 +107,7 @@ export default [
     async run() {
       return withOutput(async outDir => {
         const calls = [];
-        const config = { ...cold, id: 'safe-warm', transport: 'claude-warm' };
+        const config = { ...baseConfig, id: 'safe-warm' };
         const options = { cards, cases, configs: [config], outDir, createTransport: stubFactory(calls) };
         const summary = await runBenchmark(options);
         assert.equal(calls.length, 1 + cases.length * 2, 'one initialization and two sequential passes share the warm process');
@@ -132,7 +132,7 @@ export default [
     async run() {
       return withOutput(async outDir => {
         const calls = [];
-        const config = { ...cold, id: 'resume-warm', transport: 'claude-warm' };
+        const config = { ...baseConfig, id: 'resume-warm' };
         const options = { cards, cases, configs: [config], outDir, createTransport: stubFactory(calls) };
         await runBenchmark(options);
         const journalFile = path.join(outDir, 'results.jsonl');
@@ -229,9 +229,9 @@ export default [
   {
     name: 'interview AI benchmark: correct card abstention cannot conceal incorrect turn classification',
     run() {
-      const records = cases.map(item => ({ configId: cold.id, pass: 1, caseId: item.id, status: 'ok', latencyMs: 100,
+      const records = cases.map(item => ({ configId: baseConfig.id, pass: 1, caseId: item.id, status: 'ok', latencyMs: 100,
         prediction: { cardId: item.label, confidence: 0.97, kind: item.kind === 'not-question' ? 'question' : expectedTurnKind(item) } }));
-      const [row] = scoreResults({ cases, records, configs: [cold] }).rows;
+      const [row] = scoreResults({ cases, records, configs: [baseConfig] }).rows;
       assert.equal(row.noneRecall, 1, 'all none cards are still correct');
       assert.equal(row.kindAccuracy, (cases.length - 1) / cases.length);
       assert.equal(row.accuracy, row.kindAccuracy, 'joint selection accuracy includes the turn classification');
@@ -244,23 +244,27 @@ export default [
     async run() {
       await withOutput(async outDir => {
         const calls = [];
-        const broken = { ...cold, id: 'unsupported-model' };
+        const broken = { ...baseConfig, id: 'unsupported-model' };
         const factory = async config => config.id === broken.id ? {
-          async request() { calls.push({ configId: config.id }); throw Object.assign(new Error('Synthetic model rejection'), { code: 'MODEL_UNSUPPORTED' }); },
+          async request(prompt) {
+            calls.push({ configId: config.id });
+            if (!prompt.startsWith('{')) return { text: 'READY', latencyMs: 4_000, ttftMs: 3_000 };
+            throw Object.assign(new Error('Synthetic model rejection'), { code: 'MODEL_UNSUPPORTED' });
+          },
           async close() {},
         } : stubFactory(calls)(config);
-        const summary = await runBenchmark({ cards, cases, configs: [broken, cold], outDir, createTransport: factory });
-        assert.equal(calls.filter(call => call.configId === broken.id).length, 1);
-        assert.equal(calls.filter(call => call.configId === cold.id).length, cases.length);
-        const failed = summary.rows.find(row => row.configId === broken.id);
+        const summary = await runBenchmark({ cards, cases, configs: [broken, baseConfig], outDir, createTransport: factory });
+        assert.equal(calls.filter(call => call.configId === broken.id).length, 2, 'initialization and the one failed case');
+        assert.equal(calls.filter(call => call.configId === baseConfig.id).length, 1 + cases.length * 2);
+        const failed = summary.rows.find(row => row.configId === broken.id && row.pass === 1);
         assert.equal(failed.completed, 1);
         assert.equal(failed.callFailures, 1);
         assert.equal(failed.eligible, false);
-        assert.equal(summary.recommendation.configId, cold.id);
+        assert.equal(summary.recommendation.configId, baseConfig.id);
       });
       await withOutput(async outDir => {
         let creations = 0;
-        const summary = await runBenchmark({ cards, cases, configs: [cold], outDir,
+        const summary = await runBenchmark({ cards, cases, configs: [baseConfig], outDir,
           cliMetadata: { claude: { available: false, error: 'SYNTHETIC_CLI_UNAVAILABLE' } },
           createTransport: async () => { creations += 1; throw new Error('Must not create a transport'); },
         });
@@ -274,7 +278,7 @@ export default [
   {
     name: 'interview AI benchmark: changed warm replay predictions veto otherwise perfect measurements',
     run() {
-      const config = { ...cold, id: 'drifted-warm', transport: 'claude-warm' };
+      const config = { ...baseConfig, id: 'drifted-warm' };
       const records = [1, 2].flatMap(pass => cases.map(item => ({
         type: 'sample', configId: config.id, pass, caseId: item.id, status: 'ok', latencyMs: 100,
         prediction: { cardId: item.label, confidence: 0.97, kind: expectedTurnKind(item) },
@@ -283,49 +287,6 @@ export default [
       const summary = scoreResults({ cases, records, configs: [config] });
       assert(summary.rows.every(row => row.accuracy === 1 && row.replayDrifts === 1 && !row.eligible));
       assert.equal(summary.recommendation, null);
-    },
-  },
-  {
-    name: 'interview AI benchmark: one-shot timeouts close before recreation and never retry the failed case',
-    async run() {
-      for (const transport of ['claude-cold', 'codex']) await withOutput(async outDir => {
-        const config = { ...cold, id: `timeout-${transport}`, transport };
-        const events = [];
-        let creations = 0;
-        let open = false;
-        const factory = async () => {
-          assert.equal(open, false, 'close the old transport before creating another');
-          open = true;
-          const generation = ++creations;
-          let closed = false;
-          events.push(`create-${generation}`);
-          return {
-            async request(prompt) {
-              const item = cases.find(testCase => prompt.includes(JSON.stringify(testCase.utterance)));
-              assert(item);
-              events.push(item.id);
-              if (item.id === cases[0].id) throw Object.assign(new Error('Synthetic timeout'), { code: 'MATCH_TIMEOUT' });
-              return { text: answer(item.label, expectedTurnKind(item)), latencyMs: 500, ttftMs: null };
-            },
-            async close() {
-              if (!closed) { closed = true; open = false; events.push(`close-${generation}`); }
-            },
-          };
-        };
-        const summary = await runBenchmark({ cards, cases, configs: [config], outDir, createTransport: factory });
-        assert.equal(creations, 2);
-        assert.deepEqual(events.slice(0, 4), ['create-1', cases[0].id, 'close-1', 'create-2']);
-        for (const item of cases) assert.equal(events.filter(event => event === item.id).length, 1);
-        assert.equal(open, false);
-        assert.equal(summary.rows[0].completed, cases.length);
-        assert.equal(summary.rows[0].callFailures, 1);
-        assert.equal(summary.rows[0].eligible, false);
-        const samples = (await fs.readFile(path.join(outDir, 'results.jsonl'), 'utf8')).trimEnd().split('\n')
-          .map(line => JSON.parse(line)).filter(record => record.type === 'sample');
-        assert.equal(samples.length, cases.length);
-        assert.equal(samples.filter(record => record.caseId === cases[0].id).length, 1);
-        assert.equal(samples[0].status, 'call-error');
-      });
     },
   },
 ];

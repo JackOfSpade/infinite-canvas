@@ -339,7 +339,7 @@ export async function prepareOfficialPostingForGeneration(args, {
     return { ...listing, listingCheck: { ...listing.listingCheck,
       action: 'refuse-retry', basis: 'official-lookup', override: false },
     message: `${lookup.label}. ${posting.trail?.includes('bridge-unavailable')
-      ? 'Reconnect ChatGPT, then retry Generate.' : 'Retry Generate to finish checking the official posting.'}`,
+      ? 'Claude research was unavailable. Retry Generate.' : 'Retry Generate to finish checking the official posting.'}`,
     listingAudit: null };
   };
   // The budget can expire before research or during the tail. Stored closed,
@@ -431,9 +431,9 @@ export async function prepareOfficialPostingForGeneration(args, {
       const record = await store.find(scrapedJob); active(controller.signal);
       const resolveFresh = async ({ candidateUrls = [], bypassCache = false, priorOfficialRecord } = {}) => {
         if (semanticMatching && bypassCache) verifiedFallback = undefined;
-        const resolved = await resolve([scrapedJob], { store, fetch, signal: controller.signal,
+        const resolved = await resolve([scrapedJob], { store, snapshotFetch: fetch, signal: controller.signal,
           manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, callMatch, now, bridgeAvailable,
-          timeoutMs, semanticMatching, candidateUrls, bypassCache, bridgeStatus,
+          timeoutMs, candidateUrls, bypassCache, bridgeStatus,
           ...(priorOfficialRecord ? { priorOfficialRecords: [priorOfficialRecord] } : {}) });
         resolvedTelemetry = mergeOfficialPostingTelemetry(resolvedTelemetry, resolved.telemetry);
         active(controller.signal);

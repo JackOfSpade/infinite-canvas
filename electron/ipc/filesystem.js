@@ -3216,7 +3216,6 @@ function extractSidecarData(nodes) {
           hubState: d.hubState,
           scrapeWarnings: d.scrapeWarnings,
           pendingJobs: d.pendingJobs,
-          pendingTargetRole: d.pendingTargetRole,
           errorMessage: d.errorMessage,
           isRateLimit: d.isRateLimit,
         });
@@ -3225,7 +3224,6 @@ function extractSidecarData(nodes) {
         d.hubState = 'empty';
         delete d.scrapeWarnings;
         delete d.pendingJobs;
-        delete d.pendingTargetRole;
         delete d.errorMessage;
         delete d.isRateLimit;
       } else if (n.type === 'jobsourcecard' && n.data?.persistedProgress) {
@@ -3265,7 +3263,6 @@ function mergeSidecarData(nodes, sidecarData) {
         n.data.hubState = sidecarHub.hubState || 'sources-ready';
         if (sidecarHub.scrapeWarnings !== undefined) n.data.scrapeWarnings = sidecarHub.scrapeWarnings;
         if (sidecarHub.pendingJobs !== undefined) n.data.pendingJobs = sidecarHub.pendingJobs;
-        if (sidecarHub.pendingTargetRole !== undefined) n.data.pendingTargetRole = sidecarHub.pendingTargetRole;
         if (sidecarHub.errorMessage !== undefined) n.data.errorMessage = sidecarHub.errorMessage;
         if (sidecarHub.isRateLimit !== undefined) n.data.isRateLimit = sidecarHub.isRateLimit;
       } else if (n.type === 'jobsourcecard' && cardsMap.has(n.id)) {

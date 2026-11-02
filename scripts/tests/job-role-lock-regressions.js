@@ -17,7 +17,8 @@
 // the same technique already used by scripts/tests/solve-ipc-failure.js and
 // platform-utils.js -- so these tests exercise the REAL current behavior,
 // not a paraphrase of it in prose.
-import { assert, buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries, fs, mergeNonRestorableNodeDataFromLive, normalizeJobPreferencePlan, redactReportEventHistoryLine, resolveSearchRoles, sanitizeJobPreferencePlan, screenJobRolesByTitle } from '../test-dependencies.js';
+import { assert, buildPinnedTitleQueryBundle, flattenJobSearchQueries, fs, mergeNonRestorableNodeDataFromLive, normalizeJobPreferencePlan, redactReportEventHistoryLine, resolveSearchRoles, sanitizeJobPreferencePlan, screenJobRolesByTitle } from '../test-dependencies.js';
+import { ROLE_SCREEN_MAX_ROWS } from '../../electron/ipc/resultCaps.js';
 import { buildJobCareerQueryCacheKey, careerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from '../../src/utils/jobCareerSnapshotBinding.js';
 
 // Shared minimal-but-schema-valid raw plan builder -- mirrors the `rawPlan`
@@ -136,7 +137,8 @@ export default [
       assert(emptyPoolResult.acceptedJobs.length === 0 && emptyPoolResult.droppedJobs.length === 0,
         'an empty job pool must short-circuit with zero AI calls');
 
-      const packedJobs = Array.from({ length: 597 }, (_, index) => ({ title: `Product Manager ${index}`, company: 'Acme' }));
+      // Two full role-screen batches plus one trailing row.
+      const packedJobs = Array.from({ length: ROLE_SCREEN_MAX_ROWS * 2 + 1 }, (_, index) => ({ title: `Product Manager ${index}`, company: 'Acme' }));
       const packedHints = [];
       let activeBatches = 0;
       let peakBatches = 0;
@@ -153,64 +155,16 @@ export default [
         },
       });
       assert(peakBatches === 3
-        && packed.acceptedJobs.length === 597
+        && packed.acceptedJobs.length === packedJobs.length
         && JSON.stringify(packedHints.map(hint => [hint.task, hint.batch, hint.batchTotal, hint.itemCount]))
           === JSON.stringify([
-            ['job-role-screen-batch', 1, 3, 298],
-            ['job-role-screen-batch', 2, 3, 298],
+            ['job-role-screen-batch', 1, 3, ROLE_SCREEN_MAX_ROWS],
+            ['job-role-screen-batch', 2, 3, ROLE_SCREEN_MAX_ROWS],
             ['job-role-screen-batch', 3, 3, 1],
           ]),
-      'fresh role screening fills the 15,360-token budget with 298 rows and dispatches independent batches together');
-
-      const legacyTasks = [];
-      await screenJobRolesByTitle({
-        jobs,
-        titles: ['Product Manager'],
-        useLegacyRoleScreen: true,
-        callText: async (_prompt, options) => {
-          legacyTasks.push(options.task);
-          return { verdicts: [] };
-        },
-      });
-      assert(JSON.stringify(legacyTasks) === JSON.stringify(['job-role-screen']),
-        'an in-progress legacy run retains its original role-screen task contract');
+      'fresh role screening fills the usable output budget with ROLE_SCREEN_MAX_ROWS rows and dispatches independent batches together');
 
       return { failOpenRespected: true, noMutation: true, zeroCallsWhenEmpty: true, packedBatches: packedHints.length };
-    },
-  },
-  {
-    name: 'REGRESSION: a resumed role screen replays only exact v1 chunks and packs untouched rows into v2 batches without duplicates or gaps',
-    run: async () => {
-      const jobs = Array.from({ length: 500 }, (_, index) => ({ title: `Product Manager ${index}`, company: 'Acme' }));
-      const probes = [];
-      const calls = [];
-      const result = await screenJobRolesByTitle({
-        jobs,
-        titles: ['Product Manager'],
-        // v1 split the original pool at 0..199, 200..399, 400..499. Only
-        // the first is already durable; later chunks must not be held hostage
-        // by that fact and must use today's 298-row packed layout.
-        legacyRoleScreenStepProbe: async ({ prompt, task, responseSchema, hints }) => {
-          probes.push({ prompt, task, responseSchema, hints });
-          return probes.length === 1;
-        },
-        callText: async (_prompt, options) => {
-          calls.push({ task: options.task, hints: options.hints });
-          return { verdicts: Array.from({ length: options.hints.itemCount }, (_, index) => ({ index, outcome: 'match', reason: '' })) };
-        },
-      });
-      assert(JSON.stringify(probes.map(probe => [probe.task, probe.hints.itemCount])) === JSON.stringify([
-        ['job-role-screen', 200], ['job-role-screen', 200], ['job-role-screen', 100],
-      ]), 'the exact-step probe must reconstruct every original fixed v1 chunk before choosing a contract');
-      assert(JSON.stringify(calls.map(call => [call.task, call.hints.batch || null, call.hints.batchTotal || null, call.hints.itemCount])) === JSON.stringify([
-        ['job-role-screen', null, null, 200],
-        ['job-role-screen-batch', 1, 2, 298],
-        ['job-role-screen-batch', 2, 2, 2],
-      ]), 'only the durable v1 prompt may replay; all untouched rows must enter deterministic 298-row v2 batches');
-      assert(result.acceptedJobs.length === jobs.length
-        && new Set(result.acceptedJobs.map(job => job.title)).size === jobs.length,
-      'hybrid replay must preserve every original row exactly once');
-      return { probes: probes.length, calls: calls.length, accepted: result.acceptedJobs.length };
     },
   },
   {
@@ -328,51 +282,41 @@ export default [
   {
     // New coverage: deriveGatePinnedTitles/deriveQueryTitles collapsed into
     // one deriveSearchTitles (there is no more gate/query split to test
-    // separately -- the deterministic gate is gone). Structured plan titles
-    // supersede stale legacy fields; a bare legacy targetRole remains a
-    // single-role fallback. A
+    // separately -- the deterministic gate is gone). A
     // malformed or missing plan must degrade to an empty list, never throw.
-    name: 'REGRESSION: structured search titles supersede legacy targetRole; bare legacy roles and malformed plans remain safe',
+    name: 'REGRESSION: structured search titles drive the search; malformed plans remain safe',
     run: async () => {
       const search = await fs.promises.readFile('src/nodes/JobSearchNode.jsx', 'utf8');
-      const body = extractFunction(search, 'function deriveSearchTitles(targetRole, preferencePlan) {', 'deriveSearchTitles');
+      const body = extractFunction(search, 'function deriveSearchTitles(preferencePlan) {', 'deriveSearchTitles');
       const deriveSearchTitles = new Function(`${body}\nreturn deriveSearchTitles;`)();
 
-      assert(JSON.stringify(deriveSearchTitles('Data Scientist', { titles: ['Product Manager'] })) === JSON.stringify(['Product Manager']),
-        'structured plan titles must supersede a stale legacy targetRole');
-      assert(JSON.stringify(deriveSearchTitles('  Data Scientist  ', { titles: [] })) === JSON.stringify(['Data Scientist']),
-        'a bare legacy targetRole remains a trimmed single title when the plan has none');
-      assert(JSON.stringify(deriveSearchTitles('', { titles: ['Product Manager', 'Senior Product Manager'] })) === JSON.stringify(['Product Manager', 'Senior Product Manager']),
-        'with no targetRole, the preferencePlan\'s AI-determined titles must drive the search verbatim');
-      assert(JSON.stringify(deriveSearchTitles('', null)) === '[]', 'a missing plan must yield an empty title list, not throw');
-      assert(JSON.stringify(deriveSearchTitles('', undefined)) === '[]', 'an undefined plan must yield an empty title list, not throw');
-      assert(JSON.stringify(deriveSearchTitles('', { titles: 'not-an-array' })) === '[]', 'a malformed (non-array) titles field must yield an empty list');
-      assert(JSON.stringify(deriveSearchTitles('', { titles: ['Valid', '', '   ', 42, null] })) === JSON.stringify(['Valid']),
+      assert(JSON.stringify(deriveSearchTitles({ titles: ['Product Manager', 'Senior Product Manager'] })) === JSON.stringify(['Product Manager', 'Senior Product Manager']),
+        'the preferencePlan\'s AI-determined titles must drive the search verbatim');
+      assert(JSON.stringify(deriveSearchTitles({ titles: [] })) === '[]', 'a plan with no titles must yield an empty title list');
+      assert(JSON.stringify(deriveSearchTitles(null)) === '[]', 'a missing plan must yield an empty title list, not throw');
+      assert(JSON.stringify(deriveSearchTitles(undefined)) === '[]', 'an undefined plan must yield an empty title list, not throw');
+      assert(JSON.stringify(deriveSearchTitles({ titles: 'not-an-array' })) === '[]', 'a malformed (non-array) titles field must yield an empty list');
+      assert(JSON.stringify(deriveSearchTitles({ titles: ['Valid', '', '   ', 42, null] })) === JSON.stringify(['Valid']),
         'blank and non-string entries in titles must be filtered out');
 
-      return { structuredPlanWins: true, legacyFallback: true, malformedIsSafe: true };
+      return { structuredPlanWins: true, malformedIsSafe: true };
     },
   },
   {
-    name: 'REGRESSION: fourteen structured titles bypass a stale joined targetRole and produce fourteen literal platform queries',
+    name: 'REGRESSION: fourteen structured titles produce fourteen literal platform queries',
     async run() {
       const search = await fs.promises.readFile('src/nodes/JobSearchNode.jsx', 'utf8');
-      const body = extractFunction(search, 'function deriveSearchTitles(targetRole, preferencePlan) {', 'deriveSearchTitles');
+      const body = extractFunction(search, 'function deriveSearchTitles(preferencePlan) {', 'deriveSearchTitles');
       const deriveSearchTitles = new Function(`${body}\nreturn deriveSearchTitles;`)();
       const titles = ['Software Engineer, AI Features', ...Array.from({ length: 13 }, (_, index) => `Synthetic Engineering Role ${index + 1}`)];
       const preferencePlan = { titles };
-      const legacyTargetRole = titles.join(', ');
-      const roleLine = extractLine(search, "const activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation)", 'effective target role');
-      const activeTargetRole = new Function('deriveSearchTitles', 'jobPreferencesInterpretation', 'legacyTargetRole',
-        `${roleLine}\nreturn activeTargetRole;`)(deriveSearchTitles, preferencePlan, legacyTargetRole);
-      assert(activeTargetRole === '', 'structured titles must clear the effective legacy targetRole before query selection');
-      const activeSearchTitles = deriveSearchTitles(activeTargetRole, preferencePlan);
+      const activeSearchTitles = deriveSearchTitles(preferencePlan);
       const start = search.indexOf('      let queriesResult = null;');
       const end = search.indexOf('      const queryModel = queriesResult.queryModel || null;', start);
       assert(start >= 0 && end > start, 'could not locate actual query selection branch');
       let locationCalls = 0;
       const runQueries = new Function('deps', `return (async () => {
-        const { canReuseQueries, activeTargetRole, activeSearchTitles, buildExactTargetRoleQueryBundle,
+        const { canReuseQueries, activeSearchTitles,
           buildPinnedTitleQueryBundle, flattenJobSearchQueries, window, EventLogger, profile, currentId,
           pinnedCareerSnapshotId, effectiveManualAiRunId, activePreferredLocation, cancelled,
           pinnedCareerSnapshotStillCurrent } = deps;
@@ -380,8 +324,8 @@ export default [
         return { allQueries, queriesResult };
       })();`);
       const result = await runQueries({
-        canReuseQueries: false, activeTargetRole, activeSearchTitles,
-        buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries,
+        canReuseQueries: false, activeSearchTitles,
+        buildPinnedTitleQueryBundle, flattenJobSearchQueries,
         window: { electronAPI: {
           resolveJobSearchLocation: async () => { locationCalls++; return { success: true, canonicalLocation: 'Synthetic Region' }; },
           generateJobQueries: async () => { throw new Error('structured titles must not trigger query generation'); },
@@ -395,11 +339,6 @@ export default [
       assert(locationCalls === 1, 'query selection resolves location once without another role or query resolver call');
       const key = JSON.parse(buildJobCareerQueryCacheKey({ careerSnapshotId: 'a'.repeat(64) }));
       assert(key.strategyVersion === 9, 'version-nine query keys must invalidate older keys without an ordered title binding');
-      const reanalysis = search.slice(search.indexOf('let activeTargetRole = (runData.targetRole'));
-      const reanalysisRoleLine = extractLine(reanalysis, "activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation)", 'reanalysis effective target role');
-      const reanalysisTargetRole = new Function('deriveSearchTitles', 'jobPreferencesInterpretation', 'activeTargetRole',
-        `${reanalysisRoleLine}\nreturn activeTargetRole;`)(deriveSearchTitles, preferencePlan, legacyTargetRole);
-      assert(reanalysisTargetRole === '', 'saved-job reanalysis must also clear the effective legacy target role');
       return { queryCount: result.allQueries.length, locationCalls, cacheStrategyVersion: key.strategyVersion };
     },
   },
@@ -407,7 +346,7 @@ export default [
     name: 'REGRESSION: reanalysis replacing locked [A,B] with [A,C] rebuilds the next scan queries in title order',
     async run() {
       const search = await fs.promises.readFile('src/nodes/JobSearchNode.jsx', 'utf8');
-      const deriveSearchTitles = new Function(`${extractFunction(search, 'function deriveSearchTitles(targetRole, preferencePlan) {', 'deriveSearchTitles')}\nreturn deriveSearchTitles;`)();
+      const deriveSearchTitles = new Function(`${extractFunction(search, 'function deriveSearchTitles(preferencePlan) {', 'deriveSearchTitles')}\nreturn deriveSearchTitles;`)();
       const careerDerivedStateMatches = new Function('careerSnapshotBindingMatches',
         `${extractFunction(search, 'function careerDerivedStateMatches(source, careerSnapshotId) {', 'careerDerivedStateMatches')}\nreturn careerDerivedStateMatches;`)(careerSnapshotBindingMatches);
       const pinnedCareerSnapshotId = 'a'.repeat(64);
@@ -433,7 +372,6 @@ export default [
       assert(patchStart >= 0 && patchEnd > patchStart, 'could not locate the reanalysis role-lock patch');
       const makePatch = new Function('jobPreferencesInterpretation', 'runData', 'activeJobPreferences', 'normalizedJobCareerSnapshotId', 'deriveSearchTitles', `
         let refreshedRoleLockPatch = null;
-        const activeTargetRole = '';
         const resolveResult = {};
         ${search.slice(patchStart, patchEnd)}
         return refreshedRoleLockPatch;
@@ -444,9 +382,8 @@ export default [
       const scan = new Function('deps', `return (async () => {
         const { buildJobCareerQueryCacheKey, pinnedCareerSnapshotId, resumeFingerprint, activeJobPreferences,
           activePreferredLocation, activeSearchTitles, laneTurnData, profile, careerDerivedStateMatches,
-          careerSnapshotBindingMatches, buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle,
+          careerSnapshotBindingMatches, buildPinnedTitleQueryBundle,
           flattenJobSearchQueries, window, EventLogger } = deps;
-        const activeTargetRole = '';
         const currentId = 'synthetic-reanalysis-hub';
         const effectiveManualAiRunId = 'synthetic-run';
         const cancelled = () => false;
@@ -460,9 +397,9 @@ export default [
         assert(JSON.stringify(laneTurnData.pinnedTitles) === JSON.stringify(titles), 'reanalysis must update the displayed titles');
         return scan({
           buildJobCareerQueryCacheKey, pinnedCareerSnapshotId, resumeFingerprint, activeJobPreferences,
-          activePreferredLocation, activeSearchTitles: deriveSearchTitles('', laneTurnData.searchBriefPlan),
+          activePreferredLocation, activeSearchTitles: deriveSearchTitles(laneTurnData.searchBriefPlan),
           laneTurnData, profile: {}, careerDerivedStateMatches, careerSnapshotBindingMatches,
-          buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries,
+          buildPinnedTitleQueryBundle, flattenJobSearchQueries,
           window: { electronAPI: {
             resolveJobSearchLocation: async () => { locationCalls++; return { success: true, canonicalLocation: activePreferredLocation }; },
             generateJobQueries: async () => { throw new Error('pinned titles must build their queries locally'); },

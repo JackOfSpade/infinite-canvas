@@ -4,7 +4,9 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { assert } from './testHelpers.js';
 import {
+  INTERVIEW_EXACT_COPY_SUFFIX,
   buildInterviewBrief,
+  buildInterviewPreparedAnswers,
   captureInterviewPreparationBundle,
   interviewPreparedBriefRecordId,
   isPublishedInterviewBrief,
@@ -19,6 +21,8 @@ import {
 } from '../../electron/ipc/interviewPreparation.js';
 import { formatOriginalJobListingMarkdown } from '../../electron/ipc/applicationBundle.js';
 
+// No model is reachable from this suite: later pipeline steps degrade to their warnings.
+const syntheticAiTransport = { callText: async () => { throw new Error('Synthetic transport has no reply queued.'); }, callRaw: async () => { throw new Error('Synthetic transport has no reply queued.'); } };
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const SNAPSHOT_ID = 'a'.repeat(64);
 
@@ -306,7 +310,7 @@ export default [
       let rawOpts; let textOpts;
       let rawPrompt; let assessmentPrompt;
       const result = await buildInterviewBrief({ nodeId: 'node-1', snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: bundle.artifactId, manualAiRunId: 'run-1', userDataPath: '/tmp', loadBundle: async () => bundle, callRaw: async (prompt, opts) => { rawPrompt = prompt; rawOpts = opts; return rawResearch; }, callText: async (prompt, opts) => { assessmentPrompt = prompt; textOpts = opts; return emptySummaryValue; } });
-      assert(rawOpts.task === 'interview-brief-research' && rawOpts.grounding === true && textOpts.task === 'interview-brief-assessment' && result.brief.briefId === emptySummaryBrief.briefId && result.brief.role.summary === '', 'two-stage worker requests must preserve an empty optional summary in their stable public digest');
+      assert(rawOpts.task === 'interview-brief-research' && typeof rawOpts.responseValidator === 'function' && textOpts.task === 'interview-brief-assessment' && assessmentPrompt.endsWith(INTERVIEW_EXACT_COPY_SUFFIX) && result.brief.briefId === emptySummaryBrief.briefId && result.brief.role.summary === '', 'two-stage worker requests must preserve an empty optional summary in their stable public digest');
       assert(/untrusted-interview-canonical-job-url-/u.test(rawPrompt) && /untrusted-interview-canonical-job-url-/u.test(assessmentPrompt) && /untrusted-interview-original-listing-/u.test(rawPrompt) && /untrusted-interview-grounded-research-/u.test(assessmentPrompt) && /untrusted-interview-application-positioning-/u.test(assessmentPrompt), 'all renderer- or external-controlled prompt inputs must use nonce-bound wrappers');
       assert(/<untrusted-interview-canonical-job-url-[^>]+>\nhttps:\/\/jobs\.example\.test\/1\n<\/untrusted-interview-canonical-job-url-/u.test(rawPrompt), 'the canonical URL must occur only inside its untrusted-data boundary');
       assert(rawPrompt.includes("Compare the live canonical job URL's role/company identity") && assessmentPrompt.includes('If the page is inaccessible, the identity is ambiguous, or the targets mismatch, state that plainly in warnings.'), 'both worker stages must preserve role identity and expose inaccessible, ambiguous, or mismatched targets as warnings');
@@ -360,14 +364,28 @@ export default [
         await fs.promises.unlink(recordPath);
 
         const handlers = new Map();
-        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), buildBrief: async () => ({ brief: sealedBrief }),
+        let handed;
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport,
+          buildBrief: async args => { handed = args; return { brief: sealedBrief }; },
           // This case isolates brief publication. Separate answer-bank tests
           // exercise the third handoff, grounding and real sealed store.
           buildAnswers: async () => ({ bank: {} }), publishAnswers: async () => ({ answerBankAvailable: true, answerCardCount: 16 }) });
         const reply = await handlers.get('build-interview-brief')({}, { nodeId: 'node-1', snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: bundle.artifactId, manualAiRunId: 'run-prepared-brief' });
+        assert(handed.callText === syntheticAiTransport.callText && handed.callRaw === syntheticAiTransport.callRaw, 'the build handler must hand the brief builder its injected AI transport');
         assert(reply?.briefRecordId === interviewPreparedBriefRecordId(sealedBrief) && (await loadInterviewPreparedBrief({ briefRecordId: reply.briefRecordId, brief: reply.brief, userDataPath: root })), 'the build handler must publish and reload the sealed record before returning success');
         return { recordId: published.briefRecordId.slice(0, 12) };
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview preparation: brief and answer builders require the AI transport',
+    run: async () => {
+      const args = { nodeId: 'node-1', snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: 'a'.repeat(64), manualAiRunId: 'run-no-transport' };
+      const missing = await buildInterviewBrief(args).then(() => null, error => error);
+      assert(missing instanceof TypeError, 'a brief without callRaw and callText must fail before any work');
+      const missingAnswers = await buildInterviewPreparedAnswers({}).then(() => null, error => error);
+      assert(missingAnswers instanceof TypeError, 'answers without callText must fail before any work');
+      return { required: true };
     },
   },
   {

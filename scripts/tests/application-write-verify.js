@@ -1027,7 +1027,7 @@ export default [
   {
     name: 'v2 prompt, transport, and plain-text bridge limits are explicit',
     run() {
-      assert.equal(APPLICATION_V2_LIMITS.chatReplyTokens, 16_384);
+      assert.equal(APPLICATION_V2_LIMITS.chatReplyTokens, undefined, 'no ChatGPT reply size is carried');
       assert.equal(APPLICATION_V2_LIMITS.chatPromptChars, 250_000);
       assert.equal(APPLICATION_V2_LIMITS.bridgeRequestBytes, 2 * 1024 * 1024);
       assert.equal(APPLICATION_V2_LIMITS.bridgeToolResultBytes, 8 * 1024 * 1024);

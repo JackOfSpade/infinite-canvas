@@ -163,7 +163,6 @@ export function buildJobHubScrapeClearPatch(data, {
     resultDisposition: null,
     searchWindow: null,
     pendingJobs: null,
-    pendingTargetRole: null,
     scrapeWarnings: [],
     collectionScopeCaveats: [],
     preferenceMatchedCount: null,

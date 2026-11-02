@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useBridgeLaunchAccounts } from '../hooks/useBridgeLaunchAccounts';
+import { useClaudeTaskStatus } from '../hooks/useClaudeTaskStatus';
 import { Check } from 'lucide-react';
 import { BRIDGE_PROGRESS_COPY, BRIDGE_UI_COPY, ipcErrorMessage } from '../utils/handoffBridgeCopy';
 import { deriveBridgeJobProgress, deriveBridgePushProgress, progressTimeLines } from '../utils/bridgeJobProgress';
@@ -201,6 +202,8 @@ export function BridgeProgress({
   workersOnly = false,
 }) {
   const launchAccountName = useBridgeLaunchAccounts(status);
+  // Claude answers every push handoff, so none of them waits for a ChatGPT chat.
+  const claudeWorker = useClaudeTaskStatus().active === true && isPush === true && !workersOnly;
   const [now, setNow] = useState(() => Date.now());
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -264,7 +267,7 @@ export function BridgeProgress({
       serving: status?.serving,
       tunnelReachable: status?.setup?.tunnelReachable === true,
       linked: status?.setup?.linked === true,
-    }, ownerWorker, awaitingClaim })
+    }, ownerWorker, awaitingClaim, claudeWorker })
     : deriveBridgeJobProgress({ job, chat, item, ownerWorker, now, bridge: { paused: status?.paused === true, pluginName, autoLaunchChats: status?.autoLaunchChats === true } });
   const lines = progressTimeLines(view, now);
   // The page-level worker block never prints the timer lines, so it must not
@@ -482,7 +485,7 @@ export function BridgeProgress({
 
   return (
     <section
-      aria-label={BRIDGE_PROGRESS_COPY.region}
+      aria-label={claudeWorker ? BRIDGE_PROGRESS_COPY.claudeRegion : BRIDGE_PROGRESS_COPY.region}
       data-progress-kind={view.kind}
       data-workers-only={workersOnly ? 'true' : undefined}
       className={`min-w-0 rounded-lg border px-3 py-3 text-xs leading-relaxed ${TONE_CLASS[view.tone] || TONE_CLASS.neutral}`}

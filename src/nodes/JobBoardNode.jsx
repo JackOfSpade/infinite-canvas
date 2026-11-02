@@ -232,9 +232,7 @@ function captureJobSearchRollback(sourceId, sourceData, nodes, edges) {
 // after every reload; resolvedRoles survives both because it is written once
 // and persisted. Fall back to pinnedTitles only for a hub that has never
 // locked (fresh hub mid-run) or an unmigrated/legacy canvas that predates
-// resolvedRoles entirely. `d?.targetRole` itself is legacy-only (an
-// unmigrated canvas may still carry it) and is deliberately not read here —
-// reading it would show a stale role no run has actually pinned on.
+// resolvedRoles entirely.
 function moduleLabel(d) {
   const loc = String(d?.preferredLocation || d?.canonicalLocation || '').trim();
   const resolvedRoles = Array.isArray(d?.resolvedRoles) ? d.resolvedRoles : [];
@@ -999,7 +997,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             errorMessage: n.data?.errorMessage || '',
             locked: !!n.data?.locked,
             hasCareerInput: hubHasAcceptedInitialDrop(n),
-            targetRole: n.data?.targetRole || '',
             preferredLocation: n.data?.preferredLocation || '',
             canonicalLocation: n.data?.canonicalLocation || '',
             searchLocation: n.data?.searchLocation || null,
@@ -6930,7 +6927,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       : pauseSaving ? 'Saving the active Search continuation…'
         : !data.boardScanResume?.boardRunId ? 'Waiting for the Job Board to save a search run id before pausing safely.' : '';
   const waitingWorkersLabel = waitingForWorkers
-    ? `Waiting for ChatGPT workers or a live bridge connection to finish search resolution for ${awaitingSourceLabel}.` : null;
+    ? `Waiting for Claude to finish search resolution for ${awaitingSourceLabel}.` : null;
 
   return (
     <>

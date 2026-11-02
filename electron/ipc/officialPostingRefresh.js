@@ -2,8 +2,6 @@ import { handleSafe } from './ipcUtils.js';
 import { getHandoffBridgeStatus } from './handoffBridge/index.js';
 import { bridgeLinked } from './handoffBridge/bridgeAvailability.js';
 import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
-import { createOfficialPostingFetchSession } from './officialPostingFetchSession.js';
-import { fetchOfficialPosting } from './officialPostingFetch.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingLookupStatus } from './officialPostingFields.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
@@ -77,15 +75,15 @@ export function validateOfficialPostingRefreshArgs(args) {
  * or passes its rows through Board deduplication, scoring or retirement. */
 export async function refreshOfficialPostingEntries(args, {
   projectJob = value => ({ ...value }), resolve = resolveOfficialPostings, store,
-  fetch = fetchOfficialPosting, bridgeStatus = getHandoffBridgeStatus, signal, onProgress,
-  callRaw, callMatch, now = Date.now,
+  bridgeStatus = getHandoffBridgeStatus, signal, onProgress,
+  callRaw, callMatch, snapshotFetch, now = Date.now,
 } = {}) {
   validateOfficialPostingRefreshArgs(args);
   active(signal);
   let linked = false;
   try { linked = bridgeLinked(await bridgeStatus()); } catch { /* Missing research cannot silently become a completed miss. */ }
   active(signal);
-  if (!linked) throw error('Connect ChatGPT research before refreshing official postings.', 'OFFICIAL_POSTING_RESEARCH_UNAVAILABLE');
+  if (!linked) throw error('Claude research is not running. Restart the app, then refresh official postings.', 'OFFICIAL_POSTING_RESEARCH_UNAVAILABLE');
   store ||= getOfficialPostingStore();
   const jobs = args.entries.map(({ job }) => {
     const projected = structuredClone(projectJob(job));
@@ -112,54 +110,50 @@ export async function refreshOfficialPostingEntries(args, {
       cardPosting?.sourceUrl, cardPosting?.officialApplyUrl].map(officialHttpsUrl).filter(Boolean))]);
   }
   active(signal);
-  // ChatGPT reads the pages in production; a host fetch session exists only for an injected crawl fetcher.
-  const session = fetch === fetchOfficialPosting ? null : createOfficialPostingFetchSession({ fetch, signal });
   const progress = value => {
     if (signal?.aborted) return;
     const completed = Math.min(jobs.length, Math.max(0, Math.floor(Number(value?.completed) || 0)));
     try { onProgress?.({ nodeId: args.nodeId, manualAiRunId: args.manualAiRunId, completed, total: jobs.length }); } catch { /* UI progress cannot fail research. */ }
   };
-  try {
-    progress({ completed: 0 });
-    const resolved = await resolve(jobs, { store, fetch, ...(session ? { fetchSession: session } : {}), signal, now,
-      nodeId: args.nodeId, manualAiRunId: args.manualAiRunId, semanticMatching: true, bypassCache: args.force !== false,
-      bypassCacheByRow: args.entries.map(({ job }) => {
-        const posting = normalizeOfficialPosting(job.officialPosting);
-        return Boolean(posting && officialPostingLookupStatus(posting).retryable);
-      }),
-      bridgeAvailable: true, bridgeStatus, priorOfficialRecords, candidateUrlsByRow, onProgress: progress,
-      ...(callRaw ? { callRaw } : {}), ...(callMatch ? { callMatch } : {}) });
-    active(signal);
-    if (!Array.isArray(resolved?.jobs) || resolved.jobs.length !== jobs.length) {
-      throw error('Official posting refresh returned incomplete results.', 'OFFICIAL_POSTING_REFRESH_INCOMPLETE');
+  progress({ completed: 0 });
+  const resolved = await resolve(jobs, { store, signal, now,
+    nodeId: args.nodeId, manualAiRunId: args.manualAiRunId, bypassCache: args.force !== false,
+    bypassCacheByRow: args.entries.map(({ job }) => {
+      const posting = normalizeOfficialPosting(job.officialPosting);
+      return Boolean(posting && officialPostingLookupStatus(posting).retryable);
+    }),
+    bridgeAvailable: true, bridgeStatus, priorOfficialRecords, candidateUrlsByRow, onProgress: progress,
+    ...(callRaw ? { callRaw } : {}), ...(callMatch ? { callMatch } : {}), ...(snapshotFetch ? { snapshotFetch } : {}) });
+  active(signal);
+  if (!Array.isArray(resolved?.jobs) || resolved.jobs.length !== jobs.length) {
+    throw error('Official posting refresh returned incomplete results.', 'OFFICIAL_POSTING_REFRESH_INCOMPLETE');
+  }
+  const entries = resolved.jobs.map((row, index) => {
+    const posting = normalizeOfficialPosting(row?.officialPosting);
+    if (!posting || officialPostingSemanticInputHash(row) !== officialPostingSemanticInputHash(jobs[index])
+      || (!officialPostingLookupStatus(posting).retryable || officialLevels.has(posting.level))
+        && !officialPostingSemanticProofMatches(jobs[index], posting)) {
+      throw error('Official posting refresh returned an invalid match.', 'OFFICIAL_POSTING_REFRESH_INVALID');
     }
-    const entries = resolved.jobs.map((row, index) => {
-      const posting = normalizeOfficialPosting(row?.officialPosting);
-      if (!posting || officialPostingSemanticInputHash(row) !== officialPostingSemanticInputHash(jobs[index])
-        || (!officialPostingLookupStatus(posting).retryable || officialLevels.has(posting.level))
-          && !officialPostingSemanticProofMatches(jobs[index], posting)) {
-        throw error('Official posting refresh returned an invalid match.', 'OFFICIAL_POSTING_REFRESH_INVALID');
-      }
-      const prior = normalizeOfficialPosting(priorOfficialRecords[index]?.officialPosting);
-      const retain = prior && officialLevels.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
-        && posting.outcome !== 'closed' && officialPostingLookupStatus(posting).retryable;
-      const trail = retain ? retainedRecheckTrail(prior, posting) : null;
-      // Failures describe one run: the record carries this recheck's, never an earlier recheck's.
-      const { fetchFailures: _earlierFailures, alternatives: _earlierAlternatives, ...priorRecord } = prior || {};
-      // Only the judges' own citations ride along on a kept verification, never the generic lead list.
-      const alternatives = (posting.alternatives || []).filter(item => item.title.startsWith('Unconfirmed · cited')
-        && canonicalLeadUrl(item.url) !== canonicalLeadUrl(prior?.sourceUrl));
-      const officialPosting = retain ? { ...priorRecord, trail,
-        ...(alternatives.length ? { alternatives } : {}),
-        ...(posting.fetchFailures?.length ? { fetchFailures: posting.fetchFailures } : {}) } : posting;
-      return { cardId: args.entries[index].cardId, officialPosting,
-        postedBy: officialLevels.has(officialPosting.level)
-          ? strictEmployerEqual(officialPosting.employer, jobs[index].company) ? '' : jobs[index].company
-          : row.postedBy || '' };
-    });
-    progress({ completed: jobs.length });
-    return { entries, telemetry: resolved.telemetry || null };
-  } finally { session?.dispose(); }
+    const prior = normalizeOfficialPosting(priorOfficialRecords[index]?.officialPosting);
+    const retain = prior && officialLevels.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
+      && posting.outcome !== 'closed' && officialPostingLookupStatus(posting).retryable;
+    const trail = retain ? retainedRecheckTrail(prior, posting) : null;
+    // Failures describe one run: the record carries this recheck's, never an earlier recheck's.
+    const { fetchFailures: _earlierFailures, alternatives: _earlierAlternatives, ...priorRecord } = prior || {};
+    // Only the judges' own citations ride along on a kept verification, never the generic lead list.
+    const alternatives = (posting.alternatives || []).filter(item => item.title.startsWith('Unconfirmed · cited')
+      && canonicalLeadUrl(item.url) !== canonicalLeadUrl(prior?.sourceUrl));
+    const officialPosting = retain ? { ...priorRecord, trail,
+      ...(alternatives.length ? { alternatives } : {}),
+      ...(posting.fetchFailures?.length ? { fetchFailures: posting.fetchFailures } : {}) } : posting;
+    return { cardId: args.entries[index].cardId, officialPosting,
+      postedBy: officialLevels.has(officialPosting.level)
+        ? strictEmployerEqual(officialPosting.employer, jobs[index].company) ? '' : jobs[index].company
+        : row.postedBy || '' };
+  });
+  progress({ completed: jobs.length });
+  return { entries, telemetry: resolved.telemetry || null };
 }
 
 export function registerOfficialPostingRefreshHandler({ projectJob, ...dependencies } = {}) {

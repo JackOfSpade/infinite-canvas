@@ -17,7 +17,6 @@ import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { handleSafe } from './ipcUtils.js';
-import { callLLMRaw, callLLMText } from './llm.js';
 import { isInterviewHelperNodeId, isInterviewHelperSnapshotId, loadInterviewHelperCareerSnapshot } from './interviewHelper.js';
 import {
   buildInterviewAnswerEvidence, INTERVIEW_ANSWER_BANK_SCHEMA, interviewAnswerBankPrompt,
@@ -940,31 +939,33 @@ function validateGroundedResearchTextCore(value) {
   return value;
 }
 
-export async function buildInterviewBrief({ nodeId, snapshotId, canonicalJobUrl, bundleArtifactId, manualAiRunId, signal, userDataPath, loadBundle = loadPrivateInterviewPreparationBundle, callRaw = callLLMRaw, callText = callLLMText } = {}) {
+export async function buildInterviewBrief({ nodeId, snapshotId, canonicalJobUrl, bundleArtifactId, manualAiRunId, signal, userDataPath, loadBundle = loadPrivateInterviewPreparationBundle, callRaw, callText } = {}) {
   validateInterviewBriefRequestArgs({ nodeId, snapshotId, canonicalJobUrl, bundleArtifactId, manualAiRunId });
+  if (typeof callRaw !== 'function' || typeof callText !== 'function') throw new TypeError('Interview brief preparation needs the AI transport.');
   throwIfAborted(signal);
   const bundle = await loadBundle({ artifactId: bundleArtifactId, userDataPath });
   throwIfAborted(signal);
   if (!bundle) throw new Error('The selected application bundle is unavailable.');
-  const rawResearch = await callRaw(researchPrompt({ canonicalJobUrl, bundle }), { signal, task: 'interview-brief-research', grounding: true, responseValidator: validateGroundedResearchText, hints: { itemCount: 1 } });
+  const rawResearch = await callRaw(researchPrompt({ canonicalJobUrl, bundle }), { signal, task: 'interview-brief-research', responseValidator: validateGroundedResearchText });
   throwIfAborted(signal);
   validateGroundedResearchText(rawResearch);
-  // Reject a response the publish gate would refuse before it is accepted as
-  // a durable step; otherwise every resume would replay the same failure.
+  // Reject a response the publish gate would refuse inside the transport's
+  // same-session retry, not after the reply has been accepted.
   const publishableAssessment = value => {
     const assessed = validateInterviewBriefAssessment(value, { rawResearch, bundle, snapshotId, canonicalJobUrl, bundleArtifactId });
     if (!isPublishedInterviewBrief(assessed)) throw new Error('invalid interview brief');
     return assessed;
   };
-  const response = await callText(assessmentPrompt({ rawResearch, bundle, canonicalJobUrl }), { signal, task: 'interview-brief-assessment', displayOnlyPromptSuffix: INTERVIEW_EXACT_COPY_SUFFIX, responseSchema: INTERVIEW_BRIEF_SCHEMA, responseValidator: publishableAssessment, hints: { itemCount: 1 } });
+  const response = await callText(`${assessmentPrompt({ rawResearch, bundle, canonicalJobUrl })}\n\n${INTERVIEW_EXACT_COPY_SUFFIX}`, { signal, task: 'interview-brief-assessment', responseSchema: INTERVIEW_BRIEF_SCHEMA, responseValidator: publishableAssessment });
   throwIfAborted(signal);
   return { brief: validateInterviewBriefAssessment(response, { rawResearch, bundle, snapshotId, canonicalJobUrl, bundleArtifactId }), rawResearch };
 }
 
 /** A separate, career-aware third handoff. Research keeps its no-candidate contract. */
 export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonicalJobUrl, bundleArtifactId, signal, userDataPath,
-  loadBundle = loadPrivateInterviewPreparationBundle, loadSnapshot = loadInterviewHelperCareerSnapshot, callText = callLLMText,
+  loadBundle = loadPrivateInterviewPreparationBundle, loadSnapshot = loadInterviewHelperCareerSnapshot, callText,
   onValidationRound } = {}) {
+  if (typeof callText !== 'function') throw new TypeError('Interview answer preparation needs the AI transport.');
   throwIfAborted(signal);
   if (!isPublishedInterviewBrief(brief) || brief.inputs.careerSnapshotId !== snapshotId
     || brief.inputs.jobUrlSha256 !== sha256(canonicalJobUrl) || brief.inputs.applicationArtifactId !== bundleArtifactId) throw new Error('Interview answer inputs changed.');
@@ -979,7 +980,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
   const basePrompt = interviewAnswerBankPrompt({ brief, bundle, evidence });
   const draft = await callText(basePrompt, {
     signal, task: 'interview-answer-bank', responseSchema: INTERVIEW_ANSWER_BANK_SCHEMA,
-    responseValidator: value => validateInterviewAnswerDraft(value, undefined, { requireExtensions: true }), hints: { itemCount: 16 },
+    responseValidator: value => validateInterviewAnswerDraft(value, undefined, { requireExtensions: true }),
   });
   throwIfAborted(signal);
   let cards = validateInterviewAnswerDraft(draft, undefined, { requireExtensions: true }).cards;
@@ -1113,7 +1114,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       const judge = value => validateInterviewAnswerEntailment(value, candidate);
       const review = await callText(interviewAnswerEntailmentPrompt(candidate), {
         signal, task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
-        responseValidator: judge, hints: { itemCount: pending.length * 5 },
+        responseValidator: judge,
       });
       throwIfAborted(signal);
       const verdicts = judge(review);
@@ -1145,7 +1146,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       const response = await callText(interviewAnswerRepairPrompt({ cards: targets, failures, evidence, brief, bundle,
         lockedCards: cards.filter(card => lockedIds.has(card.id)) }), {
         signal, task: 'interview-answer-bank', claudeStage: 'qa-fact-correction', responseSchema: interviewAnswerRepairSchema(targets),
-        responseValidator: value => validateInterviewAnswerDraft(value, targets, { requireExtensions: true }), hints: { itemCount: targets.length },
+        responseValidator: value => validateInterviewAnswerDraft(value, targets, { requireExtensions: true }),
       });
       throwIfAborted(signal);
       cards = mergeInterviewAnswerCardRepair(cards, response, targets);
@@ -1237,7 +1238,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       const judge = value => validateInterviewAnswerEntailment(value, candidate);
       const review = await callText(interviewAnswerEntailmentPrompt(candidate), {
         signal, task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
-        responseValidator: judge, hints: { itemCount: fallbackCards.length * 2 },
+        responseValidator: judge,
       });
       throwIfAborted(signal);
       const verdicts = judge(review);
@@ -1485,16 +1486,15 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   registerHandler('build-interview-brief', async (_event, args, signal) => {
     validateInterviewBriefRequestArgs(args);
     try {
-      // Claude CLI with the application stage profiles (careerWritingCore);
-      // `aiTransport: null` keeps the injected/legacy defaults (tests).
-      const ai = aiTransport ? { callText: aiTransport.callText, callRaw: aiTransport.callRaw } : {};
-      const result = await buildBrief({ ...args, ...ai, signal, userDataPath: appInstance.getPath('userData') });
+      // Claude CLI with the application stage profiles (careerWritingCore).
+      const { callText, callRaw } = aiTransport;
+      const result = await buildBrief({ ...args, callText, callRaw, signal, userDataPath: appInstance.getPath('userData') });
       throwIfAborted(signal);
       const published = await publishBrief({ brief: result?.brief, signal, userDataPath: appInstance.getPath('userData') });
       throwIfAborted(signal);
       if (!published || !isPublishedInterviewBrief(published.brief) || !ID_RE.test(published.briefRecordId)
         || interviewPreparedBriefRecordId(published.brief) !== published.briefRecordId) throw new Error('The interview brief could not be prepared safely.');
-      const answers = await buildAnswers({ ...args, ...(ai.callText ? { callText: ai.callText } : {}), brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
+      const answers = await buildAnswers({ ...args, callText, brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
       throwIfAborted(signal);
       const answerSummary = await publishAnswers({ bank: answers?.bank, brief: published.brief, signal, userDataPath: appInstance.getPath('userData') });
       throwIfAborted(signal);
@@ -1506,7 +1506,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       let disclosureMapping = [];
       try {
         const bankQuestions = (answers?.bank?.cards || []).map(card => card.question);
-        disclosureMapping = await mapDisclosures({ rawResearch: result?.rawResearch, signal, callText: ai.callText || (() => { throw new Error('Disclosure mapping needs the AI transport.'); }),
+        disclosureMapping = await mapDisclosures({ rawResearch: result?.rawResearch, signal, callText,
           foundationQuestions: INTERVIEW_FOUNDATION_QUESTIONS.map(item => item.question),
           companyQuestions: bankQuestions.filter(question => !isFoundationQuestion(question)) });
       } catch (error) {
@@ -1518,9 +1518,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       // Final gate shared with application generation: the same fact-check
       // contract and model profile. Flagged claims are removed, never rewritten.
       let checkedBank = answers?.bank;
-      if (ai.callText && checkedBank?.cards?.length) {
+      if (checkedBank?.cards?.length) {
         try {
-          const checked = await factCheckInterviewCards({ cards: checkedBank.cards, evidence: checkedBank.evidence, company: published.brief.role?.company || '', callText: ai.callText, signal });
+          const checked = await factCheckInterviewCards({ cards: checkedBank.cards, evidence: checkedBank.evidence, company: published.brief.role?.company || '', callText, signal });
           checkedBank = { ...checkedBank, cards: checked.cards };
         } catch (error) {
           if (signal?.aborted) throw error;
@@ -1534,9 +1534,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       throwIfAborted(signal);
       // Practice mode: an AI-planned interview order over every Foundation and
       // company question, each recorded once with an on-device voice.
-      if (ai.callText && qa) {
+      if (qa) {
         try {
-          await preparePractice({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, signal, callText: ai.callText,
+          await preparePractice({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, signal, callText,
             company: published.brief.role?.company || '', questions: [...qa.foundation.cards, ...qa.company.cards].map(card => card.question) });
         } catch (error) {
           if (signal?.aborted) throw error;

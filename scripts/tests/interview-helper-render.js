@@ -27,7 +27,7 @@ function snapshot(id = SNAPSHOT_A) {
 function sourceNodes(id = SNAPSHOT_A) {
   return [{
     id: 'job-source', type: 'jobhub', position: { x: 0, y: 0 },
-    data: { careerSnapshotId: id, activeTargetRole: 'Product Manager', searchLocation: { city: 'Toronto' } },
+    data: { careerSnapshotId: id, resolvedRoles: ['Product Manager'], searchLocation: { city: 'Toronto' } },
   }];
 }
 

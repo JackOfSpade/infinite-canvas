@@ -705,7 +705,7 @@ function statusCounts(rows) {
 
 // 3: ceilings count distinct requirements (overlapping gap rows merge) and
 //    only hard gaps (not documented / contradicted) reach the 69 ceilings.
-export const JOB_FIT_CALIBRATION_VERSION = 3;
+export const JOB_FIT_SCORE_RULES_VERSION = 3;
 
 /**
  * Aggregate how often the deterministic ceilings above actually moved a score,
@@ -941,7 +941,7 @@ export function recalibrateAuditedFitAssessment(audit) {
   });
   return {
     ...audit,
-    calibrationVersion: JOB_FIT_CALIBRATION_VERSION,
+    calibrationVersion: JOB_FIT_SCORE_RULES_VERSION,
     adjustedScore,
     adjustments,
     mergedGapClusters,
@@ -1019,7 +1019,7 @@ export function validateAndNormalizeFitAssessment(raw, {
   });
   return {
     schemaVersion: 1,
-    calibrationVersion: JOB_FIT_CALIBRATION_VERSION,
+    calibrationVersion: JOB_FIT_SCORE_RULES_VERSION,
     scoreInterpretation: 'hiring-fit-not-probability',
     auditStatus: legacy ? 'legacy-unverified' : 'audited',
     rawScore,

@@ -1,4 +1,4 @@
-import { legacyJobScoringMaxTokens } from '../../electron/ipc/resultCaps.js';
+import { BATCH_OUTPUT_TOKEN_BUDGET, JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS, JOB_PREFERENCE_RESEARCH_MAX_ITEMS, MAX_LISTING_BATCH, legacyJobScoringMaxTokens } from '../../electron/ipc/resultCaps.js';
 // AI task/model sizing — NOT provider routing. Every AI call in the app now
 // goes through the single human copy/paste handoff (electron/ipc/nonApiAi.js,
 // NON_API_AI_TRANSPORT === 'non-api-ai'); there is no Gemini/Claude API call,
@@ -24,26 +24,20 @@ import { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA
 
 export default [
   {
-    name: 'llm: official posting research sizes by rows and shortlist and comparison size by bounded options',
+    name: 'llm: official posting research sizes by rows and judgment size by bounded options',
     run() {
       const known = getKnownTaskIds();
-      for (const task of ['job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match']) {
+      for (const task of ['job-official-posting-research', 'job-official-posting-match']) {
         assert(known.has(task), `${task} must never fall through to the default task`);
         for (const size of [0, 1, 3, 8, 12, 1000]) {
           const cap = taskMaxTokensFor(task, task === 'job-official-posting-research' ? { itemCount: size } : { optionCount: size });
-          assert(Number.isFinite(cap) && cap > 0 && cap <= 15360, `${task} has a bounded output cap`);
+          assert(Number.isFinite(cap) && cap > 0 && cap <= BATCH_OUTPUT_TOKEN_BUDGET, `${task} has a bounded output cap`);
         }
       }
       assert(taskMaxTokensFor('job-official-posting-research', { itemCount: 1 }) === 1724);
       assert(taskMaxTokensFor('job-official-posting-research', { itemCount: 12 }) === 9424);
-      assert(taskMaxTokensFor('job-official-posting-shortlist', { optionCount: 1 }) === 1040);
-      assert(taskMaxTokensFor('job-official-posting-shortlist', { optionCount: 64 }) === 2048);
-      assert(taskMaxTokensFor('job-official-posting-shortlist', { optionCount: 1000 }) === 2048);
-      assert(taskMaxTokensFor('job-official-posting-shortlist', { optionCount: -1 }) === 1040);
-      assert(taskMaxTokensFor('job-official-posting-shortlist', { optionCount: 1, itemCount: 64 }) === 1040,
-        'the shortlist output stays compact and depends only on its bounded candidate count');
       const matchCaps = Array.from({ length: 8 }, (_, index) => taskMaxTokensFor('job-official-posting-match', { optionCount: index + 1 }));
-      assert(matchCaps.every(cap => cap === 15360), 'every judgment has the full usable answer for a verbatim official description');
+      assert(matchCaps.every(cap => cap === BATCH_OUTPUT_TOKEN_BUDGET), 'every judgment has the full usable answer for a verbatim official description');
       assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 0 }) === matchCaps[0]);
       assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 1000 }) === matchCaps[7], 'an invalid option count cannot grow the output budget past eight options');
       assert(taskMaxTokensFor('job-official-posting-match', { optionCount: 1, itemCount: 12 }) === matchCaps[0], 'the single-row comparison budget depends on options, not research batch size');
@@ -53,22 +47,15 @@ export default [
     name: 'llm: compensation and scoring token-budget floors accommodate larger cohorts',
     run: () => {
       assert(taskMaxTokensFor('job-scoring', { itemCount: 4 }) === 12800
-        && taskMaxTokensFor('job-scoring', { itemCount: 23 }) === 15360
-        && taskMaxTokensFor('job-scoring', { itemCount: 15 }) === 15360
+        && taskMaxTokensFor('job-scoring', { itemCount: 23 }) === 1600 + 23 * 2800
+        && taskMaxTokensFor('job-scoring', { itemCount: jobScoringBatchSize() + 1 }) === BATCH_OUTPUT_TOKEN_BUDGET
         && legacyJobScoringMaxTokens(15) === 10600,
         'fresh whole-record scoring budgets the complete audit while the explicit legacy formula stays byte-stable');
-      assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) === 12288,
-        'per-cohort compensation assessment has the larger 12,288-token ceiling');
-      assert(taskMaxTokensFor('job-compensation-assessment', { itemCount: 15 }) === 11048,
-        'a 15-job consolidated cohort no longer flattens at the former 8,192-token ceiling');
-      // The profile grows with the corpus the multi-file career drop merges, so
-      // its cap must too. The old flat 4096 truncated a large corpus mid-JSON,
-      // and the copy/paste transport has no cap-raise retry to recover it.
-      assert(taskMaxTokensFor('resume-parse', {}) === 4096
-        && taskMaxTokensFor('resume-parse', { promptLength: 6000 }) === 4608
-        && taskMaxTokensFor('resume-parse', { promptLength: 60000 }) === 11776
-        && taskMaxTokensFor('resume-parse', { promptLength: 5_000_000 }) === 12288,
-        'resume-parse scales its cap with the merged career corpus and stops at a bounded ceiling');
+      const largeCohortCap = taskMaxTokensFor('job-compensation-assessment-batch', { cohortCount: 1, itemCount: 100 });
+      assert(Number.isInteger(largeCohortCap) && largeCohortCap > 0
+        && !getKnownTaskIds().has('job-compensation-assessment')
+        && !getKnownTaskIds().has('job-compensation-research'),
+        'compensation assessment has a positive row-aware batch ceiling and no one-item task ids remain registered');
       const careerCompilerTasks = [
         'career-profile-compile', 'career-profile-audit-completeness',
         'career-profile-audit-grounding', 'career-profile-audit-attribution',
@@ -79,7 +66,7 @@ export default [
         && Number.isInteger(taskMaxTokensFor(task, { promptLength: 80_000, itemCount: 100 }))
         && taskMaxTokensFor(task, { promptLength: 80_000, itemCount: 100 }) > 0),
       'every career compiler, independent audit, and repair handoff is registered with a positive bounded output budget');
-      return { scoringCap: taskMaxTokensFor('job-scoring', { itemCount: 100 }), compensationCap: taskMaxTokensFor('job-compensation-assessment', { itemCount: 100 }) };
+      return { scoringCap: taskMaxTokensFor('job-scoring', { itemCount: 100 }), compensationCap: largeCohortCap };
     },
   },
 {
@@ -245,7 +232,8 @@ export default [
         && fallback.roleByIndex[24] === 'Classified',
       'only the unmapped residual is classified in a bounded 1-based chunk and written back to its original index');
 
-      const sequentialJobs = Array.from({ length: 1000 }, (_, index) => ({
+      // Three chunks: two full ones plus a residual of under one chunk.
+      const sequentialJobs = Array.from({ length: JOB_TAXONOMY_CHUNK_SIZE * 2 + 1000 }, (_, index) => ({
         title: `Sequential Role ${index}`,
         careerDirection: `Sequential Direction ${index}`,
         salary: '$100k/yr',
@@ -280,16 +268,16 @@ export default [
         && sequentialHints.every((hint, index) => hint.itemsTotal === sequentialJobs.length
           && hint.itemsDone === sequentialPlanned
           && hint.progressUnits === sequentialResidualSizes[index]
-          && hint.progressUnitId === `fresh:${index + 1}`
+          && hint.progressUnitId === `classify:${index + 1}`
           && typeof hint.progressScopeId === 'string' && hint.progressScopeId.length > 0)
         && new Set(sequentialHints.map(hint => hint.progressScopeId)).size === 1,
-      'v2 taxonomy fills the 15,360-token ceiling with 448 compact rows per handoff, dispatches independent chunks together with stable identities, and reports only accepted scoped progress');
+      'v2 taxonomy fills the usable output budget with JOB_TAXONOMY_CHUNK_SIZE compact rows per handoff, dispatches independent chunks together with stable identities, and reports only accepted scoped progress');
 
       // Classification is automatic work: one slow batch must not strand the
       // other nine worker slots. Keep every prompt deferred so this verifies
       // the cap, immediate refill, and durable batch identity without a fast
       // successor cascading through the rest of the test data.
-      const rollingJobs = Array.from({ length: 5_000 }, (_, index) => ({
+      const rollingJobs = Array.from({ length: JOB_TAXONOMY_CHUNK_SIZE * 11 + 100 }, (_, index) => ({
         title: `Rolling Roster Role ${index}`,
         careerDirection: `Rolling Roster Direction ${index}`,
         salary: '$100k/yr',
@@ -347,116 +335,6 @@ export default [
       assert(rolling.roleByIndex.length === rollingJobs.length
         && rolling.roleByIndex.every(Boolean),
       'rolling taxonomy completion preserves the original output shape and every classified assignment');
-
-      // Restored v1 and fresh v2 chunks retain their independent durable task
-      // identities, but they share the same work-conserving automatic roster.
-      let hybridWaveProbeCount = 0;
-      const hybridRollingCalls = [];
-      let hybridActive = 0;
-      let hybridPeak = 0;
-      let notifyInitialHybridRoster;
-      const initialHybridRoster = new Promise(resolve => { notifyInitialHybridRoster = resolve; });
-      const hybridWaveRun = runBoundedJobTaxonomy(rollingJobs, {
-        legacyClassifierStepProbe: async () => (++hybridWaveProbeCount === 1),
-        callText: async (_prompt, options) => {
-          if (options.task === 'job-taxonomy-plan') return rollingPlan;
-          const { itemCount } = options.hints;
-          const result = { roleByIndex: Array.from({ length: itemCount }, () => 1) };
-          return new Promise(resolve => {
-            hybridActive += 1;
-            hybridPeak = Math.max(hybridPeak, hybridActive);
-            const call = {
-              task: options.task,
-              hints: options.hints,
-              released: false,
-              release() {
-                if (call.released) return;
-                call.released = true;
-                hybridActive -= 1;
-                resolve(result);
-              },
-            };
-            hybridRollingCalls.push(call);
-            if (hybridRollingCalls.length === 10) notifyInitialHybridRoster();
-          });
-        },
-      });
-      await initialHybridRoster;
-      assert(hybridRollingCalls.length === 10
-        && hybridRollingCalls[0].task === 'job-taxonomy-classify'
-        && hybridRollingCalls.slice(1).every(call => call.task === 'job-taxonomy-classify-batch')
-        && hybridActive === 10 && hybridPeak === 10,
-      `one restored taxonomy classifier plus nine fresh chunks must fill the first automatic roster, got ${JSON.stringify(hybridRollingCalls.map(call => call.task))}`);
-      hybridRollingCalls[0].release();
-      for (let attempt = 0; attempt < 100 && hybridRollingCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      assert(hybridRollingCalls.length === 11
-        && hybridRollingCalls[10].task === 'job-taxonomy-classify-batch'
-        && hybridRollingCalls.slice(1, 10).every(call => !call.released)
-        && hybridActive === 10 && hybridPeak === 10,
-      'a settled restored classifier must immediately refill its slot with fresh work without changing its legacy identity');
-      for (let attempt = 0; attempt < 100 && hybridActive > 0; attempt += 1) {
-        hybridRollingCalls.filter(call => !call.released).forEach(call => call.release());
-        await new Promise(resolve => setImmediate(resolve));
-      }
-      const hybridRolling = await hybridWaveRun;
-      assert(hybridRolling.roleByIndex.length === rollingJobs.length
-        && hybridRolling.roleByIndex.every(Boolean),
-      'mixed restored/fresh rolling taxonomy preserves every classified assignment');
-
-      const legacyJobs = sequentialJobs.slice(0, 50);
-      const legacyPlan = {
-        ...diversePlan,
-        directionRoleIndexes: buildJobTaxonomyPlanSummary(legacyJobs).commonSuggestedDirections
-          .map(({ direction }) => ({ direction, roleIndex: 0 })),
-      };
-      const legacyHints = [];
-      let activeLegacyClassifiers = 0;
-      let peakLegacyClassifiers = 0;
-      await runBoundedJobTaxonomy(legacyJobs, {
-        useLegacyClassifierBatches: true,
-        callText: async (_prompt, options) => {
-          if (options.task === 'job-taxonomy-plan') return legacyPlan;
-          legacyHints.push({ task: options.task, ...options.hints });
-          activeLegacyClassifiers += 1;
-          peakLegacyClassifiers = Math.max(peakLegacyClassifiers, activeLegacyClassifiers);
-          await new Promise(resolve => setTimeout(resolve, 1));
-          activeLegacyClassifiers -= 1;
-          return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 1) };
-        },
-      });
-      assert(peakLegacyClassifiers === 2
-        && JSON.stringify(legacyHints.map(hint => [hint.task, hint.batch, hint.batchTotal, hint.itemCount]))
-          === JSON.stringify([['job-taxonomy-classify', 1, 2, 24], ['job-taxonomy-classify', 2, 2, 2]]),
-      'a durable legacy taxonomy run retains its exact 24-row task contract while independent prompts share one bounded automatic roster');
-
-      const hybridProbes = [];
-      const hybridCalls = [];
-      const hybrid = await runBoundedJobTaxonomy(sequentialJobs, {
-        legacyClassifierStepProbe: async ({ prompt, task, responseSchema, hints }) => {
-          hybridProbes.push({ prompt, task, responseSchema, hints });
-          return hybridProbes.length === 1;
-        },
-        callText: async (_prompt, options) => {
-          if (options.task === 'job-taxonomy-plan') return sequentialPlan;
-          hybridCalls.push({ task: options.task, hints: options.hints });
-          return { roleByIndex: Array.from({ length: options.hints.itemCount }, () => 1) };
-        },
-      });
-      const hybridFreshSizes = [];
-      for (let remaining = sequentialJobs.length - sequentialPlanned - 24; remaining > 0; remaining -= JOB_TAXONOMY_CHUNK_SIZE) {
-        hybridFreshSizes.push(Math.min(JOB_TAXONOMY_CHUNK_SIZE, remaining));
-      }
-      assert(hybridProbes.length === Math.ceil((sequentialJobs.length - sequentialPlanned) / 24)
-        && hybridProbes.every((probe, index) => probe.task === 'job-taxonomy-classify'
-          && probe.hints.batch === index + 1
-          && probe.hints.batchTotal === hybridProbes.length),
-      'the resume probe must reconstruct every original 24-row v1 identity, never broadly inspect task history');
-      assert(JSON.stringify(hybridCalls.map(call => [call.task, call.hints.batch, call.hints.batchTotal, call.hints.itemCount])) === JSON.stringify([
-        ['job-taxonomy-classify', 1, hybridProbes.length, 24],
-        ...hybridFreshSizes.map((itemCount, index) => ['job-taxonomy-classify-batch', index + 1, hybridFreshSizes.length, itemCount]),
-      ]), 'only the exact durable classifier prompt may replay; all unissued rows must move to deterministic 448-row v2 chunks');
-      assert(hybrid.roleByIndex.length === sequentialJobs.length && hybrid.roleByIndex.every(Boolean),
-        'hybrid taxonomy migration must assign each original job exactly once without any unclassified gap');
 
       const shortCalls = [];
       let failed = false;
@@ -578,8 +456,10 @@ export default [
         && jobPreferenceResearchAssessmentMaxTokens(6) === 4608
         && jobPreferenceResearchMaxTokens(12) === 15360
         && jobPreferenceResearchAssessmentMaxTokens(12) === 7680
-        && jobPreferenceResearchAssessmentMaxTokens(27) === 15360,
-      'batched research keeps the legacy singleton floors and fills the usable output budget at twelve employers');
+        && jobPreferenceResearchAssessmentMaxTokens(27) === 15360
+        && jobPreferenceResearchMaxTokens(JOB_PREFERENCE_RESEARCH_MAX_ITEMS + 1) === BATCH_OUTPUT_TOKEN_BUDGET
+        && jobPreferenceResearchAssessmentMaxTokens(JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS + 1) === BATCH_OUTPUT_TOKEN_BUDGET,
+      'batched research keeps the legacy singleton floors and per-employer growth, and clamps at the usable output budget past the exported maximum item counts');
       const packedCaps = [
         taskMaxTokensFor('price-synthesis-batch', { itemCount: 4, totalCompCount: 53 }),
         taskMaxTokensFor('marketplace-hub-scan-batch', { platformCount: 4, urlCount: 8 }),
@@ -589,20 +469,23 @@ export default [
         taskMaxTokensFor('job-compensation-research-batch', { cohortCount: 4, itemCount: 4 }),
         taskMaxTokensFor('job-compensation-assessment-batch', { cohortCount: 4, itemCount: 12 }),
       ];
-      assert(packedCaps.every(cap => Number.isFinite(cap) && cap > 0 && cap <= 15360)
+      assert(packedCaps.every(cap => Number.isFinite(cap) && cap > 0 && cap <= BATCH_OUTPUT_TOKEN_BUDGET)
         && packedCaps[0] === 15224
         && packedCaps[1] === 15360,
-      `packed manual handoffs must stay at or below the 15,360-token usable ceiling, got ${packedCaps.join(', ')}`);
-      assert(priceSynthesisBatchEstimatedTokens(1, 67) === 15324
-        && priceSynthesisBatchFits(1, 67)
-        && !priceSynthesisBatchFits(1, 68)
-        && priceSynthesisBatchMaxComps(1) === 67
-        && priceSynthesisBatchMaxTokens(1, 68) === 15360
-        && marketplaceHubScanMaxPagesForPlatform() === 26
-        && marketplaceHubScanBatchEstimatedTokens(1, 26) === 15360
-        && marketplaceHubScanBatchFits(1, 26)
-        && !marketplaceHubScanBatchFits(1, 27),
-      'packers compare unclamped estimates at the exact price-comp and hub-page boundaries while prompt caps clamp to 15,360');
+      `packed manual handoffs must stay at or below the ${BATCH_OUTPUT_TOKEN_BUDGET}-token usable budget, got ${packedCaps.join(', ')}`);
+      const maxComps = priceSynthesisBatchMaxComps(1);
+      const maxPages = marketplaceHubScanMaxPagesForPlatform();
+      // Derived from the price envelope (1,024 base + 900 per item + 200 per comp).
+      assert(maxComps === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 1024 - 900) / 200)
+        && priceSynthesisBatchEstimatedTokens(1, maxComps) <= BATCH_OUTPUT_TOKEN_BUDGET
+        && priceSynthesisBatchFits(1, maxComps)
+        && !priceSynthesisBatchFits(1, maxComps + 1)
+        && priceSynthesisBatchEstimatedTokens(1, maxComps + 1) > BATCH_OUTPUT_TOKEN_BUDGET
+        && priceSynthesisBatchMaxTokens(1, maxComps + 1) === BATCH_OUTPUT_TOKEN_BUDGET
+        && marketplaceHubScanBatchEstimatedTokens(1, maxPages) <= BATCH_OUTPUT_TOKEN_BUDGET
+        && marketplaceHubScanBatchFits(1, maxPages)
+        && !marketplaceHubScanBatchFits(1, maxPages + 1),
+      'packers compare unclamped estimates at the exact price-comp and hub-page boundaries while prompt caps clamp to the usable output budget');
       return { itemCounts };
     },
   },
@@ -623,11 +506,6 @@ export default [
         'the two-item baseline gets the 2048 floor');
       assert(taskMaxTokensFor('bundle-price-synthesis', { itemCount: 20 }) === 8192,
         'a large bundle clamps at the 8192 hard cap');
-      // marketplace-hub-scan: 1536 + 512/url beyond the first, capped at 4096.
-      assert(taskMaxTokensFor('marketplace-hub-scan', { urlCount: 1 }) === 1536,
-        'a single watched URL gets the 1536 floor');
-      assert(taskMaxTokensFor('marketplace-hub-scan', { urlCount: 10 }) === 4096,
-        'a busy multi-URL hub scan clamps at the 4096 hard cap');
       // An unmapped/unknown task id falls back to the same cap as 'default',
       // and any hints it was passed are ignored (the default entry is a flat number).
       assert(taskMaxTokensFor('not-a-real-task') === taskMaxTokensFor('default')
@@ -671,7 +549,7 @@ export default [
         const batch = listingEvaluationBatchSize(planItems);
         assert(Number.isInteger(batch) && batch >= 1,
           `batch size must be a positive integer for a ${planItems}-item plan, got ${batch}`);
-        assert(batch <= 25, `batch size must stay reviewable for a ${planItems}-item plan, got ${batch}`);
+        assert(batch <= MAX_LISTING_BATCH, `batch size must stay reviewable for a ${planItems}-item plan, got ${batch}`);
         // Declare on BOTH axes, exactly as the batch was derived: matches bind
         // a large plan, the per-listing floor binds a small one. Declaring on
         // matches alone under-states a small-plan batch, which is precisely the
@@ -690,7 +568,7 @@ export default [
       // the caller) nor an unbounded one.
       for (const bad of [0, -5, NaN, undefined, null, 'x']) {
         const batch = listingEvaluationBatchSize(bad);
-        assert(Number.isInteger(batch) && batch >= 1 && batch <= 25,
+        assert(Number.isInteger(batch) && batch >= 1 && batch <= MAX_LISTING_BATCH,
           `degenerate plan size ${String(bad)} must still yield a sane batch, got ${batch}`);
       }
       // A bigger plan must never buy a bigger batch.
@@ -704,22 +582,22 @@ export default [
       // listings per handoff and all 20 of its responses were accepted without
       // truncation. A change that moves this number is a change to how many
       // times the user is interrupted AND to the truncation risk, so pin it.
-      assert(listingEvaluationBatchSize(8) === 10,
-        `a typical 8-item plan must still afford the measured-safe 10 listings, got ${listingEvaluationBatchSize(8)}`);
+      assert(listingEvaluationBatchSize(8) === MAX_LISTING_BATCH,
+        `a typical 8-item plan must afford the full ${MAX_LISTING_BATCH}-listing batch, got ${listingEvaluationBatchSize(8)}`);
       // THE REGRESSION THIS PINS: a 32-item preference plan (the size actually
       // measured, from a real canvas) once collapsed to 3 listings per handoff
       // because the per-match constant was derived from schema worst-case field
       // lengths instead of measured output. That turned a 2070-listing run into
       // 690 copy/paste prompts instead of 207 — a 3.3x increase in human work,
       // produced by a constant nobody could see was wrong.
-      assert(listingEvaluationBatchSize(32) === 10,
-        `the measured 32-item plan must afford 10 listings per handoff, got ${listingEvaluationBatchSize(32)}`);
-      assert(Math.ceil(2070 / listingEvaluationBatchSize(32)) === 207,
-        'a 2070-listing pool at the measured plan size must cost 207 handoffs, not 690');
+      assert(listingEvaluationBatchSize(32) === MAX_LISTING_BATCH,
+        `the measured 32-item plan must afford ${MAX_LISTING_BATCH} listings per handoff, got ${listingEvaluationBatchSize(32)}`);
+      assert(Math.ceil(2070 / listingEvaluationBatchSize(32)) === Math.ceil(2070 / MAX_LISTING_BATCH),
+        'a 2070-listing pool at the measured plan size must cost one handoff per full batch, not 690');
       // The per-match term must stay at or below the floor crossover for the one
       // plan size with real data behind it, or the floor stops governing and the
       // batch silently drops below the 10 that has a 20/20 no-truncation record.
-      assert(listingEvaluationMaxTokens(10 * 32, 10) <= CEILING,
+      assert(listingEvaluationMaxTokens(MAX_LISTING_BATCH * 32, MAX_LISTING_BATCH) <= CEILING,
         'the measured-safe batch must not declare more output than the model can emit');
       return { ceiling: CEILING, atEightItemPlan: listingEvaluationBatchSize(8) };
     },
@@ -733,12 +611,14 @@ export default [
       // cap is fixed, so the function is zero-arg now.
       assert(jobScoringBatchSize.length === 0, 'jobScoringBatchSize takes no argument (no per-model sizing survives)');
       const size = jobScoringBatchSize();
-      assert(size === 4
-        && jobScoringEstimatedTokens(size) === 12800
+      // Derived from the whole-record envelope (1,600 base + 2,800 per job).
+      const expectedSize = Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 1600) / 2800);
+      assert(size === expectedSize
+        && jobScoringEstimatedTokens(size) === 1600 + size * 2800
         && jobScoringBatchFits(size)
         && !jobScoringBatchFits(size + 1)
-        && jobScoringMaxTokens(size) === 12800,
-        `jobScoringBatchSize packs the maximum 4 whole-record jobs below 15,360 output tokens (got ${size})`);
+        && jobScoringMaxTokens(size) === jobScoringEstimatedTokens(size),
+        `jobScoringBatchSize packs the maximum ${expectedSize} whole-record jobs within ${BATCH_OUTPUT_TOKEN_BUDGET} output tokens (got ${size})`);
       assert(jobScoringBatchSize() === size, 'the result is stable across repeated calls (no hidden state/model drift)');
       return { batchSize: size };
     },

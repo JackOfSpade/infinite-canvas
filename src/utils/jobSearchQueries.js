@@ -1,7 +1,8 @@
-// Exploratory bundles (target role blank) come from the query-generation model.
-// Keep every distinct query it produced; the one safe omission is a normalized
-// duplicate already present in the same bundle. A set target role instead uses
-// buildExactTargetRoleQueryBundle and never enters model variation generation.
+// Exploratory bundles (no brief-resolved titles) come from the query-generation
+// model. Keep every distinct query it produced; the one safe omission is a
+// normalized duplicate already present in the same bundle. Brief-resolved
+// titles instead use buildPinnedTitleQueryBundle and never enter model
+// variation generation.
 const QUERY_GROUP_KEYS = [
   'targetRoleQueries',
   'titleQueries',
@@ -9,24 +10,11 @@ const QUERY_GROUP_KEYS = [
   'skillsOnlyQueries',
 ];
 
-/** A target-role run has exactly one scrape query and no generated variations. */
-export function buildExactTargetRoleQueryBundle(targetRole) {
-  const role = normalizeJobSearchQuery(targetRole);
-  return {
-    targetRoleQueries: role ? [role] : [],
-    titleQueries: [],
-    suggestedRoleQueries: [],
-    skillsOnlyQueries: [],
-  };
-}
-
 /**
  * A Job Preferences plan that produced `titles` (always worked out by the AI
  * from the brief + career profile, with any title the user wrote in the brief
  * preserved verbatim inside that list — see jobPreferences.js) searches those
- * titles verbatim, the same
- * "one query per role, no model variation" shape as
- * buildExactTargetRoleQueryBundle, just for N roles instead of one. Building
+ * titles verbatim: "one query per role, no model variation". Building
  * this bundle locally — instead of a second generateJobQueries model call —
  * is the whole point: every AI call in this app is a human copy/paste
  * handoff, so a plan that already named its roles must not pay for another

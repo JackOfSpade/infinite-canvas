@@ -176,16 +176,16 @@ export default [
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, runStage: async args => { runs.push(args); return { text: replies.shift(), model: 'claude-opus-5-5' }; } });
     const value = await transport.callText('PROMPT', { task: 'interview-answer-bank', responseSchema: { type: 'object' }, responseValidator: v => { if (!v.ok) throw new Error('not ok'); } });
     assert.deepEqual(value, { ok: true });
-    assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['opus', 'xhigh', false, ''], ['opus', 'xhigh', true, ''], ['opus', 'xhigh', true, '']]);
+    assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['opus', 'medium', false, ''], ['opus', 'medium', true, ''], ['opus', 'medium', true, '']]);
     assert.equal(new Set(runs.map(run => run.sessionId)).size, 1, 'retries stay in one Claude session');
     assert.match(runs[0].text, /REPLY FORMAT: one JSON object/u);
     assert.match(runs[2].text, /^YOUR PREVIOUS REPLY WAS REJECTED BY THE APP\..*\nnot ok$/su);
     runs.length = 0; replies = ['Research prose with https://x.test'];
     assert.equal(await transport.callRaw('R', { task: 'interview-brief-research' }), 'Research prose with https://x.test');
-    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'high', INTERVIEW_RESEARCH_TOOLS]);
+    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'xhigh', INTERVIEW_RESEARCH_TOOLS]);
     runs.length = 0; replies = ['{}'];
     await transport.callText('C', { task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: { type: 'object' } });
-    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['sonnet', 'high', '']);
+    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'high', '']);
     replies = ['bad', 'bad', 'bad'];
     await assert.rejects(transport.callText('X', { task: 'interview-answer-bank', responseSchema: { type: 'object' } }), error => /no JSON object/.test(error.message) && error.code === 'VALIDATION_FAILED');
   } },

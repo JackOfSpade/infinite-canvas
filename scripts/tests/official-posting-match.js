@@ -6,9 +6,8 @@ import {
 import {
   coreTitle, descriptionOverlap, evaluateOfficialPostingMatch, frozenOfficialEmployer,
   locationsCompatible, posterEmployerSignals, resolveScrapedEmployer,
-  selectOfficialPostingMatch, buildOfficialPostingComparisonSet, officialPostingScrapedContradictsChoice,
+  selectOfficialPostingMatch, buildOfficialPostingComparisonSet,
 } from '../../electron/ipc/officialPostingMatch.js';
-import { validateOfficialPostingMatchResponse } from '../../electron/ipc/officialPostingBridge.js';
 
 const EMPLOYER = 'Northwind Labs';
 const DESCRIPTION = 'Design reliable ledger reconciliation services for regional dispatch teams. '
@@ -217,28 +216,6 @@ export default [
     },
   },
   {
-    name: 'Official posting comparative evidence requires three verbatim long pairs across distinct parts',
-    run() {
-      const quotes = DESCRIPTION.split(/(?<=\.)\s+/u).filter(Boolean);
-      const answer = { choice: 'P1', evidence: [quotes[0], quotes[2], quotes[4]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), distinguishing: [], conflicts: [] };
-      const job = row({ salaryProvenance: 'unknown' });
-      const { options } = buildOfficialPostingComparisonSet(job, [candidate({ salary: { text: '', provenance: 'unknown' } })], { now: NOW });
-      const context = { job, options };
-      assert.deepEqual(validateOfficialPostingMatchResponse(answer, context), answer);
-      for (const invalid of [{ ...answer, evidence: answer.evidence.slice(0, 2) },
-        { ...answer, evidence: answer.evidence.map(pair => ({ ...pair, officialQuote: 'Invented wording that never occurs in the fetched official description text.' })) },
-        { ...answer, conflicts: ['different team'] }, { ...answer, evidence: [answer.evidence[0], answer.evidence[0], answer.evidence[0]] }]) {
-        assert.throws(() => validateOfficialPostingMatchResponse(invalid, context));
-      }
-      const filler = 'A distinct application-specific narrative describes entirely separate day to day work and planning priorities. ';
-      const officialText = `${quotes[0]} ${filler.repeat(2)} ${quotes[2]} ${filler.repeat(2)} ${quotes[4]}`;
-      const noAnchor = candidate({ salary: { text: '', provenance: 'unknown' }, description: officialText });
-      assert.equal(evaluate(job, noAnchor).reason, 'no-anchor', 'the evaluator itself has no pairwise acceptance path');
-      const { options: compared } = buildOfficialPostingComparisonSet(job, [noAnchor], { now: NOW });
-      assert.deepEqual(validateOfficialPostingMatchResponse(answer, { job, options: compared }), answer);
-    },
-  },
-  {
     name: 'Official posting matching: unique decisions preserve ambiguity and refuse unanchored evergreen postings',
     run() {
       assert.equal(selectOfficialPostingMatch(row(), [candidate()], { now: NOW }).outcome, 'found');
@@ -395,69 +372,6 @@ export default [
       const sameFour = buildOfficialPostingComparisonSet(job, [candidate({ identifier: 'ABCD' }), candidate({ identifier: 'ABCD', sourceUrl: 'https://careers.northwind.test/jobs/four', ats: '', tenant: '', employerDomainProven: true })], { now: NOW });
       assert.equal(sameFour.preCapCount, 1);
       for (const identifier of ['X', 'ABC']) assert.equal(buildOfficialPostingComparisonSet(job, [candidate({ identifier }), candidate({ identifier, sourceUrl: 'https://jobs.ashbyhq.com/northwind/other' })], { now: NOW }).preCapCount, 2);
-    },
-  },
-  {
-    name: 'Amendment 9 contradiction windows compare word tokens without punctuation or presentation markers',
-    run() {
-      const chosen = { id: 'P1', candidate: candidate({ identifier: 'chosen-request' }), description: DESCRIPTION };
-      const variants = [
-        DESCRIPTION.replace('contracts and improve', 'contracts, and improve'),
-        DESCRIPTION.split('. ').join('.\n• '),
-        DESCRIPTION.replace('reliable ledger reconciliation services', '“reliable ledger reconciliation services”'),
-        DESCRIPTION.replace('contracts and improve', 'contracts — and improve'),
-      ];
-      for (const description of variants) {
-        const other = { candidate: candidate({ identifier: 'other-request' }), description };
-        assert.equal(officialPostingScrapedContradictsChoice(row({ snippet: description }), chosen, [chosen],
-          { contradictionOnly: [other] }), false, description);
-      }
-      const exclusive = 'Engineers rotate through a shared on call schedule and publish a written summary after every incident review.';
-      const other = { candidate: candidate({ identifier: 'other-request' }), description: `${DESCRIPTION} ${exclusive}` };
-      assert.equal(officialPostingScrapedContradictsChoice(row({ snippet: `${DESCRIPTION} ${exclusive.toUpperCase()}` }),
-        chosen, [chosen], { contradictionOnly: [other] }), true, 'a ten-word role passage still contradicts across case changes');
-    },
-  },
-  {
-    name: 'Amendment 9 nested hidden copies share one requisition while different requisitions still contradict',
-    run() {
-      const extra = 'Join a rotating on call schedule and publish a written summary after every incident review. '
-        + 'Coordinate quarterly capacity planning sessions with partner teams across several regions.';
-      const full = `${DESCRIPTION} ${extra}`;
-      const job = row({ snippet: full, salaryProvenance: 'unknown' });
-      for (const [selected, hidden] of [[DESCRIPTION, full], [full, DESCRIPTION]]) {
-        const chosen = { id: 'P1', candidate: candidate({ identifier: 'request-shared' }), description: selected };
-        const other = { candidate: candidate({ identifier: 'request-shared', sourceUrl: 'https://careers.northwind.test/jobs/request-shared' }), description: hidden };
-        assert.equal(officialPostingScrapedContradictsChoice(job, chosen, [chosen], { contradictionOnly: [other] }), false,
-          'containment in either direction identifies fuller or shorter copies');
-        if (selected === DESCRIPTION) {
-          const sibling = { ...other, candidate: { ...other.candidate, identifier: 'other-request', sourceUrl: 'https://careers.northwind.test/jobs/other-request' } };
-          assert.equal(officialPostingScrapedContradictsChoice(job, chosen, [chosen], { contradictionOnly: [sibling] }), true,
-            'nested text alone never exempts another requisition');
-          assert.equal(officialPostingScrapedContradictsChoice(job, chosen, [chosen, { ...other, id: 'P2' }]), true,
-            'the narrow exception applies only to contradiction-only copies');
-        }
-      }
-    },
-  },
-  {
-    name: 'Amendment 9 tenant-proven truncated copy validates against a fuller hidden copy of the same requisition',
-    run() {
-      const lines = DESCRIPTION.split(/(?<=\.)\s+/u);
-      const full = `${DESCRIPTION} Join a rotating on call schedule and publish a written summary after every incident review. `
-        + 'Coordinate quarterly capacity planning sessions with partner teams across several regions.';
-      const noise = ['Recruiters add that the group enjoys flexible schedules and frequent offsite gatherings throughout the year.',
-        'Occasional travel to regional offices may be needed during the first quarter of employment.',
-        'Our culture values curiosity and steady collaboration between engineering and partner teams.'];
-      const job = row({ snippet: [noise[0], ...lines.slice(0, 3), noise[1], ...lines.slice(3), noise[2], full.slice(DESCRIPTION.length)].join(' '), salaryProvenance: 'unknown', salary: '' });
-      const ats = candidate({ identifier: 'req-5501', sourceUrl: 'https://jobs.ashbyhq.com/northwind/req-5501', salary: { text: '', provenance: 'unknown' } });
-      const embed = candidate({ identifier: 'req-5501', sourceUrl: 'https://careers.northwind.test/jobs/req-5501', description: full,
-        ats: '', tenant: '', tenantProven: false, employerDomainProven: true, salary: { text: '', provenance: 'unknown' } });
-      const set = buildOfficialPostingComparisonSet(job, [ats, embed], { now: NOW });
-      assert.equal(set.options[0].candidate, ats);
-      assert.equal(set.contradictionOnly[0].candidate, embed);
-      const value = { choice: set.options[0].id, conflicts: [], evidence: [lines[0], lines[3], lines[5]].map(quote => ({ scrapedQuote: quote, officialQuote: quote })), distinguishing: [] };
-      assert.deepEqual(validateOfficialPostingMatchResponse(value, { job, ...set }), value);
     },
   },
   {

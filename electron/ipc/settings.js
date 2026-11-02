@@ -451,10 +451,6 @@ export function saveRoleFamilyExperienceBandsBatch(entries) {
   return saved;
 }
 
-export function saveRoleFamilyExperienceBands(roleFamily, value) {
-  saveRoleFamilyExperienceBandsBatch([{ roleFamily, value }]);
-}
-
 /**
  * Platform-wide hub pages (dashboard, notifications, etc.) configured through
  * Settings → Marketplace Monitors. Marketplace Status scans only these pages;

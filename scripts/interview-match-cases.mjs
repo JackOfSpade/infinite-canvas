@@ -199,12 +199,12 @@ export async function main(argv = process.argv.slice(2)) {
     throw error;
   }
   const cards = normalizeBank(rawBank);
-  const cli = await inspectCli(options['claude-bin'], 'claude');
+  const cli = await inspectCli(options['claude-bin']);
   if (!cli.available) throw new Error('Claude CLI is unavailable. Install/authenticate it outside the sandbox, then retry.');
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'interview-match-cases-'));
   let transport;
   try {
-    transport = await createTransport({ id: 'case-generator', transport: 'claude-cold', model: options.model, effort: options.effort }, {
+    transport = await createTransport({ id: 'case-generator', model: options.model, effort: options.effort }, {
       timeoutMs: options.timeoutMs, claudeBin: options['claude-bin'], claudeHelp: cli.help, cwd,
       systemPrompt: 'Generate evaluation utterances from provided data. Return requested strict JSON. Do not choose labels or use tools.',
     });

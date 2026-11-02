@@ -3,17 +3,14 @@ import {
   domainBrandMatchesEmployer, leadingTitleSegment, proveBidirectionalOwnership, registrableDomain,
 } from '../../electron/ipc/officialSourceHosts.js';
 import {
-  __debug, canonicalLeadUrl, descriptionOverlap, evaluateOfficialPostingMatch, flatPostingText, plainPostingText, selectOfficialPostingMatch, buildOfficialPostingComparisonSet,
+  __debug, canonicalLeadUrl, descriptionOverlap, evaluateOfficialPostingMatch, flatPostingText, plainPostingText, selectOfficialPostingMatch,
 } from '../../electron/ipc/officialPostingMatch.js';
-import { buildOfficialPostingMatchRequest, validateOfficialPostingMatchResponse } from '../../electron/ipc/officialPostingBridge.js';
-import { resolveOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 
 // AMENDMENT-3 sections 1-4 plus the small-pool resolutions R1 (best match with
 // margin among same-identity postings) and R2 (a small pool never accepts on
 // description alone). Synthetic names only.
 const EMPLOYER = 'Northwind Labs';
 const POSTER = 'Acme Talent Partners';
-const ROOT = 'https://northwind.test/';
 const NOW = Date.parse('2026-10-24T00:00:00Z');
 
 const VERBS = ['Calibrate', 'Reconcile', 'Tune', 'Audit', 'Schedule', 'Profile', 'Migrate', 'Inspect', 'Replay', 'Model', 'Partition', 'Index', 'Simulate', 'Validate', 'Throttle', 'Compact'];
@@ -33,113 +30,12 @@ const ABOUT = 'About Northwind Labs. Northwind Labs builds workflow products for
 // Process copy shared by every posting on a board but never labelled as a company section.
 const PROCESS = lines(9000, 6).join(' ');
 
-const boardJob = (extra = {}) => ({ id: 'req-one', title: 'Software Engineer', companyName: EMPLOYER, location: 'Lakeview, Ontario, Canada',
-  descriptionPlain: lines(1, 8).join(' '), jobUrl: 'https://jobs.ashbyhq.com/northwind/req-one', isListed: true, ...extra });
-const jsonld = (url, extra = {}) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', url, title: 'Software Engineer',
-  hiringOrganization: { name: EMPLOYER, sameAs: ROOT }, description: lines(1, 8).join(' '),
-  jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } }, identifier: 'req-one', ...extra })}</script>`;
-const boardApi = jobs => ({ body: JSON.stringify({ jobs }), contentType: 'application/json' });
-const BOARD = 'https://api.ashbyhq.com/posting-api/job-board/northwind?includeCompensation=true';
-const POSTING = 'https://jobs.ashbyhq.com/northwind/req-one';
-function network(pages, requests = []) {
-  return async url => {
-    requests.push(url);
-    const page = pages[url];
-    if (!page) { const error = new Error('Fixture page is closed'); error.code = 'closed'; throw error; }
-    return { url, contentType: 'text/html', statusCode: 200, ...(typeof page === 'string' ? { body: page } : page) };
-  };
-}
 const row = (extra = {}) => ({ title: 'Software Engineer', company: EMPLOYER, location: 'Lakeview, Ontario, Canada',
   snippet: lines(1, 8).join(' '), salary: '', salaryProvenance: 'unknown', url: 'https://www.linkedin.com/jobs/view/synthetic-role-30', ...extra });
-const otherJobs = count => Array.from({ length: count }, (_, index) => boardJob({ id: `other-${index}`, title: `Specialist ${index}`,
-  jobUrl: `https://jobs.ashbyhq.com/northwind/other-${index}`, descriptionPlain: lines(100 + index * 10, 8).join(' ') }));
-// Tie-breaker quote normalization fixtures. A converter renders lists as "* item" / "1. item" lines under an upper-cased heading, while a
-// model quotes plain prose that may cross list items.
 const NBSP = String.fromCharCode(160);
-const converted = (sentences, heading = 'RESPONSIBILITIES') => [heading, ...sentences.map((item, index) => (
-  index % 3 === 0 ? `* ${item}` : index % 3 === 1 ? `${index}. ${item}` : `  - ${item}`))].join('\n');
-const joinGroups = (sentences, groups) => groups.map(group => group.map(index => sentences[index]).join(' '));
-const quoteAnswer = (pairs, extra = {}) => ({ choice: 'P1', conflicts: [], distinguishing: [], ...extra, evidence: pairs.map(([scrapedQuote, officialQuote]) => ({ scrapedQuote, officialQuote })) });
-const comparativeContext = (scrapedText, officialText, { peerDescriptions = [], rivalDescriptions = [] } = {}) => {
-  const job = row({ snippet: scrapedText });
-  const candidate = (id, description, title = job.title) => ({ title, employer: EMPLOYER, description, sourceUrl: `https://careers.northwind.test/job/${id}` });
-  const option = (id, description) => ({ id, title: job.title, location: job.location, status: 'live', description, candidate: candidate(id, description) });
-  return { job, options: [option('P1', officialText), ...rivalDescriptions.map((body, index) => option(`P${index + 2}`, body))],
-    peerCandidates: peerDescriptions.map((body, index) => candidate(`peer-${index}`, body, `Specialist ${index}`)) };
-};
-function verifiedComparativeEvidence(scrapedText, officialText, answer, settings = {}) {
-  const context = comparativeContext(scrapedText, officialText, settings);
-  // These normalization fixtures supply a complete distinguishing answer from
-  // their already quoted evidence; omission and wrong-source cases live in the bridge group.
-  const distinguishing = context.options.slice(1).flatMap(option => {
-    const pair = answer.evidence.find(pair => !flatPostingText(option.description).includes(flatPostingText(pair.officialQuote)));
-    return pair ? [{ optionId: option.id, officialQuote: pair.officialQuote, reason: 'The quoted role duty distinguishes this option.' }] : [];
-  });
-  try { validateOfficialPostingMatchResponse({ ...answer, distinguishing }, context); return true; } catch { return false; }
-}
-function assertNoPosting(result) {
-  assert.ok(['L5', 'L6'].includes(result.officialPosting.level), JSON.stringify(result.officialPosting));
-  assert.equal(result.officialPosting.sourceUrl || '', '');
-  assert.equal(result.officialPosting.officialApplyUrl || '', '');
-  assert.equal(result.description, undefined);
-}
 
-// Section 1: a marketing-suffixed root title, no og:site_name, a careers page
-// that links to the tenant and its posting, and a posting that points back.
-function roundTripPages({ rootTitle = `${EMPLOYER} – The workflow platform for regional dispatch`, careersLinks = true, sameAs = ROOT, jobs = [boardJob(), ...otherJobs(5)], root = ROOT } = {}) {
-  return {
-    [root]: `<title>${rootTitle}</title><a href="/careers">Careers</a>`,
-    [`${root}careers`]: `<title>Join the team</title>${careersLinks ? `<a href="https://jobs.ashbyhq.com/northwind">Open roles</a><a href="${POSTING}">Software Engineer</a>` : '<p>No openings listed.</p>'}`,
-    'https://jobs.ashbyhq.com/northwind': '<main>Available roles</main>',
-    [POSTING]: jsonld(POSTING, { hiringOrganization: { name: EMPLOYER, sameAs } }),
-    [BOARD]: boardApi(jobs),
-  };
-}
 
 export default [
-  {
-    name: 'Amendment 3 ownership: a mutual round trip proves a marketing-titled employer domain and its tenant (L2)',
-    async run() {
-      const requests = [];
-      const result = await resolveOfficialPosting(row(), { fetch: network(roundTripPages(), requests), candidateUrls: [ROOT] });
-      assert.equal(result.officialPosting.level, 'L2', JSON.stringify(result.officialPosting));
-      assert.equal(result.officialPosting.sourceUrl, POSTING);
-      assert.equal(result.officialPosting.employer, EMPLOYER);
-      assert.ok(result.officialPosting.trail.includes('domain-proof'));
-      assert.ok(result.officialPosting.trail.includes('description-anchor'));
-      // A recruiter row reaches the same proof when the client is named by the row's own title.
-      const recruiter = row({ company: POSTER, title: `Software Engineer at ${EMPLOYER}`, snippet: `Our client is hiring. ${lines(1, 8).join(' ')}` });
-      const client = await resolveOfficialPosting(recruiter, { fetch: network(roundTripPages()), candidateUrls: [ROOT] });
-      assert.equal(client.officialPosting.level, 'L2'); assert.equal(client.officialPosting.sourceUrl, POSTING);
-    },
-  },
-  {
-    name: 'Amendment 3 ownership: a recruiter-branded domain titled Careers at the employer is rejected',
-    async run() {
-      for (const [root, title] of [['https://acmetalent.test/', 'Acme Talent Partners | Executive Search'],
-        ['https://northwindjobs.test/', `Careers at ${EMPLOYER} | ${POSTER}`]]) {
-        const pages = roundTripPages({ root, rootTitle: title, sameAs: root });
-        pages[`${root}careers`] = `<title>Careers at ${EMPLOYER}</title><a href="https://jobs.ashbyhq.com/northwind">Open roles</a><a href="${POSTING}">Software Engineer</a>`;
-        const job = row({ company: POSTER, title: `Software Engineer at ${EMPLOYER}`, snippet: `Our client is hiring. ${lines(1, 8).join(' ')}` });
-        const result = await resolveOfficialPosting(job, { fetch: network(pages), candidateUrls: [`${root}careers`] });
-        assertNoPosting(result);
-        assert.ok(result.officialPosting.trail.includes('tenant-unproven') || result.officialPosting.trail.includes('poster-tenant'), root);
-      }
-    },
-  },
-  {
-    name: 'Amendment 3 ownership: a sameAs with no link back from the domain proves nothing',
-    async run() {
-      const pages = roundTripPages({ careersLinks: false });
-      const result = await resolveOfficialPosting(row({ applyOptions: [{ label: 'Apply', href: POSTING }] }), { fetch: network(pages), candidateUrls: [ROOT] });
-      assertNoPosting(result);
-      assert.ok(result.officialPosting.trail.includes('tenant-unproven'));
-      // A domain whose brand is wrong fails even when it links to the tenant and the tenant points back.
-      const wrong = roundTripPages({ rootTitle: 'Unrelated Group – Marketing', root: 'https://elsewhere.test/', sameAs: 'https://elsewhere.test/' });
-      const mismatch = await resolveOfficialPosting(row(), { fetch: network(wrong), candidateUrls: ['https://elsewhere.test/'] });
-      assertNoPosting(mismatch);
-    },
-  },
   {
     name: 'Amendment 3 ownership: pure checks require link, back reference, brand and no poster, aggregator or ATS veto',
     run() {
@@ -191,23 +87,6 @@ export default [
     },
   },
   {
-    name: 'Amendment 3 description: an employer-site posting with a Phenom-style board resolves to L1 through the resolver',
-    async run() {
-      const target = 3; const urls = Array.from({ length: 8 }, (_, index) => `https://northwind.test/job/${index}`);
-      const pages = { [ROOT]: '<title>Northwind Labs</title><a href="/careers">Careers</a>',
-        [`${ROOT}careers`]: `<title>Careers</title>${urls.map(url => `<a href="${url}">Role</a>`).join('')}` };
-      urls.forEach((url, index) => {
-        pages[url] = jsonld(url, { title: index === target ? 'Software Engineer' : `Specialist ${index}`, identifier: `req-${index}`,
-          description: `${lines(3000 + index * 20, 10).join(' ')} ${PROCESS} ${ABOUT}` });
-      });
-      const partial = lines(3000 + target * 20, 6).join('\n');
-      const result = await resolveOfficialPosting(row({ snippet: partial }), { fetch: network(pages), candidateUrls: [ROOT] });
-      assert.equal(result.officialPosting.level, 'L1', JSON.stringify(result.officialPosting));
-      assert.equal(result.officialPosting.sourceUrl, urls[target]);
-      assert.ok(result.officialPosting.trail.includes('description-anchor'));
-    },
-  },
-  {
     name: 'Amendment 3 description: shared copy with a same-title same-city sibling never anchors it, closed true role or not',
     async run() {
       const make = (index, extra = {}) => ({ title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' },
@@ -221,30 +100,6 @@ export default [
       const withoutClosed = selectOfficialPostingMatch(scraped, [sibling, ...others], { now: NOW });
       assert.equal(withoutClosed.candidate, null); assert.equal(withoutClosed.outcome, 'not-found');
       assert.equal(evaluateOfficialPostingMatch(scraped, sibling, { now: NOW, peerCandidates: [sibling, ...others] }).reason, 'no-anchor');
-    },
-  },
-  {
-    name: 'Amendment 3 description: a twin role in another city sharing 31 of 32 lines never erases or replaces the right city (33 posting board)',
-    async run() {
-      const shared = lines(5000, 31);
-      const vancouver = boardJob({ id: 'van', title: 'Data Engineer', location: 'Vancouver, British Columbia, Canada', jobUrl: 'https://jobs.ashbyhq.com/northwind/van',
-        descriptionPlain: [...shared, sentence(5100)].join(' ') });
-      const tokyo = boardJob({ id: 'tok', title: 'Data Engineer', location: 'Tokyo, Japan', jobUrl: 'https://jobs.ashbyhq.com/northwind/tok',
-        descriptionPlain: [...shared, sentence(5200)].join(' ') });
-      const others = Array.from({ length: 31 }, (_, index) => boardJob({ id: `x-${index}`, title: `Specialist ${index}`, jobUrl: `https://jobs.ashbyhq.com/northwind/x-${index}`,
-        descriptionPlain: `${lines(6000 + index * 20, 10).join(' ')} ${PROCESS}` }));
-      const pages = { [ROOT]: '<title>Northwind Labs</title><a href="/careers">Careers</a>',
-        [`${ROOT}careers`]: '<title>Careers at Northwind Labs</title><a href="https://jobs.ashbyhq.com/northwind">Open roles</a>',
-        'https://jobs.ashbyhq.com/northwind': '<main>Available roles</main>', [BOARD]: boardApi([tokyo, ...others, vancouver]) };
-      const rowFor = (location, tail) => row({ title: 'Data Engineer', location, snippet: [...shared, sentence(tail)].join(' ') });
-      const run = job => resolveOfficialPosting(job, { fetch: network(pages), candidateUrls: [ROOT] });
-      const van = await run(rowFor('Vancouver, British Columbia, Canada', 5100));
-      assert.equal(van.officialPosting.sourceUrl, 'https://jobs.ashbyhq.com/northwind/van', JSON.stringify(van.officialPosting));
-      const tok = await run(rowFor('Tokyo, Japan', 5200));
-      assert.equal(tok.officialPosting.sourceUrl, 'https://jobs.ashbyhq.com/northwind/tok', JSON.stringify(tok.officialPosting));
-      // Without the Vancouver posting the Tokyo twin is never selected for the Vancouver row.
-      pages[BOARD] = boardApi([tokyo, ...others]);
-      assertNoPosting(await run(rowFor('Vancouver, British Columbia, Canada', 5100)));
     },
   },
   {
@@ -272,210 +127,6 @@ export default [
     },
   },
   {
-    name: 'Amendment 3 R2: fewer than four peers never accepts on description alone, with or without a closed true peer',
-    async run() {
-      const process = lines(9100, 11).join(' ');
-      const actual = `${sentence(9200)} ${process}`; const sibling = `${sentence(9300)} ${process}`;
-      assert.equal(descriptionOverlap(actual, sibling).anchored, true, 'the overlap itself is unchanged for no-peer input');
-      const jobs = (...items) => items;
-      const page = list => ({ [ROOT]: '<title>Northwind Labs</title><a href="/careers">Careers</a>',
-        [`${ROOT}careers`]: '<title>Careers at Northwind Labs</title><a href="https://jobs.ashbyhq.com/northwind">Open roles</a>',
-        'https://jobs.ashbyhq.com/northwind': '<main>Roles</main>', [BOARD]: boardApi(list) });
-      const live = boardJob({ id: 'sibling', jobUrl: 'https://jobs.ashbyhq.com/northwind/sibling', descriptionPlain: sibling });
-      const closed = boardJob({ isListed: false, descriptionPlain: actual });
-      // (i) the exact conflict: a closed true peer and a live wrong-role sibling sharing unlabelled process text.
-      const conflict = await resolveOfficialPosting(row({ snippet: actual }), { fetch: network(page(jobs(closed, live))), candidateUrls: [ROOT] });
-      assertNoPosting(conflict);
-      assert.equal(conflict.officialPosting.outcome, 'closed');
-      assert.ok(conflict.officialPosting.trail.includes('closed')); assert.ok(conflict.officialPosting.trail.includes('no-anchor'));
-      // (ii) the same texts with no peer at all.
-      const lone = await resolveOfficialPosting(row({ snippet: actual }), { fetch: network(page(jobs(live))), candidateUrls: [ROOT] });
-      assertNoPosting(lone);
-      assert.ok(lone.officialPosting.trail.includes('no-anchor'));
-      // Deterministic anchors still accept before any comparative judgment.
-      const own = boardJob({ descriptionPlain: lines(1, 8).join(' ') });
-      const identified = await resolveOfficialPosting(row({ identifier: 'req-one' }), { fetch: network(page(jobs(own))), candidateUrls: [ROOT] });
-      assert.equal(identified.officialPosting.level, 'L2'); assert.ok(identified.officialPosting.trail.includes('identifier-anchor'));
-      // Two texts that each keep a role sentence the other lacks: no independent anchor, no match.
-      const twoSided = await resolveOfficialPosting(row({ snippet: `${lines(1, 7).join(' ')} ${sentence(9998)}` }),
-        { fetch: network(page(jobs(boardJob({ descriptionPlain: `${lines(1, 7).join(' ')} ${sentence(9997)}` })))), candidateUrls: [ROOT] });
-      assertNoPosting(twoSided); assert.ok(twoSided.officialPosting.trail.includes('no-anchor'));
-      // Nesting resolution: an identical text is one text nested in the other and accepts without a peer.
-      const nested = await resolveOfficialPosting(row(), { fetch: network(page(jobs(own))), candidateUrls: [ROOT] });
-      assert.equal(nested.officialPosting.level, 'L2'); assert.ok(nested.officialPosting.trail.includes('description-anchor'));
-    },
-  },
-  {
-    name: 'Amendment 5 comparative validation handles a small pool after the deterministic evaluator refuses non-nested text',
-    run() {
-      const text = lines(1, 12); const quotes = [text[0], text[5], text[10]];
-      const candidate = { title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description: text.join(' '),
-        sourceUrl: 'https://careers.northwind.test/job/1', ats: '', tenant: '', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
-      const scraped = row({ snippet: text.join(' ') });
-      const partial = row({ snippet: `${text.slice(0, 11).join(' ')} ${sentence(9998)}` });
-      assert.equal(evaluateOfficialPostingMatch(partial, candidate, { now: NOW }).reason, 'no-anchor');
-      assert.equal(evaluateOfficialPostingMatch(scraped, candidate, { now: NOW }).anchor, 'description-anchor');
-      const { options } = buildOfficialPostingComparisonSet(partial, [candidate], { now: NOW });
-      const answer = quoteAnswer(quotes.map(quote => [quote, quote]));
-      assert.deepEqual(validateOfficialPostingMatchResponse(answer, { job: partial, options }), answer);
-    },
-  },
-  {
-    name: 'Amendment 5 comparative quotes require unique role evidence rather than rejecting every shared pair',
-    run() {
-      const text = lines(1, 12); const quotes = [text[0], text[5], text[10]];
-      const answer = quoteAnswer(quotes.map(quote => [quote, quote]));
-      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer), true);
-      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer, { peerDescriptions: [`${quotes[0]} Other work.`] }), true, 'one other-title peer is not a frequency estimate');
-      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer, { rivalDescriptions: [`${quotes[2]} Other work.`] }), true, 'other quoted role duties distinguish the chosen posting');
-      assert.equal(verifiedComparativeEvidence(text.join(' '), text.join(' '), answer, { rivalDescriptions: [text.join(' ')] }), false, 'an identical same-identity rival has no distinctive evidence');
-      const copy = lines(9500, 4).join(' ');
-      const crowd = Array.from({ length: 6 }, (_, index) => `${lines(9600 + index * 10, 6).join(' ')} ${copy}`);
-      const boilerplate = quoteAnswer([sentence(9500), sentence(9501), sentence(9502)].map(quote => [quote, quote]));
-      const official = `${lines(9700, 3).join(' ')} ${sentence(9500)} ${lines(9710, 3).join(' ')} ${sentence(9501)} ${lines(9720, 3).join(' ')} ${sentence(9502)}`;
-      assert.equal(verifiedComparativeEvidence(official, official, boilerplate), true);
-      assert.equal(verifiedComparativeEvidence(official, official, boilerplate, { peerDescriptions: crowd }), false, 'max(3, 20%) frequency copy never counts');
-    },
-  },
-  {
-    name: 'Amendment 3 lead identity: the row url or one of its own apply options is an identifier anchor, nothing else is',
-    async run() {
-      const url = 'https://northwind.test/jobs/one';
-      const pages = { [ROOT]: '<title>Northwind Labs</title>', [url]: jsonld(url, { description: lines(500, 8).join(' ') }) };
-      const unrelated = row({ snippet: lines(1, 8).join(' ') });
-      const exactUrl = await resolveOfficialPosting({ ...unrelated, url }, { fetch: network(pages) });
-      assert.equal(exactUrl.officialPosting.level, 'L1', JSON.stringify(exactUrl.officialPosting));
-      assert.ok(exactUrl.officialPosting.trail.includes('identifier-anchor'));
-      const tracked = await resolveOfficialPosting({ ...unrelated, url: `${url}?utm_source=board#top` }, { fetch: network(pages) });
-      assert.equal(tracked.officialPosting.level, 'L1', 'tracking parameters are removed before comparing');
-      const viaApply = await resolveOfficialPosting({ ...unrelated, applyOptions: [{ label: 'Apply on Northwind Labs', href: url }] }, { fetch: network(pages) });
-      assert.equal(viaApply.officialPosting.level, 'L1'); assert.ok(viaApply.officialPosting.trail.includes('identifier-anchor'));
-      // A job-id parameter belongs to the identity: another id is another posting.
-      const idUrl = `${url}?gh_jid=77`;
-      const idPages = { [ROOT]: '<title>Northwind Labs</title>', [idUrl]: jsonld(idUrl, { description: lines(500, 8).join(' ') }) };
-      assert.equal((await resolveOfficialPosting({ ...unrelated, url: idUrl }, { fetch: network(idPages) })).officialPosting.level, 'L1');
-      const otherId = await resolveOfficialPosting({ ...unrelated, url: `${url}?gh_jid=88`, applyOptions: [{ label: 'Apply', href: idUrl.replace('gh_jid=77', 'gh_jid=77') }] }, { fetch: network(idPages), candidateUrls: [idUrl] });
-      assert.equal(otherId.officialPosting.level, 'L1', 'one of the row\'s own apply options still names the posting');
-      const wrongId = await resolveOfficialPosting({ ...unrelated, url: `${url}?gh_jid=88` }, { fetch: network(idPages), candidateUrls: [idUrl] });
-      assertNoPosting(wrongId);
-      assert.equal(canonicalLeadUrl('https://Northwind.test/jobs/one/?utm_source=x&gh_jid=7&ref=a#top'), 'https://northwind.test/jobs/one?gh_jid=7');
-      assert.equal(canonicalLeadUrl('http://northwind.test/jobs/one'), '');
-      assert.equal(canonicalLeadUrl('https://northwind.test/jobs/one?jobId=9&id=2'), 'https://northwind.test/jobs/one?id=2&jobId=9');
-    },
-  },
-  {
-    name: 'Amendment 3 lead identity: the same url from description text or a bridge candidate is not an anchor',
-    async run() {
-      const url = 'https://northwind.test/jobs/one';
-      const pages = { [ROOT]: '<title>Northwind Labs</title>', [url]: jsonld(url, { description: lines(500, 8).join(' ') }) };
-      const unrelated = row({ snippet: lines(1, 8).join(' ') });
-      const fromText = await resolveOfficialPosting({ ...unrelated, snippet: `${unrelated.snippet} Apply at ${url}.` }, { fetch: network(pages) });
-      assertNoPosting(fromText);
-      assert.ok(fromText.officialPosting.trail.includes('no-anchor'));
-      const fromBridge = await resolveOfficialPosting(unrelated, { fetch: network(pages), research: async () => [{ employer: EMPLOYER, postingUrl: url }] });
-      assertNoPosting(fromBridge);
-      assert.ok(fromBridge.officialPosting.trail.includes('no-anchor'));
-      const direct = await resolveOfficialPosting(unrelated, { fetch: network(pages), candidateUrls: [url] });
-      assertNoPosting(direct);
-    },
-  },
-  {
-    name: 'Amendment 5 comparative quote normalization: converter list markers, headings and typography never hide the quoted wording',
-    run() {
-      const sentences = lines(1, 12);
-      const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
-      const answer = quoteAnswer(groups.map(quote => [quote, quote]));
-      const official = converted(sentences); const plain = sentences.join(' ');
-      // The fixture is only meaningful when a raw search could not find a quote that crosses list items.
-      assert.equal(official.replace(/\s+/gu, ' ').includes(groups[0]), false);
-      assert.equal(verifiedComparativeEvidence(plain, official, answer), true, 'a bulleted official text and unbulleted quotes');
-      assert.equal(verifiedComparativeEvidence(official, plain, answer), true, 'a bulleted scraped text and unbulleted quotes');
-      assert.equal(verifiedComparativeEvidence(official, official, answer), true);
-      const nbsp = sentences.map((sentence, index) => `${NBSP}• ${sentence.replace(' and ', `${NBSP}and `)}${index % 2 ? NBSP : ''}`).join('\r\n');
-      assert.equal(verifiedComparativeEvidence(nbsp, official, answer), true, 'bullet glyphs, non-breaking spaces and CRLF');
-      // Quotes copied with their own markers and line breaks locate the same way.
-      const marked = official.split('\n');
-      const withMarkers = quoteAnswer([[groups[0], marked.slice(1, 3).join('\n')], [groups[1], marked.slice(6, 9).join('\n')], [groups[2], marked.slice(11, 13).join('\n')]]);
-      assert.equal(verifiedComparativeEvidence(plain, official, withMarkers), true);
-      // Verbatim evidence preserves case, including text upper-cased by a converter.
-      const shouted = converted(sentences.map((sentence, index) => (index >= 5 && index <= 7 ? sentence.toUpperCase() : sentence)));
-      assert.equal(verifiedComparativeEvidence(plain, shouted, answer), false);
-      const shoutedAnswer = quoteAnswer(groups.map((quote, index) => [quote, index === 1 ? quote.toUpperCase() : quote]));
-      assert.equal(verifiedComparativeEvidence(plain, shouted, shoutedAnswer), true);
-    },
-  },
-  {
-    name: 'Amendment 5 comparative quote normalization: typographic quotes, dashes and non-breaking spaces compare as plain punctuation',
-    run() {
-      const typed = ['Partner with dispatchers on the scheduler\'s nightly rebalancing pass, including carrier lane exceptions during peak volume.',
-        'Draft the "quarterly lane review" for finance - covering tariff tables, fuel cards and settlement files.',
-        'Maintain yard queue dashboards so operations managers can review dock windows before the evening cutoff.'];
-      const typeset = value => value.replace(/'/gu, '’').replace(/"([^"]*)"/gu, '“$1”').replace(/ - /gu, ' — ').replace(/ on the /u, `${NBSP}on${NBSP}the `);
-      const fill = lines(300, 3);
-      const scraped = [fill[0], typed[0], fill[1], typed[1], fill[2], typed[2]].join(' ');
-      const official = converted([fill[0], ...typed.slice(0, 1).map(typeset), fill[1], typeset(typed[1]), fill[2], typeset(typed[2])]);
-      assert.notEqual(official.replace(/\s+/gu, ' ').includes(typed[1]), true, 'fixture: the typeset text differs from the plain quotes');
-      const answer = quoteAnswer(typed.map(quote => [quote, quote]));
-      assert.equal(verifiedComparativeEvidence(scraped, official, answer), true);
-      assert.equal(verifiedComparativeEvidence(official, scraped, answer), true);
-      // The reverse direction: typeset quotes against plain text.
-      assert.equal(verifiedComparativeEvidence(scraped, scraped, quoteAnswer(typed.map(quote => [typeset(quote), typeset(quote)]))), true);
-      // Punctuation is unified, not removed: a different word is still a different quote.
-      const reworded = quoteAnswer([[typed[0], typed[0]], [typed[1], typed[1].replace('finance', 'treasury')], [typed[2], typed[2]]]);
-      assert.equal(verifiedComparativeEvidence(scraped, official, reworded), false);
-    },
-  },
-  {
-    name: 'Amendment 5 comparative quote normalization: a quote absent from either text still fails, even when the other text needs normalization to match',
-    run() {
-      const sentences = lines(1, 12);
-      const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
-      const plain = sentences.join(' '); const official = converted(sentences);
-      const altered = quote => quote.replace(' and ', ' plus ');
-      const dropped = quote => quote.replace(' and ', ' ');
-      const withMiddle = replacement => quoteAnswer(groups.map((quote, index) => [quote, index === 1 ? replacement : quote]));
-      for (const [scrapedText, officialText] of [[official, plain], [plain, official], [official, official]]) {
-        assert.equal(verifiedComparativeEvidence(scrapedText, officialText, quoteAnswer(groups.map(quote => [quote, quote]))), true);
-        for (const side of [0, 1]) {
-          for (const change of [altered, dropped]) {
-            const pairs = groups.map((quote, index) => (index === 1 ? [side === 0 ? change(quote) : quote, side === 1 ? change(quote) : quote] : [quote, quote]));
-            assert.equal(verifiedComparativeEvidence(scrapedText, officialText, quoteAnswer(pairs)), false,
-              `one quote absent from the ${side === 0 ? 'scraped' : 'official'} text (${change.name})`);
-          }
-        }
-      }
-      void withMiddle;
-      // A quote present in only one of the texts fails for the other, however each is normalized.
-      const onlyOfficial = `${converted(sentences)}\n* ${sentence(9990)}`;
-      const lone = quoteAnswer([[groups[0], groups[0]], [groups[1], groups[1]], [sentence(9990), sentence(9990)]]);
-      assert.equal(verifiedComparativeEvidence(plain, onlyOfficial, lone), false);
-      assert.equal(verifiedComparativeEvidence(onlyOfficial, plain, lone), false);
-      // Normalization joins adjacent list items, never non-adjacent ones.
-      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer([[`${sentences[0]} ${sentences[2]}`, `${sentences[0]} ${sentences[2]}`], [groups[1], groups[1]], [groups[2], groups[2]]])), false);
-      // Still required: three pairs, eight words, no conflicts, two separated parts.
-      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer(groups.slice(0, 2).map(quote => [quote, quote]))), false);
-      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer(groups.map(quote => [quote, quote]), { conflicts: ['different team'] })), false);
-      assert.equal(verifiedComparativeEvidence(plain, official, quoteAnswer(groups.map(() => [groups[0], groups[0]]))), false, 'repeating one passage');
-      const short = quoteAnswer([[groups[0], groups[0]], [groups[1], groups[1]], ['* Calibrate nightly freight lanes', 'Calibrate nightly freight lanes']]);
-      assert.equal(verifiedComparativeEvidence(plain, official, short), false, 'a marker is not a word');
-    },
-  },
-  {
-    name: 'Amendment 5 comparative quote normalization: numbered rivals and boilerplate crowds are compared in the same plain form',
-    run() {
-      const sentences = lines(1, 12);
-      const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
-      const plain = sentences.join(' '); const official = converted(sentences);
-      const answer = quoteAnswer(groups.map(quote => [quote, quote]));
-      const numberedRival = sentences.map((item, index) => `${index + 1}. ${item}`).join('\n');
-      assert.equal(verifiedComparativeEvidence(plain, official, answer, { peerDescriptions: [], rivalDescriptions: [numberedRival] }), false, 'a quote crossing numbered items of a gate-passing rival');
-      assert.equal(verifiedComparativeEvidence(plain, official, answer, { peerDescriptions: [], rivalDescriptions: [converted(lines(700, 12))] }), true);
-      // Boilerplate frequency counts numbered copies of the same wording as the same wording.
-      const crowd = Array.from({ length: 6 }, (_, index) => `${converted(lines(800 + index * 10, 6))}\n${numberedRival}`);
-      assert.equal(verifiedComparativeEvidence(plain, official, answer, { peerDescriptions: crowd, rivalDescriptions: [] }), false);
-    },
-  },
-  {
     name: 'Amendment 5 comparative quote normalization: only list markers at a line start go, and a normalized form is stable',
     run() {
       const kept = ['3.5 years of experience with carrier ledgers', '401(k) matching for every employee', '-5% variance on weigh tickets', 'A. Smith and Co. audits', '**Bold** claim about yard queues', 'Scale to 10,000 pallet routes'];
@@ -484,53 +135,6 @@ export default [
       assert.equal(plainPostingText('it’s “quoted” – and — dashes'), 'it\'s "quoted" - and - dashes');
       assert.equal(flatPostingText(`  * one${NBSP}${NBSP}two \n\n  2. three  `), 'one two three');
       for (const sample of [`* a\n1. b ${NBSP}c`, 'plain text', '', `-\nfoo bar`, '- – x']) assert.equal(flatPostingText(flatPostingText(sample)), flatPostingText(sample));
-    },
-  },
-  {
-    name: 'Amendment 5 comparative quote normalization: a converter-rendered official text validates after deterministic refusal',
-    run() {
-      const text = lines(1, 12);
-      const candidate = { title: 'Software Engineer', employer: EMPLOYER, location: { display: 'Lakeview, Ontario, Canada' }, description: converted(text),
-        sourceUrl: 'https://careers.northwind.test/job/1', ats: '', tenant: '', employerDomainProven: true, live: true, isListed: true, statusCode: 200 };
-      const partial = row({ snippet: `${text.slice(0, 11).join(' ')} ${sentence(9998)}` });
-      const groups = joinGroups(text, [[0, 1], [4, 5, 6], [9, 10]]);
-      const answer = quoteAnswer(groups.map(quote => [quote, quote]));
-      assert.equal(evaluateOfficialPostingMatch(partial, candidate, { now: NOW }).reason, 'no-anchor');
-      const { options } = buildOfficialPostingComparisonSet(partial, [candidate], { now: NOW });
-      assert.deepEqual(validateOfficialPostingMatchResponse(answer, { job: partial, options }), answer);
-      const invented = quoteAnswer(groups.map((quote, index) => (index === 1 ? [quote, quote.replace(' and ', ' plus ')] : [quote, quote])));
-      assert.throws(() => validateOfficialPostingMatchResponse(invented, { job: partial, options }));
-    },
-  },
-  {
-    name: 'Amendment 3 bridge: the match prompt shows the plain form the host checks, and the validator verifies in that form',
-    run() {
-      const sentences = lines(1, 12);
-      const groups = joinGroups(sentences, [[0, 1], [5, 6, 7], [10, 11]]);
-      const scrapedDescription = converted(sentences, 'About the role'); const officialDescription = converted(sentences);
-      const context = comparativeContext(scrapedDescription, officialDescription);
-      const request = buildOfficialPostingMatchRequest({ ...context, run: 'A' });
-      const supplied = JSON.parse(request.prompt.split('BEGIN UNTRUSTED POSTING COMPARISON JSON\n')[1].split('\nEND UNTRUSTED POSTING COMPARISON JSON')[0]);
-      assert.equal(supplied.scraped.description, plainPostingText(scrapedDescription));
-      assert.equal(supplied.options[0].description, plainPostingText(officialDescription));
-      for (const shown of [supplied.scraped.description, supplied.options[0].description]) {
-        assert.equal(/^[ \t]*(?:[*•-]|\d{1,3}[.)])[ \t]/mu.test(shown), false, 'no list marker survives at a line start');
-        assert.ok(sentences.every(sentence => shown.includes(sentence)), 'every sentence is shown verbatim');
-      }
-      const answer = quoteAnswer(groups.map(quote => [quote, quote]));
-      assert.deepEqual(request.responseValidator(answer), answer);
-      assert.deepEqual(validateOfficialPostingMatchResponse(JSON.stringify(answer), context), answer);
-      // A quote copied with its markers and line breaks is the same wording.
-      const marked = officialDescription.split('\n');
-      const copied = quoteAnswer([[groups[0], marked.slice(1, 3).join('\n')], [groups[1], marked.slice(6, 9).join('\n')], [groups[2], marked.slice(11, 13).join('\n')]]);
-      assert.deepEqual(validateOfficialPostingMatchResponse(copied, context), copied);
-      const failing = pairs => { try { validateOfficialPostingMatchResponse(quoteAnswer(pairs), context); } catch (error) { return error.correctionRuleIds || []; } return null; };
-      const quote = groups[1].replace(' and ', ' plus ');
-      assert.ok(failing([[groups[0], groups[0]], [quote, groups[1]], [groups[2], groups[2]]])?.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'), 'absent from the scraped text');
-      assert.ok(failing([[groups[0], groups[0]], [groups[1], quote], [groups[2], groups[2]]])?.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'), 'absent from the official text');
-      // The comparative verbatim check remains case-sensitive.
-      assert.ok(failing([[groups[0], groups[0]], [groups[1].toUpperCase(), groups[1]], [groups[2], groups[2]]])?.includes('LOOKUP_OFFICIAL_MATCH_VERBATIM'));
-      assert.ok(failing(groups.slice(0, 2).map(item => [item, item]))?.includes('LOOKUP_OFFICIAL_MATCH_COUNT'));
     },
   },
   {
@@ -664,23 +268,6 @@ export default [
       // Without any deterministic anchor the unanchored siblings stay unresolved: two of them are ambiguous and one alone is not a match.
       assert.equal(selectOfficialPostingMatch(row({ snippet: summary }), [a, b, ...others], { now: NOW }).outcome, 'ambiguous');
       assert.equal(selectOfficialPostingMatch(row({ snippet: summary }), [b, ...others], { now: NOW }).outcome, 'not-found');
-    },
-  },
-  {
-    name: 'Amendment 3 deterministic anchors: the resolver returns the lead posting whichever same-title sibling is read first',
-    async run() {
-      const second = 'https://jobs.ashbyhq.com/northwind/req-two';
-      const jobs = [boardJob(), boardJob({ id: 'req-two', jobUrl: second, descriptionPlain: lines(300, 8).join(' ') }), ...otherJobs(5)];
-      const pages = roundTripPages({ jobs }); pages[second] = jsonld(second, { identifier: 'req-two', description: lines(300, 8).join(' ') });
-      const summary = 'Short reformatted marketing summary of this role with different wording from the official text so no five word run is shared.';
-      const mention = `${summary} Also see ${second} for a related opening.`;
-      const apply = [{ label: 'Apply on Northwind Labs', href: POSTING }];
-      for (const job of [row({ snippet: summary, applyOptions: apply }), row({ snippet: mention, applyOptions: apply }), row({ snippet: mention, url: POSTING })]) {
-        const result = await resolveOfficialPosting(job, { fetch: network(pages), candidateUrls: [] });
-        assert.equal(result.officialPosting.level, 'L2', JSON.stringify(result.officialPosting));
-        assert.equal(result.officialPosting.sourceUrl, POSTING);
-        assert.ok(result.officialPosting.trail.includes('identifier-anchor'), JSON.stringify(result.officialPosting.trail));
-      }
     },
   },
   {
@@ -830,21 +417,6 @@ export default [
       }
       const rewritten = official.replace(sentence(104), sentence(9904));
       assert.notEqual(selectOfficialPostingMatch(row({ snippet: rewritten }), [candidate('true', official), ...peers], { now: NOW }).outcome, 'found');
-    },
-  },
-  {
-    name: 'Amendment 3 ownership: a recruiter tenant whose slug extends the poster name is still the poster tenant, even when it names the client',
-    async run() {
-      const root = ROOT;
-      for (const slug of ['acme-talent', 'acme-careers', 'acme-jobs', 'acmetalentjobs', 'acme-recruiting', 'acmetalentpartnersinc']) {
-        const url = `https://jobs.ashbyhq.com/${slug}/req-one`;
-        const pages = { [root]: `<title>${EMPLOYER}</title>`, [url]: jsonld(url, { hiringOrganization: { name: EMPLOYER, sameAs: root } }),
-          [`https://api.ashbyhq.com/posting-api/job-board/${slug}?includeCompensation=true`]: boardApi([boardJob({ jobUrl: url })]) };
-        const job = row({ company: POSTER, title: `Software Engineer at ${EMPLOYER}`, snippet: `Our client is hiring. ${lines(1, 8).join(' ')}`, applyOptions: [{ label: 'Apply', href: url }] });
-        const result = await resolveOfficialPosting(job, { fetch: network(pages), candidateUrls: [] });
-        assertNoPosting(result);
-        assert.ok(result.officialPosting.trail.includes('poster-tenant'), `${slug}: ${JSON.stringify(result.officialPosting.trail)}`);
-      }
     },
   },
 ];

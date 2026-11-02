@@ -25,7 +25,7 @@ import {
   sourcesPresentInGroundedResearch,
 } from '../../electron/ipc/jobCompensation.js';
 import { ROLE_FAMILY_HANDOFF_BATCH_SIZE, COMPENSATION_COHORT_HANDOFF_BATCH_SIZE } from '../../electron/ipc/jobCompensationPlanning.js';
-import { COMPENSATION_ASSESSMENT_BASE_TOKENS, COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS, COMPENSATION_ASSESSMENT_PER_ROW_TOKENS, MANUAL_AI_USABLE_OUTPUT_TOKENS, MAX_COMPENSATION_COHORTS_PER_ASSESSMENT, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT } from '../../electron/ipc/resultCaps.js';
+import { COMPENSATION_ASSESSMENT_BASE_TOKENS, COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS, COMPENSATION_ASSESSMENT_PER_ROW_TOKENS, BATCH_OUTPUT_TOKEN_BUDGET, MAX_COMPENSATION_COHORTS_PER_ASSESSMENT, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT, MAX_ROLE_FAMILIES_PER_ASSESSMENT } from '../../electron/ipc/resultCaps.js';
 import { normalizeRemoteResidences } from '../../src/utils/jobSearchLocations.js';
 import { JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA, ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 
@@ -289,7 +289,7 @@ export default [{
       group.experienceBand.basis === 'listing-role-level' && !('minYears' in group.experienceBand)
       && group.experienceBandSources.length === 0 && group.jobs.every(item => !item.job.compensationAssessment)),
       'each listing seniority reaches a separate market cohort without fabricated salary evidence or experience years');
-    const helper = source.slice(source.indexOf('function compensationResearchParametersForGroup('), source.indexOf('function buildLegacyCompensationResearchPrompt('));
+    const helper = source.slice(source.indexOf('function compensationResearchParametersForGroup('), source.indexOf('function buildCompensationResearchPrompt('));
     const api = runInNewContext(`(function(){ ${helper} return { parameters: compensationResearchParametersForGroup, disclosure: compensationJustificationWithExperienceDisclosure }; })()`);
     const group = [...context.groups.values()][0];
     assert(api.parameters(group).experienceBandBasis.includes('No published years-to-level ladder')
@@ -369,11 +369,10 @@ export default [{
       && source.includes('async function runFreshCompensationPipeline')
       && source.match(/queue\.add\(\{ kind: 'assessment', assessmentBatch \}, \{ front: true \}\)/g)?.length === 2,
     'both production fresh pipelines use the centralized ready queue with assessment priority');
-    assert(source.includes('const hasLegacyCompensationSteps =')
-      && source.includes("await durableRunHasAnyTask(manualAiRunId, [")
-      && source.includes("'job-compensation-research',")
-      && source.includes('legacyResearchStepProbe: activeLegacyResearchStepProbe'),
-    'fresh durable runs gate legacy prompt reconstruction once at run scope before either role or compensation work begins');
+    assert(!source.includes('hasLegacyCompensationSteps')
+      && !source.includes('legacyResearchStepProbe')
+      && !source.includes('legacyAssessmentStepProbe'),
+    'role and compensation work begin without any durable-run probe for older prompt layouts');
     return { roleAssessmentAt, compensationAssessmentAt };
   },
 }, {
@@ -394,8 +393,8 @@ export default [{
       sources: [{ name: 'Design framework', url: 'https://roles.example.test/design' }],
       evidenceQuote: 'Principal designers lead design', sourceDate: '2026-02-02',
     }] }, [{ researchId: roleId, role: 'Engineering' }, { researchId: otherId, role: 'Design' }], sections);
-    assert(ladders.size === 2 && ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA.properties.ladders.maxItems === 20,
-      'role-family assessment batching must preserve one independently validated ladder per raw section and cap at twenty');
+    assert(ladders.size === 2 && ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA.properties.ladders.maxItems === MAX_ROLE_FAMILIES_PER_ASSESSMENT,
+      'role-family assessment batching must preserve one independently validated ladder per raw section and cap at the exported assessment maximum');
     const cachedRequest = [{ researchId: roleId, role: 'Engineering', cached: { roleFamily: 'Engineering' } }];
     const inertCached = validateRoleFamilyExperienceBandsBatchSubmission({ ladders: [{
       researchId: roleId, roleFamily: 'Engineering', reusedFrom: '', bands: [], sources: [], evidenceQuote: '', sourceDate: '',
@@ -520,14 +519,16 @@ export default [{
 }, {
   name: 'Compensation assessment phases pack independently of their smaller raw-research phases',
   run: () => {
-    const roles = Array.from({ length: 21 }, (_, index) => ({ key: `role-${index}`, role: `Role ${index}`, researchId: `id-${index}`, cached: null }));
+    const roles = Array.from({ length: MAX_ROLE_FAMILIES_PER_ASSESSMENT + 1 }, (_, index) => ({ key: `role-${index}`, role: `Role ${index}`, researchId: `id-${index}`, cached: null }));
     const rolePlan = planRoleFamilyAssessmentBatches(roles);
     const cohorts = Array.from({ length: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT + 1 }, (_, index) => ({ researchKey: `market-${index}`, researchId: `cohort-${index}`, group: { jobs: [{}] } }));
     const rawPlan = packCompensationResearchBatches(cohorts);
     const assessmentPlan = packCompensationAssessmentBatches(cohorts);
-    assert(rolePlan.length === 2 && rolePlan[0].batch.length === 20 && rolePlan[1].batch.length === 1
-      && roleFamilyAssessmentMaxTokens(20) === 15024,
-    'twenty compact role ladders fit one 15,024-token assessment even though raw research remains seven at a time');
+    assert(rolePlan.length === 2 && rolePlan[0].batch.length === MAX_ROLE_FAMILIES_PER_ASSESSMENT && rolePlan[1].batch.length === 1
+      && roleFamilyAssessmentMaxTokens(MAX_ROLE_FAMILIES_PER_ASSESSMENT) <= BATCH_OUTPUT_TOKEN_BUDGET
+      && roleFamilyAssessmentMaxTokens(MAX_ROLE_FAMILIES_PER_ASSESSMENT + 1) === BATCH_OUTPUT_TOKEN_BUDGET
+      && MAX_ROLE_FAMILIES_PER_ASSESSMENT > ROLE_FAMILY_HANDOFF_BATCH_SIZE,
+    'the maximum compact role ladders fit one assessment within the usable output budget even though raw research carries fewer at a time');
     assert(rawPlan.length === Math.ceil(cohorts.length / COMPENSATION_COHORT_HANDOFF_BATCH_SIZE)
       && rawPlan[0].length === COMPENSATION_COHORT_HANDOFF_BATCH_SIZE
       && assessmentPlan.length === 2
@@ -539,13 +540,13 @@ export default [{
 }, {
   name: 'Role-family cache preserves later durable batch membership and ordinal after restart',
   run: () => {
-    const roles = Array.from({ length: 9 }, (_, index) => ({
+    const roles = Array.from({ length: ROLE_FAMILY_HANDOFF_BATCH_SIZE + 2 }, (_, index) => ({
       key: `role-${index + 1}`,
       role: `Role ${index + 1}`,
       researchId: `role-id-${index + 1}`,
       // Model an app restart after batch one was accepted and persisted:
-      // its seven ladders are cache hits while batch two remains pending.
-      cached: index < 7 ? { roleFamily: `Role ${index + 1}`, cacheHit: true } : null,
+      // its full slice of ladders are cache hits while batch two remains pending.
+      cached: index < ROLE_FAMILY_HANDOFF_BATCH_SIZE ? { roleFamily: `Role ${index + 1}`, cacheHit: true } : null,
     }));
     const plan = planRoleFamilyResearchBatches(roles);
     const first = plan[0];
@@ -554,7 +555,7 @@ export default [{
       && first.missingEntries.length === 0,
     'the accepted first role-family slice may be skipped only as a whole');
     assert(pendingSecond.batchNumber === 2 && pendingSecond.batchTotal === 2
-      && pendingSecond.batch.map(entry => entry.researchId).join(',') === 'role-id-8,role-id-9'
+      && pendingSecond.batch.map(entry => entry.researchId).join(',') === `role-id-${ROLE_FAMILY_HANDOFF_BATCH_SIZE + 1},role-id-${ROLE_FAMILY_HANDOFF_BATCH_SIZE + 2}`
       && pendingSecond.missingEntries.length === 2,
     'the formerly pending second slice must keep its original batch=2/total=2 prompt metadata and exact membership');
     const beforeRestartPrompt = buildRoleFamilyBatchResearchPrompt(pendingSecond.batch.map(entry => ({ ...entry, cached: null })));
@@ -569,14 +570,16 @@ export default [{
       'a newly cached first slice must not alter the literal raw prompt/hash of the pending second role-family handoff');
 
     const partial = planRoleFamilyResearchBatches(roles.map((entry, index) => ({ ...entry, cached: index < 2 ? entry.cached : null })))[0];
-    assert(partial.batch.length === 7 && partial.cachedEntries.length === 2 && partial.missingEntries.length === 5,
+    assert(partial.batch.length === ROLE_FAMILY_HANDOFF_BATCH_SIZE && partial.cachedEntries.length === 2
+      && partial.missingEntries.length === ROLE_FAMILY_HANDOFF_BATCH_SIZE - 2,
       'a partial stable slice must be reissued intact while retaining its cached rows for non-overwriting merge');
     return { preservedBatch: `${pendingSecond.batchNumber}/${pendingSecond.batchTotal}`, partialCachedRows: partial.cachedEntries.length };
   },
 }, {
   name: 'Compensation raw and assessment plans keep later handoff membership when earlier slices become cached',
   run: () => {
-    const entries = Array.from({ length: 9 }, (_, index) => ({
+    // Two full raw batches plus one trailing cohort.
+    const entries = Array.from({ length: COMPENSATION_COHORT_HANDOFF_BATCH_SIZE * 2 + 1 }, (_, index) => ({
       researchKey: `market-${index + 1}`,
       researchId: `cohort-${index + 1}`,
       group: { jobs: [{}] },
@@ -588,9 +591,11 @@ export default [{
     const cacheAfterFirstRaw = new Set(rawPlan[0].map(entry => entry.researchKey));
     const rawLater = rawPlan.slice(1).flat().map(entry => entry.researchId).join(',');
     const assessmentLater = assessmentPlan.slice(1).flat().map(entry => entry.researchId).join(',');
-    assert(rawPlan.length === 3 && rawPlan[1].map(entry => entry.researchId).join(',') === 'cohort-5,cohort-6,cohort-7,cohort-8'
-      && cacheAfterFirstRaw.size === 4
-      && rawLater === 'cohort-5,cohort-6,cohort-7,cohort-8,cohort-9'
+    const cohortSize = COMPENSATION_COHORT_HANDOFF_BATCH_SIZE;
+    const idRange = (from, to) => entries.slice(from, to).map(entry => entry.researchId).join(',');
+    assert(rawPlan.length === 3 && rawPlan[1].map(entry => entry.researchId).join(',') === idRange(cohortSize, cohortSize * 2)
+      && cacheAfterFirstRaw.size === cohortSize
+      && rawLater === idRange(cohortSize)
       && assessmentLater === entries.slice(MAX_COMPENSATION_COHORTS_PER_ASSESSMENT).map(entry => entry.researchId).join(','),
     'later raw and assessment handoff identities are derived from the full ordered plan, not a cache-filtered remainder');
     return { rawBatches: rawPlan.length, assessmentBatches: assessmentPlan.length };
@@ -622,50 +627,39 @@ export default [{
     return { rawResearchCalls: rawResearchCalls.length, assessmentBatches: assessmentPlan.length };
   },
 }, {
-  name: 'Compensation batching uses bounded multi-batch task IDs while exact legacy prompts retain only their own one-item IDs',
+  name: 'Compensation batching uses bounded multi-batch task IDs and no one-item task IDs remain',
   run: () => {
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-    assert(ROLE_FAMILY_HANDOFF_BATCH_SIZE === 7
-      && COMPENSATION_COHORT_HANDOFF_BATCH_SIZE === 4
+    // Derived from the raw-research envelope (2,048 base; 1,800 per role family; 3,000 per cohort).
+    assert(ROLE_FAMILY_HANDOFF_BATCH_SIZE === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 2048) / 1800)
+      && COMPENSATION_COHORT_HANDOFF_BATCH_SIZE === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 2048) / 3000)
       && source.includes("task: 'job-compensation-research-batch'")
       && source.includes("task: 'job-compensation-assessment-batch'"),
       'raw research remains bounded while its downstream assessment phase has separate deterministic batches');
-    assert(source.includes('legacyResearchStepProbe')
-      && source.includes('legacyAssessmentStepProbe')
-      && source.includes('hasExactDurableRawHandoff(prompt')
-      && source.includes('hasExactDurableTextHandoff(prompt')
-      && source.includes('buildLegacyRoleFamilyResearchPrompt')
-      && source.includes('buildLegacyCompensationResearchPrompt')
-      && source.includes('const legacyCompleteKeys = new Set(prepared')
-      && source.includes("mode === 'v1-complete'")
-      && source.includes('const legacyRawV2Keys = new Set(prepared')
-      && source.includes("mode === 'raw-v2'")
-      && source.includes('recallRunMigration(manualAiRunId')
-      && source.includes('rememberRunMigration(manualAiRunId')
-      && source.includes('hints: { itemCount: group.jobs.length }')
-      && source.includes("const rawDescriptors = [")
-      && source.includes("...legacyRawCandidates.map(candidate => ({ kind: 'legacy', ...candidate }))")
-      && source.includes("...freshRawPlans.map(rawBatch => ({ kind: 'fresh', rawBatch }))")
-      && source.includes('const rawPhase = await mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
-      && source.includes('const legacyAssessmentCandidates = []')
-      && source.includes('await mapAutomaticHandoffs(legacyAssessmentCandidates, HANDOFF_CONCURRENCY')
-      && source.includes('const completedRawDescriptors = await mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
-      && source.includes('const legacyAssessmentDescriptors = completedRawDescriptors')
+    assert(!source.includes('legacyResearchStepProbe')
+      && !source.includes('legacyAssessmentStepProbe')
+      && !source.includes('hasExactDurable')
+      && !source.includes('buildLegacy')
+      && !source.includes('compensation-role-migration')
+      && !source.includes("'job-compensation-research'")
+      && !source.includes("'job-compensation-assessment'")
+      && source.includes('hints: { itemCount: batch.length, roleFamilyCount: batch.length')
+      && source.includes('await mapAutomaticHandoffs(rawBatchPlans, HANDOFF_CONCURRENCY')
       && !source.includes('getExperienceBandsForRoleFamily(')
       && !source.includes('useLegacyIndividualCompensation'),
-    'exact legacy and fresh raw prompts share the rolling automatic scheduler, while their dependent legacy/current extractions remain later phases');
+    'every role-family and market prompt is packed, with no one-item research or extraction path or per-run migration store left');
     assert(source.includes('MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT')
       && packCompensationAssessmentBatches(Array.from({ length: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT + 1 }, (_, index) => ({ researchKey: String(index), group: { jobs: [{}] } }))).length === 2
       && source.includes('const rawFirstParts = []')
       && source.includes('const stableRawBatches = packCompensationResearchBatches(rawFirstParts)')
-      && source.includes('const stableAssessmentBatches = packCompensationAssessmentBatches(freshAll)')
+      && source.includes('const stableAssessmentBatches = packCompensationAssessmentBatches(all)')
       && source.includes('propagate its exact section to later parts below'),
-    'boundary-size and oversized cohorts must use the shared 15,360 assessment formula and reuse their completed raw research');
+    'boundary-size and oversized cohorts must use the shared usable-budget assessment formula and reuse their completed raw research');
     assert(source.includes('mapAutomaticHandoffs(roleResearchBatches, HANDOFF_CONCURRENCY,')
       && source.includes('mapAutomaticHandoffs(roleAssessmentBatches, HANDOFF_CONCURRENCY,')
       && source.includes('mapAutomaticHandoffs(assessmentBatchPlans, HANDOFF_CONCURRENCY,'),
     'independent role-family, salary-research, and salary-assessment batches refill the automatic worker pool while later row parts reuse their first market lookup');
-    const maxRowsForFourCohorts = Math.floor((MANUAL_AI_USABLE_OUTPUT_TOKENS
+    const maxRowsForFourCohorts = Math.floor((BATCH_OUTPUT_TOKEN_BUDGET
       - COMPENSATION_ASSESSMENT_BASE_TOKENS - 4 * COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS)
       / COMPENSATION_ASSESSMENT_PER_ROW_TOKENS);
     assert(compensationCohortAssessmentMaxTokens(4, maxRowsForFourCohorts)
@@ -676,36 +670,26 @@ export default [{
       && compensationCohortAssessmentFits(1, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT)
       && !compensationCohortAssessmentFits(1, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT + 1),
     'the shared compensation cap must match the batcher boundary exactly');
-    const restartLayout = Array.from({ length: 8 }, (_, index) => ({ key: `role-${index}`, legacy: index === 0, cached: index === 0 }));
-    const firstPassV2 = restartLayout.filter(entry => !entry.legacy).map(entry => entry.key);
-    const restartedV2 = restartLayout.filter(entry => !(entry.cached && entry.legacy)).map(entry => entry.key);
-    assert(firstPassV2.join(',') === restartedV2.join(','),
-      'a completed legacy role must remain outside the v2 layout after restart rather than inserting a newly cached identity before a pending batch');
-    // A raw-only v1 role can be one member of an accepted v2 twenty-role
-    // extraction.  On restart it is now cached, just like its fresh-v2
-    // siblings, so the whole completed slice disappears rather than issuing a
-    // different prompt with nineteen CACHED markers and one raw legacy row.
-    const mixedAcceptedRestart = Array.from({ length: 21 }, (_, index) => ({
+    // On restart every member of an accepted twenty-role extraction is cached,
+    // so the whole completed slice disappears rather than issuing a different
+    // prompt with nineteen CACHED markers.
+    const mixedAcceptedRestart = Array.from({ length: MAX_ROLE_FAMILIES_PER_ASSESSMENT + 1 }, (_, index) => ({
       key: `mixed-role-${index}`,
       researchId: `mixed-id-${index}`,
-      legacyRawV2: index === 0,
-      cached: index < 20 ? { roleFamily: `Mixed Role ${index}` } : null,
+      cached: index < MAX_ROLE_FAMILIES_PER_ASSESSMENT ? { roleFamily: `Mixed Role ${index}` } : null,
     }));
     const mixedRestartPlan = planRoleFamilyAssessmentBatches(mixedAcceptedRestart);
     assert(mixedRestartPlan.length === 2
       && mixedRestartPlan[0].missingEntries.length === 0
       && mixedRestartPlan[1].batchNumber === 2
       && mixedRestartPlan[1].batchTotal === 2
-      && mixedRestartPlan[1].batch.map(entry => entry.researchId).join(',') === 'mixed-id-20',
-    'an accepted mixed raw-v1 + fresh-v2 assessment slice must be skipped as a whole while the later pending slice keeps its ordinal and membership');
-    assert(source.includes('const legacyCachedRawV2 = new Map(prepared')
-      && source.includes('if (!missing.length) return results;')
-      && source.includes('!legacyCachedRawV2.has(entry.key)')
-      && source.includes("if (entry.legacyRawResearch && !entry.cached)")
+      && mixedRestartPlan[1].batch.map(entry => entry.researchId).join(',') === `mixed-id-${MAX_ROLE_FAMILIES_PER_ASSESSMENT}`,
+    'an accepted assessment slice must be skipped as a whole while the later pending slice keeps its ordinal and membership');
+    assert(source.includes('if (!missing.length) return results;')
       && source.includes('saveRoleFamilyExperienceBandsBatch(validEntries.map')
       && source.includes('saveRoleFamilyExperienceBandsBatch,'),
-    'a cached raw-only v1 role stays a cached annotated v2-plan member, and all valid rows from an accepted v2 slice are persisted in one Settings write');
-    return { roleRawBatch: 7, roleAssessmentBatch: 20, cohortRawBatch: 4, cohortAssessmentBatch: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT, exactLegacyMigration: true, restartLayoutStable: true, mixedAcceptedSliceSkipped: true, atomicV2CacheSave: true, maxRowsSingleCohort: MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT };
+    'all valid rows from an accepted slice are persisted in one Settings write');
+    return { roleRawBatch: 7, roleAssessmentBatch: 20, cohortRawBatch: 4, cohortAssessmentBatch: MAX_COMPENSATION_COHORTS_PER_ASSESSMENT, mixedAcceptedSliceSkipped: true, atomicCacheSave: true, maxRowsSingleCohort: MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT };
   },
 }, {
   name: 'classifyCompensationFitEligibility: the configured boundary is inclusive and an unscored job is not a low-scoring job',
@@ -911,7 +895,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const handler = source.slice(handlerStart, source.indexOf("handleSafe(", handlerStart + 1));
     assert(handlerStart >= 0 && handler.includes('await resolveBoardCompensationCareerInputs(jobs, { signal, salaryCareerSnapshotId })')
       && source.includes('dependencies.resolveCompensationCareerInputs || resolveCompensationCareerInputs')
-      && handler.includes('manualAiRunId, careerInputs,'),
+      && handler.includes('signal, careerInputs, salaryCareerSnapshotId'),
     'the real IPC handler must resolve approved inputs itself before passing the host map into compensation research');
     return { uniqueApprovedReads: reads.length, resolvedSnapshots: inputs.size };
   },
@@ -1132,9 +1116,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     assert(start >= 0 && end > start, 'the role-family experience-band resolver must remain a distinct audited path');
     assert(/callLLMRaw\([\s\S]*?grounding:\s*true/.test(resolver),
       'experience-band research must use the raw grounded path; structured calls cannot activate Claude web search');
-    assert(/callLLMText\([\s\S]*?responseSchema:\s*ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA/.test(resolver)
-      && resolver.includes('const rawPhase = await mapAutomaticHandoffs(rawDescriptors, HANDOFF_CONCURRENCY')
-      && resolver.includes('await mapAutomaticHandoffs(legacyAssessmentCandidates, HANDOFF_CONCURRENCY'),
+    assert(/callLLMText\([\s\S]*?responseSchema:\s*ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA/.test(resolver)
+      && resolver.includes('await mapAutomaticHandoffs(roleAssessmentBatches, HANDOFF_CONCURRENCY'),
       'grounded role-family prose must still go through schema-constrained extraction before persistence');
     return { grounded: true };
   },

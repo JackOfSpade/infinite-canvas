@@ -19,7 +19,7 @@
  *       providerGatheredAt?: number, collectionCompletedAt?: number,
  *       collectionDisposition?: 'user-finished-partial',
  *       collectionDiagnostics?: { disposition, startedAt, completedAt, unfinishedSourceCount },
- *       inputs: { queries, profileFingerprint, targetRole, jobPreferences,
+ *       inputs: { queries, profileFingerprint, jobPreferences,
  *                 jobPreferencePlan, canonicalLocation, searchWindow,
  *                 maxAgeDays, nodeId },
  *       sources: { [sourceId]: { status: 'pending'|'done'|'skipped'|'blocked',
@@ -1273,7 +1273,7 @@ export function sanitizeJobSearchWindow(value) {
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, careerSnapshotId = null, targetRole = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [], operationAuthority = null, __testOnlyAllowUnpinned = false }) {
+async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, careerSnapshotId = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [], operationAuthority = null, __testOnlyAllowUnpinned = false }) {
   const ownerNodeId = normalizeNodeId(nodeId);
   const files = runFilesForCanvas(canvasFilePath, ownerNodeId);
   if (!files) return null;
@@ -1297,7 +1297,6 @@ async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], pro
       queries,
       profileFingerprint: normalizeJobRunProfileFingerprint(profileFingerprint),
       careerSnapshotId: normalizedCareerSnapshotId,
-      targetRole,
       jobPreferences: sanitizeJobPreferences(jobPreferences),
       jobPreferencePlan: sanitizeJobPreferencePlan(jobPreferencePlan),
       canonicalLocation,

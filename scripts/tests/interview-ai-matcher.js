@@ -6,8 +6,9 @@ import { createInterviewAiMatcher as createPooledMatcher, parseInterviewAiSelect
 // Pool concurrency and the production default are covered in speculative-pool.
 const createInterviewAiMatcher = options => createPooledMatcher({ ...options, config: { ...options?.config, poolSize: 1 } });
 import { createInterviewAiTransport } from '../../electron/interviewAiTransports.js';
+import { CLAUDE_MAX_OUTPUT_TOKENS } from '../../electron/ipc/claudeApplicationRunner.js';
 
-// Synthetic fixtures only; no CLI or bridge/model request is made by this suite.
+// Synthetic fixtures only; no CLI or model request is made by this suite.
 const bank = { cards: [
   { id: 'project', question: 'Describe a project.', headline: { text: 'I built a garden watering timer.' } },
   { id: 'team', question: 'Describe working with others.', headline: { text: 'We divided community garden tasks.' } },
@@ -15,15 +16,15 @@ const bank = { cards: [
 const answer = (cardId = 'project', kind = 'question', confidence = 0.95) => JSON.stringify({ kind, cardId, confidence });
 function stub(extra = {}) {
   const calls = { starts: [], matches: [], closes: 0 };
-  const matcher = createInterviewAiMatcher({ bank, config: { transport: 'chatgpt-bridge' }, transportFactory: async () => ({
+  const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => ({
     async start(value) { calls.starts.push(value); },
     async match(value) { calls.matches.push(value); return answer(); },
     close() { calls.closes += 1; }, ...extra,
   }) });
   return { matcher, calls };
 }
-const HELP = '--print --model --output-format --tools --system-prompt --no-session-persistence --strict-mcp-config --mcp-config --safe-mode --effort --input-format --verbose --include-partial-messages --sandbox --config --json --skip-git-repo-check --ignore-user-config --ephemeral --ignore-rules';
-function fakeCli({ codexTool = false, malformedEvent, matchResults = [], deferMatches = false } = {}) {
+const HELP = '--print --model --output-format --tools --system-prompt --no-session-persistence --strict-mcp-config --mcp-config --safe-mode --effort --input-format --verbose --include-partial-messages';
+function fakeCli({ malformedEvent, matchResults = [], deferMatches = false } = {}) {
   const children = [];
   const writes = [];
   const pendingMatches = [];
@@ -35,15 +36,8 @@ function fakeCli({ codexTool = false, malformedEvent, matchResults = [], deferMa
     const record = { binary, args, options, child }; children.push(record);
     const emit = value => queueMicrotask(() => child.stdout.emit('data', value));
     child.kill = signal => { child.signals.push(signal); child.emit('close', 0); };
-    child.stdin.end = input => {
+    child.stdin.end = () => {
       if (args.includes('--help')) emit(HELP);
-      else {
-        writes.push(input);
-        emit(binary === 'codex-test' ? [
-          ...(codexTool ? [{ type: 'item.completed', item: { type: 'command_execution' } }] : []),
-          { type: 'item.completed', item: { type: 'agent_message', text: answer() } }, { type: 'turn.completed' },
-        ].map(value => JSON.stringify(value)).join('\n') : JSON.stringify({ type: 'result', subtype: 'success', result: answer() }));
-      }
       queueMicrotask(() => child.emit('close', 0));
     };
     child.stdin.write = (input, callback) => {
@@ -78,7 +72,7 @@ export default [
   } },
   { name: 'interview AI matcher: cancelled warm callers detach while their turn drains before the next question', async run() {
     const fake = fakeCli({ deferMatches: true, matchResults: [answer('team'), answer('project')] });
-    const matcher = createInterviewAiMatcher({ bank, config: { transport: 'claude-warm', claudeBin: 'claude-test' },
+    const matcher = createInterviewAiMatcher({ bank, config: { claudeBin: 'claude-test' },
       transportFactory: (config, options) => createInterviewAiTransport(config, { ...options, spawn: fake.spawn }) });
     const waitFor = async condition => {
       for (let attempts = 0; attempts < 100 && !condition(); attempts += 1) await new Promise(resolve => setImmediate(resolve));
@@ -103,9 +97,29 @@ export default [
       assert.equal(fake.writes.length, 3); assert.deepEqual(fake.children[1].child.signals, []);
     } finally { await matcher.close(); }
   } },
+  { name: 'interview AI transports: children get the output-token limit and no ANTHROPIC_ or provider-switch variables', async run() {
+    const saved = {};
+    const injected = { ANTHROPIC_API_KEY: 'synthetic-key', ANTHROPIC_BASE_URL: 'https://synthetic.invalid', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1', CLAUDECODE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDE_CODE_MAX_OUTPUT_TOKENS: '1' };
+    for (const [key, value] of Object.entries(injected)) { saved[key] = process.env[key]; process.env[key] = value; }
+    const fake = fakeCli();
+    const transport = await createInterviewAiTransport({ claudeBin: 'claude-test' }, { spawn: fake.spawn });
+    try {
+      await transport.start({ instructions: 'synthetic cards' });
+      assert(fake.children.length > 0, 'the transport spawned at least one child');
+      for (const { options } of fake.children) {
+        assert.equal(options.env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, CLAUDE_MAX_OUTPUT_TOKENS);
+        assert.deepEqual(Object.keys(options.env).filter(key => key.startsWith('ANTHROPIC_') || key.startsWith('CLAUDE_CODE_USE_')), []);
+        assert.equal(options.env.CLAUDECODE, undefined);
+        assert.equal(options.env.CLAUDE_CODE_ENTRYPOINT, undefined);
+      }
+    } finally {
+      await transport.close();
+      for (const [key, value] of Object.entries(saved)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
+    }
+  } },
   { name: 'interview AI transports: cancelling a queued warm question never sends it or retires the process', async run() {
     const fake = fakeCli({ deferMatches: true });
-    const transport = await createInterviewAiTransport({ transport: 'claude-warm', claudeBin: 'claude-test' }, { spawn: fake.spawn });
+    const transport = await createInterviewAiTransport({ claudeBin: 'claude-test' }, { spawn: fake.spawn });
     try {
       await transport.start({ instructions: 'synthetic cards' });
       const first = transport.match({ question: 'Describe a project.' });
@@ -148,20 +162,18 @@ export default [
     } finally { await matcher.close(); }
   } },
   { name: 'interview AI transports: saved-evidence lock includes the prior question without inventing a card id', async run() {
-    const calls = [];
-    const transport = await createInterviewAiTransport({ transport: 'chatgpt-bridge' }, { request: async input => {
-      calls.push(input); return JSON.parse(answer('none', 'follow-up'));
-    } });
+    const fake = fakeCli({ matchResults: [answer('none', 'follow-up')] });
+    const transport = await createInterviewAiTransport({ claudeBin: 'claude-test' }, { spawn: fake.spawn });
     try {
       await transport.start({ instructions: 'synthetic cards' });
       await transport.match({ question: 'What was the result of that?', previousPlanLocked: true, previousQuestion: 'Tell me about leading a team.' });
-      assert.deepEqual(JSON.parse(calls[0].prompt), { question: 'What was the result of that?', previousPlanLocked: true, previousQuestion: 'Tell me about leading a team.' });
+      assert.deepEqual(JSON.parse(fake.writes[1].message.content), { question: 'What was the result of that?', previousPlanLocked: true, previousQuestion: 'Tell me about leading a team.' });
     } finally { await transport.close(); }
   } },
   { name: 'interview AI matcher: a queued bank retains the explicit old locked id only for follow-ups', async run() {
     const calls = [];
     let kind = 'follow-up';
-    const matcher = createInterviewAiMatcher({ bank, config: { transport: 'chatgpt-bridge' }, transportFactory: async () => ({
+    const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => ({
       async start() {}, async match(input) { calls.push(input); return answer('old-locked', kind); }, async close() {},
     }) });
     const context = { previousCardId: 'old-locked', previousCardQuestion: 'The original locked prepared question?', previousQuestion: 'The prior spoken turn?' };
@@ -176,104 +188,82 @@ export default [
     } finally { await matcher.close(); }
   } },
   { name: 'interview AI matcher: benchmark defaults select warm Opus with independent startup and question deadlines', async run() {
-    assert.deepEqual(INTERVIEW_AI_MATCH_DEFAULTS, { transport: 'claude-warm', model: 'opus', effort: 'default',
+    assert.deepEqual(INTERVIEW_AI_MATCH_DEFAULTS, { model: 'opus', effort: 'default',
       timeoutMs: 2500, initTimeoutMs: 10000, latencyThresholdMs: 2500, minConfidence: 0.55 });
     const configs = [];
-    for (const config of [{}, { transport: 'chatgpt-bridge' }, { transport: 'codex', model: 'synthetic-codex', effort: 'low' }]) {
+    for (const config of [{}, { model: 'synthetic-model', effort: 'low' }]) {
       const matcher = createInterviewAiMatcher({ bank, config, transportFactory: async settings => {
         configs.push(settings); return { start: async () => {}, match: async () => answer(), close() {} };
       } });
       try { assert.equal((await matcher.match('Describe a project.')).source, 'ai'); }
       finally { await matcher.close(); }
     }
-    assert.deepEqual(configs.map(({ transport, model, effort }) => ({ transport, model, effort })), [
-      { transport: 'claude-warm', model: 'opus', effort: 'default' },
-      { transport: 'chatgpt-bridge', model: null, effort: null },
-      { transport: 'codex', model: 'synthetic-codex', effort: 'low' },
+    assert.deepEqual(configs.map(({ model, effort }) => ({ model, effort })), [
+      { model: 'opus', effort: 'default' },
+      { model: 'synthetic-model', effort: 'low' },
     ]);
   } },
-  { name: 'interview AI matcher: failed warm initialization or question retries cold Opus before Approximate', async run() {
+  { name: 'interview AI matcher: a failed warm initialization or question reports Approximate for that turn and restarts the warm process', async run() {
     for (const stage of ['start', 'match']) {
-      const calls = []; const configs = []; const closed = [];
-      const matcher = createInterviewAiMatcher({ bank, transportFactory: async config => {
-        const kind = config.transport; configs.push(config);
+      let creations = 0; const calls = []; const closed = [];
+      const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => {
+        const index = ++creations;
         return { start: async value => {
-          calls.push(`${kind}:start`); assert.match(value.instructions, /garden watering/u);
-          if (kind === 'claude-warm' && stage === 'start') throw new Error('missing warm capability');
+          calls.push(`${index}:start`); assert.match(value.instructions, /garden watering/u);
+          if (index === 1 && stage === 'start') throw new Error('missing warm capability');
         }, match: async value => {
-          calls.push(`${kind}:match`); assert.equal(value.question, 'Describe a project.');
-          if (kind === 'claude-warm') throw new Error('process exited');
+          calls.push(`${index}:match`); assert.equal(value.question, 'Describe a project.');
+          if (index === 1) throw new Error('process exited');
           return answer('team');
-        }, close() { closed.push(kind); } };
+        }, close() { closed.push(index); } };
       } });
       try {
         const result = await matcher.match('Describe a project.');
-        assert.equal(result.source, 'ai'); assert.equal(result.cardId, 'team'); assert.equal(result.approximate, false);
-        assert.deepEqual(configs.map(({ transport, model, effort }) => ({ transport, model, effort })), [
-          { transport: 'claude-warm', model: 'opus', effort: 'default' },
-          { transport: 'claude-cold', model: 'opus', effort: 'default' },
-        ]);
-        assert.deepEqual(calls, stage === 'start' ? ['claude-warm:start', 'claude-cold:start', 'claude-cold:match']
-          : ['claude-warm:start', 'claude-warm:match', 'claude-cold:start', 'claude-cold:match']);
-        assert.deepEqual(closed, ['claude-warm', 'claude-cold']);
+        assert.equal(result.source, 'approximate'); assert.equal(result.reason, 'unavailable'); assert.equal(result.approximate, true);
+        assert.equal(creations, 1, 'the failed turn does not open a second route');
+        for (let attempts = 0; attempts < 100 && creations < 2; attempts += 1) await new Promise(resolve => setTimeout(resolve, 10));
+        assert.equal(creations, 2, 'the warm process restarts during idle time');
+        assert.deepEqual(closed, [1]);
+        const next = await matcher.match('Describe a project.');
+        assert.equal(next.source, 'ai'); assert.equal(next.cardId, 'team'); assert.equal(creations, 2);
+        assert.deepEqual(calls, stage === 'start' ? ['1:start', '2:start', '2:match'] : ['1:start', '1:match', '2:start', '2:match']);
       } finally { await matcher.close(); }
     }
   } },
-  { name: 'interview AI matcher: both Claude routes failing uses conservative labelled Approximate without bridge', async run() {
+  { name: 'interview AI matcher: a failed Claude turn uses conservative labelled Approximate', async run() {
     for (const question of ['Can you describe a project?', 'Can you describe a project? Describe working with others.']) {
-      const routes = [];
-      const matcher = createInterviewAiMatcher({ bank, transportFactory: async config => {
-        routes.push(config.transport);
+      let creations = 0;
+      const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => {
+        creations += 1;
         return { start: async () => {}, match: async () => { throw new Error('unavailable'); }, close() {} };
       } });
       try {
         const result = await matcher.match(question);
-        assert.deepEqual(routes, ['claude-warm', 'claude-cold']);
+        assert.equal(creations, 1);
         assert.equal(result.source, 'approximate'); assert.equal(result.confidence, 0); assert.match(result.label, /Approximate/u);
         assert.equal(result.cardId, question === 'Can you describe a project?' ? 'project' : 'none');
       } finally { await matcher.close(); }
     }
   } },
-  { name: 'interview AI matcher: successful warm abstention never retries cold or overrides confidence', async run() {
+  { name: 'interview AI matcher: successful abstention never overrides confidence', async run() {
     for (const selection of [answer('none'), answer('project', 'question', 0.1)]) {
-      const routes = [];
-      const matcher = createInterviewAiMatcher({ bank, transportFactory: async config => {
-        routes.push(config.transport); return { start: async () => {}, match: async () => selection, close() {} };
+      let creations = 0;
+      const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => {
+        creations += 1; return { start: async () => {}, match: async () => selection, close() {} };
       } });
       try {
         const result = await matcher.match('Describe a project.');
-        assert.equal(result.cardId, 'none'); assert.equal(result.source, 'ai'); assert.deepEqual(routes, ['claude-warm']);
+        assert.equal(result.cardId, 'none'); assert.equal(result.source, 'ai'); assert.equal(creations, 1);
       } finally { await matcher.close(); }
     }
   } },
-  { name: 'interview AI matcher: cold retry shares the question deadline and cancellation closes it', async run() {
-    for (const cancel of [false, true]) {
-      const abort = new AbortController(); let entered; let coldSignal; const closed = [];
-      const began = new Promise(resolve => { entered = resolve; });
-      const matcher = createInterviewAiMatcher({ bank, config: { timeoutMs: 40 }, transportFactory: async config => ({
-        start: async () => {}, match: async ({ signal }) => {
-          if (config.transport === 'claude-warm') throw new Error('warm failed');
-          coldSignal = signal; entered(); return new Promise(() => {});
-        }, close() { closed.push(config.transport); },
-      }) });
-      try {
-        const pending = matcher.match('Describe a project.', { signal: abort.signal });
-        await began;
-        if (cancel) { abort.abort(); await assert.rejects(pending, { name: 'AbortError' }); }
-        else { assert.equal((await pending).reason, 'timeout'); }
-        assert.equal(coldSignal.aborted, true); assert.deepEqual(closed, ['claude-warm', 'claude-cold']);
-      } finally { await matcher.close(); }
-    }
-  } },
-  { name: 'interview AI matcher: closing waits for cold fallback resources to finish cleanup exactly once', async run() {
+  { name: 'interview AI matcher: closing waits for the transport to finish cleanup exactly once', async run() {
     let entered; let finishCleanup; let closeCalls = 0; let fullyClosed = false;
     const began = new Promise(resolve => { entered = resolve; });
     const cleanup = new Promise(resolve => { finishCleanup = resolve; });
-    const matcher = createInterviewAiMatcher({ bank, transportFactory: async config => ({
-      start: async () => {}, match: async () => {
-        if (config.transport === 'claude-warm') throw new Error('warm failed');
-        entered(); return new Promise(() => {});
-      }, close() { if (config.transport === 'claude-cold') { closeCalls += 1; return cleanup; } },
+    const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => ({
+      start: async () => {}, match: async () => { entered(); return new Promise(() => {}); },
+      close() { closeCalls += 1; return cleanup; },
     }) });
     const pending = matcher.match('Describe a project.');
     const cancelled = assert.rejects(pending, { name: 'AbortError' });
@@ -281,7 +271,7 @@ export default [
       await began;
       const closing = matcher.close().then(() => { fullyClosed = true; });
       await cancelled; await Promise.resolve();
-      assert.equal(fullyClosed, false, 'close must join the cold process termination and temporary-directory cleanup');
+      assert.equal(fullyClosed, false, 'close must join the process termination and temporary-directory cleanup');
       finishCleanup(); await closing; await matcher.close();
       assert.equal(closeCalls, 1); assert.equal(fullyClosed, true);
     } finally { finishCleanup(); await matcher.close(); }
@@ -522,14 +512,14 @@ export default [
   } },
   { name: 'interview AI matcher: environment configuration overrides benchmark defaults explicitly', run() {
     assert.deepEqual(interviewAiMatcherConfigFromEnv({}), {});
-    assert.deepEqual(interviewAiMatcherConfigFromEnv({ INTERVIEW_MATCH_TRANSPORT: 'claude-warm', INTERVIEW_MATCH_MODEL: 'synthetic-model',
+    assert.deepEqual(interviewAiMatcherConfigFromEnv({ INTERVIEW_MATCH_MODEL: 'synthetic-model',
       INTERVIEW_MATCH_EFFORT: 'low', INTERVIEW_MATCH_TIMEOUT_MS: '2000', INTERVIEW_MATCH_INIT_TIMEOUT_MS: '6000', INTERVIEW_MATCH_LATENCY_THRESHOLD_MS: '2500' }),
-    { transport: 'claude-warm', model: 'synthetic-model', effort: 'low', timeoutMs: 2000, initTimeoutMs: 6000, latencyThresholdMs: 2500 });
+    { model: 'synthetic-model', effort: 'low', timeoutMs: 2000, initTimeoutMs: 6000, latencyThresholdMs: 2500 });
     assert.deepEqual(interviewAiMatcherConfigFromEnv({ INTERVIEW_MATCH_TIMEOUT_MS: '-1', INTERVIEW_MATCH_MODEL: 'bad\nmodel' }), {});
   } },
   { name: 'interview AI transports: warm stream-json retains one process and sends context once', async run() {
     const fake = fakeCli();
-    const matcher = createInterviewAiMatcher({ bank, config: { transport: 'claude-warm', model: 'synthetic-model', effort: 'low', claudeBin: 'claude-test' },
+    const matcher = createInterviewAiMatcher({ bank, config: { model: 'synthetic-model', effort: 'low', claudeBin: 'claude-test' },
       context: { extensions: { project: [{ id: 'extension-1', text: 'Checked the timer in the garden.', exampleHook: 'Garden timer' }] } },
       transportFactory: (config, options) => createInterviewAiTransport(config, { ...options, spawn: fake.spawn }) });
     await matcher.start(); await matcher.match('Describe a project.'); await matcher.match('What did you make?');
@@ -547,30 +537,27 @@ export default [
     await matcher.close(); assert.deepEqual(processRecord.child.signals, ['SIGTERM']);
     await assert.rejects(fs.stat(processRecord.options.cwd), { code: 'ENOENT' });
   } },
-  { name: 'interview AI matcher: invalid selection retries cold for one turn and preserves the healthy warm process', async run() {
+  { name: 'interview AI matcher: an invalid selection reports Approximate for that turn and preserves the healthy warm process', async run() {
     const fake = fakeCli({ matchResults: ['not a selection', answer('unknown'), answer('team')] });
-    const matcher = createInterviewAiMatcher({ bank, config: { transport: 'claude-warm', claudeBin: 'claude-test' },
+    const matcher = createInterviewAiMatcher({ bank, config: { claudeBin: 'claude-test' },
       transportFactory: (config, options) => createInterviewAiTransport(config, { ...options, spawn: fake.spawn }) });
     try {
       for (let turn = 0; turn < 2; turn += 1) {
         const fallback = await matcher.match('Describe a project.');
-        assert.equal(fallback.cardId, 'project'); assert.equal(fallback.source, 'ai'); assert.equal(fallback.reason, null);
+        assert.equal(fallback.source, 'approximate'); assert.equal(fallback.reason, 'invalid'); assert.equal(fallback.confidence, 0);
         assert.deepEqual(fake.children[1].child.signals, []);
       }
       const result = await matcher.match('What did you do with others?');
-      assert.equal(result.source, 'ai'); assert.equal(result.cardId, 'team'); assert.equal(fake.children.length, 6);
-      assert.equal(fake.writes.filter(message => typeof message === 'object' && message.message.content.includes('Reply only READY.')).length, 1);
-      const providerCalls = fake.children.filter(child => !child.args.includes('--help'));
-      assert.equal(providerCalls.length, 3, 'one warm process and two cold retries must use the production defaults');
-      for (const { args } of providerCalls) {
-        assert.equal(args[args.indexOf('--model') + 1], 'opus');
-        assert.equal(args.includes('--effort'), false, 'default effort must leave Claude effort selection at its default');
-      }
+      assert.equal(result.source, 'ai'); assert.equal(result.cardId, 'team'); assert.equal(fake.children.length, 2, 'capability probe and one warm process only');
+      assert.equal(fake.writes.filter(message => message.message.content.includes('Reply only READY.')).length, 1);
+      const args = fake.children[1].args;
+      assert.equal(args[args.indexOf('--model') + 1], 'opus');
+      assert.equal(args.includes('--effort'), false, 'default effort must leave Claude effort selection at its default');
     } finally { await matcher.close(); }
   } },
   { name: 'interview AI matcher: protocol failures retire the process before a later turn recovers', async run() {
     let creations = 0; let closes = 0;
-    const matcher = createInterviewAiMatcher({ bank, config: { transport: 'chatgpt-bridge' }, transportFactory: async () => {
+    const matcher = createInterviewAiMatcher({ bank, transportFactory: async () => {
       const current = ++creations;
       return { start: async () => {}, match: async () => {
         if (current === 1) throw Object.assign(new Error('broken protocol'), { code: 'TRANSPORT_INVALID_RESPONSE' });
@@ -586,45 +573,37 @@ export default [
     for (const malformedEvent of [null, { type: 'assistant', message: { content: 'not an array' } },
       { type: 'assistant', message: { content: {} } }, { type: 'assistant', message: { content: [null] } }]) {
       const fake = fakeCli({ malformedEvent });
-      const transport = await createInterviewAiTransport({ transport: 'claude-warm', claudeBin: 'claude-test' }, { spawn: fake.spawn });
+      const transport = await createInterviewAiTransport({ claudeBin: 'claude-test' }, { spawn: fake.spawn });
       try {
         await transport.start({ instructions: 'SYNTHETIC CARDS' });
         await assert.rejects(transport.match({ question: 'Describe a project.' }), /TRANSPORT_INVALID_RESPONSE/u);
       } finally { await transport.close(); }
     }
   } },
-  ...['claude-cold', 'codex'].map(kind => ({ name: `interview AI transports: ${kind} uses tool-free isolated one-shot calls`, async run() {
-    const fake = fakeCli();
-    const transport = await createInterviewAiTransport({ transport: kind, model: 'synthetic-model', effort: 'low', claudeBin: 'claude-test', codexBin: 'codex-test' }, { spawn: fake.spawn });
-    try {
-      await transport.start({ instructions: 'SYNTHETIC CARDS', signal: new AbortController().signal });
-      assert.equal(parseInterviewAiSelection(await transport.match({ question: 'What did you build?' }), bank.cards).cardId, 'project');
-      assert.match(fake.writes[0], /SYNTHETIC CARDS/u); assert.equal(fake.children[1].options.shell, false);
-      assert.ok(fake.children[1].args.includes(kind === 'codex' ? '--ignore-user-config' : '--no-session-persistence'));
-    } finally { await transport.close(); }
-  } })),
-  { name: 'interview AI transports: Codex tool events are rejected before selecting a card', async run() {
-    const fake = fakeCli({ codexTool: true });
-    const transport = await createInterviewAiTransport({ transport: 'codex', codexBin: 'codex-test' }, { spawn: fake.spawn });
+  { name: 'interview AI transports: warm tool events are rejected before selecting a card', async run() {
+    const fake = fakeCli({ malformedEvent: { type: 'assistant', message: { content: [{ type: 'tool_use' }] } } });
+    const transport = await createInterviewAiTransport({ claudeBin: 'claude-test' }, { spawn: fake.spawn });
     try {
       await transport.start({ instructions: 'cards' });
       await assert.rejects(transport.match({ question: 'What did you build?' }), /TRANSPORT_TOOL_USE/u);
     } finally { await transport.close(); }
   } },
-  { name: 'interview AI transports: bridge uses nonApiAi structured selection and propagates cancellation', async run() {
-    const calls = [];
-    const transport = await createInterviewAiTransport({ transport: 'chatgpt-bridge' }, { request: async options => { calls.push(options); return JSON.parse(answer()); } });
+  { name: 'interview AI transports: partial-aware per-turn message shares one context prefix across pooled warm processes', async run() {
+    const fake = fakeCli();
+    const matcher = createPooledMatcher({ bank, config: { poolSize: 2, claudeBin: 'claude-test' },
+      transportFactory: (config, options) => createInterviewAiTransport(config, { ...options, spawn: fake.spawn }) });
     try {
-      const abort = new AbortController(); await transport.start({ instructions: 'compact prepared cards' });
-      const result = await transport.match({ question: 'What did you create?', previousCardId: 'team',
-        previousQuestion: 'Tell me about teamwork.', previousCardQuestion: bank.cards[1].question, signal: abort.signal });
-      assert.equal(result.cardId, 'project'); assert.equal(calls[0].task, 'interview-live-match');
-      assert.equal(calls[0].cachedPrefix, 'compact prepared cards'); assert.equal(calls[0].signal, abort.signal);
-      assert.deepEqual(JSON.parse(calls[0].prompt), { question: 'What did you create?', previousCardId: 'team',
-        previousQuestion: 'Tell me about teamwork.', previousCardQuestion: bank.cards[1].question });
-      assert.deepEqual(calls[0].responseSchema.required, ['kind', 'cardId', 'confidence']);
-      assert.equal(calls[0].responseSchema.additionalProperties, false);
-      assert.deepEqual(calls[0].responseSchema.properties.kind.enum, ['question', 'follow-up', 'not-question']);
-    } finally { await transport.close(); }
+      await matcher.start();
+      await matcher.select({ text: 'Tell me about projects', partial: true });
+      await matcher.select({ text: 'Tell me about projects.' });
+      const contents = fake.writes.map(message => message.message.content);
+      const prefixes = contents.filter(content => content.includes('Reply only READY.'));
+      assert.equal(prefixes.length, 2); assert.equal(prefixes[0], prefixes[1]);
+      assert.match(prefixes[0], /When the user message has partial: true, the interviewer is still mid-sentence:/u);
+      const messages = contents.filter(content => !content.includes('Reply only READY.')).map(content => JSON.parse(content));
+      assert.equal(messages.length, 2);
+      assert.equal(messages.find(message => message.question === 'Tell me about projects').partial, true);
+      assert.equal(Object.hasOwn(messages.find(message => message.question === 'Tell me about projects.'), 'partial'), false);
+    } finally { await matcher.close(); }
   } },
 ];

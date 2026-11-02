@@ -41,7 +41,7 @@ import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { fixedPageTypeAreaHeight, formatTypeAreaUtilization, pageTextMeasurementExpression, renderedPageLayoutIssues, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
 import { createApplicationConvergenceTracker } from '../test-dependencies.js';
-import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, RESUME_PARSE_SCHEMA, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
+import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { buildJobBoardDiagnostics, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { closeReportDiagnostic, projectReportDiagnostic, redactReportLocalPathsInText, redactReportLogSecrets, redactReportOpaqueIds, redactReportPath, redactReportUrl, redactReportUrlsInText, renderSessionTraceBlocks } from '../../electron/ipc/bugReport/helpers.js';
@@ -7470,9 +7470,7 @@ export default [
         && gap.required.join('|') === 'requirementText|priority|jobEvidence|status|candidateEvidence|impact'
         && gap.properties.status.enum.join('|') === 'not_documented|contradicted|unclear'
         && scoreProperties.experienceAssessment.properties.categorySpecificExperience.items.required
-          .join('|') === 'category|requiredMinimumYears|roleIds|years|candidateEvidence|jobEvidence|explanation'
-        && RESUME_PARSE_SCHEMA.required.includes('workHistory')
-        && RESUME_PARSE_SCHEMA.properties.workHistory.items.required.join('|') === 'id|title|employer|startDate|endDate',
+          .join('|') === 'category|requiredMinimumYears|roleIds|years|candidateEvidence|jobEvidence|explanation',
       'schema keeps a bounded decisive-evidence inventory while requiring complete compact hard-gap coverage and optional tenure');
       return { requiredScoreFields: JOB_SCORING_SCHEMA.properties.scores.items.required.length };
     },
@@ -10145,7 +10143,6 @@ export default [
       assert(search.includes('const careerData = snapshot?.careerData || laneTurnData.careerData || \'\';')
         && search.includes('if (!snapshot || !profile || savedJobs.length === 0')
         && !search.includes('if (!snapshot || !profile || !careerData || savedJobs.length === 0)')
-        && /careerData,\s+activeTargetRole/.test(search)
         && search.includes('jobs: jobsToEvaluate,'),
       'resuming a saved scrape restores raw career evidence when available while keeping legacy profile-only snapshots resumable');
       assert(search.includes('function isSavedAnalysisForCurrentHub')

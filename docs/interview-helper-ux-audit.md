@@ -54,6 +54,8 @@ There is **no token streaming**: first evidence and the complete rail become ava
 
 ### Prepare and AI transport, separately
 
+> Update: the `llm.js` / `requestNonApiAi` / bridge route described in this section is removed. The research, assessment and answer-bank calls run only through `electron/ipc/interviewClaudeTransport.js`.
+
 `src/nodes/InterviewHelperNode.jsx:616` starts a recoverable preparation run and calls `prepareInterviewBrief`. `electron/preload.js:162` maps that to `build-interview-brief`; `electron/ipc/interviewPreparation.js:902` validates the arguments and runs `buildInterviewBrief` (`:852`). It loads/revalidates the private captured application artifact, then makes **two serial AI handoffs**:
 
 1. `interview-brief-research`: canonical job URL, captured original listing and application target. Requests source URLs/quotes and explicitly forbids candidate/career claims.

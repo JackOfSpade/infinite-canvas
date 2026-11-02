@@ -3,7 +3,6 @@ import { EventEmitter, getEventListeners } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { createOfficialPostingFetchSession } from '../../electron/ipc/officialPostingFetchSession.js';
 import { fetchOfficialPosting, OfficialPostingFetchError, OFFICIAL_FETCH_HOP_CAPABILITY } from '../../electron/ipc/officialPostingFetch.js';
-import { resolveOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const page = url => ({ url, sourceUrl: url, body: '<main>Official posting</main>', contentType: 'text/html', statusCode: 200 });
@@ -465,35 +464,6 @@ export default [
       assert.equal(a.requestedUrl, 'https://northwind.test/a'); assert.equal(b.requestedUrl, 'https://northwind.test/b');
       assert.equal(a.url, 'https://northwind.test/final'); assert.equal(b.url, 'https://northwind.test/final');
       assert.equal((await session.fetch('https://northwind.test/final')).requestedUrl, 'https://northwind.test/final');
-    },
-  },
-  {
-    name: 'R3 root ownership through a shared fetch session does not depend on whether another row read the apex or the www alias first',
-    async run() {
-      const employer = 'Northwind Labs'; const location = 'Lakeview, Ontario, Canada';
-      const description = 'Requirements include experience building reliable services and maintaining reporting workflows. Engineers design clear interfaces for dispatch teams and validate operational changes with careful review. The role includes improving data quality across scheduled pipelines and documenting decisions for partner teams. You will work with colleagues to investigate delivery failures and make service behavior understandable. Responsibilities include writing tests for new features and improving the tools used by support teams every day.';
-      const jsonLd = title => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title, hiringOrganization: { name: employer },
-        description, jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>`;
-      const pages = { 'https://nwlhq.test/': { status: 301, headers: { location: 'https://www.nwlhq.test/' } },
-        'https://www.nwlhq.test/': { body: `<html><head><title>${employer}</title></head><body>Welcome</body></html>` },
-        'https://nwlhq.test/jobs/1': { body: jsonLd('Engineer 1') }, 'https://www.nwlhq.test/jobs/2': { body: jsonLd('Engineer 2') } };
-      const rows = { A: { title: 'Engineer 1', company: employer, location, snippet: description, url: 'https://nwlhq.test/jobs/1', salaryProvenance: 'unknown' },
-        B: { title: 'Engineer 2', company: employer, location, snippet: description, url: 'https://www.nwlhq.test/jobs/2', salaryProvenance: 'unknown' } };
-      const results = [];
-      for (const order of [['A', 'B'], ['B', 'A'], ['B']]) {
-        let value = 0; const timer = { now: () => value, sleep: async ms => { value += ms; } };
-        const session = createOfficialPostingFetchSession({ fetch: forwarded(pages, timer), now: timer.now, sleep: timer.sleep });
-        const levels = {};
-        for (const name of order) {
-          const { officialPosting } = await resolveOfficialPosting(rows[name], { fetch: session.fetch, store: null });
-          levels[name] = `${officialPosting.level}/${officialPosting.outcome}/${officialPosting.trail.join(',')}`;
-        }
-        session.dispose(); results.push(levels);
-      }
-      assert.match(results[2].B, /^L1\/found\//u, 'the www posting proves its own root when it runs alone');
-      assert.equal(results[0].B, results[2].B, 'an apex reader running first cannot change the www row');
-      assert.equal(results[1].B, results[2].B);
-      assert.equal(results[0].A, results[1].A, 'the apex row resolves the same whichever order the rows ran');
     },
   },
 ];

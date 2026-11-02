@@ -18009,9 +18009,7 @@ export function registerLocalAiApplicationHandlers() {
     const onAbort = () => { void discardQueuedJob(); };
     signal?.addEventListener?.('abort', onAbort, { once: true });
     try {
-      // Temporary: end-to-end stage comparisons reuse logged postings without a live lookup.
-      const testRun = process.env.INFINITE_CANVAS_E2E === '1' && Boolean(process.env.INFINITE_CANVAS_TEST_STAGE_PROFILES);
-      localJob = await queueLocalApplicationJob({ ...args, [REQUIRE_PREPARED_POSTING]: !testRun }, signal);
+      localJob = await queueLocalApplicationJob({ ...args, [REQUIRE_PREPARED_POSTING]: true }, signal);
       if (signal?.aborted) {
         await discardQueuedJob();
         throwIfAborted(signal);

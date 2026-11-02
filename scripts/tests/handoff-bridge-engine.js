@@ -3839,23 +3839,23 @@ tests.push(
       };
       const engine = createHandoffEngine({ sources: { application: source().api, push }, scope: { applications: false, scoring: true, marketplace: false } });
       const scoringOnly = received.at(-1);
-      assert(scoringOnly.has('job-scoring') && !scoringOnly.has('price-synthesis'), 'scoring consent injects scoring tasks but not marketplace tasks');
+      assert(scoringOnly.has('job-scoring') && !scoringOnly.has('price-synthesis-batch'), 'scoring consent injects scoring tasks but not marketplace tasks');
       engine.setScope({ applications: false, scoring: false, marketplace: true });
       const marketplaceOnly = received.at(-1);
-      assert(JSON.stringify([...marketplaceOnly].sort()) === JSON.stringify(['bundle-price-synthesis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch', 'platform-fit-assessment', 'price-synthesis', 'price-synthesis-batch', 'vision-product-analysis']), 'marketplace-only consent injects exactly its closed task family');
+      assert(JSON.stringify([...marketplaceOnly].sort()) === JSON.stringify(['bundle-price-synthesis', 'marketplace-hub-scan-batch', 'platform-fit-assessment', 'price-synthesis-batch', 'vision-product-analysis']), 'marketplace-only consent injects exactly its closed task family');
     },
   },
   {
     name: 'handoff bridge: engine: an omitted scope retains the default-on marketplace family',
     run: async () => {
       const push = {
-        async get() { return { status: 'served', handoffCode: 'PUSH-MARKET-DEFAULT', task: 'price-synthesis', prompt: 'Synthetic pricing prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async get() { return { status: 'served', handoffCode: 'PUSH-MARKET-DEFAULT', task: 'price-synthesis-batch', prompt: 'Synthetic pricing prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
         async submit() { return { status: 'unknown_handoff' }; },
       };
       const engine = createHandoffEngine({ sources: { application: source().api, push }, holdMs: 0 });
       const chat = await engine.newChat({ linkId: LINK });
       const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
-      assert(served.status === 'served' && served.kind === 'push' && served.task === 'price-synthesis',
+      assert(served.status === 'served' && served.kind === 'push' && served.task === 'price-synthesis-batch',
         'the standalone fallback must agree with persisted/bootstrap default-on marketplace scope');
     },
   },
@@ -3888,7 +3888,7 @@ tests.push(
     run: async () => {
       let pushGets = 0;
       const push = {
-        async get() { pushGets++; return { status: 'served', handoffCode: 'PUSH-MARKET', task: 'price-synthesis', prompt: 'Synthetic pricing prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
+        async get() { pushGets++; return { status: 'served', handoffCode: 'PUSH-MARKET', task: 'price-synthesis-batch', prompt: 'Synthetic pricing prompt.', remaining: { ready: 0, working: 0, needsYou: 0 } }; },
         async submit() { return { status: 'unknown_handoff' }; },
       };
       const engine = createHandoffEngine({
@@ -3902,7 +3902,7 @@ tests.push(
         'a marketplace task must never be framed as served while scope.marketplace is off, even though the push channel is live for scoring');
       engine.setScope({ applications: false, scoring: true, marketplace: true });
       const served = await engine.get({ session: chat.sessionCode, linkId: LINK });
-      assert(served.status === 'served' && served.kind === 'push' && served.task === 'price-synthesis' && served.handoffCode === 'PUSH-MARKET',
+      assert(served.status === 'served' && served.kind === 'push' && served.task === 'price-synthesis-batch' && served.handoffCode === 'PUSH-MARKET',
         'turning marketplace on must let the same push task serve');
     },
   },

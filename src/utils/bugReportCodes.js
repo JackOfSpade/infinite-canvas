@@ -321,7 +321,7 @@ export const CODE_DEFINITIONS = {
     label: 'Manual Job-AI Handoff',
     description: 'Manual Non-API job-AI lifecycle — issued prompts, validation rejections, dialog-remount replays, acceptance, cancellation, and terminal timing. Use when a copy/paste job-analysis step appears stuck or when a submitted response was not applied. The compact redacted lifecycle receipt is also included in FULL.',
     logFilter: line =>
-      /non-api ai|non-api-ai|manual ai|manual handoff|taxonomy|scor(?:e|ing)|compensation|career-file|resume-parse/i.test(line),
+      /non-api ai|non-api-ai|manual ai|manual handoff|taxonomy|scor(?:e|ing)|compensation|career-file/i.test(line),
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 

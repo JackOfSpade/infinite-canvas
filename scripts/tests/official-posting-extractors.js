@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { extractJobPostingBaseSalary, extractJobPostingDescription, walkJsonLdJobPostings } from '../../electron/extractors/apiExtractors.js';
 import { locationsCompatible } from '../../electron/ipc/officialPostingMatch.js';
 import { officialPostingSemanticCandidateEvidence } from '../../electron/ipc/officialPostingSemantic.js';
-import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import {
   extractAshbyPostings, extractGreenhousePostings, extractJsonLdPostings, extractLeverPostings,
   extractOfficialPostingCandidates, extractSmartRecruitersPostings, extractSmartRecruitersHtmlPostings,
@@ -77,44 +76,6 @@ export default [
       assert.equal(limited.coverageIncomplete, true);
       assert.deepEqual(limited.links, [{ url: `${source}privacy`, tag: 'a', attribute: 'href' }], 'bounded-out navigation does not remove actual DOM links');
       assert.equal(visible.coverageIncomplete, undefined);
-    },
-  },
-  {
-    name: 'Bounded-out recognized SSG navigation cannot turn two valid none comparisons into a durable miss',
-    async run() {
-      const { resolveOfficialPosting, shouldPersistOfficialPostingResult } = await import('../../electron/ipc/officialPostingResolver.js');
-      const root = 'https://northwind.test/'; const other = `${root}jobs/other`; const target = `${root}jobs/target`;
-      const roles = `${root}open-roles`;
-      const description = 'Build distributed systems for operational reporting. Maintain dependable release services and document engineering decisions. '.repeat(5);
-      const job = { title: 'Target Engineer', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada', snippet: description,
-        url: 'https://www.linkedin.com/jobs/view/synthetic-ssg-coverage' };
-      const posting = (title, url) => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title, url,
-        hiringOrganization: { name: job.company }, description, jobLocation: { address: {
-          addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>`;
-      const navigation = { _type: 'internalLink', targetBlank: false, text: 'Open Roles', reference: { _type: 'page', parent: null,
-        language: null, slug: { _type: 'slug', current: 'open-roles' }, title: 'Open Roles' } };
-      for (const limited of [false, true]) {
-        const settings = { _type: 'settings', orgUrl: root, companySection: { _type: 'menuSection',
-          linkLists: [{ _type: 'linkList', links: [navigation] }] }, extra: limited ? 'x'.repeat(512 * 1024) : '' };
-        const content = { _type: 'page', parent: null, path: '', slug: { _type: 'slug', current: 'home' } };
-        const body = `<title>Northwind Labs</title><link rel="canonical" href="${root}"><a href="${other}">Other role</a>
-          <script id="ssgContent" type="application/json">${JSON.stringify(content)}</script>
-          <script id="ssgSiteSettings" type="application/json">${JSON.stringify(settings)}</script>`;
-        const pages = { [root]: body, [other]: posting('Other Engineer', other),
-          [roles]: `<a href="${target}">Target role</a>`, [target]: posting(job.title, target) };
-        const reads = []; let comparisons = 0;
-        const result = await resolveOfficialPosting(job, { semanticMatching: true, researchRan: true, persistResults: false, store: null,
-          render: null, candidateUrls: [root], fetch: async url => { reads.push(url); if (!pages[url]) throw new Error('Unretained synthetic source');
-            return { url, statusCode: 200, contentType: 'text/html', body: pages[url] }; },
-          match: async (_job, options) => { comparisons++; return { choice: options.some(item => item.title === job.title) ? 'uncertain' : 'none',
-            evidence: [], distinguishing: [], conflicts: ['Synthetic source-coverage regression; no identity accepted.'] }; } });
-        assert.equal(comparisons, 2); assert.equal(reads.includes(target), !limited);
-        assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), false);
-        if (limited) {
-          for (const code of ['comparative-a-valid', 'comparative-b-valid', 'comparative-none', 'crawl-partial']) assert.ok(result.officialPosting.trail.includes(code), code);
-          assert.equal(officialPostingLookupStatus(result.officialPosting).retryable, true);
-        }
-      }
     },
   },
   {

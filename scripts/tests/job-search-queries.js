@@ -1,21 +1,6 @@
-import { assert, buildExactTargetRoleQueryBundle, buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../test-dependencies.js';
+import { assert, buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../test-dependencies.js';
 
 export default [
-  {
-    name: 'A set target role constructs exactly one literal scrape query with no generated variations',
-    run: () => {
-      const bundle = buildExactTargetRoleQueryBundle('  Product Manager  ');
-      const queries = flattenJobSearchQueries(bundle);
-
-      assert(JSON.stringify(queries) === JSON.stringify(['Product Manager']),
-        'target-role search must use the trimmed literal role exactly once');
-      assert(bundle.titleQueries.length === 0
-        && bundle.suggestedRoleQueries.length === 0
-        && bundle.skillsOnlyQueries.length === 0,
-      'target-role search must not contain title, suggested-role, or skills variations');
-      return { queries };
-    },
-  },
   {
     name: 'Job query bundles normalize text duplicates and discard malformed query values',
     run: () => {
@@ -31,10 +16,6 @@ export default [
         'Platform Engineer',
         'Kubernetes Go',
       ]), 'empty-role bundles retain valid groups, collapse whitespace-equivalent duplicates, and never stringify malformed values');
-
-      const exactRole = buildExactTargetRoleQueryBundle('  Product\n Manager  ');
-      assert(JSON.stringify(flattenJobSearchQueries(exactRole)) === JSON.stringify(['Product Manager']),
-        'target roles use the same boundary normalization as generated queries');
       return { queries };
     },
   },
@@ -118,7 +99,7 @@ export default [
         'Café Concierge',            // NFD twin of the line above
       ]);
       assert(bundle.titleQueries.length === 0 && bundle.suggestedRoleQueries.length === 0 && bundle.skillsOnlyQueries.length === 0,
-        'a pinned-title bundle only ever populates targetRoleQueries, the same "one query per role" shape as buildExactTargetRoleQueryBundle');
+        'a pinned-title bundle only ever populates targetRoleQueries, the "one query per role" shape');
       assert(JSON.stringify(bundle.targetRoleQueries) === JSON.stringify([
         'Backend Engineer', 'Senior Backend Engineer', 'Café Concierge',
       ]), `pinned titles must merge case/whitespace/Unicode-form duplicates while keeping the seniority-qualified title distinct, got: ${JSON.stringify(bundle.targetRoleQueries)}`);

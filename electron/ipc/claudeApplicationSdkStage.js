@@ -41,6 +41,10 @@ export async function runClaudeSdkStage({
   effort = 'high',
   sessionId,
   resume = false,
+  tools = [],
+  maxTurns = 1,
+  persistSession = true,
+  systemAppend = '',
   queryImpl = null,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   onThinkingSummary = async () => {},
@@ -124,16 +128,18 @@ export async function runClaudeSdkStage({
         cwd,
         env,
         abortController: controller,
-        tools: [],
+        tools,
+        // Only web research names tools, and only those run without a prompt.
+        ...(tools.length ? { allowedTools: tools, permissionMode: 'dontAsk' } : {}),
         strictMcpConfig: true,
         mcpServers: {},
         settingSources: [],
-        persistSession: true,
-        maxTurns: 1,
+        persistSession,
+        maxTurns,
         // Partial stream events are a liveness signal only; they fall through
         // every branch below and are never counted or logged.
         includePartialMessages: true,
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: CLAUDE_HANDOFF_SYSTEM_PROMPT },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: systemAppend ? `${CLAUDE_HANDOFF_SYSTEM_PROMPT}\n\n${systemAppend}` : CLAUDE_HANDOFF_SYSTEM_PROMPT },
         extraArgs: { restricted: null },
         ...(sessionId ? (resume ? { resume: sessionId } : { sessionId }) : {}),
       },
@@ -194,6 +200,8 @@ export async function runClaudeSdkStage({
           durationMs: message.duration_ms ?? null,
           stopReason: typeof message.stop_reason === 'string' ? clipped(message.stop_reason, 100) : null,
           errors,
+          usage: message.usage ?? null,
+          costUsd: typeof message.total_cost_usd === 'number' ? message.total_cost_usd : null,
         };
       } else if (message.type === 'system' &&
         (message.subtype === 'model_refusal_no_fallback' || (message.subtype === 'model_refusal_fallback' && message.scope !== 'local'))) {
@@ -229,6 +237,9 @@ export async function runClaudeSdkStage({
       throw new ClaudeRunnerError('CLAUDE_WRONG_MODEL',
         `Claude answered with ${[...mainModels].join(', ') || 'an unverified model'} instead of ${model}.`, detail(), terminal.result);
     }
+    if (stopReasons.has('max_tokens') || terminal.stopReason === 'max_tokens') {
+      throw new ClaudeRunnerError('CLAUDE_OUTPUT_TRUNCATED', 'Claude stopped because the reply hit the output limit, so the answer is incomplete and was not used.', detail());
+    }
     if (!terminal.result.trim()) {
       throw new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code returned an empty answer.', detail(), terminal.result);
     }
@@ -236,6 +247,8 @@ export async function runClaudeSdkStage({
       text: terminal.result,
       model: answered,
       durationMs: terminal.durationMs ?? Date.now() - started,
+      ...(terminal.usage ? { usage: terminal.usage } : {}),
+      ...(terminal.costUsd !== null ? { costUsd: terminal.costUsd } : {}),
       summaryCount,
       summaryChars,
       thinkingDisplay: 'summarized',

@@ -15,10 +15,9 @@
 // classification error look like a confident rejection. They stay visible
 // (with a card badge) unless the board explicitly switches review cards off.
 
-// Mirrors UNSCORED_SCORE_STATUS in electron/ipc/jobBatchReconcile.js. The
-// scorer may stamp a more specific variant ('unscored-evidence-incomplete'),
-// so detection is a prefix test on the structural field — never on the
-// sentinel number, which an honestly assessed job can also score.
+// Mirrors UNSCORED_SCORE_STATUS in electron/ipc/jobBatchReconcile.js. Detection
+// is a prefix test on the structural field — never on the sentinel number,
+// which an honestly assessed job can also score.
 export const UNSCORED_SCORE_STATUS = 'unscored';
 
 // What a placeholder looked like BEFORE scoreStatus existed: the scorer's

@@ -20,7 +20,12 @@
 // with the renderer dropdown and the photo-analysis / price-synthesis prompts.
 import { CONDITION_VALUES } from '../../src/utils/productConditions.js';
 import { SELL_PLATFORMS } from '../../src/utils/constants.js';
-import { MAX_COMPENSATION_COHORTS_PER_ASSESSMENT } from './resultCaps.js';
+import {
+  JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS,
+  MAX_COMPENSATION_COHORTS_PER_ASSESSMENT,
+  MAX_ROLE_FAMILIES_PER_ASSESSMENT,
+  ROLE_SCREEN_MAX_ROWS,
+} from './resultCaps.js';
 import { PERSONAL_SALARY_RECOMMENDATION_SCHEMA } from './personalSalaryRecommendation.js';
 
 // The platform-id enum for recommended_platforms is DERIVED from SELL_PLATFORMS
@@ -331,37 +336,6 @@ export const JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA = {
         properties: {
           pairId: { type: 'string', minLength: 3, maxLength: 40, description: 'Copy the supplied pairId exactly.' },
           sameJob: { type: 'boolean', description: 'True only when the two listings are the same underlying requisition offered at different locations.' },
-        },
-      },
-    },
-  },
-};
-
-// ── Resume parse: file → structured profile ────────────────────────────────
-export const RESUME_PARSE_SCHEMA = {
-  type: 'object',
-  required: ['titles', 'skills', 'experience_years', 'soft_skills', 'industries', 'locations', 'education', 'summary', 'workHistory'],
-  properties: {
-    titles:           { type: 'array', items: { type: 'string' }, description: 'Exact job titles held, most recent first' },
-    skills:           { type: 'array', items: { type: 'string' } },
-    experience_years: { type: 'number', description: 'Total years of professional experience' },
-    soft_skills:      { type: 'array', items: { type: 'string' } },
-    industries:       { type: 'array', items: { type: 'string' } },
-    locations:        { type: 'array', items: { type: 'string' } },
-    education:        { type: 'array', items: { type: 'string' } },
-    summary:          { type: 'string', description: '2-sentence professional summary' },
-    workHistory: {
-      type: 'array',
-      description: 'Every dated professional role, most recent first. This supports deterministic tenure calculations, so preserve the source-stated dates and do not invent missing dates.',
-      items: {
-        type: 'object',
-        required: ['id', 'title', 'employer', 'startDate', 'endDate'],
-        properties: {
-          id: { type: 'string', description: 'Stable role identifier, unique within this profile and derived consistently from the role order/source.' },
-          title: { type: 'string', description: 'Job title as stated in the career data.' },
-          employer: { type: 'string', description: 'Employer or organization as stated; empty when absent.' },
-          startDate: { type: 'string', description: 'Start date copied exactly as stated in the source; empty when absent.' },
-          endDate: { type: 'string', description: 'End date copied exactly as stated in the source; empty when absent.' },
         },
       },
     },
@@ -1084,7 +1058,7 @@ export const JOB_ROLE_SCREEN_SCHEMA = {
       // Sized to the BATCH, not to an expectation about the answer: the caller
       // sends at most ROLE_SCREEN_BATCH_SIZE rows per call and every row must
       // come back. A malformed response that invents extra rows trips here.
-      maxItems: 400,
+      maxItems: ROLE_SCREEN_MAX_ROWS,
       items: {
         type: 'object',
         required: ['index', 'outcome', 'reason'],
@@ -1121,50 +1095,6 @@ export const JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA = {
   },
 };
 
-// Kept solely to read accepted durable handoffs made before listing identity
-// was added. New requests always use JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA.
-export const JOB_PREFERENCE_LISTING_EVALUATION_V1_SCHEMA = {
-  type: 'object',
-  required: ['assessments'],
-  properties: {
-    assessments: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['index', 'matches'],
-        properties: {
-          index: { type: 'integer' },
-          matches: { type: 'array', items: JOB_PREFERENCE_MATCH_SCHEMA },
-        },
-      },
-    },
-  },
-};
-
-// Structured extraction from an independently grounded company lookup. URL
-// provenance is validated by code against the raw grounded response.
-export const JOB_PREFERENCE_RESEARCH_ASSESSMENT_SCHEMA = {
-  type: 'object',
-  required: ['assessments'],
-  properties: {
-    assessments: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['preferenceId', 'outcome', 'evidence', 'evidenceQuote', 'sourceUrls', 'sourceDate'],
-        properties: {
-          preferenceId: { type: 'string' },
-          outcome: { type: 'string', enum: ['confirmed', 'conflicts', 'unverified'] },
-          evidence: { type: 'string' },
-          evidenceQuote: { type: 'string', description: 'For confirmed/conflicts, a short verbatim span copied from the grounded research that supports the outcome; empty only for unverified.' },
-          sourceUrls: { type: 'array', maxItems: 5, items: { type: 'string' } },
-          sourceDate: { type: 'string', description: 'Publisher or last-updated date directly supported by the source; empty when unavailable. Never infer a date.' },
-        },
-      },
-    },
-  },
-};
-
 // Structured extraction from one bounded batch of independently grounded
 // company lookups. `researchId` is an opaque, deterministic application id;
 // it prevents an otherwise plausible verdict for one employer from being
@@ -1175,9 +1105,10 @@ export const JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA = {
   properties: {
     assessments: {
       type: 'array',
-      // Grounded research is partitioned at 12, but the compact extraction
-      // phase may safely combine completed sections from adjacent partitions.
-      maxItems: 27,
+      // Grounded research is partitioned smaller than this, but the compact
+      // extraction phase may safely combine completed sections from adjacent
+      // partitions; the limit is the one resultCaps derives from the budget.
+      maxItems: JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS,
       items: {
         type: 'object',
         required: ['researchId', 'preferenceId', 'outcome', 'evidence', 'evidenceQuote', 'sourceUrls', 'sourceDate'],
@@ -1691,45 +1622,6 @@ export const JOB_GAP_REVIEW_SCHEMA = {
   },
 };
 
-export const JOB_COMPENSATION_EVIDENCE_SCHEMA = {
-  type: 'object',
-  required: ['assessments'],
-  properties: {
-    assessments: {
-      type: 'array',
-      items: {
-        type: 'object',
-        required: ['index', 'comparableRanges', 'justification', 'sourceLinks'],
-        properties: {
-          index: { type: 'integer' },
-          comparableRanges: {
-            type: 'array',
-            items: {
-              type: 'object',
-              // Comparable=true evidence is only accepted by the code when
-              // these provenance fields contain a direct http(s) source. They
-              // remain required for false entries too (empty strings are fine)
-              // so providers cannot omit provenance accidentally.
-              required: ['min', 'max', 'currency', 'comparable', 'sourceName', 'sourceUrl'],
-              properties: {
-                min: { type: 'number' },
-                max: { type: 'number' },
-                currency: { type: 'string' },
-                comparable: { type: 'boolean', description: 'False for evidence which must be excluded (wrong market, seniority, type, or total compensation).' },
-                sourceName: { type: 'string' },
-                sourceUrl: { type: 'string' },
-                note: { type: 'string' },
-              },
-            },
-          },
-          justification: { type: 'string' },
-          sourceLinks: { type: 'array', items: { type: 'string' } },
-        },
-      },
-    },
-  },
-};
-
 // Grounded role-family experience ladders. These are persisted before any
 // salary cohort using a new role family can proceed, so a later market lookup
 // receives a concrete, auditable band rather than a generic seniority guess.
@@ -1767,20 +1659,21 @@ export const ROLE_FAMILY_EXPERIENCE_BANDS_SCHEMA = {
   },
 };
 
-// Versioned, bounded multi-item forms of the two compensation extraction
-// contracts.  The raw research is sectioned by an opaque id, and every
-// structured row carries that id back.  This keeps one copied research answer
-// useful for several independent role families/cohorts without allowing a URL
-// or quote from one item to silently justify another item.
+// Bounded multi-item compensation extraction contracts. The raw research is
+// sectioned by an opaque id, and every structured row carries that id back.
+// This keeps one copied research answer useful for several independent role
+// families/cohorts without allowing a URL or quote from one item to silently
+// justify another item.
 export const ROLE_FAMILY_EXPERIENCE_BANDS_BATCH_SCHEMA = {
   type: 'object',
   required: ['ladders'],
   properties: {
     ladders: {
       type: 'array',
-      // Grounded research is seven role families per handoff, but the compact
-      // extraction phase can safely combine twenty completed raw sections.
-      maxItems: 20,
+      // Grounded research carries fewer role families per handoff, but the
+      // compact extraction phase can safely combine as many completed raw
+      // sections as resultCaps derives from the budget.
+      maxItems: MAX_ROLE_FAMILIES_PER_ASSESSMENT,
       items: {
         type: 'object',
         required: ['researchId', 'roleFamily', 'reusedFrom', 'bands', 'sources', 'evidenceQuote', 'sourceDate'],

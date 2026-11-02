@@ -289,12 +289,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stepBackNonApiAiRequest: (requestId) => ipcRenderer.invoke('step-back-non-api-ai-request', { requestId }),
   cancelNonApiAiRequest: (requestId) => ipcRenderer.invoke('cancel-non-api-ai-request', { requestId }),
   revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath }),
+  // Whether the Claude worker is held up by a usage limit or a sign-in problem.
+  getClaudeTaskStatus: () => ipcRenderer.invoke('get-claude-task-status'),
 
   // ── Price Check Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
   scrapePriceComps: (args) => ipcRenderer.invoke('scrape-price-comps', args),
   rescrapeSource: (args) => ipcRenderer.invoke('rescrape-source', args),
-  synthesizePrice: (args) => ipcRenderer.invoke('synthesize-price', args),
   synthesizePricesBatch: (args) => ipcRenderer.invoke('synthesize-prices-batch', args),
   synthesizeBundlePrice: (args) => ipcRenderer.invoke('synthesize-bundle-price', args),
   assessPlatformFit: (args) => ipcRenderer.invoke('assess-platform-fit', args),

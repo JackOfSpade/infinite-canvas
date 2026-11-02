@@ -122,6 +122,8 @@ export const JOB_ROW_COPY = Object.freeze({
 // a guessed cause, and none claims progress the status cannot see.
 export const BRIDGE_PROGRESS_COPY = Object.freeze({
   region: 'ChatGPT progress',
+  claudeRegion: 'Claude progress',
+  claudeWorking: Object.freeze(['Claude is working on this handoff', '']),
   stepper: 'Application steps',
   stepState: Object.freeze({ done: 'done', current: 'current step', upcoming: 'not started yet' }),
   toneLabel: Object.freeze({ neutral: '', working: '', attention: 'Needs attention', problem: 'Problem' }),

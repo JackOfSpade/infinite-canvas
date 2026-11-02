@@ -85,11 +85,9 @@ export function prepareBackgroundBoardChildRequest({
     collectionLimits,
   );
   const preferencePlan = data.searchBriefPlan || data.jobPreferencePlan || null;
-  const planTitles = Array.isArray(preferencePlan?.titles)
+  const titles = Array.isArray(preferencePlan?.titles)
     ? preferencePlan.titles.filter(title => typeof title === 'string' && title.trim())
     : [];
-  const legacyTargetRole = String(data.targetRole || '').trim();
-  const titles = planTitles.length ? planTitles : (legacyTargetRole ? [legacyTargetRole] : []);
   if (
     node?.type !== 'jobhub'
     || !node.id
@@ -161,7 +159,6 @@ export function prepareBackgroundBoardChildRequest({
       canvasFilePath,
       preferredLocation,
       rawLocation: String(data.preferredLocation || preferredLocation),
-      targetRole: String(data.targetRole || ''),
       jobPreferences: String(data.jobPreferences || ''),
       jobPreferencePlan: preferencePlan,
       countryScope: String(data.canonicalCountry || searchLocation.country || ''),

@@ -105,7 +105,7 @@ export default [
         { id: 'board', type: 'jobboard', data: { boardScanResume: { boardRunId: 'board-run', activeSourceIds: ['child'] } } },
         { id: 'child', type: 'jobhub', data: { hubState: 'scoring', manualAiResume: acceptedMarker } },
         { id: 'hidden', type: 'jobhub', data: { hubState: 'sources-ready', manualAiResume: acceptedMarker,
-          pendingJobs: pending, pendingCareerData: 'synthetic saved career input', pendingTargetRole: '',
+          pendingJobs: pending, pendingCareerData: 'synthetic saved career input',
           pendingJobPreferencePlan: { version: 1 }, scoredJobs: [{ id: 'old-score' }] } },
       ];
       const calls = [];
@@ -137,7 +137,6 @@ export default [
       assert.equal(nodes[2].data.manualAiResume.pausedByUser, true);
       assert.equal(nodes[2].data.pendingJobs, pending);
       assert.equal(nodes[2].data.pendingCareerData, 'synthetic saved career input');
-      assert.equal(nodes[2].data.pendingTargetRole, '');
       assert.equal(queue.getSnapshot().admissionsSuspended, true);
       coordinator.release();
       assert.equal(queue.getSnapshot().admissionsSuspended, false);

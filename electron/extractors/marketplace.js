@@ -307,12 +307,11 @@ export function priceChartingQuery(query) {
 }
 
 // NOTE: comp extractors return the FULL rendered page — no per-source slice.
-// The downstream relevance ranker + synthesis cap (resultCaps.compsForPricing:
-// 25 sold / 15 active, selected fairly across sources) still bound what reaches
-// the pricing LLM, so token cost is unchanged. The win is that the ranker now
-// chooses from EVERY listing on the page instead of the first N in DOM order —
-// eBay's sold results sort by recency, not relevance, so the closest-matching
-// comps frequently sit past the old 25-item cutoff.
+// The pricing batch's per-item comp bound (marketplace.js compactBatchComps)
+// still limits what reaches the pricing LLM, so token cost is unchanged. The
+// win is that the ranker now chooses from EVERY listing on the page instead of
+// the first N in DOM order — eBay's sold results sort by recency, not relevance,
+// so the closest-matching comps frequently sit past the old 25-item cutoff.
 
 
 // ── eBay Sold Listings Extractor ────────────────────────────────────────────

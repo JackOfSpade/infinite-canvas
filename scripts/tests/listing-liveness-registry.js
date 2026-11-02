@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { assert } from './testHelpers.js';
+import { BATCH_OUTPUT_TOKEN_BUDGET } from '../../electron/ipc/resultCaps.js';
 import { getKnownTaskIds, taskMaxTokensFor } from '../../electron/ipc/llm.js';
 import { BRIDGE_RAW_RESEARCH_TASKS, BRIDGE_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { PUSH_TASK_POLICY, assertPushTaskPolicy } from '../../electron/ipc/handoffBridge/sources/push.js';
@@ -23,7 +24,7 @@ export default [
     assert(taskMaxTokensFor(TASK, { itemCount: 0 }) === 1184);
     assert(taskMaxTokensFor(TASK, { itemCount: 1 }) === 1184);
     assert(taskMaxTokensFor(TASK, { itemCount: 8 }) === 2304);
-    assert(taskMaxTokensFor(TASK, { itemCount: 1000 }) === 15360, 'the batch cap must stop at the usable ceiling');
+    assert(taskMaxTokensFor(TASK, { itemCount: 1000 }) === BATCH_OUTPUT_TOKEN_BUDGET, 'the batch cap must stop at the usable output budget');
     assert(BRIDGE_RELEASE_ONE_TASKS.includes(TASK), 'the liveness task rides the reviewed bridge route');
     assert(!BRIDGE_RAW_RESEARCH_TASKS.includes(TASK), 'validated liveness JSON must not take the raw research exception');
     assert(PUSH_TASK_POLICY[TASK]?.mode === 'release_one' && PUSH_TASK_POLICY[TASK]?.bridgeable === true);

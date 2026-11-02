@@ -95,7 +95,6 @@ const ACTIVE_JOB_SEARCH_STATES = new Set([
 // Board cancellation restores. Using a small positive allow-list also keeps a
 // newly added run field from silently becoming undo-restorable by default.
 const JOB_SEARCH_UNDOABLE_SETTING_FIELDS = [
-  'targetRole',
   'jobPreferences',
   'searchLocation',
   'preferredLocation',
@@ -136,7 +135,6 @@ function hasExternallyOwnedJobSearchState(data) {
     || data.terminalFinalizationRecovery
     || data.queuedModuleRun
     || data.pendingJobs
-    || data.pendingTargetRole
     || data.pendingCareerData
     || data.pendingJobPreferences
     || data.pendingJobPreferencePlan
@@ -512,7 +510,6 @@ function mergeNonRestorableData(nodes, byId) {
         mergedData.jobRunId = null;
         mergedData.resultDisposition = null;
         mergedData.pendingJobs = null;
-        mergedData.pendingTargetRole = null;
         mergedData.pendingCareerData = null;
         mergedData.pendingJobPreferences = null;
         mergedData.pendingJobPreferencePlan = null;

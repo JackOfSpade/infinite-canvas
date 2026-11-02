@@ -112,7 +112,7 @@ const PRIVATE_JOB_PREFERENCE_TRANSIENT_KEYS = new Set([
 // Inverted to an allowlist so a transient key added later cannot leak by
 // default: only these short, non-document status strings are quoted.
 const ECHOABLE_TRANSIENT_STRING_KEYS = new Set([
-  'errorMessage', 'rerunOutcome', 'rerunNotice', 'pendingTargetRole',
+  'errorMessage', 'rerunOutcome', 'rerunNotice',
 ]);
 
 // Native Chrome challenge telemetry is intentionally metadata-only. In

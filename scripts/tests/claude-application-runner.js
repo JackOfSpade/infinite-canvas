@@ -12,8 +12,10 @@ import {
   CLAUDE_STAGE_PROFILES,
   CLAUDE_STAGE_TIMEOUT_MS,
   claudeStageProfile,
+  splitCareerCatalog,
   ClaudeRunnerError,
   buildClaudeInputMessage,
+  CLAUDE_MAX_OUTPUT_TOKENS,
   claudeChildEnv,
   claudeCliArgs,
   classifyClaudeFailure,
@@ -667,7 +669,7 @@ export default [
         ANTHROPIC_API_KEY: 'k', ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1',
         HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg', PATH: '/usr/bin',
       }, '/opt/claude/bin');
-      assert.deepEqual(env, { HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg', PATH: `/opt/claude/bin${path.delimiter}/usr/bin` });
+      assert.deepEqual(env, { HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_MAX_OUTPUT_TOKENS: CLAUDE_MAX_OUTPUT_TOKENS, PATH: `/opt/claude/bin${path.delimiter}/usr/bin` });
     },
   },
   {
@@ -754,22 +756,39 @@ export default [
     },
   },
   {
-    name: 'claude runner: Opus writes (xhigh) and judges (high); Sonnet converts (medium) and repairs and fact-checks (high)',
+    name: 'claude runner: the career catalog moves to the system prompt only when large, and nothing else is lost',
+    run() {
+      const catalog = Array.from({ length: 300 }, (_, i) => `[host.career.role.p1.${i}] Quote number ${i} from the career record, long enough to count.`).join('\n');
+      const hand = `## Role p1\n${catalog}\n\n## Project p2\n[host.career.project.p2.1] Another quote.`;
+      const text = `HEADER job-1\nFULL APPROVED CATALOG (300 items; every ID and full quote):\n${hand}\n\nOUTPUT FORMAT:\nWrite it.`;
+      const split = splitCareerCatalog(text);
+      assert.equal(split.catalog, hand);
+      assert.ok(split.text.startsWith('HEADER job-1\nFULL APPROVED CATALOG'));
+      assert.ok(split.text.endsWith('OUTPUT FORMAT:\nWrite it.'));
+      assert.ok(split.text.includes('APPROVED CAREER CATALOG'));
+      assert.ok(!split.text.includes('Quote number 5 '));
+      assert.equal(splitCareerCatalog(text.replace('job-1', 'job-2')).catalog, split.catalog, 'another job shares the cached text');
+      assert.deepEqual(splitCareerCatalog('## Role p1\n[host.career.role.p1.1] Short.\n\nRest.'), { text: '## Role p1\n[host.career.role.p1.1] Short.\n\nRest.', catalog: '' });
+      assert.deepEqual(splitCareerCatalog('no catalog'), { text: 'no catalog', catalog: '' });
+    },
+  },
+  {
+    name: 'claude runner: Opus plans (xhigh), writes (low), judges and fact-checks (high); Sonnet converts (medium) and repairs (high)',
     run() {
       assert.deepEqual(JSON.parse(JSON.stringify(CLAUDE_STAGE_PROFILES)), {
         'editorial-plan': { model: 'opus', effort: 'xhigh' },
-        write: { model: 'opus', effort: 'xhigh' },
+        write: { model: 'opus', effort: 'low' },
         pick: { model: 'opus', effort: 'high' },
         convert: { model: 'sonnet', effort: 'medium' },
         'verify-correction': { model: 'sonnet', effort: 'high' },
         'fit-correction': { model: 'sonnet', effort: 'high' },
-        'fact-check': { model: 'sonnet', effort: 'high' },
-        'fact-correction': { model: 'sonnet', effort: 'high' },
-        'fact-recheck': { model: 'sonnet', effort: 'high' },
+        'fact-check': { model: 'opus', effort: 'high' },
+        'fact-correction': { model: 'opus', effort: 'high' },
+        'fact-recheck': { model: 'opus', effort: 'high' },
       });
       // A stage the table does not name runs on the Sonnet high default.
       assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'sonnet', effort: 'high' });
-      assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'xhigh']);
+      assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'low']);
     },
   },
   {
@@ -1548,7 +1567,7 @@ export default [
       assert.deepEqual(rows.map(row => row.event), ['started', 'failed']);
       assert.equal(rows[0].runId, rows[1].runId);
       assert.deepEqual([rows[1].stage, rows[1].error], ['write', { code: 'CLAUDE_USAGE_LIMIT', message: 'Claude usage limit reached.' }]);
-      assert.deepEqual([rows[0].requestedModel, rows[0].requestedEffort], ['opus', 'xhigh']);
+      assert.deepEqual([rows[0].requestedModel, rows[0].requestedEffort], ['opus', 'low']);
       assert.equal('answer' in rows[1], false);
     },
   },
@@ -1770,9 +1789,9 @@ export default [
       runner.ensure({ jobId: 'job-parallel-log', canvasFilePath: '/c.canvas' });
       await waitFor(() => runner.status(['job-parallel-log'])['job-parallel-log']?.status === 'done', 'done');
       await runner.shutdown();
-      assert.deepEqual(profiles, [['write', 'opus', 'xhigh'], ['convert', 'sonnet', 'medium']]);
+      assert.deepEqual(profiles, [['write', 'opus', 'low'], ['convert', 'sonnet', 'medium']]);
       const rows = readRunLog(logFile);
-      for (const [matchTaskId, stage, model, effort] of [['writer', 'write', 'opus', 'xhigh'], ['converter', 'convert', 'sonnet', 'medium']]) {
+      for (const [matchTaskId, stage, model, effort] of [['writer', 'write', 'opus', 'low'], ['converter', 'convert', 'sonnet', 'medium']]) {
         const group = rows.filter(row => row.matchTaskId === matchTaskId);
         assert.deepEqual(group.map(row => row.event), ['started', 'response', 'submission']);
         assert.equal(new Set(group.map(row => row.runId)).size, 1);

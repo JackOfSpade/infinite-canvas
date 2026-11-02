@@ -1,5 +1,6 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterGrosslyOffTargetSources, filterHistoryForResume, formatPricingNotesForPrompt, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, routeLegacyPriceSynthesisHandoff, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterHistoryForResume, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 import { isMarketplaceSourceLifecycleAbort, packBatchPriceSynthesisItems, validateBatchPriceSynthesisSubmission, validateMarketplaceBatchExecution } from '../../electron/ipc/marketplace.js';
+import { BATCH_OUTPUT_TOKEN_BUDGET, priceSynthesisBatchFits, priceSynthesisBatchMaxComps } from '../../electron/ipc/resultCaps.js';
 import { collectMarketplaceRecoveryOwners } from '../../src/utils/canvasInteractions.js';
 import { createWorkspaceStartupRecoveryCoordinator } from '../../src/utils/workspaceStartupRecovery.js';
 import {
@@ -34,49 +35,10 @@ import {
 
 export default [
 {
-    name: 'legacy singleton price handoff: an exact durable old step alone keeps its 24,576-token replay contract',
-    run: async () => {
-      const legacyPrompt = 'legacy price prompt bytes: sold=[{"title":"old"}]';
-      const legacyHints = { itemCount: 108 };
-      const calls = [];
-      let probe;
-      const result = await routeLegacyPriceSynthesisHandoff({
-        legacyPrompt,
-        legacyHints,
-        manualAiRunId: 'run-exact',
-        nodeId: 'node-exact',
-        batchItem: { itemId: 'price-exact', soldComps: [], activeComps: [] },
-        exactStepProbe: async (prompt, options) => {
-          probe = { prompt, options };
-          return true;
-        },
-        callText: async (prompt, options) => {
-          calls.push({ prompt, options });
-          return { recommended_price: 42, match_quality: 'strong' };
-        },
-      });
-      assert(probe.prompt === legacyPrompt
-        && probe.options.manualAiRunId === 'run-exact'
-        && probe.options.nodeId === 'node-exact'
-        && probe.options.task === 'price-synthesis'
-        && probe.options.exactLegacyPriceSynthesisHandoff === true,
-      'only an exact, run-and-node-scoped durable probe may select the historical singleton handoff');
-      assert(calls.length === 1 && calls[0].prompt === legacyPrompt
-        && calls[0].options.task === 'price-synthesis'
-        && calls[0].options.exactLegacyPriceSynthesisHandoff === true
-        && result.usedLegacyHandoff === true && result.pricing.recommended_price === 42,
-      'the accepted/pending old step replays its prompt unchanged with the identical narrow cap override');
-      assert(taskMaxTokensFor('price-synthesis', legacyHints) === 16384,
-        'the public task cap is hard-clamped; only the exact legacy replay override retains its historical 24,576 seed');
-      return { replayedExactStep: true };
-    },
-  },
-  {
-    name: 'legacy singleton price handoff: a fresh call uses v2 singleton cap, isolation, and provenance instead of the old prompt',
-    run: async () => {
-      const calls = [];
+    name: 'single-item price synthesis: a one-item batch is capped and binds comp provenance to its item',
+    run: () => {
       const batchItem = {
-        itemId: 'price-v2-singleton',
+        itemId: 'price-singleton',
         query: 'Widget',
         condition: 'Used - Good',
         userPricingNotes: 'Includes original box',
@@ -89,32 +51,15 @@ export default [
         comp_breakdown: { anchor_count: 1, adjusted_count: 0, bound_count: 1 },
         market_summary: { sold_count: 1, active_count: 1 }, recommended_platforms: [],
       };
-      const result = await routeLegacyPriceSynthesisHandoff({
-        legacyPrompt: 'OLD NAKED SCRAPED COMPS MUST NOT BE SENT',
-        legacyHints: { itemCount: 2 },
-        manualAiRunId: 'fresh-run',
-        nodeId: 'fresh-node',
-        batchItem,
-        exactStepProbe: async () => false,
-        callText: async (prompt, options) => {
-          calls.push({ prompt, options });
-          return { items: [{ itemId: batchItem.itemId, pricing, compSourceUrls: ['https://example.test/sold'], compSources: ['sold-source'] }] };
-        },
-      });
-      assert(calls.length === 1 && calls[0].options.task === 'price-synthesis-batch'
-        && taskMaxTokensFor(calls[0].options.task, calls[0].options.hints) <= 15360
-        && !calls[0].prompt.includes('OLD NAKED SCRAPED COMPS MUST NOT BE SENT')
-        && calls[0].prompt.includes('=== PRICING ITEM price-v2-singleton ===')
-        && calls[0].prompt.includes('DATA scraped from an external source')
-        && calls[0].prompt.includes('<untrusted-price-synthesis-price-v2-singleton-'),
-      'a fresh legacy IPC call issues exactly one capped v2 prompt with item isolation and wrapped untrusted listings');
-      assert(result.usedLegacyHandoff === false && result.pricing === pricing
-        && result.modelItem === batchItem,
-      'the v2 singleton validates source provenance yet returns the historical { pricing } result shape');
-      const marketplaceSource = fs.readFileSync(path.join(process.cwd(), 'electron/ipc/marketplace.js'), 'utf8');
-      assert((marketplaceSource.match(/exactLegacyPriceSynthesisHandoff: true/g) || []).length === 2,
-        'the 24,576 compatibility override is passed only to the exact probe and exact replay, never fresh production work');
-      return { freshTask: calls[0].options.task, provenanceBound: true };
+      assert(taskMaxTokensFor('price-synthesis-batch', { itemCount: 1, totalCompCount: 2 }) <= BATCH_OUTPUT_TOKEN_BUDGET,
+        'a single-item price batch stays under the usable output ceiling');
+      validateBatchPriceSynthesisSubmission({ items: [{ itemId: batchItem.itemId, pricing, compSourceUrls: ['https://example.test/sold'], compSources: ['sold-source'] }] }, [batchItem]);
+      let foreign = null;
+      try {
+        validateBatchPriceSynthesisSubmission({ items: [{ itemId: batchItem.itemId, pricing, compSourceUrls: ['https://example.test/other'], compSources: ['sold-source'] }] }, [batchItem]);
+      } catch (error) { foreign = error; }
+      assert(foreign, 'a single-item batch rejects a comp URL that was not supplied for that item');
+      return { singletonBatch: true };
     },
   },
 {
@@ -125,10 +70,14 @@ export default [
         soldComps: Array.from({ length: count }, (_, index) => ({ url: `https://example.test/${itemId}/${index}`, source: 'example' })),
         activeComps: [],
       });
-      const items = [makeItem('price-a', 40), makeItem('price-b', 40)];
+      // Each item alone fills the output budget with comps, so the pair cannot share a batch.
+      const fullItemComps = priceSynthesisBatchMaxComps(1);
+      assert(priceSynthesisBatchFits(1, fullItemComps) && !priceSynthesisBatchFits(2, fullItemComps * 2),
+        'the derived fixture fits one item per batch and never two');
+      const items = [makeItem('price-a', fullItemComps), makeItem('price-b', fullItemComps)];
       const batches = packBatchPriceSynthesisItems(items);
       assert(batches.length === 2 && batches[0][0].itemId === 'price-a' && batches[1][0].itemId === 'price-b',
-        'items exceeding 1024 + 900*n + 200*comps <= 15360 split deterministically without reordering');
+        'items exceeding 1024 + 900*n + 200*comps <= BATCH_OUTPUT_TOKEN_BUDGET split deterministically without reordering');
       const pricing = {
         recommended_price: 100, quick_sell_price: 90, max_profit_price: 120,
         justification: 'Matched the supplied listing.', match_quality: 'moderate',
@@ -170,8 +119,10 @@ export default [
         && hub.includes('const synthResults = await synthesizePricesBatch(aiItems, manualAiRunId, synthesisRecovery, options.autoResume === true);')
         && !hub.includes('const synthResult = await synthesizePrice(comps, overrides);')
         && main.includes("handleSafe('synthesize-prices-batch'")
-        && main.includes("handleSafe('synthesize-price'"),
-      'every fresh SellHub pricing request, including a singleton, must traverse the identity-keyed batch endpoint while the legacy handler remains available only for compatibility');
+        && !main.includes("handleSafe('synthesize-price'")
+        && !preload.includes("'synthesize-price'")
+        && !hook.includes('synthesizePrice,'),
+      'every SellHub pricing request, including a singleton, must traverse the identity-keyed batch endpoint; the one-item handler is gone');
       return { rendererBatchRoute: true };
     },
   },
@@ -389,35 +340,14 @@ export default [
     },
   },
 {
-    name: 'pricing notes: normalize and format for price synthesis prompt',
+    name: 'pricing notes: normalize whitespace and stay uncapped',
     run: () => {
       const notes = '  8x10 rug\n\nsmall coffee stain, pet home.  ';
       const normalized = normalizePricingNotes(notes);
-      const promptBlock = formatPricingNotesForPrompt(notes);
       assert(normalized === '8x10 rug small coffee stain, pet home.', `pricing notes normalize whitespace → ${normalized}`);
-      assert(promptBlock.includes('USER NOTES FROM SELLER') && promptBlock.includes(normalized), `pricing notes prompt block includes notes → ${promptBlock}`);
-      assert(formatPricingNotesForPrompt('   ') === '', 'blank pricing notes do not add a prompt section');
+      assert(normalizePricingNotes('   ') === '', 'blank pricing notes normalize to an empty string');
       const long = normalizePricingNotes('x'.repeat(10_000));
       assert(long.length === 10_000, `pricing notes should remain uncapped, got ${long.length}`);
-      return { ok: true };
-    },
-  },
-{
-    name: 'price comp relevance: grossly off-target sources do not get forced round-robin slots',
-    run: () => {
-      const comps = [
-        { source: 'ebay-sold', score: 10 },
-        { source: 'ebay-sold', score: 8 },
-        { source: 'mercari', score: 4 },
-        { source: 'pricecharting', score: 1 },
-        { source: 'pricecharting', score: 0.5 },
-      ];
-      const filtered = filterGrosslyOffTargetSources(comps, item => item.score);
-      assert(filtered.sources.length === 1 && filtered.sources[0] === 'pricecharting',
-        `only grossly off-target source rejected → ${JSON.stringify(filtered.sources)}`);
-      assert(filtered.kept.length === 3 && filtered.rejected.length === 2, 'all good-source comps kept; wrong-source comps rejected');
-      const oneSource = filterGrosslyOffTargetSources([{ source: 'only', score: 0 }], item => item.score);
-      assert(oneSource.kept.length === 1 && oneSource.rejected.length === 0, 'never reject the only available source');
       return { ok: true };
     },
   },

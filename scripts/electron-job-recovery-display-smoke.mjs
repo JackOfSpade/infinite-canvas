@@ -24,7 +24,7 @@ try {
   } };
   const us = { id: 'us', type: 'jobhub', position: { x: 0, y: 450 }, data: {
     hubState: 'empty', jobRunId: 'us-run', careerSnapshotId: pin, resumeProfile: {}, careerData: 'Saved career evidence',
-    manualAiResume: { runId: 'us-ai', jobRunId: 'us-run', task: 'job-preference-research', orchestratorNodeId: 'board', boardRunId: 'board-run' },
+    manualAiResume: { runId: 'us-ai', jobRunId: 'us-run', task: 'job-preference-research-batch', orchestratorNodeId: 'board', boardRunId: 'board-run' },
   } };
   const board = { id: 'board', type: 'jobboard', position: { x: 500, y: 0 }, data: {
     hubState: 'empty', locked: true, selectedSearchModuleIds: ['ca', 'us'],

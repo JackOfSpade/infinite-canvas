@@ -2,14 +2,13 @@ import { readFileSync } from 'node:fs';
 import * as officialPosting from '../../electron/ipc/officialPostingBridge.js';
 import { validateGapReviewSubmission as gapValidator, w4Lines as lines, __rejectionCauseKeysForTests as causeKeys, diagnoseCompensationExperienceBandLadder, isValidCompensationExperienceBandLadder } from '../test-dependencies.js';
 import {
-  assert, w4Jobs as jobs, w4Scoring as scoring, w4Preferences as prefs,
+  assert, w4Jobs as jobs, w4Preferences as prefs,
   w4Taxonomy as taxonomy, w4Location as location, w4Consolidation as consolidation,
-  w4Interview as interview, w4Marketplace as market, w4Hub as hub, w4Text as text,
+  w4Interview as interview, w4Marketplace as market, w4Hub as hub,
 } from '../test-dependencies.js';
 
 const A = 'a'.repeat(24), B = 'b'.repeat(24), C = 'c'.repeat(24);
 const source = 'ZQX-SENTINEL-RESEARCH Alpha duty one. Beta duty two. https://source.example.test/a 2026-01-01';
-const inventory = ['one', 'two', 'three'].map((id, index) => ({ id, requirementText: 'Synthetic duty', priority: 'required', jobEvidence: `Duty ${index}` }));
 const plan = () => ({ version: 1, summary: '', titles: [], warnings: [], softPreferences: [{ id: 'p1', criterion: 'Alpha role', category: 'role' }], strictRequirements: [], direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: true } });
 const listing = (index, fields = {}) => ({ index, listingId: 'wrong', matches: [{ preferenceId: 'p1', outcome: 'confirmed', evidenceQuote: '' }], ...fields });
 const gapRow = id => ({ id, verdict: 'confirmed', priority: 'unchanged', status: 'unchanged', jobEvidence: '', candidateEvidence: '', duplicateOf: '', explanation: 'Synthetic' });
@@ -26,14 +25,9 @@ const badPrice = itemId => ({ itemId, compSourceUrls: ['https://wrong.example.te
 export const w4ReproCases = [
   { name: 'scoring strict', minimum: 2, call: () => jobs.validateJobScoringSubmission({ scores: [{ index: 0, matchScore: -1 }, { index: 1, matchScore: -1 }, { index: 2, matchScore: 80, requirementAssessments: [{ jobEvidence: '', status: 'direct', candidateEvidence: '' }] }] }, [{}, {}, {}], { requireComplete: true }) },
   { name: 'scoring structural', minimum: 2, call: () => jobs.validateJobScoringSubmission({ scores: [{ index: 0 }, { index: 0 }, { index: 9 }] }, [{}]) },
-  { name: 'inventory', minimum: 2, call: () => scoring.normalizeScoringInventory({ requirements: [{ requirementText: '', priority: 'required', jobEvidence: 'Alpha duty one.' }, { requirementText: 'Beta', priority: 'required', jobEvidence: 'invented' }, { requirementText: 'Gamma', priority: 'required', jobEvidence: 'invented too' }] }, source) },
-  { name: 'page evidence', minimum: 2, call: () => scoring.validateScoringPageEvidence({ assessments: [{ requirementId: 'wrong', status: 'direct' }, { requirementId: 'wrong-again', status: 'direct' }, { requirementId: 'three', status: 'direct', candidateEvidence: 'invented' }] }, inventory, { id: 'page-1', digest: 'd', text: 'ZQX-SENTINEL-CAREER Alpha career text.' }) },
-  { name: 'synthesis', minimum: 2, call: () => scoring.composeScoringSynthesis({ matchScore: 80, confidence: 'high', assessments: [{ requirementId: 'one', status: 'not_documented', candidateEvidence: '' }, { requirementId: 'two', status: 'direct', candidateEvidence: 'invented' }, { requirementId: 'three', status: 'not_documented', candidateEvidence: '' }] }, inventory, inventory.map(row => ({ ...row, observations: [{ status: 'direct', candidateEvidence: 'Alpha career text.' }] }))) },
   { name: 'gap review', minimum: 2, call: () => jobsGap({ reviews: [{ index: 0, rows: [gapRow('wrong'), gapRow('wrong-again')] }] }) },
   { name: 'preference plan', minimum: 2, call: () => prefs.validateJobPreferencePlanSubmission({ ...plan(), softPreferences: [{ id: 'p1', criterion: 'Alpha role', category: 'role' }, { id: 'p2', criterion: 'alpha role', category: 'role' }, { id: 'p3', criterion: 'ALPHA ROLE', category: 'role' }], direction: { ...plan().direction, roleDirections: ['Missing role'] } }) },
   ...[true, false].map(requireComplete => ({ name: `listing v2 ${requireComplete}`, minimum: 2, call: () => prefs.validateJobPreferenceListingSubmission({ assessments: [listing(0), listing(1)] }, [{}, {}], plan(), { requireComplete, listingIds: ['ZQX-SENTINEL-LISTING-0', 'ZQX-SENTINEL-LISTING-1'] }) })),
-  ...[true, false].map(requireComplete => ({ name: `listing legacy ${requireComplete}`, minimum: 2, call: () => prefs.validateLegacyJobPreferenceListingSubmission({ assessments: [{ index: 0, matches: [{ preferenceId: 'wrong', outcome: 'confirmed', evidenceQuote: '' }] }, { index: 1, matches: [] }] }, [{}, {}], plan(), { requireComplete }) })),
-  { name: 'research single', minimum: 1, call: () => prefs.validateJobPreferenceResearchSubmission({ assessments: [{ preferenceId: 'p1', outcome: 'confirmed', evidenceQuote: 'invented', sourceUrls: [] }] }, { preferenceId: 'p1', groundedResearch: source }) },
   { name: 'research batch', minimum: 2, call: () => prefs.validateJobPreferenceResearchBatchSubmission({ assessments: [{ researchId: A, preferenceId: 'p1', outcome: 'confirmed', evidenceQuote: 'invented', sourceUrls: [] }, { researchId: B, preferenceId: 'p2', outcome: 'confirmed', evidenceQuote: 'invented', sourceUrls: [] }] }, { requests: [{ researchId: A, match: { preferenceId: 'p1' } }, { researchId: B, match: { preferenceId: 'p2' } }], groundedResearchById: sections }) },
   { name: 'consolidation', minimum: 2, call: () => consolidation.__locationConsolidationConfirmationForTests.validateConfirmation({ confirmations: [{ pairId: 'wrong', sameJob: true }, { pairId: '0:1', sameJob: 'yes' }] }, [{ id: '0:1' }, { id: '1:2' }]) },
   { name: 'lookup rows', minimum: 2, call: () => location.parseJobLocationLookupBatch(`${mark('JOB LOCATION LOOKUP', A, 'nothing')}\n${mark('JOB LOCATION LOOKUP', B, 'RESULT: FOUND')}`, [{ id: A }, { id: B }]) },
@@ -45,7 +39,6 @@ export const w4ReproCases = [
   { name: 'interview', minimum: 2, call: () => interview.validateInterviewBriefAssessment({ companyFacts: [{ fact: 'invented', evidenceQuote: '', sourceUrl: '', sourceDate: '' }, { fact: 'invented too', evidenceQuote: '', sourceUrl: '', sourceDate: '' }], recentContext: [], applicationPositioning: [{ documentKind: 'resume', point: 'invented', evidenceQuote: '' }] }, { rawResearch: source, bundle: { job: {}, listingText: '', digests: {}, applicationPositioning: { resume: 'ZQX-SENTINEL-APPLICATION' } }, snapshotId: 'x', canonicalJobUrl: 'https://example.test/job', bundleArtifactId: 'b', createdAt: '2026-01-01' }) },
   { name: 'price', minimum: 2, call: () => market.validateBatchPriceSynthesisSubmission({ items: priceItems.map(row => badPrice(row.itemId)) }, priceItems) },
   { name: 'hub', minimum: 2, call: () => hub.validateHubScanBatchSubmission({ platforms: [{ scanId: 'wrong', attention: [] }, { scanId: A, attention: 'bad' }] }, expectedHub) },
-  { name: 'grounded text', minimum: 1, call: () => text.validateGroundedResearchText('') },
   { name: 'interview text', minimum: 1, call: () => interview.validateGroundedResearchText('') },
   { name: 'compensation sections', minimum: 2, call: () => jobs.parseCompensationResearchSections('Unwanted preface\nBEGIN COMPENSATION RESEARCH malformed', [A, B]) },
   { name: 'preference sections', minimum: 2, call: () => prefs.parseJobPreferenceResearchSections(`BEGIN RESEARCH foreign\ntext\nEND RESEARCH foreign`, [A, B]) },
@@ -93,7 +86,7 @@ export default [
       assert(key === causeKeys('VALIDATION_FAILED', null, [two])[0], `${id}: own values and numbers cannot evade same-rule counting`);
       assert(!allKeys.has(key), `${id} collides with ${allKeys.get(key)}`); allKeys.set(key, id);
     }
-    for (const area of [jobs, scoring, prefs, taxonomy, location, consolidation, interview, market, hub, text, officialPosting]) {
+    for (const area of [jobs, prefs, taxonomy, location, consolidation, interview, market, hub, officialPosting]) {
       const maps = Object.entries(area).filter(([name]) => name.endsWith('_CORRECTION_TEMPLATES'));
       assert(maps.length > 0 && maps.every(([, map]) => Object.isFrozen(map)), 'each area exports frozen templates');
     }
@@ -127,7 +120,7 @@ export default [
     assert(prompt.includes('Unspecified entry (minSalary=0, maxSalary=0) LAST') && prompt.includes('must equal the minSalary of the range listed just before it'), 'taxonomy builder must teach the exact ordering and contiguity rules');
   } },
   { name: 'W4 repro R5: display-only suffixes teach their hidden validator rules', run: () => {
-    for (const [name, phrase, count] of [['COMPENSATION_SECTION_FORMAT_SUFFIX', 'nothing outside', 5], ['ROLE_FAMILY_LADDER_SUFFIX', 'whole numbers', 2], ['COHORT_PROVENANCE_SUFFIX', 'at least 8 characters', 1]]) {
+    for (const [name, phrase, count] of [['COMPENSATION_SECTION_FORMAT_SUFFIX', 'nothing outside', 4], ['ROLE_FAMILY_LADDER_SUFFIX', 'whole numbers', 2], ['COHORT_PROVENANCE_SUFFIX', 'at least 8 characters', 1]]) {
       assert(typeof jobs[name] === 'string' && jobs[name].includes(phrase), `${name} must expose its rule`);
       const sourceText = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
       assert(sourceText.split(`displayOnlyPromptSuffix: ${name}`).length - 1 === count, `${name} must be wired at every v2 call site`);

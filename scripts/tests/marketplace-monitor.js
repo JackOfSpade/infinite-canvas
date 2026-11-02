@@ -1,16 +1,27 @@
-import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, fs, normalizeMarketplaceWatchUrls, path, prepareHubPages, resolveAttentionSourceUrls, scanPreparedHubPages, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes, withStatusCheckLock } from '../test-dependencies.js';
-import { mergePreparedHubScanSections, packPreparedHubScans, scanPreparedHubPageBatch } from '../../electron/ipc/listingStatusCheck.js';
+import { READ_STATE_READ_TOKEN, READ_STATE_UNREAD_TOKEN, annotateReadState, assert, buildMarketplaceModuleRollup, buildSellHubPriceDropRollup, buildSellHubResolveRollup, buildSellHubResolveSnapshot, deriveHubScanStatus, fs, normalizeMarketplaceWatchUrls, path, prepareHubPages, resolveAttentionSourceUrls, stripHtmlForAnalysis, stripReadStateTokens, summarizeReadState, visitCanvasNodes, withStatusCheckLock } from '../test-dependencies.js';
+import { marketplaceHubScanBatchFits, marketplaceHubScanMaxPagesForPlatform } from '../../electron/ipc/resultCaps.js';
+import { finalizeTerminalHubScan, mergePreparedHubScanSections, packPreparedHubScans, scanPreparedHubPageBatch } from '../../electron/ipc/listingStatusCheck.js';
 
-// Runs the real two-stage production sequence — prepareHubPages (scrape +
-// transport-outcome classification, no LLM call) then scanPreparedHubPages
-// (the human copy/paste LLM handoff + result binding) — instead of the
-// deleted scanSellerHubPages convenience wrapper that used to compose them
-// for exactly this kind of single-platform test. This is what
-// marketplace.js's Check-All handler actually calls, so exercising it here
-// is strictly better coverage than the wrapper gave.
+// Runs the real production sequence for one platform: prepareHubPages (scrape
+// + transport-outcome classification, no LLM call), then either
+// finalizeTerminalHubScan (every page already hit a terminal outcome) or a
+// one-platform packed batch through scanPreparedHubPageBatch (the human
+// copy/paste LLM handoff + result binding). This is what marketplace.js's
+// Check-All handler actually does. `llmText` answers with the per-platform
+// { summary, attention } shape; it is wrapped into the batch envelope here.
 async function runHubScan({ urlSpecs, llmText, signal, platformId = 'test-platform' }) {
   const prepared = await prepareHubPages({ urlSpecs, platformId, signal });
-  return scanPreparedHubPages({ ...prepared, signal, llmText });
+  if (prepared.llmInputs.length === 0) return finalizeTerminalHubScan(prepared);
+  const entries = packPreparedHubScans([{ platformId, prepared }]).flat();
+  const scans = await scanPreparedHubPageBatch({
+    scans: entries,
+    signal,
+    llmText: async (prompt, options) => {
+      const row = await llmText(prompt, options);
+      return { platforms: entries.map(entry => ({ scanId: entry.scanId, ...row })) };
+    },
+  });
+  return mergePreparedHubScanSections(entries.map(entry => ({ entry, scan: scans.get(entry.scanId) })));
 }
 
 export default [
@@ -143,7 +154,7 @@ export default [
       // (marketplace.js) never reaches prepareHubPages with an empty list; it checks
       // watchUrls.length itself first. What's still guaranteed, and worth locking
       // down here, is that prepareHubPages handles urlSpecs:null structurally
-      // (empty llmInputs/sources, no throw) and scanPreparedHubPages turns that into
+      // (empty llmInputs/sources, no throw) and finalizeTerminalHubScan turns that into
       // the same clean 'unknown' shape via deriveHubScanStatus on an empty list.
       const noUrls = await runHubScan({ urlSpecs: null, llmText: async () => ({}) });
       assert(noUrls.status === 'unknown' && noUrls.sources.length === 0, 'missing URL list returns a clean unknown result');
@@ -161,7 +172,7 @@ export default [
       // ⟦READ⟧/⟦UNREAD⟧ sentinels into headline/evidence/summary and emit an
       // invalid urgency/category. The scan must scrub the tokens everywhere and
       // coerce to low/other — this backs the read-message false-flag fix and is
-      // only reachable through scanPreparedHubPages (sanitizeAttention isn't exported).
+      // only reachable through the hub batch scan (sanitizeAttention isn't exported).
       const scrubbed = await runHubScan({
         urlSpecs: [{ url: messages, urlLabel: 'hub', fetcher: async () => ({ ok: true, status: 200, finalUrl: messages, html: readableHtml }) }],
         llmText: async () => ({
@@ -191,7 +202,7 @@ export default [
         // Abort ownership lives entirely in stage 1: prepareHubPages rethrows an
         // AbortError from a fetcher instead of swallowing it into a terminal page
         // failure (see its per-URL catch), so this throws before runHubScan ever
-        // reaches scanPreparedHubPages.
+        // reaches the batch scan.
         await runHubScan({
           signal: controller.signal,
           urlSpecs: [{
@@ -214,7 +225,7 @@ export default [
   },
 {
     // marketplace.js's check-marketplace-status handler runs a Check All scan
-    // as two passes over prepareHubPages/scanPreparedHubPages (the split this
+    // as two passes over prepareHubPages/scanPreparedHubPageBatch (the split this
     // test targets) specifically so browser scraping for every platform
     // finishes before any platform's manual AI handoff is issued — otherwise
     // a human would have to paste platform A's prompt before platform B's
@@ -231,7 +242,7 @@ export default [
       // Three simulated platforms with deliberately uneven fetch latency —
       // the slowest (platform-a) must still finish its fetch before the
       // FASTEST platform's (platform-c) AI handoff fires, which only holds if
-      // every prepareHubPages call is awaited before any scanPreparedHubPages
+      // every prepareHubPages call is awaited before any scanPreparedHubPageBatch
       // call begins (the actual two-pass shape), not if scan were interleaved
       // per platform as the loop went.
       const platforms = [
@@ -268,23 +279,28 @@ export default [
       const scanBatches = packPreparedHubScans(pendingScans);
       assert(scanBatches.length === 1 && scanBatches[0].length === 3,
         'three ordinary one-page platforms should share one conservative manual handoff');
+      // Three dense platforms fill the batch budget; a fourth one-page platform cannot join them.
+      let densePages = 1;
+      while (marketplaceHubScanBatchFits(3, 3 * (densePages + 1))) densePages += 1;
+      assert(marketplaceHubScanBatchFits(3, 3 * densePages) && !marketplaceHubScanBatchFits(4, 3 * densePages + 1),
+        'the derived dense fixture fills three platforms and leaves no room for a fourth');
       const denseScans = ['dense-a', 'dense-b', 'dense-c', 'dense-d'].map((platformId, platformIndex) => ({
         platformId,
         prepared: {
-          llmInputs: Array.from({ length: platformIndex < 3 ? 3 : 1 }, (_, pageIndex) => ({
+          llmInputs: Array.from({ length: platformIndex < 3 ? densePages : 1 }, (_, pageIndex) => ({
             spec: { url: `https://example.com/${platformId}/${pageIndex}`, urlLabel: 'hub' },
           })),
         },
       }));
       const denseBatches = packPreparedHubScans(denseScans);
       assert(denseBatches.length === 2 && denseBatches[0].length === 3 && denseBatches[1].length === 1,
-        'the packer reserves the batch envelope so mixed multi-page hubs never exceed 15,360 output tokens');
+        'the packer reserves the batch envelope so mixed multi-page hubs never exceed the usable output budget');
       const oversized = packPreparedHubScans([{
         platformId: 'oversized-platform',
         prepared: {
           sources: [{ url: 'https://example.com/terminal', status: 'unknown' }],
           readState: { read: 9, unread: 3 },
-          llmInputs: Array.from({ length: 27 }, (_, index) => ({
+          llmInputs: Array.from({ length: marketplaceHubScanMaxPagesForPlatform() + 1 }, (_, index) => ({
             spec: { url: `https://example.com/oversized/${index}`, urlLabel: 'hub' }, status: 200, snippet: 'page',
           })),
         },
@@ -294,10 +310,10 @@ export default [
         platformId: 'boundary-platform',
         prepared: { llmInputs: oversizedEntries[0].prepared.llmInputs, sources: [], readState: { read: 0, unread: 0 } },
       }]).flat();
-      assert(boundaryEntries.length === 1 && !boundaryEntries[0].isPageGroup && boundaryEntries[0].prepared.llmInputs.length === 26,
-        'the exact 26-page ceiling remains a normal singleton and retains its legacy scan path');
-      assert(oversizedEntries.length === 2 && oversizedEntries[0].prepared.llmInputs.length === 26 && oversizedEntries[1].prepared.llmInputs.length === 1,
-        'an oversized single platform splits into page groups below the 15,360-token batch ceiling');
+      assert(boundaryEntries.length === 1 && !boundaryEntries[0].isPageGroup && boundaryEntries[0].prepared.llmInputs.length === marketplaceHubScanMaxPagesForPlatform(),
+        'the exact per-platform page ceiling remains one unsplit platform section');
+      assert(oversizedEntries.length === 2 && oversizedEntries[0].prepared.llmInputs.length === marketplaceHubScanMaxPagesForPlatform() && oversizedEntries[1].prepared.llmInputs.length === 1,
+        'an oversized single platform splits into page groups within the usable batch output budget');
       assert(oversizedEntries[0].isPageGroup && oversizedEntries[1].isPageGroup
         && oversizedEntries[0].parentScanId === oversizedEntries[1].parentScanId
         && oversizedEntries[0].scanId !== oversizedEntries[1].scanId,
@@ -372,7 +388,7 @@ export default [
         'a cross-platform source URL must fail the entire batch rather than leak evidence between platform cards');
 
       // Guard the composition itself: marketplace.js must call prepareHubPages
-      // inside its per-platform loop (never scanPreparedHubPages there) and
+      // inside its per-platform loop (never the batch scanner there) and
       // defer every scan into one batched Promise.all AFTER that loop — the
       // shape this test exercises above.
       const marketplaceSource = fs.readFileSync(path.resolve('electron/ipc/marketplace.js'), 'utf8');
@@ -385,8 +401,8 @@ export default [
       const perPlatformLoop = marketplaceSource.slice(loopStart, pass2Start);
       // The loop may finalize a platform inline ONLY when prepareHubPages found
       // no LLM-eligible page (every hub page already hit a terminal transport
-      // outcome, so scanPreparedHubPages makes no AI call) — that immediate
-      // scanPreparedHubPages call costs nothing to await early. Any platform
+      // outcome, so there is no AI call) — that immediate
+      // finalizeTerminalHubScan call costs nothing to run early. Any platform
       // WITH llm-eligible pages must instead be queued onto pendingScans and
       // deferred to pass 2, never scanned inline.
       assert(perPlatformLoop.includes('await prepareHubPages('),
@@ -398,9 +414,11 @@ export default [
       assert(inlineFinalizeIndex >= 0 && pendingPushIndex > inlineFinalizeIndex,
         'a platform may only be scanned inline (no queued handoff) when its prepared payload has zero llm-eligible pages; every other platform must be queued onto pendingScans instead');
       assert(marketplaceSource.includes('scanPreparedHubPageBatch({'),
-        'the handler must use the identity-bound batch scanner for multi-platform handoffs');
-      assert(marketplaceSource.includes("scanPreparedHubPages({ ...prepared, signal })"),
-        'singleton batches preserve the established one-platform scanner');
+        'the handler must use the identity-bound batch scanner for every hub-scan handoff');
+      assert(marketplaceSource.includes('finalizeTerminalHubScan(prepared)')
+        && !marketplaceSource.includes('scanPreparedHubPages(')
+        && !marketplaceSource.includes('entries.length === 1 && !entries[0].isPageGroup'),
+      'a one-platform scan goes through the batch scanner; there is no separate singleton scanner');
       return { fetches: 3, handoffs: 1, platformsBoundByOpaqueId: true, orderedAfterAllFetches: true };
     },
   },

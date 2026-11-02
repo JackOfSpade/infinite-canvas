@@ -48,16 +48,15 @@ Every response, including exact-evidence and unsupported results, offers a compa
 
 ## Transport lifecycle and configuration
 
-`electron/interviewAiMatcher.js` owns parsing, deadlines, confidence, cancellation, deterministic fallback and the last 30 AI latency observations. `electron/interviewAiTransports.js` implements a small `start({cards,extensions,instructions,signal})`, `match({question,previousCardId,previousQuestion,signal})`, `close()` interface. The controller accepts an injected factory, config, request function and matcher for tests/integration.
+`electron/interviewAiMatcher.js` owns parsing, deadlines, confidence, cancellation, deterministic fallback and the last 30 AI latency observations. `electron/interviewAiTransports.js` implements a small `start({cards,extensions,instructions,signal})`, `match({question,previousCardId,previousQuestion,signal})`, `close()` interface. The controller accepts an injected factory, config and matcher for tests/integration.
 
-| Transport value | Behavior |
+There is one transport: a persistent warm Claude CLI process. The earlier cold, Codex and ChatGPT-bridge transports are removed.
+
+| Transport | Behavior |
 | --- | --- |
-| `claude-warm` | One persistent Claude CLI process with stream-json input/output. Window open starts initialization; compact card IDs/questions/headlines plus approved extension IDs/text and example hooks are sent once. Later turns contain only the question and explicit previous-card context. Window close retires the process. |
-| `claude-cold` / `claude-one-shot` | Claude CLI print call per question; the session retains the bounded prefix in host memory. |
-| `codex` | Codex CLI exec call per question with explicit model/effort and tool restrictions. |
-| `chatgpt-bridge` | Existing `requestNonApiAi` route, task `interview-live-match`, bound to the canvas owner rather than exposing a general child AI API. Uses the existing bridge schema/abort handling. |
+| Warm Claude | One persistent Claude CLI process with stream-json input/output. Window open starts initialization; compact card IDs/questions/headlines plus approved extension IDs/text and example hooks are sent once. Later turns contain only the question and explicit previous-card context. Window close retires the process. |
 
-CLI capability checks run through help before provider calls. Calls use isolated temporary working directories, no shell interpolation, bounded stdout/stderr, tool restrictions and abort-driven process termination. Temporary CLI resources are cleaned up. The host retains no live matcher transcript log. CLI and bridge providers retain their existing service/account behavior; the ChatGPT bridge's durable handoff policy is unchanged.
+CLI capability checks run through help before provider calls. Calls use isolated temporary working directories, no shell interpolation, bounded stdout/stderr, tool restrictions and abort-driven process termination. Temporary CLI resources are cleaned up. The host retains no live matcher transcript log.
 
 One matcher lifecycle belongs to the live window. Next question reuses its context and latency observations. A changed validated bank/pin replaces the matcher; close, crash, owner deletion and owner close release it. A question timeout or cancellation while waiting for initialization ends only that question: startup continues under its independent `initTimeoutMs` deadline, and the expired question is never dispatched when startup finishes. Later questions reuse the ready session. Initialization failure/expiry, protocol/process failures, and timeouts or cancellation after dispatch retire uncertain transport state; the next question can initialize a fresh transport. Invalid selection content/schema alone does not retire the warm transport. Late initialization/results are fenced. Claude warm is the adapter with a real persistent provider conversation. One-shot CLIs and the existing bridge do not gain a provider warm-session API: the bridge currently inlines its cached prefix for each handoff and uses its existing ChatGPT chat/model. Model/effort configuration directly controls the CLI adapters; bridge model selection remains in ChatGPT.
 
@@ -73,27 +72,24 @@ The measured default is **`claude-warm`, `opus`, default effort**. The historica
 | Sonnet warm / default, later quiet runs | 0.805–2.812 | 4.941–8.136 | 98.4% | 87.5% | Stages 2–3; misses one `none`, disqualified |
 | Sonnet warm / default, heavy CPU load | 1.974–2.054 | 5.933–7.179 | 98.4% | 87.5% | Stage 4; fails latency and quality criteria |
 | Haiku warm / default | 1.272–1.285 | 1.400–1.537 | 100% | 100% | Stage 1; slower than selected Opus |
-| Codex `gpt-6.1-terra` / low effort | 2.970 | 5.886 | 100% | 100% | Stage 1; too slow for live matching |
-| ChatGPT bridge | ≥45 per handoff | Unmeasured | Unmeasured | Unmeasured | Separate real in-app Prepare repair rounds; unusable for live matching |
+| Codex `gpt-6.1-terra` / low effort | 2.970 | 5.886 | 100% | 100% | Stage 1; too slow for live matching (Codex transport since removed) |
 
 Sources: `/tmp/interview-match-bench/results-stage1/summary.md`, `results-stage2/summary.md`, `results-stage3-quiet/summary.md` and `results-stage4-loaded/summary.md` in the same benchmark directory. Ranges span the two warm passes (and stages where specified); they are not pooled percentiles. Every listed benchmark run completed all 63 utterances. Opus retained 100% top-1 and 100% `none` recall in every run, including the loaded confirmation. Default effort is the diminishing-returns point: high effort adds no quality, while default effort supplies the demonstrated sub-second quiet and loaded tails. High effort was not separately tested under heavy load. Sonnet is disqualified even on a quiet machine by its later 4.9–8.1 second tails and missed abstention, as well as its loaded performance. The benchmark scripts' per-stage recommendations do not replace these cross-stage selection criteria.
 
-The bridge bound comes from separate real handoffs; it was not measured by the transport benchmark. It remains explicitly selectable for diagnostics or other workflows and is never the live default. Benchmark matching times exclude warm initialization, speech endpointing and rendering; they do not establish total live response time. The chosen matching latency supports the normal two-section display and does not justify making Keep going the primary layout.
+Benchmark matching times exclude warm initialization, speech endpointing and rendering; they do not establish total live response time. The chosen matching latency supports the normal two-section display and does not justify making Keep going the primary layout.
 
 Main-process configuration is read from the environment; the child cannot supply binaries, model names or transport instructions. The AI deadline starts after the existing authoritative snapshot/bank validation; it does not bound filesystem validation or renderer scheduling.
 
 | Environment variable | Default |
 | --- | --- |
-| `INTERVIEW_MATCH_TRANSPORT` | `claude-warm` |
 | `INTERVIEW_MATCH_MODEL` | `opus` |
 | `INTERVIEW_MATCH_EFFORT` | `default` (no explicit effort flag) |
-| `INTERVIEW_MATCH_TIMEOUT_MS` | `2500` total per question, including remaining initialization and any cold retry; expiry while warming leaves startup running |
+| `INTERVIEW_MATCH_TIMEOUT_MS` | `2500` total per question, including remaining initialization; expiry while warming leaves startup running |
 | `INTERVIEW_MATCH_INIT_TIMEOUT_MS` | `10000` independent initialization deadline |
 | `INTERVIEW_MATCH_LATENCY_THRESHOLD_MS` | `2500` |
 | `INTERVIEW_MATCH_CLAUDE_BIN` | `claude` |
-| `INTERVIEW_MATCH_CODEX_BIN` | `codex` |
 
-The default fallback order is **warm Opus → cold Opus at default effort → deterministic Approximate matching**. A warm failure or invalid selection can retry through `claude-cold` inside the same 2500 ms question budget. Cold Opus is a recovery route; these summaries do not establish its latency. A full timeout exhausts that budget and goes directly to Approximate; it does not add another provider wait. Explicit bridge, Codex and cold selections use their selected transport followed by deterministic matching. Busy calls also fall back without launching another AI turn. The deterministic result is labelled **Approximate · fallback matching**. Timeout results cannot arrive later and overwrite it. A successful AI abstention or low-confidence result does not trigger another provider or deterministic prepared-card selection. The audio fallback retains the conservative multipart/story gate only after AI fails; the semantic path sees the full endpointed turn instead of lexically choosing its tail. Audio capture/ASR remains local; submitting the turn to AI is part of live matching. No raw audio is sent to any AI transport.
+The fallback order is **warm Opus → deterministic Approximate matching**. A failed or invalid warm turn reports Approximate matching for that turn only, and a failed warm process restarts during idle time; there is no second provider route. A timeout exhausts the question budget and goes directly to Approximate. Busy calls also fall back without launching another AI turn. The deterministic result is labelled **Approximate · fallback matching**. Timeout results cannot arrive later and overwrite it. A successful AI abstention or low-confidence result does not trigger another provider or deterministic prepared-card selection. The audio fallback retains the conservative multipart/story gate only after AI fails; the semantic path sees the full endpointed turn instead of lexically choosing its tail. Audio capture/ASR remains local; submitting the turn to AI is part of live matching. No raw audio is sent to any AI transport.
 
 ## Latency layouts
 
@@ -109,15 +105,14 @@ The old `advanceQuestion(childEvent, false)` before an awaited answer lookup is 
 
 | Area | Files |
 | --- | --- |
-| AI contract, fallback, measurements and CLI/bridge adapters | `electron/interviewAiMatcher.js`, `electron/interviewAiTransports.js` |
+| AI contract, fallback, measurements and warm CLI adapter | `electron/interviewAiMatcher.js`, `electron/interviewAiTransports.js` |
 | Dedicated extension generation, sparse validation, sealing and Prepare guidance | `electron/ipc/interviewAnswerExtensions.js`, `electron/ipc/interviewAnswerBank.js`, `interviewAnswerEntailment.js`, `interviewPreparation.js` |
 | Child lifecycle, atomic replacement, audio gate and mode IPC | `electron/interviewWindow.js`, `electron/interviewWindowPreload.js`, `electron/interviewCallQuestionDetector.js` |
 | Recall/continuation display and copy | `src/interview-window/InterviewWindowApp.jsx`, `interviewWindow.css` |
-| Owner-bound handoff context and reviewed task registration | `electron/ipc/ipcUtils.js`, `llm.js`, `nonApiAi.js`, `handoffBridge/controller.js`, `engine.js`, `telemetry.js` |
 | Regression suites | `scripts/tests/interview-ai-matcher.js`, `interview-ai-window.js`, `interview-preload.js`, `interview-prepared-picker-render.js`, `interview-answer-extensions.js`, `interview-answer-sections-render.js` |
 | Registration and existing offline fixture adaptation | `scripts/test-runner.js`, `scripts/tests/interview-answer-live.js`, `interview-call-audio.js`, `interview-window-render.js`, `interview-window-e2e.js`, `scripts/interview-window-controller-session.mjs`, `scripts/interview-window-e2e.mjs` |
 
-Registered suites cover stubbed AI picks, none, follow-ups, timeout and labelled lexical fallback; slow startup surviving multiple question deadlines, independent initialization expiry, tolerant parsing and healthy-session reuse; compact warm initialization, one-shot/Codex/bridge adapter protocols; recovery and cancellation; invented-fact, duplicate and candor rejection; individual mechanical/semantic extension drops; realistic replay survival of at least two points per card; section order/collapse/copy, hooks and empty-extension omission; p50 and manual layout changes; child authorization and direct card-ID validation; all-card pickers after every response, duplicate question labels and late-AI fencing; and atomic audio failure/supersession. The new picker suite is registered in `scripts/test-runner.js` and automatically discovered by the interview runner. Existing offline fixtures explicitly inject an unavailable AI transport so they never contact a provider. Run:
+Registered suites cover stubbed AI picks, none, follow-ups, timeout and labelled lexical fallback; slow startup surviving multiple question deadlines, independent initialization expiry, tolerant parsing and healthy-session reuse; compact warm initialization, warm adapter protocol; recovery and cancellation; invented-fact, duplicate and candor rejection; individual mechanical/semantic extension drops; realistic replay survival of at least two points per card; section order/collapse/copy, hooks and empty-extension omission; p50 and manual layout changes; child authorization and direct card-ID validation; all-card pickers after every response, duplicate question labels and late-AI fencing; and atomic audio failure/supersession. The new picker suite is registered in `scripts/test-runner.js` and automatically discovered by the interview runner. Existing offline fixtures explicitly inject an unavailable AI transport so they never contact a provider. Run:
 
 ```bash
 node --import ./scripts/test-stubs/register.mjs scripts/run-interview-tests.mjs
@@ -170,19 +165,7 @@ All prior working-tree changes remain. No app/Electron or live provider was run,
 
 ## Verify real generation before app Prepare
 
-The plain-Node harness exercises the production Prepare handoffs, sparse repairs, entailment, sealing and reload without launching the app or Electron. Its **codex** transport generates fresh worker replies; `replay` checks recorded replies and cannot establish live generation quality. Run from the repository root with the same pinned snapshot, canonical job URL and applied-job bundle as the prior probe, but a **fresh** `--out`. The exact private input arguments belong in the Claude handoff rather than tracked documentation:
-
-```bash
-node --import ./scripts/test-stubs/register.mjs scripts/interview-live-prepare-harness.mjs \
-  --user-data "<existing user-data root>" \
-  --snapshot-id <same approved snapshot ID> \
-  --job-url "<same canonical job URL>" \
-  --bundle-dir "<same applied-job bundle directory>" \
-  --out /tmp/interview-live-prep-v7-extensions \
-  --transport codex
-```
-
-Inspect the private output's `report.json`, `final-answer-bank.json` and validation records before re-running Prepare in the app. Confirm that surviving cards carry 2–4 short additional points where evidence supports them, correct project/role hooks, complete exact citations and retained candor qualifications; inspect any card with zero points and the rejection reasons. The harness creates private output directories/files and protects its input trees against writes. This implementation session ran only synthetic/offline validation; a new successful live generation is still required to verify the real worker's yield. Do not copy private bank contents, source text or generated answers into the repo.
+The plain-Node harness for this step (`scripts/interview-live-prepare-harness.mjs`, Codex and replay transports over the removed handoff route) is removed. Prepare runs through `electron/ipc/interviewClaudeTransport.js`.
 
 ### Dedicated extension redesign verification (2026-10-30)
 

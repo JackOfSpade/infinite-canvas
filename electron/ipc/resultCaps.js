@@ -4,14 +4,13 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  * Result-count caps — how many results reach the LLM, and the per-source
  * breadth ceilings, in one place.
  *
- * The LLM-input caps (compsForPricing, jobScoringBatchSize) are the adaptive
- * part: they scale to how many quality results actually exist and stay bounded
- * by the downstream output-token budget. The old singleton price-synthesis
- * formula remains only to reconstruct exact durable handoffs; fresh pricing
- * uses the 15,360-token versioned batch formula below. Job scoring follows the
- * same contract: its fresh batch count and prompt seed come from the one
- * 1,600 + 600/job estimate below, while its retired 15-row contract remains
- * available only to replay an exact durable handoff.
+ * The LLM-input cap (jobScoringBatchSize) is the adaptive part: it scales to
+ * how many quality results actually exist and stays bounded by the downstream
+ * output-token budget. Pricing uses the versioned batch formula below, sized
+ * against BATCH_OUTPUT_TOKEN_BUDGET. Job scoring follows the same contract: its fresh batch count and
+ * prompt seed come from the one 1,600 + 600/job estimate below, while its
+ * retired 15-row contract remains available only to replay an exact durable
+ * handoff.
  *
  * Job collection breadth is deliberately NOT configured here. It is a persisted
  * per-hub user setting (`collectionLimits`) so a run can be reproduced and does
@@ -20,12 +19,22 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-// Chat-app responses top out at 16,384 output tokens. Keep one Ki-token margin
-// for provider/UI variation and size every new multi-item handoff against the
-// same usable ceiling.
-export const MANUAL_AI_USABLE_OUTPUT_TOKENS = 15360;
+// The output size every multi-item batch is sized against. Anthropic's official
+// model overview (platform.claude.com/docs/en/models/overview) gives the latest
+// Haiku, Sonnet and Opus models a 128,000-token maximum output per call. This is
+// that limit minus the same 1,024-token margin the budget always kept, and every
+// batch-size formula below derives from it.
+export const BATCH_OUTPUT_TOKEN_BUDGET = 128000 - 1024;
 
-// ── Versioned multi-item manual handoff estimates ──────────────────────────
+// The career clean layer keeps a 4/5 share of the budget, leaving room for its
+// per-row framing.
+export const CAREER_CLEAN_BUDGET_SHARE_NUMERATOR = 4;
+export const CAREER_CLEAN_BUDGET_SHARE_DENOMINATOR = 5;
+export const CAREER_CLEAN_RESPONSE_TOKEN_LIMIT = Math.floor(
+  BATCH_OUTPUT_TOKEN_BUDGET * CAREER_CLEAN_BUDGET_SHARE_NUMERATOR / CAREER_CLEAN_BUDGET_SHARE_DENOMINATOR,
+);
+
+// ── Versioned multi-item handoff estimates ──────────────────────────
 // These return the UNCLAMPED estimate as well as the prompt cap. Packers must
 // compare the estimate to the usable ceiling; checking only the clamped cap
 // would make an oversized batch look safe after it had already overflowed.
@@ -38,15 +47,15 @@ export function priceSynthesisBatchEstimatedTokens(itemCount = 1, totalCompCount
   return PRICE_BATCH_BASE_TOKENS + items * PRICE_BATCH_ITEM_TOKENS + comps * PRICE_BATCH_COMP_TOKENS;
 }
 export function priceSynthesisBatchMaxTokens(itemCount = 1, totalCompCount = 0) {
-  return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, priceSynthesisBatchEstimatedTokens(itemCount, totalCompCount));
+  return Math.min(BATCH_OUTPUT_TOKEN_BUDGET, priceSynthesisBatchEstimatedTokens(itemCount, totalCompCount));
 }
 export function priceSynthesisBatchFits(itemCount = 1, totalCompCount = 0) {
-  return priceSynthesisBatchEstimatedTokens(itemCount, totalCompCount) <= MANUAL_AI_USABLE_OUTPUT_TOKENS;
+  return priceSynthesisBatchEstimatedTokens(itemCount, totalCompCount) <= BATCH_OUTPUT_TOKEN_BUDGET;
 }
 export function priceSynthesisBatchMaxComps(itemCount = 1) {
   const items = Math.max(1, Math.floor(Number(itemCount) || 1));
   return Math.max(0, Math.floor(
-    (MANUAL_AI_USABLE_OUTPUT_TOKENS - PRICE_BATCH_BASE_TOKENS - items * PRICE_BATCH_ITEM_TOKENS)
+    (BATCH_OUTPUT_TOKEN_BUDGET - PRICE_BATCH_BASE_TOKENS - items * PRICE_BATCH_ITEM_TOKENS)
       / PRICE_BATCH_COMP_TOKENS,
   ));
 }
@@ -60,94 +69,53 @@ export function marketplaceHubScanBatchEstimatedTokens(platformCount = 1, urlCou
   return HUB_SCAN_BATCH_BASE_TOKENS + platforms * HUB_SCAN_PLATFORM_TOKENS + urls * HUB_SCAN_PAGE_TOKENS;
 }
 export function marketplaceHubScanBatchMaxTokens(platformCount = 1, urlCount = 1) {
-  return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, marketplaceHubScanBatchEstimatedTokens(platformCount, urlCount));
+  return Math.min(BATCH_OUTPUT_TOKEN_BUDGET, marketplaceHubScanBatchEstimatedTokens(platformCount, urlCount));
 }
 export function marketplaceHubScanBatchFits(platformCount = 1, urlCount = 1) {
-  return marketplaceHubScanBatchEstimatedTokens(platformCount, urlCount) <= MANUAL_AI_USABLE_OUTPUT_TOKENS;
+  return marketplaceHubScanBatchEstimatedTokens(platformCount, urlCount) <= BATCH_OUTPUT_TOKEN_BUDGET;
 }
 export function marketplaceHubScanMaxPagesForPlatform() {
   return Math.max(1, Math.floor(
-    (MANUAL_AI_USABLE_OUTPUT_TOKENS - HUB_SCAN_BATCH_BASE_TOKENS - HUB_SCAN_PLATFORM_TOKENS)
+    (BATCH_OUTPUT_TOKEN_BUDGET - HUB_SCAN_BATCH_BASE_TOKENS - HUB_SCAN_PLATFORM_TOKENS)
       / HUB_SCAN_PAGE_TOKENS,
   ));
 }
-
-// Historical singleton price-synthesis shape. Keep these values stable so an
-// exact accepted/pending durable handoff can replay byte-for-byte. Fresh work
-// is packed by PRICE_BATCH_* above and never receives this 24,576-token cap.
-const PRICE_SYNTH_TOKEN_HARD_CAP = 24576;
-const PRICE_BASE_TOKENS          = 3000;
-const PRICE_TOKENS_PER_COMP      = 200;
+// Ordinary platforms (two pages each) per hub scan call, from the same
+// per-platform and per-page arithmetic as the estimate above.
+const HUB_SCAN_ORDINARY_PAGES_PER_PLATFORM = 2;
+export function marketplaceHubScanMaxPlatformsPerBatch() {
+  return Math.max(1, Math.floor(
+    (BATCH_OUTPUT_TOKEN_BUDGET - HUB_SCAN_BATCH_BASE_TOKENS)
+      / (HUB_SCAN_PLATFORM_TOKENS + HUB_SCAN_ORDINARY_PAGES_PER_PLATFORM * HUB_SCAN_PAGE_TOKENS),
+  ));
+}
 
 // ── Compensation-research fit gate ────────────────────────────────────────────
 // Minimum matchScore a job must clear before the competitive-pay check runs
-// on it. Compensation research is NOT cheap on the manual-handoff transport:
-// each cohort (jobs grouped by role/seniority/experience/employment-type/
-// location/currency) costs TWO separate copy/paste round trips — one grounded
-// market-research prompt plus one assessment prompt — and cohorts fragment by
-// the job's own city, so a single multi-employer, multi-city search can
-// fragment into dozens of cohorts. Every one of those round trips is a manual
-// interruption for the person running the search, so an ungated run could
-// demand dozens of handoffs just for compensation research on jobs the user
-// was never going to pursue. Gating on fit score keeps the comparison to jobs
+// on it. Compensation research is NOT cheap: each cohort (jobs grouped by
+// role/seniority/experience/employment-type/location/currency) costs TWO
+// separate handoffs — one grounded market-research prompt plus one assessment
+// prompt — and cohorts fragment by the job's own city, so a single
+// multi-employer, multi-city search can fragment into dozens of cohorts. An
+// ungated run could spend dozens of model calls just for compensation
+// research on jobs the user was never going to pursue. Gating on fit score keeps the comparison to jobs
 // the user could realistically pursue: a competitive-pay verdict only changes
 // a decision on a job worth applying to.
 export const COMPENSATION_MIN_FIT_SCORE = 70;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)
-// returns the whole pool unchanged, so cappedForBudget is always 0. The manual
-// handoff transport has no request quota to exhaust, so there is no longer a
-// reason to cap this short of the batching/paste effort itself.
+// returns the whole pool unchanged, so cappedForBudget is always 0. There is no
+// request quota to exhaust, so there is no longer a reason to cap this.
 // Test mode can still skip expensive scoring, but it no longer changes what the
 // user asked the collectors to fetch.
 export const JOB_SCORE_CAP = JOB_SEARCH_TEST_MODE.skipAI ? 0 : Infinity;
 
-// ── Legacy singleton price-synthesis output-token budget ───────────────
-/**
- * Historical output-token formula used to reconstruct an exact old durable
- * prompt. Public task routing hard-clamps fresh requests, and production fresh
- * pricing uses priceSynthesisBatchMaxTokens() instead.
- */
-export function priceSynthesisMaxTokens(itemCount = 40) {
-  const n = Math.max(0, Number(itemCount) || 0);
-  return Math.min(PRICE_SYNTH_TOKEN_HARD_CAP, PRICE_BASE_TOKENS + n * PRICE_TOKENS_PER_COMP);
-}
-
-// ── Legacy singleton input cap ─────────────────────────────────────────
-// The largest comp count whose budget still fits UNDER the hard cap — beyond it
-// priceSynthesisMaxTokens() clamps and the synthesis could truncate. Derived from
-// the same constants as the budget formula, so the count fed and the budget
-// granted stay in lockstep no matter how either is tuned.
-const MAX_COMPS_BY_BUDGET = Math.floor((PRICE_SYNTH_TOKEN_HARD_CAP - PRICE_BASE_TOKENS) / PRICE_TOKENS_PER_COMP);
-
-/**
- * How many sold/active comps to feed the price-synthesis LLM. UNBOUNDED: feeds
- * EVERY available comp (the caller pre-sorts by title-match relevance, so the
- * ordering is preserved), limited only by MAX_COMPS_BY_BUDGET — the point past
- * which the token budget would clamp. If the combined set exceeds that ceiling,
- * both sides scale down proportionally so the sold/active mix is preserved.
- * @returns {{ sold:number, active:number }}
- */
-export function compsForPricing(soldAvailable = 0, activeAvailable = 0) {
-  // Coerce defensively: a non-numeric/NaN count would otherwise propagate to
-  // slice(0, NaN) → [] (silently dropping every comp).
-  let sold   = Math.max(0, Number(soldAvailable)   || 0);
-  let active = Math.max(0, Number(activeAvailable) || 0);
-  const total = sold + active;
-  if (total > MAX_COMPS_BY_BUDGET && total > 0) {
-    const scale = MAX_COMPS_BY_BUDGET / total;
-    sold   = Math.floor(sold * scale);
-    active = Math.floor(active * scale);
-  }
-  return { sold, active };
-}
-
 // A whole-record score includes four evidence-backed strengths, the COMPLETE
 // professional-gap inventory, confidence and optional tenure/pay context. The
 // former 600-token allowance could not reliably fit that audit and packed 22
-// jobs into one response. Reserve 2,800 tokens per job; four jobs use 12,800
-// including framing, while a fifth would exceed the 15,360 usable envelope.
+// jobs into one response. Reserve 2,800 tokens per job plus framing; a batch
+// holds as many jobs as fit BATCH_OUTPUT_TOKEN_BUDGET.
 const JOB_SCORING_BASE_TOKENS = 1600;
 const JOB_SCORING_TOKENS_PER_JOB = 2800;
 const LEGACY_JOB_SCORING_TOKENS_PER_JOB = 600;
@@ -159,11 +127,11 @@ export function jobScoringEstimatedTokens(itemCount = 1) {
 }
 
 export function jobScoringMaxTokens(itemCount = 1) {
-  return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, jobScoringEstimatedTokens(itemCount));
+  return Math.min(BATCH_OUTPUT_TOKEN_BUDGET, jobScoringEstimatedTokens(itemCount));
 }
 
 export function jobScoringBatchFits(itemCount = 1) {
-  return jobScoringEstimatedTokens(itemCount) <= MANUAL_AI_USABLE_OUTPUT_TOKENS;
+  return jobScoringEstimatedTokens(itemCount) <= BATCH_OUTPUT_TOKEN_BUDGET;
 }
 
 // The pre-v2 formula and grouping are deliberately retained for an exact
@@ -176,7 +144,7 @@ export function legacyJobScoringMaxTokens(itemCount = 1) {
 /**
  * Jobs to score per fresh LLM call. The count is derived from the same output
  * estimate which appears in the copied prompt, so a full batch is always
- * below the manual transport's 15,360-token usable ceiling.
+ * within BATCH_OUTPUT_TOKEN_BUDGET.
  * The model's INPUT window is deliberately NOT the driver — it dwarfs even ~50
  * full JDs — but it isn't ignored: the free token-count preflight (scoreBatch /
  * splitBatchesToFitWindow in jobs.js) verifies every REAL batch fits the serving
@@ -185,18 +153,17 @@ export function legacyJobScoringMaxTokens(itemCount = 1) {
  */
 export function jobScoringBatchSize() {
   return Math.max(1, Math.floor(
-    (MANUAL_AI_USABLE_OUTPUT_TOKENS - JOB_SCORING_BASE_TOKENS) / JOB_SCORING_TOKENS_PER_JOB,
+    (BATCH_OUTPUT_TOKEN_BUDGET - JOB_SCORING_BASE_TOKENS) / JOB_SCORING_TOKENS_PER_JOB,
   ));
 }
 
 // ── Job-preference listing evaluation budget ──────────────────────────────────
-// How many job listings ride in ONE preference-evaluation handoff. Every call
-// is a human copy/paste round trip, so the batch size IS the number of times
-// the user is interrupted.
+// How many job listings ride in ONE preference-evaluation handoff, which sets
+// how many handoffs a run costs.
 //
 // The INPUT window is emphatically NOT the bound — slimListing caps each
-// listing at 16,000 chars and the models this transport targets have very large
-// contexts. The bound is OUTPUT, and it is hard: the model must WRITE one match
+// listing at 16,000 chars and the model's context is very large. The bound is
+// the OUTPUT budget below: the model must WRITE one match
 // object (outcome + evidence + a verbatim evidenceQuote) for EVERY
 // (listing x preference-plan item) pair, so response volume scales with that
 // PRODUCT, not with the listing count.
@@ -206,32 +173,22 @@ export function jobScoringBatchSize() {
 // 33,649–56,038 chars, mean 41,054. At roughly 4 chars/token for this
 // English-heavy JSON that is ~10.3k tokens typical and ~14k worst case for TEN
 // listings. That is the calibration anchor for LISTING_EVAL_TOKENS_PER_MATCH
-// below, and it is why the batch cannot simply be made large: on a 16k-output
-// model, ten listings is already close to the ceiling.
+// below. Ten listings of 32-item plans measured ~14k tokens worst case, and 10
+// is the batch size whose quality was tested.
 //
-// LISTING_EVAL_TOKEN_HARD_CAP is the SERVING MODEL'S usable output ceiling, not
-// an arbitrary budget. The transport has no cap-raise retry (see llm.js), so a
-// batch sized past it does not degrade gracefully — the response is truncated
-// mid-JSON and the whole handoff has to be re-pasted.
-//
-// Set for ChatGPT's WEB APP, which is what this copy/paste transport actually
-// targets, and that distinction is load-bearing: GPT-5.6 Sol's API advertises
-// 128,000 max output tokens, but a single response in the chat UI is capped at
-// 16,384 regardless of context size — and the chat UI is where these prompts
-// are pasted. Sizing to the API number would truncate every batch. Held at
-// 15,360 for margin.
-// RAISE THIS when the serving transport changes, and the batch size follows
-// automatically.
-const LISTING_EVAL_TOKEN_HARD_CAP   = 15360;
+// LISTING_EVAL_TOKEN_HARD_CAP is the output budget the batch size is derived
+// from (the shared batch budget). With the full Claude output limit the budget
+// no longer binds first at typical plan sizes; MAX_LISTING_BATCH below does.
+const LISTING_EVAL_TOKEN_HARD_CAP   = BATCH_OUTPUT_TOKEN_BUDGET;
 // Real JSON scaffolding only — `{"assessments":[{"index":N,"matches":[...]}]}`.
 // This is NOT a safety cushion (the cushion is the per-listing floor below plus
-// the 15,360-of-16,384 margin above); inflating it silently costs listings.
+// the budget margin above); inflating it silently costs listings.
 const LISTING_EVAL_BASE_TOKENS      = 256;
 // Per (listing x plan item) match object. MEASURED, not derived from the schema
 // caps — an earlier version of this constant used the schema worst case (~260
 // tokens) discounted to 150, and that was wrong by 3x in the direction that
 // hurts: it silently cut batches to 3 for a 32-item plan and TRIPLED the number
-// of copy/paste handoffs a run costs (2070 listings became 690 prompts).
+// of handoffs a run costs (2070 listings became 690 prompts).
 //
 // The measurement: the run whose 20 responses are recorded in the
 // 2026-09-17T01-10 bug report used a 32-item preference plan at 10 listings per
@@ -250,14 +207,10 @@ const LISTING_EVAL_BASE_TOKENS      = 256;
 const LISTING_EVAL_TOKENS_PER_MATCH = 46;
 // Fixed cost of one listing's response ROW, independent of plan size — the
 // wrapper only: `{"index":12,"matches":[ ]},` is about 28 chars, so ~8 tokens.
-// Small ON PURPOSE. It is here because a measured per-match rate has this
-// overhead amortised into it at whatever plan size it was measured on, so
-// applying that rate bare at a much SMALLER plan slightly under-counts the row.
-// Being genuinely tiny, that distortion is tiny too — which is the point: it
-// means a per-match rate does transfer across plan sizes, and no large
-// plan-size-specific floor belongs on the measured path.
+// Small ON PURPOSE: the measured per-match rate has this overhead amortised
+// into it at the plan size it was measured on.
 const LISTING_EVAL_FIXED_ROW_TOKENS = 10;
-// Per-listing FLOOR for the UNCALIBRATED path, and the safety-critical constant. The per-match term alone
+// Per-listing FLOOR, and the safety-critical constant. The per-match term alone
 // under-predicts whenever the preference plan is small, because a listing's
 // response carries per-row overhead the plan size does not explain. Derived
 // from the measurement above: 56,038 chars for 10 listings is 1,303–1,648
@@ -265,19 +218,18 @@ const LISTING_EVAL_FIXED_ROW_TOKENS = 10;
 // content, so 1,500 sits mid-range and is conservative at the ratios that
 // actually apply to English-heavy JSON.
 //
-// Sanity check against reality: (15,360 − 256) / 1,500 = 10 listings, which is
-// exactly the batch size whose 20 responses were all accepted without
-// truncation in the measured run. The formula reproduces the empirical answer
-// rather than contradicting it.
+// The per-listing cost is a token estimate for sizing and for the declared
+// output budget; it is independent of how large the budget is.
 const LISTING_EVAL_TOKENS_PER_LISTING_FLOOR = 1500;
-// A floor here must never exceed the budget: with a hard output ceiling and no
-// retry, forcing a batch the model cannot finish guarantees truncation. 2 keeps
+// A floor here must never exceed the budget: forcing a batch past the output
+// budget risks a truncated reply. 2 keeps
 // a pathological plan from degenerating to one handoff per listing while
 // staying affordable at every plan size the budget admits.
 const MIN_LISTING_BATCH             = 2;
-// Upper bound on one human paste. Even with budget to spare, a single response
-// the user has to shuttle between apps should stay reviewable.
-const MAX_LISTING_BATCH             = 25;
+// Upper bound on one batch. This is a separate reason from the output cap: even
+// with budget to spare, one reply covers at most 25 listings so a failed or
+// incomplete reply costs a bounded re-ask.
+export const MAX_LISTING_BATCH      = 25;
 
 /**
  * Tokens one listing's response is expected to need.
@@ -287,22 +239,11 @@ const MAX_LISTING_BATCH             = 25;
  * verbose model while the budget written into the prompt still quoted the old
  * static rate, telling the model to write less than the answer actually needs.
  *
- * Measured rate when calibration has evidence, static estimate otherwise. The
- * fixed row cost is added in BOTH cases: it is the part a per-match rate cannot
- * express, and it is what keeps a rate learned at one plan size from
- * under-counting at another. The uncalibrated path keeps its floor, which was
- * measured at a 32-item plan and is meaningless for a 2-item one — so it is a
- * floor on the STATIC guess only, never on measured evidence.
+ * A pure function of the plan size: the larger of the per-listing floor and
+ * the fixed row cost plus the per-match estimate for every plan item.
  */
-function listingEvalTokensPerListing(planItemCount, observedTokensPerMatch = null) {
+function listingEvalTokensPerListing(planItemCount) {
   const items = Number.isFinite(planItemCount) ? Math.max(1, Math.floor(planItemCount)) : 1;
-  const measured = Number(observedTokensPerMatch);
-  if (Number.isFinite(measured) && measured > 0) {
-    // No extra safety multiplier: the margin already lives in the calibration
-    // percentile, which sizes on the worst sample until the window is deep
-    // enough for an outlier to be identifiable.
-    return Math.ceil(LISTING_EVAL_FIXED_ROW_TOKENS + items * measured);
-  }
   return Math.max(
     LISTING_EVAL_TOKENS_PER_LISTING_FLOOR,
     LISTING_EVAL_FIXED_ROW_TOKENS + items * LISTING_EVAL_TOKENS_PER_MATCH,
@@ -317,7 +258,7 @@ function listingEvalTokensPerListing(planItemCount, observedTokensPerMatch = nul
  * the declaration stops being a guard. Always clamped to the serving model's
  * output ceiling.
  */
-export function listingEvaluationMaxTokens(matchCount = 10, listingCount = 0, { observedTokensPerMatch = null } = {}) {
+export function listingEvaluationMaxTokens(matchCount = 10, listingCount = 0) {
   const listings = Math.max(0, Number.isFinite(listingCount) ? Math.floor(listingCount) : 0);
   const matches = Math.max(1, Number(matchCount) || 1);
   // Derive the plan size back out of the two counts so the shared per-listing
@@ -325,17 +266,12 @@ export function listingEvaluationMaxTokens(matchCount = 10, listingCount = 0, { 
   // did not say how many listings it is sending.
   const planItems = listings > 0 ? Math.max(1, Math.round(matches / listings)) : matches;
   const byListings = LISTING_EVAL_BASE_TOKENS
-    + Math.max(1, listings) * listingEvalTokensPerListing(planItems, observedTokensPerMatch);
+    + Math.max(1, listings) * listingEvalTokensPerListing(planItems);
   return Math.min(LISTING_EVAL_TOKEN_HARD_CAP, byListings);
 }
 
-export function listingEvaluationBatchSize(planItemCount, { observedTokensPerMatch = null } = {}) {
-  // A MEASURED per-match cost beats every static estimate here, and it is the
-  // only thing that catches model drift — so when calibration has evidence, it
-  // replaces both the per-match constant AND the per-listing floor (the floor
-  // exists only to cover what the per-match guess could not see). The static
-  // path stays as the cold-start default.
-  const perListing = listingEvalTokensPerListing(planItemCount, observedTokensPerMatch);
+export function listingEvaluationBatchSize(planItemCount) {
+  const perListing = listingEvalTokensPerListing(planItemCount);
   const affordable = Math.floor((LISTING_EVAL_TOKEN_HARD_CAP - LISTING_EVAL_BASE_TOKENS) / perListing);
   // MIN_LISTING_BATCH may not raise the batch above what the budget affords —
   // that is the one direction the clamp must not go, because exceeding a hard
@@ -348,51 +284,77 @@ export function listingEvaluationBatchSize(planItemCount, { observedTokensPerMat
 // scale on that section count, not input size: every additional employer needs
 // its own sources and facts in the raw phase and one provenance-bearing row in
 // the assessment phase.
+// Never give a one-item remainder less than a 4096-token floor. Extra
+// employers then add bounded headroom of their own.
+const JOB_PREFERENCE_RESEARCH_FLOOR_TOKENS = 4096;
+const JOB_PREFERENCE_RESEARCH_EXTRA_ITEM_TOKENS = 1024;
+// Keep a 2048-token floor for a final singleton.
+const JOB_PREFERENCE_ASSESSMENT_FLOOR_TOKENS = 2048;
+const JOB_PREFERENCE_ASSESSMENT_EXTRA_ITEM_TOKENS = 512;
+// The most employers one research / assessment call can carry within the budget.
+export const JOB_PREFERENCE_RESEARCH_MAX_ITEMS = Math.floor(
+  (BATCH_OUTPUT_TOKEN_BUDGET - JOB_PREFERENCE_RESEARCH_FLOOR_TOKENS) / JOB_PREFERENCE_RESEARCH_EXTRA_ITEM_TOKENS,
+) + 1;
+export const JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS = Math.floor(
+  (BATCH_OUTPUT_TOKEN_BUDGET - JOB_PREFERENCE_ASSESSMENT_FLOOR_TOKENS) / JOB_PREFERENCE_ASSESSMENT_EXTRA_ITEM_TOKENS,
+) + 1;
+
 export function jobPreferenceResearchMaxTokens(itemCount = 1) {
   const n = Math.max(1, Math.floor(Number(itemCount) || 1));
-  // Never give a one-item remainder less room than the historical one-company
-  // handoff (4096). Extra employers then add bounded headroom of their own.
-  return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 4096 + Math.max(0, n - 1) * 1024);
+  return Math.min(
+    BATCH_OUTPUT_TOKEN_BUDGET,
+    JOB_PREFERENCE_RESEARCH_FLOOR_TOKENS + Math.max(0, n - 1) * JOB_PREFERENCE_RESEARCH_EXTRA_ITEM_TOKENS,
+  );
 }
 
 export function jobPreferenceResearchAssessmentMaxTokens(itemCount = 1) {
   const n = Math.max(1, Math.floor(Number(itemCount) || 1));
-  // Preserve the legacy structured-assessment floor for a final singleton.
-  return Math.min(MANUAL_AI_USABLE_OUTPUT_TOKENS, 2048 + Math.max(0, n - 1) * 512);
+  return Math.min(
+    BATCH_OUTPUT_TOKEN_BUDGET,
+    JOB_PREFERENCE_ASSESSMENT_FLOOR_TOKENS + Math.max(0, n - 1) * JOB_PREFERENCE_ASSESSMENT_EXTRA_ITEM_TOKENS,
+  );
 }
+
+// ── Role screen rows ────────────────────────────────────────────────────────
+// 1,024 base + 48 tokens per terse verdict row.
+export const ROLE_SCREEN_BASE_TOKENS = 1024;
+export const ROLE_SCREEN_ROW_TOKENS = 48;
+export const ROLE_SCREEN_MAX_ROWS = Math.floor(
+  (BATCH_OUTPUT_TOKEN_BUDGET - ROLE_SCREEN_BASE_TOKENS) / ROLE_SCREEN_ROW_TOKENS,
+);
 
 // ── Batched compensation-assessment budgets ─────────────────────────────────
 // One structured cohort row needs its own compact evidence extraction, while
 // every listing in that cohort needs one exact indexed verdict.  Keep this
 // formula shared by the packer and task cap: a drift here would either waste
-// manual handoffs or advertise a response that cannot fit.
+// handoffs or advertise a response that cannot fit.
 export const COMPENSATION_ASSESSMENT_BASE_TOKENS = 1024;
 export const COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS = 1400;
 // Each listing now includes a career-grounded application range, a rounded
 // desired salary and a brief explanation alongside its market evidence.
 export const COMPENSATION_ASSESSMENT_PER_ROW_TOKENS = 1200;
 // A role-family ladder is a smaller structured result than salary evidence.
-// Keep this next to the cohort formula because both share the same manual
+// Keep this next to the cohort formula because both share the same
 // extraction task, but deliberately let its downstream phase pack beyond the
 // seven-item grounded-research batch that feeds it.
 export const ROLE_FAMILY_ASSESSMENT_BASE_TOKENS = 1024;
 export const ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS = 700;
 export const MAX_ROLE_FAMILIES_PER_ASSESSMENT = Math.floor(
-  (MANUAL_AI_USABLE_OUTPUT_TOKENS - ROLE_FAMILY_ASSESSMENT_BASE_TOKENS)
+  (BATCH_OUTPUT_TOKEN_BUDGET - ROLE_FAMILY_ASSESSMENT_BASE_TOKENS)
     / ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS,
 );
 // Every cohort has at least one listing row, so account for both its compact
 // evidence envelope and its required indexed assessment before setting the
 // schema/packer ceiling.
 export const MAX_COMPENSATION_COHORTS_PER_ASSESSMENT = Math.floor(
-  (MANUAL_AI_USABLE_OUTPUT_TOKENS - COMPENSATION_ASSESSMENT_BASE_TOKENS)
+  (BATCH_OUTPUT_TOKEN_BUDGET - COMPENSATION_ASSESSMENT_BASE_TOKENS)
     / (COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS + COMPENSATION_ASSESSMENT_PER_ROW_TOKENS),
 );
 
 export function roleFamilyAssessmentMaxTokens(roleCount = 1) {
   const roles = Math.max(1, Math.floor(Number(roleCount) || 1));
   return Math.min(
-    MANUAL_AI_USABLE_OUTPUT_TOKENS,
+    BATCH_OUTPUT_TOKEN_BUDGET,
     ROLE_FAMILY_ASSESSMENT_BASE_TOKENS + roles * ROLE_FAMILY_ASSESSMENT_PER_ROLE_TOKENS,
   );
 }
@@ -401,7 +363,7 @@ export function compensationCohortAssessmentMaxTokens(cohortCount = 1, rowCount 
   const cohorts = Math.max(1, Math.floor(Number(cohortCount) || 1));
   const rows = Math.max(1, Math.floor(Number(rowCount) || 1));
   return Math.min(
-    MANUAL_AI_USABLE_OUTPUT_TOKENS,
+    BATCH_OUTPUT_TOKEN_BUDGET,
     COMPENSATION_ASSESSMENT_BASE_TOKENS
       + cohorts * COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS
       + rows * COMPENSATION_ASSESSMENT_PER_ROW_TOKENS,
@@ -414,10 +376,10 @@ export function compensationCohortAssessmentFits(cohortCount = 1, rowCount = 1) 
   return cohorts <= MAX_COMPENSATION_COHORTS_PER_ASSESSMENT
     && COMPENSATION_ASSESSMENT_BASE_TOKENS
       + cohorts * COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS
-      + rows * COMPENSATION_ASSESSMENT_PER_ROW_TOKENS <= MANUAL_AI_USABLE_OUTPUT_TOKENS;
+      + rows * COMPENSATION_ASSESSMENT_PER_ROW_TOKENS <= BATCH_OUTPUT_TOKEN_BUDGET;
 }
 
 export const MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT = Math.floor(
-  (MANUAL_AI_USABLE_OUTPUT_TOKENS - COMPENSATION_ASSESSMENT_BASE_TOKENS - COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS)
+  (BATCH_OUTPUT_TOKEN_BUDGET - COMPENSATION_ASSESSMENT_BASE_TOKENS - COMPENSATION_ASSESSMENT_PER_COHORT_TOKENS)
     / COMPENSATION_ASSESSMENT_PER_ROW_TOKENS,
 );

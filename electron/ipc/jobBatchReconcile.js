@@ -34,7 +34,7 @@ export function buildScoredJob(job, scoreOrNull, { fallbackScore, allNull }) {
     'index', 'matchScore', 'rawScore', 'adjustedScore', 'reasoning', 'careerDirection',
     'requirementAssessments', 'materialGaps', 'confidence', 'compensationContext',
     'strengths', 'experienceAssessment', 'fitAssessment', 'scoringEvidenceReceipt',
-    'scoreStatus', 'scoringCoverageReceipt',
+    'scoreStatus',
   ]) delete cleanJob[key];
   if (scoreOrNull) {
     return { ...cleanJob, ...scoreOrNull };

@@ -43,7 +43,7 @@
       ],
       "timestamp": "none",
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "Open and check ChatGPT worker chats in Google Chrome.",
+        "NSAppleEventsUsageDescription": "Read the marketplace pages you are signed in to in Google Chrome.",
         "NSAudioCaptureUsageDescription": "Transcribe interview call output on this Mac without capturing your microphone or changing playback.",
         "NSScreenCaptureUsageDescription": "Read interview call system audio locally. No screen frames or microphone audio are captured by Interview Helper."
       }

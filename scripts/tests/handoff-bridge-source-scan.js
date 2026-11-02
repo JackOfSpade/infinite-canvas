@@ -44,7 +44,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   // it as bridge policy without acquiring capabilities.
   'constants.js': { allow: ['../../../src/utils/handoffScheduler.js'] },
   // Availability reads main-owned worker/launcher counts without new I/O.
-  'bridgeAvailability.js': { allow: ['./constants.js', './observedChatContext.js', '../../../src/utils/handoffScheduler.js', '../../../src/utils/handoffBridgeStatus.js'] },
+  'bridgeAvailability.js': { allow: ['./constants.js', './observedChatContext.js', '../claudeTaskWorker.js', '../../../src/utils/handoffScheduler.js', '../../../src/utils/handoffBridgeStatus.js'] },
   'contracts.js': { allow: [] },
   'respond.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
   'wire.js': { allow: sibling('node:crypto', 'node:net', 'node:util') },
@@ -80,7 +80,7 @@ export const SOURCE_SCAN_ROWS = Object.freeze({
   'observedChatContext.js': { allow: ['node:crypto'] },
   'sources/application.js': { allow: ['../../localAiApplication.js'] },
   'sources/syntheticPreflight.js': { allow: ['node:crypto', './application.js'] },
-  'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js'] },
+  'sources/push.js': { allow: ['../../nonApiAi.js', '../../ipcUtils.js', '../constants.js', '../../claudeTaskWorker.js'] },
   'controller.js': { allow: sibling('node:crypto') },
   'pairing.js': { allow: sibling('node:crypto') },
   // The launch-retry reason lists are shared with the dock, which renders the

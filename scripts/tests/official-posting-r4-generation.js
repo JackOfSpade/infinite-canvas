@@ -2,8 +2,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { comparisonRow } from './official-posting-r3-resolver.js';
-import { comparativeServiceFixture, comparisonVisible, serviceComparisonAnswer } from './official-posting-r3-service.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration as prepareSemanticOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 import { OfficialPostingFetchError } from '../../electron/ipc/officialPostingFetch.js';
@@ -139,7 +137,7 @@ export default [
           assert.equal(await store.find(job), null, 'a research-free idle click does not save a miss');
         }
         const active = await prepareOfficialPostingForGeneration(args(job), { store, fetch, callRaw, bridgeStatus: () => status(false) });
-        assert.equal(calls, 1, legacy ? 'old unavailable misses retry' : 'a later linked single chat researches');
+        assert.equal(calls, 2, legacy ? 'old unavailable misses retry' : 'a later linked single chat researches with one extra search');
         assert.equal(active.officialPosting.trail.includes('recent-miss'), false);
         assert.ok(active.officialPosting.trail.includes('bridge-research'));
       });
@@ -316,28 +314,42 @@ export default [
     },
   },
   {
-    name: 'Amendment 5 Generate forwards comparative callers through the real single-row service and stores host-verified text',
+    name: 'Generate forwards finder and judge callers through the real single-row service and stores the judged text',
     async run() {
       await withStore(async store => {
-        const fixture = comparativeServiceFixture([{ id: 'one' }]); const job = comparisonRow(); const calls = [];
-        const prepared = await prepareOfficialPostingForGeneration(args(job), { store, fetch: fixture.fetch, bridgeStatus: () => status(true),
-          callRaw: fixture.research, callMatch: async (prompt, options) => {
+        const posting = 'https://job-boards.greenhouse.io/northwind/jobs/4455667'; const careers = 'https://northwind.test/careers';
+        const official = 'Northwind Labs is hiring a Dispatch Engineer to build reliable routing services for regional delivery teams.\n'
+          + 'Design the dispatch scheduling service and its reporting pipeline.\nReview route reports with operations leads every week.';
+        const job = row({ title: 'Dispatch Engineer', company: 'Northwind Labs', snippet: official, sourceJobKey: 'r4-judge' });
+        const offline = async () => { throw Object.assign(new Error('offline test'), { code: 'fetch-failed' }); };
+        const calls = [];
+        const prepared = await prepareOfficialPostingForGeneration(args(job), { store, fetch: offline, bridgeStatus: () => status(true),
+          callRaw: async (prompt, options) => {
+            assert.equal(options.task, 'job-official-posting-research');
+            const ids = prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ');
+            return ids.map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: careers, postingUrl: posting,
+              employer: 'Northwind Labs', employerDomain: 'https://northwind.test', ats: 'Greenhouse' })}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
+          }, callMatch: async (prompt, options) => {
             calls.push(options.manualHandoff);
-            return JSON.stringify(serviceComparisonAnswer(comparisonVisible(prompt)));
+            const leadsJson = JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
+            return JSON.stringify({ choice: leadsJson.find(lead => lead.url === posting).id, postingUrl: posting, status: 'open', statusQuote: 'Apply for this job',
+              employerLinked: true, employerPageUrl: careers, employerLinkQuote: 'View open roles', title: 'Dispatch Engineer', employer: 'Northwind Labs',
+              location, salary: '', description: official,
+              evidence: [{ scrapedQuote: 'Review route reports with operations leads every week.', officialQuote: 'Review route reports with operations leads every week.' }],
+              conflicts: [] });
           } });
-        assert.equal(prepared.officialPosting.level, 'L1'); assert.equal(prepared.officialPosting.sourceUrl, fixture.candidateUrls[0]);
+        assert.equal(prepared.officialPosting.outcome, 'found'); assert.equal(prepared.officialPosting.sourceUrl, posting);
         assert.ok(prepared.officialPosting.trail.includes('comparative-match'));
         assert.equal(prepared.telemetry.officialPosting.comparisons, 1);
         assert.equal(prepared.telemetry.officialPosting.comparativeAgreements, 1);
-        assert.equal(prepared.telemetry.officialPosting.comparisonOptions[1], 1);
         assert.equal(prepared.telemetry.officialPosting.comparativeMatches, 1);
-        assert.equal(/Northwind|freight|Quote|prompt|evidence/u.test(JSON.stringify(prepared.telemetry)), false);
+        assert.equal(/Northwind|Quote|prompt|evidence/u.test(JSON.stringify(prepared.telemetry)), false);
         assert.deepEqual(calls.map(call => call.comparisonRun), ['A', 'B']);
         assert.equal(calls[0].comparisonGroup, calls[1].comparisonGroup);
         const trusted = getPreparedOfficialPosting(prepared.resolutionId, job);
-        assert.ok(trusted.description.includes('nightly route allocation across coastal depots'));
-        assert.equal(trusted.applyUrl, fixture.candidateUrls[0]);
-        assert.ok((await store.find(job)).officialPosting.trail.includes('comparative-choice-p1'));
+        assert.ok(trusted.description.includes('Review route reports with operations leads every week.'));
+        assert.equal(trusted.applyUrl, posting);
+        assert.ok((await store.find(job)).officialPosting.trail.includes('comparative-match'));
       });
     },
   },

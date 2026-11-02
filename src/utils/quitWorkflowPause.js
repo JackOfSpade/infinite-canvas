@@ -18,7 +18,7 @@ export function savedWorkflowQuitPausePatch(node, acknowledgement = {}, now = Da
   let marker = existingMarker;
   if (runId && !marker) {
     marker = { runId, ...(node.type === 'jobhub'
-      ? { task: data.careerImportCompilation?.task || (data.resumeProfile ? 'job-search' : 'resume-parse') } : {}) };
+      ? { task: data.careerImportCompilation?.task || (data.resumeProfile ? 'job-search' : 'career-profile-compile') } : {}) };
     if (node.type === 'jobhub' && !acknowledgement.paused) {
       const recovery = createManualAiPreSearchRecovery({ manualAiRunId: runId, nodeId: node.id,
         searchWindow: data.searchWindow, profileFingerprint: data.resumeFingerprint, startedAt: now });

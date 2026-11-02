@@ -346,13 +346,13 @@ export default [{
     return { failed: t.locationLookup.failed };
   },
 }, {
-  name: 'Both assessment builders reserve a display slot for the location provenance link',
+  name: 'The assessment builder reserves a display slot for the location provenance link',
   run: async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
-    assert(source.split('item.locationSource ? 4 : 5').length === 4 && source.split('locationLink ? [...links, locationLink] : links').length === 3,
-      'the personal-guidance validator and both assessment builders must cap salary evidence at 4, and both builders append the location link, so guidance, verdict and display use the same salary evidence');
-    return { builders: 2 };
+    assert(source.split('item.locationSource ? 4 : 5').length === 3 && source.split('locationLink ? [...links, locationLink] : links').length === 2,
+      'the personal-guidance validator and the assessment builder must cap salary evidence at 4, and the builder appends the location link, so guidance, verdict and display use the same salary evidence');
+    return { builders: 1 };
   },
 }, {
   name: 'Bug report renders the lookup as counts and enum codes only, and old telemetry still renders',

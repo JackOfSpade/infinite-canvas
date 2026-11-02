@@ -22,7 +22,6 @@ const JOBSEARCH_TRANSIENT_KEYS = [
   '_boardRollbackSourceProgressFence',
   'scrapeWarnings',
   'pendingJobs',
-  'pendingTargetRole',
   // These freeze the active run's Job Preferences while scraping. Recovery
   // reads the manifest instead; retaining them after an interrupted hub is
   // reset to empty risks applying an old person's plan to the next run.

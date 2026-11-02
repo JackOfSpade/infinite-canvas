@@ -11,6 +11,8 @@ import { answerBankRecordId, buildInterviewAnswerEvidence, INTERVIEW_ANSWER_QUES
 import { canonicalizeGeneratedUntrustedBoundaryNonces } from '../../electron/ipc/nonApiAi.js';
 import { deriveInterviewResumeConsistency, resumeCoverage } from '../../electron/ipc/interviewResumeCoverage.js';
 
+// No model is reachable from this suite: later pipeline steps degrade to their warnings.
+const syntheticAiTransport = { callText: async () => { throw new Error('Synthetic transport has no reply queued.'); }, callRaw: async () => { throw new Error('Synthetic transport has no reply queued.'); } };
 const snapshotId = 'a'.repeat(64);
 const canonicalJobUrl = 'https://jobs.example.test/interview';
 const TOPICS = ['deployment automation', 'release validation', 'documentation', 'data migration', 'integration', 'operations', 'testing', 'planning', 'reporting', 'support', 'monitoring', 'tooling'];
@@ -503,7 +505,7 @@ export default [
         const tasks = []; let answerPrompt; let answerValidator;
         const handlers = new Map();
         const loadSnapshot = async () => snapshot;
-        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler),
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport,
           buildBrief: args => buildInterviewBrief({ ...args, callRaw: async (_prompt, opts) => { tasks.push(opts.task); return research; }, callText: async (_prompt, opts) => { tasks.push(opts.task); opts.responseValidator(assessment); return assessment; } }),
           buildAnswers: args => buildInterviewPreparedAnswers({ ...args, loadSnapshot, callText: async (prompt, opts) => { tasks.push(opts.task); if (!isEntailmentPrompt(prompt)) { answerPrompt = prompt; answerValidator = opts.responseValidator; } return answerReply(value, prompt, opts); } }),
           publishAnswers: args => publishInterviewPreparedAnswers({ ...args, loadSnapshot }),
@@ -544,7 +546,7 @@ export default [
         const rejected = await buildInterviewPreparedAnswers({ ...args, brief, signal: cancelled.signal, userDataPath: root, loadSnapshot: async () => snapshot, callText: async () => { called = true; return value; } }).then(() => false, () => true);
         assert(rejected && !called, 'a cancelled preparation must not start a third bridge handoff');
         const handlers = new Map();
-        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), buildBrief: async () => ({ brief }), buildAnswers: async () => { throw new Error('private provider/path diagnostic'); } });
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: syntheticAiTransport, buildBrief: async () => ({ brief }), buildAnswers: async () => { throw new Error('private provider/path diagnostic'); } });
         let failure; try { await handlers.get('build-interview-brief')({}, args); } catch (error) { failure = error; }
         assert(failure && !failure.message.includes('private provider') && !fs.existsSync(path.join(root, 'interview-helper-answer-bindings')), 'third-step failure returns fixed recovery text and cannot publish partial answers');
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }

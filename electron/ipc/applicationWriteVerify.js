@@ -2,7 +2,6 @@ import { COVER_LETTER_EVIDENCE_SELECTION_RULE } from './applicationWriterGuidanc
 import { applicationUnitRegistry, argumentBindings, renderedUnitCharacters, UNIT_PATCH_SCHEMA } from './applicationUnitPatches.js';
 import { bootstrapApplicationUnitState } from './applicationGateFindings.js';
 /** Application protocol v2 state and prompt policy. No candidate data is kept here. */
-import { APPLICATION_V2_LIMITS } from './applicationV2Limits.js';
 import { careerChangedFindingErrors, careerFactFindingErrors, careerFactFindingsSection, careerFactTransition, careerInflationRules } from './careerWritingCore.js';
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { cleanCareerSkillNames } from './careerCleanLayer.js';
@@ -405,7 +404,7 @@ const PRODUCTION_SHAPES = 'Return a single JSON object with production shapes: {
 
 export function writeVerifyPrompt({ stage, state, sourcePrompt, posting, hand, envelope, targetCompany = '', listingEvidence = [], corrections = [], droppedFindings = [] }) {
   const candidate = state.candidates[state.ordinal];
-  const prefix = `APPLICATION V2 HANDOFF\n${JSON.stringify(envelope)}\nReply within ${APPLICATION_V2_LIMITS.chatReplyTokens} output tokens.\n`;
+  const prefix = `APPLICATION V2 HANDOFF\n${JSON.stringify(envelope)}\n`;
   if (stage === 'write') return `${prefix}${WRITE_VERIFY_SHORTLIST_STEP}\n\n${sourcePrompt}${droppedFindingsSection(droppedFindings)}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON. Only the EVIDENCE SHORTLIST appendix may contain catalog IDs; the résumé and letter contain no evidence IDs or citation markers. Finish the letter before either appendix. Start the application with a standalone RÉSUMÉ heading; include a skills block only from INDEX-ELIGIBLE SKILLS; omit it when that list is empty. Start the letter with a standalone COVER LETTER heading. A PERSONAL PROJECTS section is optional: include at most one project from Standalone projects, and only when it clearly strengthens this application; otherwise leave the section out. Put content in both sections. Keep the wording you want published; a separate converter will only make changes required by the production structure.\n${rejectionSection(corrections)}`;
   if (stage === 'convert') return `${prefix}${sourcePrompt}\n\nPLAIN-TEXT WRITER RESULT TO CONVERT:\n${candidate.plainText}\n\nCONVERSION TASK:\nConvert that exact writer result to production shapes and attach IDs from the full approved catalog above. Change wording only where the production shape requires it. Do not add claims or alter the selection.\n\nOUTPUT FORMAT:\n${PRODUCTION_SHAPES}\nEcho the APPLICATION V2 HANDOFF fields at the top level of the returned JSON.\n${rejectionSection(corrections)}`;
   if (stage === 'verify-correction' || stage === 'fit-correction' || stage === 'fact-correction') {

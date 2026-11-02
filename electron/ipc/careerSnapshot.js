@@ -15,6 +15,7 @@ import {
   CAREER_SNAPSHOT_TECHNOLOGY_RELATIONSHIPS,
   CAREER_FILE_TRANSCRIPTION_POLICY,
 } from './aiSchemas.js';
+import { BATCH_OUTPUT_TOKEN_BUDGET, CAREER_CLEAN_RESPONSE_TOKEN_LIMIT } from './resultCaps.js';
 import { describeSchemaErrors, validateResponseSchema } from './schemaValidation.js';
 import { validationFailure } from './validationFailure.js';
 import {
@@ -166,13 +167,16 @@ const AUDIT_MANDATES = {
 // over-classify unrelated prose.
 const TECHNOLOGY_LEDGER_COMPLETENESS_INSTRUCTION = 'For every achievement/project claim, independently scan the literal source rather than trusting the current technologies array. Retain every literal technical, product, platform, interface, data-source, organization-owned system, artifact, output, or named label whose omission could let a downstream reader mistake it for candidate capability. Put each retained label in technologies and exactly one source-linked technologyReferences record with literal relationshipEvidence and source segment IDs. Candidate-authored use, integration, configuration, operation, maintenance, or other application of a named tool, technology, platform, model, service, SDK, or API is demonstrated candidate capability. When that action interacts with, consumes, connects to, automates, or access-controls an external device, endpoint, provider object, or data source, keep the external object non-skill when source semantics supports that disposition, but also emit a separate bounded capability skill for the demonstrated action; it is normally indexEligible:false unless itself a canonical standalone term. Preserve alternatives, conditions, options, and ambiguity through their literal relationship rather than flattening them into unconditional experience. A non-skill needs positive source semantics that it is an artifact, output, data source, organization-owned system, external endpoint/object, or another non-capability—not only that its use is qualified or cannot be a bare index term. This is semantic completeness, never a capitalization, keyword, or fixed-vocabulary rule.';
 
-// Kept with the compiler contract so the manual-handoff router does not grow a
-// separate, drifting set of career ingestion limits. Values never exceed its
-// globally usable response ceiling.
+// Kept with the compiler contract so the handoff router does not grow a
+// separate, drifting set of career ingestion limits. Values never exceed the
+// shared batch output budget (BATCH_OUTPUT_TOKEN_BUDGET). The clean layer keeps
+// the 4/5 share of that budget (CAREER_CLEAN_RESPONSE_TOKEN_LIMIT in
+// resultCaps.js), leaving room for its per-row framing; the compile and repair
+// tasks use the whole budget.
 export const CAREER_SNAPSHOT_TASK_OUTPUT_TOKEN_LIMITS = Object.freeze({
-  'career-profile-clean': 12_288,
-  'career-profile-compile': 15_360,
-  'career-profile-repair': 15_360,
+  'career-profile-clean': CAREER_CLEAN_RESPONSE_TOKEN_LIMIT,
+  'career-profile-compile': BATCH_OUTPUT_TOKEN_BUDGET,
+  'career-profile-repair': BATCH_OUTPUT_TOKEN_BUDGET,
   'career-profile-audit-completeness': 8_192,
   'career-profile-audit-grounding': 8_192,
   'career-profile-audit-attribution': 8_192,

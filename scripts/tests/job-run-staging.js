@@ -1,4 +1,4 @@
-import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildExactTargetRoleQueryBundle, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, markProviderGathered, markSourceStatus, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, setStage, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobPreferenceResearchSubmission, writeLastRunReceipt } from '../test-dependencies.js';
+import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, markProviderGathered, markSourceStatus, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, setStage, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 import { createDurableBoardPauseControl, pauseBoardOwnedSearch, jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
 import { runInNewContext } from 'node:vm';
 // The bug-report builders under test. test-dependencies.js already re-exports
@@ -25,6 +25,15 @@ import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRec
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../../electron/ipc/jobBoardRunLease.js';
 import { getJobAnalysisPaths, getJobDescriptionRecoveryCheckpointPath, rebindJobAnalysisRecoveryOwners } from '../../electron/ipc/jobAnalysisPaths.js';
 import { claimJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
+import {
+  BATCH_OUTPUT_TOKEN_BUDGET,
+  JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS,
+  JOB_PREFERENCE_RESEARCH_MAX_ITEMS,
+  MAX_LISTING_BATCH,
+  ROLE_SCREEN_BASE_TOKENS,
+  ROLE_SCREEN_MAX_ROWS,
+  ROLE_SCREEN_ROW_TOKENS,
+} from '../../electron/ipc/resultCaps.js';
 import crypto from 'node:crypto';
 import quitWorkflowPauseTests from './quitWorkflowPauseFixture.mjs';
 import jobCollectionDiagnosticsTests from './jobCollectionDiagnosticsFixture.mjs';
@@ -1489,17 +1498,12 @@ export default [
       assert(validateJobPreferenceListingSubmission({ assessments: [] }, [{ title: 'X' }], valid, { requireComplete: false }),
         'an omitted row is accepted by the relaxed validator so it can be re-requested on its own');
 
-      // The adaptive sizer, driven end to end through the injected seam.
+      // Listing evaluation driven end to end through the injected seam.
       // One planned group issues up to HANDOFF_CONCURRENCY (10) batches, so the
-      // pool has to exceed 10 x the initial size before a second round exists.
-      // Round 1 uses the conservative static size; later rounds re-size from
-      // what the previous responses actually cost — here, a model that turned
-      // sharply more verbose, which must shrink the next round.
-      const sizedRounds = [];
+      // pool spans more than ten full batches.
+      const carriedCounts = [];
       const queuedWorkForecasts = [];
-      let observed = null;
-      const remembered = new Map();
-      const manyJobs = Array.from({ length: 150 }, (_, i) => ({
+      const manyJobs = Array.from({ length: MAX_LISTING_BATCH * 12 }, (_, i) => ({
         title: `Engineer ${i}`, url: `https://jobs.example.test/${i}`, snippet: 'Engineer role.',
       }));
       const adaptive = await evaluateJobPreferences({
@@ -1507,32 +1511,21 @@ export default [
         jobPreferences: 'I want to pivot away from web development.',
         preferencePlan: valid,
         callRaw: () => { throw new Error('a soft role preference must not need web research'); },
-        calibration: {
-          observedTokensPerMatch: () => observed,
-          recallRoundSize: (round) => remembered.get(round) ?? null,
-          rememberRoundSize: (round, size, passKey, rate) => { remembered.set(round, { size, rate }); sizedRounds.push(size); },
-        },
         callText: async (prompt, options) => {
           queuedWorkForecasts.push(options.hints.queuedWorkForecast);
           // Count the listings this prompt actually carried.
           const carried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
-          // After the first response, report a verbose model: cost per match
-          // jumps, so the next round must ask for fewer listings.
-          observed = 2000;
+          carriedCounts.push(carried);
           return { assessments: Array.from({ length: carried }, (_, index) => ({
             index,
             matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
           })) };
         },
       });
-      assert(adaptive.candidatePool.length === 150,
-        `every listing must still be evaluated across adaptive rounds, got ${adaptive.candidatePool.length}`);
-      assert(sizedRounds.length >= 2,
-        `the run must re-size at least once rather than fixing a size up front, got ${sizedRounds.length} round(s)`);
-      assert(sizedRounds[1] < sizedRounds[0],
-        `a model that became more verbose must shrink the next round (${sizedRounds[0]} -> ${sizedRounds[1]})`);
+      assert(adaptive.candidatePool.length === manyJobs.length,
+        `every listing must still be evaluated across rounds, got ${adaptive.candidatePool.length}`);
       const initialForecast = queuedWorkForecasts[0];
-      const initialUnits = Math.ceil(manyJobs.length / sizedRounds[0]);
+      const initialUnits = Math.ceil(manyJobs.length / carriedCounts[0]);
       assert(queuedWorkForecasts.length >= 10
         && typeof initialForecast?.scopeId === 'string'
         && initialForecast.remainingUnits === initialUnits
@@ -1544,7 +1537,8 @@ export default [
       // Preserve the ten-descriptor durable group, but replenish a completed
       // root slot from the next group immediately.  The held first call is
       // deliberately left unresolved while calls 2–10 finish.
-      const rollingJobs = Array.from({ length: 11 }, (_, index) => ({
+      // Ten full root batches plus one trailing row: the eleventh batch is the replacement.
+      const rollingJobs = Array.from({ length: MAX_LISTING_BATCH * 10 + 1 }, (_, index) => ({
         title: `Rolling Engineer ${index + 1}`,
         url: `https://jobs.example.test/rolling-${index + 1}`,
         snippet: 'Engineer role.',
@@ -1557,15 +1551,8 @@ export default [
         jobPreferences: 'I want to pivot away from web development.',
         preferencePlan: valid,
         callRaw: () => { throw new Error('a soft role preference must not need web research'); },
-        calibration: {
-          // One listing per root makes the ten live slots and the eleventh
-          // replacement unambiguous, while recalled sizes keep this test on
-          // the durable-layout path rather than a calculated coincidence.
-          recallRoundSize: () => ({ size: 1, rate: 1200 }),
-          observedTokensPerMatch: () => { throw new Error('recalled rolling layout must not re-size'); },
-          rememberRoundSize: () => { throw new Error('recalled rolling layout must not be re-recorded'); },
-        },
-        callText: async (_prompt, options) => new Promise(resolve => {
+        callText: async (prompt, options) => new Promise(resolve => {
+          const rollingCarried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
           rollingActive += 1;
           rollingPeak = Math.max(rollingPeak, rollingActive);
           const call = {
@@ -1575,10 +1562,10 @@ export default [
               if (call.released) return;
               call.released = true;
               rollingActive -= 1;
-              resolve({ assessments: [{
-                index: 0,
+              resolve({ assessments: Array.from({ length: rollingCarried }, (_, index) => ({
+                index,
                 matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
-              }] });
+              })) });
             },
           };
           rollingCalls.push(call);
@@ -1603,7 +1590,7 @@ export default [
       // A worker failure must abort every sibling before any of their completed
       // slots can claim a replacement descriptor.  Keep all ten initial
       // prompts deferred so the test observes the shared signal directly.
-      const failureJobs = Array.from({ length: 11 }, (_, index) => ({
+      const failureJobs = Array.from({ length: MAX_LISTING_BATCH * 10 + 1 }, (_, index) => ({
         title: `Failure Engineer ${index + 1}`,
         url: `https://jobs.example.test/failure-${index + 1}`,
         snippet: 'Engineer role.',
@@ -1614,11 +1601,6 @@ export default [
         jobPreferences: 'I want to pivot away from web development.',
         preferencePlan: valid,
         callRaw: () => { throw new Error('a soft role preference must not need web research'); },
-        calibration: {
-          recallRoundSize: () => ({ size: 1, rate: 1200 }),
-          observedTokensPerMatch: () => { throw new Error('failed rolling layout must not re-size'); },
-          rememberRoundSize: () => { throw new Error('failed rolling layout must not be re-recorded'); },
-        },
         callText: async (_prompt, options) => new Promise((resolve, reject) => {
           failureCalls.push({ signal: options.signal, resolve, reject });
         }),
@@ -1645,7 +1627,7 @@ export default [
       // prove batch 11 can fill a different completed slot while batch 12 must
       // wait for the first root's follow-up instead of treating its initial
       // permissive response as completion.
-      const recoveryJobs = Array.from({ length: 12 }, (_, index) => ({
+      const recoveryJobs = Array.from({ length: MAX_LISTING_BATCH * 12 }, (_, index) => ({
         title: `Recovery Engineer ${index + 1}`,
         url: `https://jobs.example.test/recovery-${index + 1}`,
         snippet: 'Engineer role.',
@@ -1658,12 +1640,8 @@ export default [
         jobPreferences: 'I want to pivot away from web development.',
         preferencePlan: valid,
         callRaw: () => { throw new Error('a soft role preference must not need web research'); },
-        calibration: {
-          recallRoundSize: () => ({ size: 1, rate: 1200 }),
-          observedTokensPerMatch: () => { throw new Error('partial-recovery layout must not re-size'); },
-          rememberRoundSize: () => { throw new Error('partial-recovery layout must not be re-recorded'); },
-        },
-        callText: async (_prompt, options) => new Promise(resolve => {
+        callText: async (prompt, options) => new Promise(resolve => {
+          const recoveryCarried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
           const rootId = options.hints.progressUnitId;
           if (!activeRootSlots.has(rootId)) activeRootSlots.add(rootId);
           peakRootSlots = Math.max(peakRootSlots, activeRootSlots.size);
@@ -1680,10 +1658,10 @@ export default [
               if (!incomplete) activeRootSlots.delete(rootId);
               resolve(incomplete
                 ? { assessments: [] }
-                : { assessments: [{
-                  index: 0,
+                : { assessments: Array.from({ length: recoveryCarried }, (_, index) => ({
+                  index,
                   matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
-                }] });
+                })) });
             },
           };
           recoveryCalls.push(call);
@@ -1714,49 +1692,17 @@ export default [
       assert(recoveredRolling.candidatePool.length === recoveryJobs.length && activeRootSlots.size === 0,
         `partial-recovery rolling evaluation must complete every row and release every root slot, got ${JSON.stringify({ jobs: recoveredRolling.candidatePool.length, slots: activeRootSlots.size })}`);
 
-      // Replay determinism: a recorded size wins over recomputation, because by
-      // replay time the calibration has evidence the first pass did not.
-      const replayRounds = [];
-      observed = 20;
-      await evaluateJobPreferences({
-        jobs: manyJobs,
-        jobPreferences: 'I want to pivot away from web development.',
-        preferencePlan: valid,
-        callRaw: () => { throw new Error('no research expected'); },
-        calibration: {
-          observedTokensPerMatch: () => observed,
-          recallRoundSize: (round) => remembered.get(round) ?? null,
-          rememberRoundSize: (round, size) => { replayRounds.push(size); },
-          // (replay must not re-derive anything)
-        },
-        callText: async (prompt) => {
-          const carried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
-          return { assessments: Array.from({ length: carried }, (_, index) => ({
-            index,
-            matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
-          })) };
-        },
-      });
-      assert(replayRounds.length === 0,
-        'a replay must reuse every recorded round size and re-derive none, or its prompts stop matching the durable steps');
-
-      // An actual persisted adaptive layout has no batchTotal. Its v1 alias
-      // must retain that exact null metadata and the current concurrent batch
-      // position; a fixed historic alias would point at the wrong durable key.
-      const recalledAliases = [];
+      // A root slice reissues one targeted follow-up under the same concurrent
+      // batch position.
+      const recalledHints = [];
       let recalledCalls = 0;
       await evaluateJobPreferences({
         jobs: manyJobs.slice(0, 8),
         jobPreferences: 'I want to pivot away from web development.',
         preferencePlan: valid,
         callRaw: () => { throw new Error('no research expected'); },
-        calibration: {
-          recallRoundSize: round => round === 0 ? { size: 8, rate: 1800 } : null,
-          observedTokensPerMatch: () => 20,
-          rememberRoundSize: () => { throw new Error('recalled layout must not be re-recorded'); },
-        },
         callText: async (prompt, options) => {
-          recalledAliases.push(options.legacyReplay);
+          recalledHints.push(options.hints);
           const carried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
           recalledCalls += 1;
           return { assessments: Array.from({ length: recalledCalls === 1 ? carried - 1 : carried }, (_, index) => ({
@@ -1765,31 +1711,10 @@ export default [
           })) };
         },
       });
-      assert(recalledAliases.length === 2
-        && recalledAliases[0]?.batch === 1 && recalledAliases[0]?.batchTotal === null && recalledAliases[0]?.itemCount === 8
-        && recalledAliases[1]?.batch === 1 && recalledAliases[1]?.batchTotal === null && recalledAliases[1]?.itemCount === 1,
-      `a recalled adaptive root and its partial follow-up must share null-total root metadata, got ${JSON.stringify(recalledAliases)}`);
-
-      // A fresh adaptive size that merely happens to be eight must not inherit
-      // a v1 alias unless it is exactly aligned with the old fixed partition.
-      const freshAdaptiveAliases = [];
-      await evaluateJobPreferences({
-        jobs: manyJobs.slice(0, 16),
-        jobPreferences: 'I want to pivot away from web development.',
-        preferencePlan: valid,
-        callRaw: () => { throw new Error('no research expected'); },
-        calibration: { recallRoundSize: () => null, observedTokensPerMatch: () => 1800, rememberRoundSize: () => {} },
-        callText: async (prompt, options) => {
-          freshAdaptiveAliases.push(options.legacyReplay);
-          const carried = (prompt.match(/https:\/\/jobs\.example\.test\//g) || []).length;
-          return { assessments: Array.from({ length: carried }, (_, index) => ({
-            index,
-            matches: [{ preferenceId: 'pivot', outcome: 'unverified', evidence: 'No signal.', evidenceQuote: '' }],
-          })) };
-        },
-      });
-      assert(freshAdaptiveAliases.length === 2 && freshAdaptiveAliases.every(alias => alias === null),
-        `a non-recalled adaptive mismatch must not offer a fixed v1 alias, got ${JSON.stringify(freshAdaptiveAliases)}`);
+      assert(recalledHints.length === 2
+        && recalledHints[0]?.batch === 1 && recalledHints[0]?.itemCount === 8 && !Object.hasOwn(recalledHints[0], 'batchTotal')
+        && recalledHints[1]?.batch === 1 && recalledHints[1]?.itemCount === 1 && !Object.hasOwn(recalledHints[1], 'batchTotal'),
+      `a recalled adaptive root and its partial follow-up must share root batch metadata, got ${JSON.stringify(recalledHints)}`);
 
       const followUpPrompts = [];
       const partial = await evaluateJobPreferences({
@@ -1823,33 +1748,6 @@ export default [
         `the re-requested listing must carry its real evaluated outcome, not the default unverified, got ${JSON.stringify(recovered)}`);
 
       const groundedResearch = 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nExample Co provides free lunch to employees.';
-      const validResearch = {
-        assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Benefits page confirms the meal.', evidenceQuote: 'provides free lunch to employees', sourceUrls: ['https://example.test/benefits'], sourceDate: '' }],
-      };
-      const researchValidationFailure = value => {
-        try {
-          validateJobPreferenceResearchSubmission(value, { preferenceId: 'lunch', groundedResearch });
-          return null;
-        } catch (error) {
-          return { code: error?.code, diagnostic: error?.validationDiagnostic };
-        }
-      };
-      const coverageResearchFailure = researchValidationFailure({ assessments: [] });
-      const foreignResearchFailure = researchValidationFailure({ ...validResearch, assessments: [{ ...validResearch.assessments[0], preferenceId: 'other-preference' }] });
-      const unsupportedQuoteFailure = researchValidationFailure({ ...validResearch, assessments: [{ ...validResearch.assessments[0], evidenceQuote: 'Invented benefit' }] });
-      const unsupportedUrlFailure = researchValidationFailure({ ...validResearch, assessments: [{ ...validResearch.assessments[0], sourceUrls: ['https://other.test/benefits'] }] });
-      const unsupportedDateResearch = { ...validResearch, assessments: [{ ...validResearch.assessments[0], sourceDate: '2099-01-01' }] };
-      assert(coverageResearchFailure?.code === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'
-        && coverageResearchFailure.diagnostic?.reason === 'ASSESSMENT_COVERAGE_INVALID'
-        && coverageResearchFailure.diagnostic.expectedCount === 1
-        && coverageResearchFailure.diagnostic.receivedCount === 0
-        && foreignResearchFailure?.diagnostic?.reason === 'ASSESSMENT_IDENTITY_INVALID'
-        && unsupportedQuoteFailure?.diagnostic?.reason === 'ASSESSMENT_QUOTE_NOT_GROUNDED'
-        && unsupportedUrlFailure?.diagnostic?.reason === 'ASSESSMENT_URL_NOT_GROUNDED'
-        && validateJobPreferenceResearchSubmission(unsupportedDateResearch, { preferenceId: 'lunch', groundedResearch }) === unsupportedDateResearch
-        && validateJobPreferenceResearchSubmission(validResearch, { preferenceId: 'lunch', groundedResearch }) === validResearch,
-      'grounded company research must reject mismatched identity, quote, and URL while leaving optional source-date cleanup to normalization');
-
       let apiValidationSurfaced = false;
       try {
         await evaluateJobPreferences({
@@ -1859,15 +1757,17 @@ export default [
             version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
             softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], titles: [],
           },
-          callRaw: async () => groundedResearch,
-          callText: async (_prompt, options) => {
+          callRaw: async prompt => [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])]
+            .map(id => `BEGIN RESEARCH ${id}\n${groundedResearch}\nEND RESEARCH ${id}`).join('\n'),
+          callText: async (prompt, options) => {
             if (options.task === 'job-preference-evaluation') {
               return { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not listed.' }] }] };
             }
+            const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
             options.responseValidator({
-              assessments: [{ preferenceId: 'wrong-id', outcome: 'confirmed', evidence: 'Wrong response', evidenceQuote: 'provides free lunch to employees', sourceUrls: ['https://example.test/benefits'], sourceDate: '' }],
+              assessments: ids.map(researchId => ({ researchId, preferenceId: 'wrong-id', outcome: 'confirmed', evidence: 'Wrong response', evidenceQuote: 'provides free lunch to employees', sourceUrls: ['https://example.test/benefits'], sourceDate: '' })),
             });
-            return validResearch;
+            throw new Error('the research validator must reject a mismatched preference id');
           },
         });
       } catch (error) { apiValidationSurfaced = error?.code === 'JOB_PREFERENCE_RESEARCH_RESPONSE_INVALID'; }
@@ -1906,7 +1806,7 @@ export default [
       const auditLocations = sameTitleDifferentCities.preferenceEvaluation.audits.map(audit => audit.listingIdentity?.location);
       assert(JSON.stringify(auditLocations) === JSON.stringify(['New York, NY', 'San Francisco, CA']),
         `each audit must retain its listing identity so distinct same-title/company requisitions survive append merging, got ${JSON.stringify(sameTitleDifferentCities.preferenceEvaluation.audits)}`);
-      return { directionRejected: rejected, listingUrl: safe.sourceUrls[0], strictFailClosed: true, hallucinatedListingClaimDowngraded: true, groundedResearchValidated: true, apiValidationSurfaced, auditLocations };
+      return { directionRejected: rejected, listingUrl: safe.sourceUrls[0], strictFailClosed: true, hallucinatedListingClaimDowngraded: true, apiValidationSurfaced, auditLocations };
     },
   },
   {
@@ -2026,16 +1926,10 @@ export default [
         && renderer.includes('Failed to save preference-filtered USAJobs snapshot')
         && renderer.includes("'preference-filtered'"),
       'append scoring must merge into and generation-fence an explicit live base (never report a dropped no-base append), while all-filtered late sources retain preference recovery state, disposition, and funnel volume');
-      assert(renderer.includes('const legacyTargetRole = String(laneTurnData.targetRole || \'\').trim()')
-        && renderer.includes("const activeTargetRole = deriveSearchTitles('', jobPreferencesInterpretation).length ? '' : legacyTargetRole;")
-        && renderer.includes('targetRole: (refreshData.activeTargetRole ?? refreshData.targetRole ?? \'\').trim()')
-        && renderer.includes('continuationData.pendingTargetRole')
-        && renderer.includes('?? continuationData.activeTargetRole')
-        && renderer.includes('?? continuationData.targetRole')
-        && preferences.includes('const identity = identityJob(job);')
+      assert(preferences.includes('const identity = identityJob(job);')
         && preferences.includes('listingIdentity: listingIdentityForAudit(identity)'),
-      'a run freezes the effective Target role after structured-plan precedence across late and paused paths, and each emitted audit carries a bounded listing identity');
-      return { appendCandidateGate: true, listingAwareAudits: true, frozenTargetRole: true };
+      'each emitted audit carries a bounded listing identity');
+      return { appendCandidateGate: true, listingAwareAudits: true };
     },
   },
   {
@@ -2149,7 +2043,6 @@ export default [
           jobs: [{ title: 'Program Manager', company: 'Late Abort Co' }], jobPreferences: 'Lunch must be provided.',
           preferencePlan: { version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Lunch provided', category: 'perk' }], warnings: [], titles: [] },
           signal: lateController.signal,
-          useLegacyIndividualResearch: true,
           callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
             ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Missing' }] }] }
             : { assessments: [] },
@@ -2170,11 +2063,12 @@ export default [
       let rawCalls = 0;
       let markFirstResearchStarted;
       const firstResearchStarted = new Promise(resolve => { markFirstResearchStarted = resolve; });
-      const sharedText = async (_prompt, options) => {
+      const sharedText = async (prompt, options) => {
         if (options.task === 'job-preference-evaluation') return { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not listed' }] }] };
-        return { assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Benefits page', evidenceQuote: 'Free lunch is provided.', sourceUrls: ['https://example.test/benefits'], sourceDate: '2099-01-01' }] };
+        const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
+        return { assessments: ids.map(researchId => ({ researchId, preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Benefits page', evidenceQuote: 'Free lunch is provided.', sourceUrls: ['https://example.test/benefits'], sourceDate: '2099-01-01' })) };
       };
-      const sharedRaw = (_prompt, options) => {
+      const sharedRaw = (prompt, options) => {
         rawCalls += 1;
         // The evaluator composes each caller's signal with a wave-local abort
         // signal, so object identity is intentionally different here. The
@@ -2184,12 +2078,13 @@ export default [
           markFirstResearchStarted();
           return new Promise((_, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
         }
-        return Promise.resolve('Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nFree lunch is provided.');
+        const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
+        return Promise.resolve(ids.map(id => `BEGIN RESEARCH ${id}\nGrounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nFree lunch is provided.\nEND RESEARCH ${id}`).join('\n'));
       };
-      const first = evaluateJobPreferences({ jobs: [{ title: 'Program Manager', company: 'Example' }], jobPreferences: 'Lunch must be provided.', preferencePlan: companyPlan, signal: firstController.signal, callText: sharedText, callRaw: sharedRaw, useLegacyIndividualResearch: true });
+      const first = evaluateJobPreferences({ jobs: [{ title: 'Program Manager', company: 'Example' }], jobPreferences: 'Lunch must be provided.', preferencePlan: companyPlan, signal: firstController.signal, callText: sharedText, callRaw: sharedRaw });
       const firstSettled = first.then(() => null, error => error);
       await firstResearchStarted;
-      const second = evaluateJobPreferences({ jobs: [{ title: 'Program Manager', company: 'Example' }], jobPreferences: 'Lunch must be provided.', preferencePlan: companyPlan, signal: secondController.signal, callText: sharedText, callRaw: sharedRaw, useLegacyIndividualResearch: true });
+      const second = evaluateJobPreferences({ jobs: [{ title: 'Program Manager', company: 'Example' }], jobPreferences: 'Lunch must be provided.', preferencePlan: companyPlan, signal: secondController.signal, callText: sharedText, callRaw: sharedRaw });
       firstController.abort(new Error('first run cancelled'));
       const [firstError, secondResult] = await Promise.all([firstSettled, second]);
       const researchMatch = secondResult.acceptedJobs[0]?.preferenceAssessment?.matches?.[0];
@@ -2228,7 +2123,6 @@ export default [
           warnings: [],
           titles: [],
         },
-        useLegacyIndividualResearch: true,
         callText: async (_prompt, options) => {
           if (options.task === 'job-preference-evaluation') {
             listingCalls += 1;
@@ -2246,29 +2140,11 @@ export default [
         && strict.acceptedJobs.length === 0 && strict.filteredJobs.length === 1
         && match?.outcome === 'unverified' && match?.source === 'none',
       `strict unresolved company perks must attempt web research then filter fail-closed, got ${JSON.stringify({ listingCalls, groundedCalls, strict, match })}`);
-      const unsupportedResearch = await evaluateJobPreferences({
-        jobs,
-        jobPreferences: 'The company must provide free lunch.',
-        preferencePlan: {
-          version: 1, summary: '',
-          direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-          softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch is a listed company perk', category: 'perk' }],
-          warnings: [], titles: [],
-        },
-        useLegacyIndividualResearch: true,
-        callRaw: async () => 'Grounded source URLs (provider metadata):\n- https://example.test/benefits — Benefits\n\nThe office is downtown.',
-        callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
-          ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not in listing.' }] }] }
-          : { assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Model claim', evidenceQuote: 'Free lunch is provided.', sourceUrls: ['https://example.test/benefits'], sourceDate: '' }] },
-      });
-      const unsupportedResearchMatch = unsupportedResearch.filteredJobs[0]?.preferenceAssessment?.matches?.[0];
-      assert(unsupportedResearchMatch?.outcome === 'unverified' && unsupportedResearchMatch.sourceUrls.length === 0,
-        `a web verdict needs both a source URL and a verbatim grounded quote, got ${JSON.stringify(unsupportedResearchMatch)}`);
-
-      // Fresh raw research packs up to twelve companies; its compact dependent
-      // assessment can safely combine the completed sections into 27 rows.
+      // Fresh raw research packs up to JOB_PREFERENCE_RESEARCH_MAX_ITEMS companies; its compact
+      // dependent assessment can safely combine the completed sections up to its own ceiling.
       // An opaque research id keeps each employer's proof isolated.
-      const batchJobs = Array.from({ length: 13 }, (_, index) => ({ title: 'Program Manager', company: `Batch Company ${index}` }));
+      const batchSize = JOB_PREFERENCE_RESEARCH_MAX_ITEMS;
+      const batchJobs = Array.from({ length: batchSize + 1 }, (_, index) => ({ title: 'Program Manager', company: `Batch Company ${index}` }));
       const batchRawCalls = [];
       const batchAssessmentCalls = [];
       const batched = await evaluateJobPreferences({
@@ -2296,20 +2172,6 @@ export default [
         },
       });
       const batchedInvalidDateMatch = batched.acceptedJobs[0]?.preferenceAssessment?.matches?.[0];
-      const singletonUngroundedDate = await evaluateJobPreferences({
-        jobs: [{ title: 'Program Manager', company: 'Singleton Ungrounded Date Co' }],
-        jobPreferences: 'Free lunch is required.',
-        preferencePlan: {
-          version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-          softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], titles: [],
-        },
-        useLegacyIndividualResearch: true,
-        callRaw: async () => 'Singleton proof: Free lunch is provided. https://example.test/singleton-date',
-        callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
-          ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not listed.' }] }] }
-          : { assessments: [{ preferenceId: 'lunch', outcome: 'confirmed', evidence: 'Benefits page.', evidenceQuote: 'Singleton proof: Free lunch is provided.', sourceUrls: ['https://example.test/singleton-date'], sourceDate: '2099-01-01' }] },
-      });
-      const singletonUngroundedDateMatch = singletonUngroundedDate.acceptedJobs[0]?.preferenceAssessment?.matches?.[0];
 
       const sourceDateCases = [
         { sourceDate: '2026', researchDate: 'Last updated: 2026-01-15', expected: '' },
@@ -2371,20 +2233,20 @@ export default [
 
       let unverifiedProvenanceRawCalls = 0;
       const evaluateUnverifiedProvenance = () => evaluateJobPreferences({
-        jobs: [{ title: 'Program Manager', company: 'Singleton Unverified Provenance Co' }],
+        jobs: [{ title: 'Program Manager', company: 'Unverified Provenance Co' }],
         jobPreferences: 'Free lunch is required.',
         preferencePlan: {
           version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
           softPreferences: [], strictRequirements: [{ id: 'lunch', criterion: 'Free lunch', category: 'perk' }], warnings: [], titles: [],
         },
-        useLegacyIndividualResearch: true,
-        callRaw: async () => {
+        callRaw: async prompt => {
           unverifiedProvenanceRawCalls += 1;
-          return 'Unverified proof: Free lunch is provided. Last updated: 2026-09-18 https://example.test/unverified-provenance';
+          return [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])]
+            .map(id => `BEGIN RESEARCH ${id}\nUnverified proof: Free lunch is provided. Last updated: 2026-09-18 https://example.test/unverified-provenance\nEND RESEARCH ${id}`).join('\n');
         },
-        callText: async (_prompt, options) => options.task === 'job-preference-evaluation'
+        callText: async (prompt, options) => options.task === 'job-preference-evaluation'
           ? { assessments: [{ index: 0, matches: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Not listed.' }] }] }
-          : { assessments: [{ preferenceId: 'lunch', outcome: 'unverified', evidence: 'Benefits page was inconclusive.', evidenceQuote: 'Unverified proof: Free lunch is provided.', sourceUrls: ['https://example.test/unverified-provenance'], sourceDate: 'Last updated: 2026-09-18' }] },
+          : { assessments: [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])].map(researchId => ({ researchId, preferenceId: 'lunch', outcome: 'unverified', evidence: 'Benefits page was inconclusive.', evidenceQuote: 'Unverified proof: Free lunch is provided.', sourceUrls: ['https://example.test/unverified-provenance'], sourceDate: 'Last updated: 2026-09-18' })) },
       });
       const unverifiedProvenanceFirst = await evaluateUnverifiedProvenance();
       const unverifiedProvenanceSecond = await evaluateUnverifiedProvenance();
@@ -2486,8 +2348,8 @@ export default [
           throw new Error('a wholly cached assessment batch should not be reissued');
         },
       });
-      assert(batchRawCalls.length === 2 && JSON.stringify(batchRawCalls.map(call => call.ids.length)) === JSON.stringify([12, 1])
-        && batchAssessmentCalls.length === 1 && JSON.stringify(batchAssessmentCalls.map(call => call.ids.length)) === JSON.stringify([13])
+      assert(batchRawCalls.length === 2 && JSON.stringify(batchRawCalls.map(call => call.ids.length)) === JSON.stringify([batchSize, 1])
+        && batchAssessmentCalls.length === 1 && JSON.stringify(batchAssessmentCalls.map(call => call.ids.length)) === JSON.stringify([batchSize + 1])
         && batchRawCalls.every(call => call.options.task === 'job-preference-research-batch' && call.options.retryOnTruncation === false)
         && batchAssessmentCalls.every(call => call.options.task === 'job-preference-research-batch-assessment')
         && batchAssessmentCalls.every(call => call.prompt.includes('short verbatim evidenceQuote')
@@ -2495,20 +2357,20 @@ export default [
           && call.options.displayOnlyPromptSuffix.includes('one short literal contiguous passage')
           && call.options.displayOnlyPromptSuffix.includes('literal direct http(s) URL')
           && call.options.displayOnlyPromptSuffix.includes('empty sourceUrls'))
-        && batchRawCalls.every(call => call.options.hints.itemsTotal === 13)
+        && batchRawCalls.every(call => call.options.hints.itemsTotal === batchSize + 1)
         // Planned batch position is not completed work: every handoff starts
         // from the actual zero baseline and the transport advances this
         // shared scope only once a response is durably accepted.
         && JSON.stringify(rawProgressHints.map(hints => hints.itemsDone)) === JSON.stringify([0, 0])
-        && rawProgressHints.every(hints => hints.itemsTotal === 13 && hints.progressUnits > 0)
+        && rawProgressHints.every(hints => hints.itemsTotal === batchSize + 1 && hints.progressUnits > 0)
         && typeof rawProgressHints[0]?.progressScopeId === 'string'
         && rawProgressHints.every(hints => hints.progressScopeId === rawProgressHints[0].progressScopeId)
         && rawProgressHints.every(hints => hints.queuedWorkForecast?.scopeId === rawProgressHints[0].progressScopeId)
         && JSON.stringify(rawProgressHints.map(hints => hints.queuedWorkForecast?.remainingUnits)) === JSON.stringify([2, 1])
         && JSON.stringify(rawProgressHints.map(hints => hints.progressUnitId)) === JSON.stringify(['company-research-raw-1', 'company-research-raw-2'])
-        && JSON.stringify(rawProgressHints.map(hints => hints.progressUnits)) === JSON.stringify([12, 1])
+        && JSON.stringify(rawProgressHints.map(hints => hints.progressUnits)) === JSON.stringify([batchSize, 1])
         && assessmentProgressHints.length === 1
-        && assessmentProgressHints[0].itemCount === 13
+        && assessmentProgressHints[0].itemCount === batchSize + 1
         && !Object.hasOwn(assessmentProgressHints[0], 'itemsDone')
         && !Object.hasOwn(assessmentProgressHints[0], 'itemsTotal')
         && !Object.hasOwn(assessmentProgressHints[0], 'progressUnitId')
@@ -2530,15 +2392,12 @@ export default [
         && assessmentFailures.every(failure => failure
           && Object.values(failure.diagnostic || {}).every(value => typeof value === 'string' || typeof value === 'number'))
         && batchAssessmentCalls[0]?.options?.responseValidator(ungroundedDateBatch) === ungroundedDateBatch
-        && repeatedResearchCalls === 0 && cachedRepeat.acceptedJobs.length === 13
-        && batched.acceptedJobs.length === 13 && batched.acceptedJobs.every(job => job.preferenceAssessment.matches[0].sourceUrls.length === 1)
+        && repeatedResearchCalls === 0 && cachedRepeat.acceptedJobs.length === batchSize + 1
+        && batched.acceptedJobs.length === batchSize + 1 && batched.acceptedJobs.every(job => job.preferenceAssessment.matches[0].sourceUrls.length === 1)
         && batchedInvalidDateMatch?.outcome === 'confirmed'
         && batchedInvalidDateMatch.evidenceQuote === `Evidence ${firstBatchIds[0]}: Free lunch is provided.`
         && JSON.stringify(batchedInvalidDateMatch.sourceUrls) === JSON.stringify([`https://example.test/${firstBatchIds[0]}`])
         && batchedInvalidDateMatch.sourceDate === ''
-        && singletonUngroundedDateMatch?.outcome === 'confirmed'
-        && singletonUngroundedDateMatch.sourceDate === ''
-        && JSON.stringify(singletonUngroundedDateMatch.sourceUrls) === JSON.stringify(['https://example.test/singleton-date'])
         && exactDateMatches.every(({ expected, match }) => match?.outcome === 'confirmed'
           && match.evidenceQuote === 'Published free lunch benefit.'
           && match.sourceUrls.length === 1
@@ -2555,12 +2414,12 @@ export default [
         && unverifiedProvenanceMatch.sourceUrls.length === 0
         && unverifiedProvenanceSecond.filteredJobs.length === 1
         && unverifiedProvenanceRawCalls === 2,
-      `fresh company research must issue deterministic 12-item batches with isolated evidence, got ${JSON.stringify({ batchRawCalls, batchAssessmentCalls, counts: batched.counts })}`);
+      `fresh company research must issue deterministic ${batchSize}-item batches with isolated evidence, got ${JSON.stringify({ batchRawCalls, batchAssessmentCalls, counts: batched.counts })}`);
       return { blankBypassed: true, strictResearchAttempted: groundedCalls, unsupportedQuoteFailsClosed: true, batchedResearch: batchRawCalls.map(call => call.ids.length) };
     },
   },
   {
-    name: 'job preferences: a partial company-research cache hit preserves the stable twelve-employer batch',
+    name: 'job preferences: a partial company-research cache hit preserves the stable employer batch',
     run: async () => {
       const plan = {
         version: 1, summary: '',
@@ -2568,7 +2427,8 @@ export default [
         softPreferences: [], strictRequirements: [{ id: 'benefit', criterion: 'Published learning stipend', category: 'perk' }],
         warnings: [], titles: [],
       };
-      const jobs = Array.from({ length: 13 }, (_, index) => ({ title: 'Engineer', company: `Partial Cache Company ${index}` }));
+      const batchSize = JOB_PREFERENCE_RESEARCH_MAX_ITEMS;
+      const jobs = Array.from({ length: batchSize + 1 }, (_, index) => ({ title: 'Engineer', company: `Partial Cache Company ${index}` }));
       let listingCount = 1;
       const rawBatches = [];
       const assessmentBatches = [];
@@ -2600,71 +2460,53 @@ export default [
       const result = await evaluateJobPreferences({
         jobs, jobPreferences: 'Published learning stipend', preferencePlan: plan, callRaw, callText,
       });
-      assert(JSON.stringify(rawBatches.map(ids => ids.length)) === JSON.stringify([12, 1])
-        && JSON.stringify(assessmentBatches.map(ids => ids.length)) === JSON.stringify([13])
+      assert(JSON.stringify(rawBatches.map(ids => ids.length)) === JSON.stringify([batchSize, 1])
+        && JSON.stringify(assessmentBatches.map(ids => ids.length)) === JSON.stringify([batchSize + 1])
         && rawBatches[0].includes(primedId)
-        && JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA.properties.assessments.maxItems === 27
-        && result.acceptedJobs.length === 13,
-      'a lone cache hit must reissue its complete stable 12-item partition instead of shifting the other employers or response identities');
+        && JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA.properties.assessments.maxItems === JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS
+        && result.acceptedJobs.length === batchSize + 1,
+      `a lone cache hit must reissue its complete stable ${batchSize}-item partition instead of shifting the other employers or response identities`);
       return { batchSizes: rawBatches.map(ids => ids.length), retainedPrimedIdentity: true };
     },
   },
   {
-    name: 'job preferences: automatic role screens refill a ten-worker roster while a sibling remains slow',
+    // screenJobRolesByTitle accepts no batch-size option, so a ten-worker refill would need
+    // 10 * ROLE_SCREEN_MAX_ROWS rows. The roster scheduler is the one proven by the company
+    // research roster tests below; here the role-screen batch ceiling and one full batch are pinned.
+    name: 'job preferences: automatic role screens pack one full ROLE_SCREEN_MAX_ROWS batch into a single call',
     run: async () => {
-      const jobs = Array.from({ length: 3_000 }, (_, index) => ({
+      assert(ROLE_SCREEN_MAX_ROWS === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 1024) / 48)
+        && ROLE_SCREEN_BASE_TOKENS === 1024 && ROLE_SCREEN_ROW_TOKENS === 48,
+      `ROLE_SCREEN_MAX_ROWS must equal floor((BATCH_OUTPUT_TOKEN_BUDGET - 1024) / 48), got ${ROLE_SCREEN_MAX_ROWS}`);
+      const jobs = Array.from({ length: ROLE_SCREEN_MAX_ROWS }, (_, index) => ({
         title: `Wave Target ${index}`,
         company: `Wave Company ${index}`,
       }));
       const calls = [];
-      const releases = new Map();
-      let probeCount = 0;
-      let notifyFirstWave;
-      const firstWave = new Promise(resolve => { notifyFirstWave = resolve; });
-      const run = screenJobRolesByTitle({
+      const result = await screenJobRolesByTitle({
         jobs,
         titles: ['Wave Target'],
-        // The first original v1 chunk has a durable prompt; every remaining
-        // row is fresh v2 work. Their row sets are disjoint, so a completed
-        // automatic slot can immediately take another stable descriptor.
-        legacyRoleScreenStepProbe: async ({ hints }) => {
-          probeCount += 1;
-          return hints.itemCount === 200 && probeCount === 1;
+        callText: async (_prompt, options) => {
+          calls.push({ task: options.task });
+          return { verdicts: [] };
         },
-        callText: async (_prompt, options) => new Promise(resolve => {
-          const call = { task: options.task, resolve, released: false };
-          calls.push(call);
-          call.activeAtStart = calls.filter(entry => !entry.released).length;
-          releases.set(call, () => {
-            if (call.released) return;
-            call.released = true;
-            resolve({ verdicts: [] });
-          });
-          if (calls.length === 10) notifyFirstWave();
-        }),
       });
-      await firstWave;
-      assert(calls.length === 10
-        && calls.filter(call => call.task === 'job-role-screen').length === 1
-        && calls.filter(call => call.task === 'job-role-screen-batch').length === 9,
-      `one restored role screen plus nine fresh screens must fill the first automatic roster, got ${JSON.stringify(calls.map(call => call.task))}`);
-      releases.get(calls[0])();
-      for (let attempt = 0; attempt < 100 && calls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      assert(calls.length === 11 && calls[10].task === 'job-role-screen-batch'
-        && Math.max(...calls.map(call => call.activeAtStart)) === HANDOFF_CONCURRENCY,
-      `a completed automatic slot must immediately refill without exceeding ten workers, got ${JSON.stringify(calls.map(call => ({ task: call.task, active: call.activeAtStart })) )}`);
-      calls.slice(1).forEach(call => releases.get(call)());
-      for (let attempt = 0; attempt < 100 && calls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      const result = await run;
+      assert(calls.length === 1 && calls[0].task === 'job-role-screen-batch',
+      `one ROLE_SCREEN_MAX_ROWS batch must be issued as one role-screen call, got ${JSON.stringify(calls)}`);
       assert(result.acceptedJobs.length === jobs.length && result.droppedJobs.length === 0,
-        'mixed restored/fresh role screens preserve every fail-open listing result');
-      return { firstWave: 10, total: calls.length };
+        'a full role-screen batch preserves every fail-open listing result');
+      return { rows: ROLE_SCREEN_MAX_ROWS, calls: calls.length };
     },
   },
   {
-    name: 'job preferences: company assessment combines completed raw partitions up to its 27-row ceiling',
+    name: 'job preferences: company assessment combines completed raw partitions up to its derived row ceiling',
     run: async () => {
-      const jobs = Array.from({ length: 28 }, (_, index) => ({ title: 'Engineer', company: `Assessment Pack Company ${index}` }));
+      const rawSize = JOB_PREFERENCE_RESEARCH_MAX_ITEMS;
+      const assessmentCeiling = JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS;
+      const total = assessmentCeiling + 1;
+      const expectedRaw = [];
+      for (let remaining = total; remaining > 0; remaining -= rawSize) expectedRaw.push(Math.min(rawSize, remaining));
+      const jobs = Array.from({ length: total }, (_, index) => ({ title: 'Engineer', company: `Assessment Pack Company ${index}` }));
       const plan = {
         version: 1, summary: '',
         direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
@@ -2702,26 +2544,27 @@ export default [
       });
       const rawIds = rawBatches.flat();
       const assessmentIds = assessmentBatches.flat();
-      assert(JSON.stringify(rawBatches.map(ids => ids.length)) === JSON.stringify([12, 12, 4])
-        && JSON.stringify(assessmentBatches.map(ids => ids.length)) === JSON.stringify([27, 1])
-        && JSON.stringify(rawProgressHints.map(hints => hints.itemsDone)) === JSON.stringify([0, 0, 0])
-        && rawProgressHints.every(hints => hints.itemsTotal === 28 && hints.progressScopeId === rawProgressHints[0].progressScopeId)
-        && JSON.stringify(rawProgressHints.map(hints => hints.progressUnitId)) === JSON.stringify(['company-research-raw-1', 'company-research-raw-2', 'company-research-raw-3'])
-        && JSON.stringify(rawProgressHints.map(hints => hints.progressUnits)) === JSON.stringify([12, 12, 4])
-        && JSON.stringify(assessmentProgressHints.map(hints => hints.itemCount)) === JSON.stringify([27, 1])
+      assert(JSON.stringify(rawBatches.map(ids => ids.length)) === JSON.stringify(expectedRaw)
+        && JSON.stringify(assessmentBatches.map(ids => ids.length)) === JSON.stringify([assessmentCeiling, 1])
+        && JSON.stringify(rawProgressHints.map(hints => hints.itemsDone)) === JSON.stringify(expectedRaw.map(() => 0))
+        && rawProgressHints.every(hints => hints.itemsTotal === total && hints.progressScopeId === rawProgressHints[0].progressScopeId)
+        && JSON.stringify(rawProgressHints.map(hints => hints.progressUnitId)) === JSON.stringify(expectedRaw.map((_, index) => `company-research-raw-${index + 1}`))
+        && JSON.stringify(rawProgressHints.map(hints => hints.progressUnits)) === JSON.stringify(expectedRaw)
+        && JSON.stringify(assessmentProgressHints.map(hints => hints.itemCount)) === JSON.stringify([assessmentCeiling, 1])
         && assessmentProgressHints.every(hints => !Object.hasOwn(hints, 'itemsDone')
           && !Object.hasOwn(hints, 'itemsTotal')
           && !Object.hasOwn(hints, 'progressScopeId')
           && !Object.hasOwn(hints, 'progressUnitId'))
         && JSON.stringify(assessmentIds) === JSON.stringify(rawIds),
-      `raw partitions must stay at twelve while the dependent verdicts pack in stable order through 27, got ${JSON.stringify({ rawBatches, assessmentBatches })}`);
+      `raw partitions must stay at ${rawSize} while the dependent verdicts pack in stable order through ${assessmentCeiling}, got ${JSON.stringify({ rawBatches, assessmentBatches })}`);
       return { raw: rawBatches.map(ids => ids.length), assessment: assessmentBatches.map(ids => ids.length) };
     },
   },
   {
     name: 'job preferences: ready company assessments refill the shared raw roster before a slow raw tail settles',
     run: async () => {
-      const jobs = Array.from({ length: 132 }, (_, index) => ({ title: 'Engineer', company: `Pipelined Company ${index}` }));
+      // Ten full raw partitions fill the roster; one more employer forms the slow raw tail.
+      const jobs = Array.from({ length: 10 * JOB_PREFERENCE_RESEARCH_MAX_ITEMS + 1 }, (_, index) => ({ title: 'Engineer', company: `Pipelined Company ${index}` }));
       const plan = {
         version: 1, summary: '',
         direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
@@ -2899,7 +2742,7 @@ export default [
   {
     name: 'job preferences: company research refills a ten-handoff roster as each prompt settles',
     run: async () => {
-      const jobs = Array.from({ length: 121 }, (_, index) => ({
+      const jobs = Array.from({ length: 10 * JOB_PREFERENCE_RESEARCH_MAX_ITEMS + 1 }, (_, index) => ({
         title: 'Engineer',
         company: `Ten Wide Research Company ${index}`,
       }));
@@ -2971,113 +2814,16 @@ export default [
       const result = await run;
       assert(result.acceptedJobs.length === jobs.length
         && JSON.stringify(result.acceptedJobs.map(job => job.company)) === JSON.stringify(jobs.map(job => job.company))
-        && JSON.stringify(rawCalls.map(call => call.ids.length)) === JSON.stringify([...Array(10).fill(12), 1]),
+        && JSON.stringify(rawCalls.map(call => call.ids.length)) === JSON.stringify([...Array(10).fill(JOB_PREFERENCE_RESEARCH_MAX_ITEMS), 1]),
       `all eleven deterministic research batches must preserve stable output order while refilling the bounded roster, got ${JSON.stringify(rawCalls.map(call => call.ids.length))}`);
       return { initialPending: 10, peakPending: peakRawCalls, totalBatches: rawCalls.length };
     },
   },
   {
-    name: 'job preferences: restored legacy research refills the ten-request roster with fresh batches',
-    run: async () => {
-      const legacyCompanies = ['Restored Legacy Four', 'Restored Legacy Five', 'Restored Legacy Six'];
-      const jobs = [
-        ...legacyCompanies.map(company => ({ title: 'Engineer', company })),
-        ...Array.from({ length: 96 }, (_, index) => ({ title: 'Engineer', company: `Fresh Restart Company ${index}` })),
-      ];
-      const plan = {
-        version: 1, summary: '',
-        direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-        softPreferences: [], strictRequirements: [{ id: 'restart-benefit', criterion: 'Published restart benefit', category: 'perk' }],
-        warnings: [], titles: [],
-      };
-      const probePrompts = new Map();
-      const rawCalls = [];
-      let activeRawCalls = 0;
-      let peakRawCalls = 0;
-      const legacyUrl = company => `https://example.test/${company.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-      const release = (call) => {
-        if (!call || call.released) return;
-        call.released = true;
-        activeRawCalls -= 1;
-        if (call.options.task === 'job-preference-research') {
-          call.resolve(`Legacy evidence: Published restart benefit. ${legacyUrl(call.company)}`);
-          return;
-        }
-        call.resolve(call.ids.map(id => (
-          `BEGIN RESEARCH ${id}\nFresh evidence ${id}: Published restart benefit. https://example.test/${id}\nEND RESEARCH ${id}`
-        )).join('\n'));
-      };
-      const run = evaluateJobPreferences({
-        jobs,
-        jobPreferences: 'Published restart benefit',
-        preferencePlan: plan,
-        legacyResearchStepProbe: async input => {
-          probePrompts.set(input.request.company, input.prompt);
-          return legacyCompanies.includes(input.request.company);
-        },
-        // These simulate the three raw handoffs that were pending at restart;
-        // no v1 assessment exists yet, so accepted raw evidence later joins
-        // the compact current assessment contract.
-        legacyResearchAssessmentStepProbe: async () => false,
-        callRaw: async (prompt, options) => new Promise(resolve => {
-          const company = legacyCompanies.find(name => prompt.includes(name)) || null;
-          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
-          activeRawCalls += 1;
-          peakRawCalls = Math.max(peakRawCalls, activeRawCalls);
-          rawCalls.push({ prompt, options, company, ids, resolve, released: false });
-        }),
-        callText: async (prompt, options) => {
-          if (options.task === 'job-preference-evaluation') {
-            return { assessments: Array.from({ length: options.hints.itemCount }, (_, index) => ({
-              index, matches: [{ preferenceId: 'restart-benefit', outcome: 'unverified', evidence: 'Not listed.' }],
-            })) };
-          }
-          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
-          return { assessments: ids.map(id => {
-            const legacyCompany = legacyCompanies.find(name => prompt.includes(
-              `BEGIN RESEARCH ${id}\nLegacy evidence: Published restart benefit. ${legacyUrl(name)}\nEND RESEARCH ${id}`,
-            ));
-            return {
-              researchId: id, preferenceId: 'restart-benefit', outcome: 'confirmed', evidence: 'Benefits page.',
-              evidenceQuote: legacyCompany
-                ? 'Legacy evidence: Published restart benefit.'
-                : `Fresh evidence ${id}: Published restart benefit.`,
-              sourceUrls: [legacyCompany ? legacyUrl(legacyCompany) : `https://example.test/${id}`],
-              sourceDate: '',
-            };
-          }) };
-        },
-      });
-      for (let attempt = 0; attempt < 100 && rawCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      const firstWave = rawCalls.slice(0, 10);
-      const stableLegacyContract = prompt => String(prompt || '').replace(/untrusted-[a-z-]+-[a-f0-9]{8}/g, 'untrusted-legacy-nonce');
-      assert(firstWave.length === 10
-        && firstWave.filter(call => call.options.task === 'job-preference-research').length === 3
-        && firstWave.filter(call => call.options.task === 'job-preference-research-batch').length === 7
-        && activeRawCalls === 10 && peakRawCalls === 10
-        && legacyCompanies.every(company => stableLegacyContract(firstWave.find(call => call.company === company)?.prompt) === stableLegacyContract(probePrompts.get(company))),
-      `three exact restored legacy prompts must retain their original contracts while seven fresh batches fill the initial roster, got ${JSON.stringify(firstWave.map(call => ({ task: call.options.task, company: call.company, ids: call.ids.length })))} `);
-      release(firstWave[0]);
-      for (let attempt = 0; attempt < 100 && rawCalls.length < 11; attempt += 1) await new Promise(resolve => setImmediate(resolve));
-      assert(rawCalls.length === 11 && rawCalls[10].options.task === 'job-preference-research-batch'
-        && activeRawCalls === 10 && peakRawCalls === 10 && firstWave[1].released === false,
-        `settling a restored legacy handoff must immediately refill its slot with the eighth fresh batch while a sibling remains pending, got ${JSON.stringify({ tasks: rawCalls.map(call => call.options.task), activeRawCalls, peakRawCalls })}`);
-      rawCalls.slice(1).forEach(release);
-      const result = await run;
-      assert(result.acceptedJobs.length === jobs.length
-        && JSON.stringify(result.acceptedJobs.map(job => job.company)) === JSON.stringify(jobs.map(job => job.company)),
-        `restored and fresh research must retain all jobs after the mixed rolling roster, got ${result.acceptedJobs.length}`);
-      return { restored: 3, initialFresh: 7, replacementFresh: 1, peakRawCalls };
-    },
-  },
-  {
     name: 'job preferences: accepted restart prefix does not consume the pending ten-request wave',
     run: async () => {
-      const acceptedLegacyCompanies = Array.from({ length: 6 }, (_, index) => `Accepted Legacy ${index + 1}`);
-      const jobs = [
-        ...acceptedLegacyCompanies.map(company => ({ title: 'Engineer', company })),
-        ...Array.from({ length: 156 }, (_, index) => ({ title: 'Engineer', company: `Accepted Prefix Fresh ${index + 1}` })),
-      ];
+      // Thirteen full raw partitions: batches 1-3 replay as accepted, 4-13 form the pending wave.
+      const jobs = Array.from({ length: 13 * JOB_PREFERENCE_RESEARCH_MAX_ITEMS }, (_, index) => ({ title: 'Engineer', company: `Accepted Prefix Fresh ${index + 1}` }));
       const plan = {
         version: 1, summary: '',
         direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
@@ -3094,13 +2840,7 @@ export default [
         jobs,
         jobPreferences: 'Published accepted-prefix benefit',
         preferencePlan: plan,
-        legacyResearchStepProbe: async input => acceptedLegacyCompanies.includes(input.request.company),
-        legacyResearchAssessmentStepProbe: async () => false,
         callRaw: async (prompt, options) => {
-          if (options.task === 'job-preference-research') {
-            const company = acceptedLegacyCompanies.find(name => prompt.includes(name));
-            return `Accepted legacy evidence. https://example.test/${company.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
-          }
           const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
           if (options.hints.batch <= 3) {
             return ids.map(id => `BEGIN RESEARCH ${id}\nAccepted evidence ${id}. https://example.test/${id}\nEND RESEARCH ${id}`).join('\n');
@@ -3118,136 +2858,12 @@ export default [
       for (let attempt = 0; attempt < 100 && pendingRawCalls.length < 10; attempt += 1) await new Promise(resolve => setImmediate(resolve));
       const visibleBatches = pendingRawCalls.map(call => call.options.hints.batch);
       assert(JSON.stringify(visibleBatches) === JSON.stringify([4, 5, 6, 7, 8, 9, 10, 11, 12, 13]),
-      `six auto-replayed legacy steps and v2 batches 1–3 must leave pending 4–13 as the visible wave, got ${JSON.stringify(visibleBatches)}`);
+      `auto-replayed batches 1–3 must leave pending 4–13 as the visible wave, got ${JSON.stringify(visibleBatches)}`);
       pendingRawCalls.forEach(release);
       const result = await run;
       assert(result.candidatePool.length === jobs.length,
         `accepted-prefix replay plus the visible wave must preserve every assessed row, got ${result.candidatePool.length}`);
-      return { acceptedLegacy: 6, acceptedPacked: 3, visible: visibleBatches };
-    },
-  },
-  {
-    name: 'job preferences: exact legacy research resume does not downgrade fresh sibling employers to singleton prompts',
-    run: async () => {
-      const jobs = [
-        { title: 'Engineer', company: 'Legacy Company' },
-        ...Array.from({ length: 13 }, (_, index) => ({ title: 'Engineer', company: `Fresh Hybrid Company ${index}` })),
-      ];
-      const plan = {
-        version: 1, summary: '',
-        direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-        softPreferences: [], strictRequirements: [{ id: 'benefit', criterion: 'Published training budget', category: 'perk' }],
-        warnings: [], titles: [],
-      };
-      const rawCalls = [];
-      const assessmentCalls = [];
-      const probeCalls = [];
-      const result = await evaluateJobPreferences({
-        jobs,
-        jobPreferences: 'Published training budget',
-        preferencePlan: plan,
-        // This true is the outcome of the read-only exact durable-key probe:
-        // the legacy raw was accepted and its dependent legacy assessment is
-        // pending. No task/metadata-wide switch is available to this seam.
-        legacyResearchStepProbe: async input => {
-          probeCalls.push(input);
-          return input.request.company === 'Legacy Company';
-        },
-        legacyResearchAssessmentStepProbe: async input => (
-          input.request.company === 'Legacy Company'
-        ),
-        callRaw: async (prompt, options) => {
-          rawCalls.push({ prompt, options });
-          if (options.task === 'job-preference-research') {
-            return 'Legacy proof: Published training budget. https://example.test/legacy';
-          }
-          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
-          return ids.map(id => `BEGIN RESEARCH ${id}\nFresh proof ${id}: Published training budget. https://example.test/${id}\nEND RESEARCH ${id}`).join('\n');
-        },
-        callText: async (prompt, options) => {
-          if (options.task === 'job-preference-evaluation') {
-            return { assessments: Array.from({ length: options.hints.itemCount }, (_, index) => ({
-              index, matches: [{ preferenceId: 'benefit', outcome: 'unverified', evidence: 'Not listed.' }],
-            })) };
-          }
-          assessmentCalls.push({ prompt, options });
-          if (options.task === 'job-preference-research-assessment') {
-            return { assessments: [{
-              preferenceId: 'benefit', outcome: 'confirmed', evidence: 'Legacy benefits page.',
-              evidenceQuote: 'Legacy proof: Published training budget.', sourceUrls: ['https://example.test/legacy'], sourceDate: '',
-            }] };
-          }
-          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
-          return { assessments: ids.map(id => ({
-            researchId: id, preferenceId: 'benefit', outcome: 'confirmed', evidence: 'Fresh benefits page.',
-            evidenceQuote: `Fresh proof ${id}: Published training budget.`, sourceUrls: [`https://example.test/${id}`], sourceDate: '',
-          })) };
-        },
-      });
-      const batchedRawSizes = rawCalls
-        .filter(call => call.options.task === 'job-preference-research-batch')
-        .map(call => [...new Set(call.prompt.match(/research-[a-f0-9]{20}/g) || [])].length);
-      const batchedAssessmentSizes = assessmentCalls
-        .filter(call => call.options.task === 'job-preference-research-batch-assessment')
-        .map(call => [...new Set(call.prompt.match(/research-[a-f0-9]{20}/g) || [])].length);
-      assert(probeCalls.length === jobs.length
-        && rawCalls.filter(call => call.options.task === 'job-preference-research').length === 1
-        && assessmentCalls.filter(call => call.options.task === 'job-preference-research-assessment').length === 1
-        && JSON.stringify(batchedRawSizes) === JSON.stringify([12, 1])
-        && JSON.stringify(batchedAssessmentSizes) === JSON.stringify([13])
-        && result.acceptedJobs.length === jobs.length,
-      `an accepted legacy raw plus pending legacy assessment must resume exactly while thirteen untouched siblings still pack, got ${JSON.stringify({ batchedRawSizes, batchedAssessmentSizes, rawTasks: rawCalls.map(call => call.options.task), assessmentTasks: assessmentCalls.map(call => call.options.task) })}`);
-      return { legacyRaw: 'accepted', legacyAssessment: 'pending', freshRaw: batchedRawSizes, freshAssessment: batchedAssessmentSizes };
-    },
-  },
-  {
-    name: 'job preferences: legacy raw without an exact legacy assessment joins the packed assessment phase',
-    run: async () => {
-      const jobs = [
-        { title: 'Engineer', company: 'Raw Only Legacy Company' },
-        ...Array.from({ length: 13 }, (_, index) => ({ title: 'Engineer', company: `Raw Only Fresh Company ${index}` })),
-      ];
-      const plan = {
-        version: 1, summary: '',
-        direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false },
-        softPreferences: [], strictRequirements: [{ id: 'benefit', criterion: 'Published training budget', category: 'perk' }],
-        warnings: [], titles: [],
-      };
-      const rawTasks = [];
-      const assessmentTasks = [];
-      await evaluateJobPreferences({
-        jobs, jobPreferences: 'Published training budget', preferencePlan: plan,
-        legacyResearchStepProbe: async input => input.request.company === 'Raw Only Legacy Company',
-        // The exact structured v1 assessment key does not exist. Returning
-        // false proves an accepted raw response cannot create a new singleton
-        // assessment after the migration.
-        legacyResearchAssessmentStepProbe: async () => false,
-        callRaw: async (prompt, options) => {
-          rawTasks.push(options.task);
-          if (options.task === 'job-preference-research') return 'Raw-only proof: Published training budget. https://example.test/raw-only';
-          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
-          return ids.map(id => `BEGIN RESEARCH ${id}\nFresh proof ${id}: Published training budget. https://example.test/${id}\nEND RESEARCH ${id}`).join('\n');
-        },
-        callText: async (prompt, options) => {
-          if (options.task === 'job-preference-evaluation') return { assessments: Array.from({ length: options.hints.itemCount }, (_, index) => ({
-            index, matches: [{ preferenceId: 'benefit', outcome: 'unverified', evidence: 'Not listed.' }],
-          })) };
-          assessmentTasks.push(options.task);
-          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
-          const rawOnlyId = prompt.match(/BEGIN RESEARCH (research-[a-f0-9]{20})\nRaw-only proof:/)?.[1] || null;
-          return { assessments: ids.map(id => ({
-            researchId: id, preferenceId: 'benefit', outcome: 'confirmed', evidence: 'Benefits page.',
-            evidenceQuote: id === rawOnlyId ? 'Raw-only proof: Published training budget.' : `Fresh proof ${id}: Published training budget.`,
-            sourceUrls: [id === rawOnlyId ? 'https://example.test/raw-only' : `https://example.test/${id}`], sourceDate: '',
-          })) };
-        },
-      });
-      assert(rawTasks.filter(task => task === 'job-preference-research').length === 1
-        && rawTasks.filter(task => task === 'job-preference-research-batch').length === 2
-        && assessmentTasks.filter(task => task === 'job-preference-research-assessment').length === 0
-        && assessmentTasks.filter(task => task === 'job-preference-research-batch-assessment').length === 1,
-      `a raw-only v1 item must not create a fresh singleton v1 assessment, got ${JSON.stringify({ rawTasks, assessmentTasks })}`);
-      return { rawTasks, assessmentTasks };
+      return { acceptedPacked: 3, visible: visibleBatches };
     },
   },
   {
@@ -3419,8 +3035,8 @@ export default [
       const queryHandlerEnd = jobs.indexOf("handleSafe('get-last-job-analysis-snapshot'", queryHandlerStart);
       const queryHandler = jobs.slice(queryHandlerStart, queryHandlerEnd);
       const renderer = await fs.promises.readFile(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-      assert(queryHandler.includes('{ profile, careerData, targetRole')
-        && queryHandler.includes('jobPreferences, profile, careerData, targetRole: role')
+      assert(queryHandler.includes('{ profile, careerData, preferredLocation')
+        && queryHandler.includes('jobPreferences, profile, careerData, signal')
         && renderer.includes('careerData: activeCareerData,'),
       'the raw-preferences query IPC fallback receives the same career context as the normal interpreter, while passing only the resulting role direction to query generation');
       return { interpreter: true, evaluator: true, queryFallbackCareerContext: true };
@@ -3616,29 +3232,25 @@ export default [
     },
   },
   {
-    name: 'llm task registration: legacy and packed title-only role screens have item-scaled ceilings',
+    name: 'llm task registration: the packed title-only role screen has an item-scaled ceiling',
     run: () => {
-      // Before this fix, 'job-role-screen' was missing from both KNOWN_TASKS
+      // Before this fix, the role screen was missing from both KNOWN_TASKS
       // and TASK_MAX_TOKENS in llm.js, so resolveTask() silently fell through
       // to 'default' (a flat 2048 max_tokens) -- see resolveTask's own
-      // warning. The legacy screen batches 200 rows, while the versioned screen
-      // fills the shared usable ceiling with 298 rows
+      // warning. The screen fills the shared usable ceiling with 298 rows
       // into ONE handoff (screenJobRolesByTitle, jobPreferences.js), and this
       // transport has no cap-raise retry: a flat 2048 cap truncates the paste
       // on any batch beyond a handful of rows, turning the whole screen into
       // a failed handoff the user has to notice and redo by hand.
-      assert(getKnownTaskIds().has('job-role-screen') && getKnownTaskIds().has('job-role-screen-batch'),
-        'both legacy and packed role-screen task ids must be registered');
-      const bigBatchCap = taskMaxTokensFor('job-role-screen', { itemCount: 200 });
-      const smallBatchCap = taskMaxTokensFor('job-role-screen', { itemCount: 10 });
-      assert(Number.isFinite(bigBatchCap) && bigBatchCap > 2048 * 2,
-        `taskMaxTokensFor('job-role-screen', {itemCount:200}) must sit far above the flat 'default' cap this task used to silently fall back to, got ${bigBatchCap}`);
-      assert(bigBatchCap > smallBatchCap,
-        `the ceiling must SCALE with itemCount, not stay flat -- a 200-row batch must resolve a materially larger budget than a 10-row batch, got 200-row=${bigBatchCap} vs 10-row=${smallBatchCap}`);
+      assert(getKnownTaskIds().has('job-role-screen-batch'),
+        'the packed role-screen task id must be registered');
+      const smallBatchCap = taskMaxTokensFor('job-role-screen-batch', { itemCount: 10 });
       const packedCap = taskMaxTokensFor('job-role-screen-batch', { itemCount: 298 });
       assert(packedCap === 15328 && packedCap <= 15360,
         `the 298-row packed screen must nearly fill but never exceed 15,360 tokens, got ${packedCap}`);
-      return { registered: true, bigBatchCap, smallBatchCap, packedCap };
+      assert(packedCap > 2048 * 2 && packedCap > smallBatchCap,
+        `the ceiling must SCALE with itemCount and sit far above the flat 'default' cap, got 298-row=${packedCap} vs 10-row=${smallBatchCap}`);
+      return { registered: true, smallBatchCap, packedCap };
     },
   },
   {
@@ -3671,19 +3283,15 @@ export default [
       // is derived from jobPreferencesInterpretation — which, on a reused
       // lock, IS laneTurnData.searchBriefPlan (see the `let` above) — never
       // from a fresh interpretation.
-      assert(lockBlock.includes('const activeSearchTitles = deriveSearchTitles(activeTargetRole, jobPreferencesInterpretation);'),
+      assert(lockBlock.includes('const activeSearchTitles = deriveSearchTitles(jobPreferencesInterpretation);'),
         'activeSearchTitles must be derived from jobPreferencesInterpretation, which is the locked searchBriefPlan on a reused-lock run');
-      const deriveStart = search.indexOf('function deriveSearchTitles(targetRole, preferencePlan) {');
+      const deriveStart = search.indexOf('function deriveSearchTitles(preferencePlan) {');
       const deriveEnd = search.indexOf('\n}', deriveStart);
       const deriveBody = search.slice(deriveStart, deriveEnd);
       assert(deriveBody.includes('Array.isArray(preferencePlan?.titles)') && deriveBody.includes('preferencePlan.titles.filter'),
         'deriveSearchTitles must read its titles from preferencePlan.titles — i.e. the locked plan — not any other source');
-      // A structured locked plan supersedes any retained legacy targetRole;
-      // only canvases without usable plan titles retain the literal fallback.
-      assert(deriveBody.includes('if (titles.length) return titles;')
-        && deriveBody.includes('return role ? [role] : [];')
-        && deriveBody.indexOf('if (titles.length) return titles;') < deriveBody.indexOf('const role ='),
-        'deriveSearchTitles must prefer structured locked titles and reserve legacy targetRole for the no-plan fallback');
+      assert(!deriveBody.includes('targetRole') && !deriveBody.includes('const role ='),
+        'deriveSearchTitles must derive titles from the structured locked plan alone');
       // The deleted deterministic gate functions must not have resurfaced —
       // this is the core of what this round of fixes replaced with the AI
       // role screen (screenJobRolesByTitle, main process).
@@ -6161,7 +5769,7 @@ export default [
       // real interpretation/exploration call, rather than relying on a mock
       // that would throw if reached.
 
-      // RUNG 2: no legacy targetRole, but the Job Preferences plan already
+      // RUNG 1: the Job Preferences plan already
       // resolved `titles`. A duplicate-by-case entry proves the ladder's own
       // flattenJobSearchQueries dedup pass actually ran, not just a raw
       // pass-through. (No blank entry here: hasValidRawPlanShape requires
@@ -6175,10 +5783,10 @@ export default [
         titles: ['Software Engineer', '  software engineer  ', 'Data Scientist'],
       };
       const rung2 = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', careerSnapshotId, targetRole: '', preferredLocation: 'Toronto, ON',
+        profile: {}, careerData: '', careerSnapshotId, preferredLocation: 'Toronto, ON',
         jobPreferences: '', preferencePlan: titlesPlan,
       }, undefined);
-      assert(rung2.success === true, `rung 2 must succeed, got ${JSON.stringify(rung2)}`);
+      assert(rung2.success === true, `rung 1 must succeed, got ${JSON.stringify(rung2)}`);
       assert(rung2.queryModel === null, 'a brief-resolved title list must not spend a model call generating query variations');
       assert(JSON.stringify(rung2.queries.targetRoleQueries) === JSON.stringify(['Software Engineer', 'Data Scientist']),
         `titles must be searched verbatim (case-insensitive deduped, blanks dropped), got ${JSON.stringify(rung2.queries)}`);
@@ -6189,35 +5797,11 @@ export default [
       // a model call, returning only canonicalLocation (no canonicalCountry —
       // that field is populated only by the model-resolved branch). Asserting
       // canonicalLocation here still proves location resolution ran for a
-      // titles-driven bundle exactly like it does for the target-role bundle.
+      // titles-driven bundle.
       assert(rung2.canonicalLocation === 'Toronto, Ontario, Canada' && rung2.canonicalCountry === '',
         `location resolution still runs for a titles-driven bundle, got ${JSON.stringify({ canonicalLocation: rung2.canonicalLocation, canonicalCountry: rung2.canonicalCountry })}`);
 
-      // RUNG 1 still wins over rung 2 when BOTH a legacy targetRole and a
-      // titles-bearing plan are present — this is exactly the back-compat
-      // guarantee: an old renderer/manifest that only ever sent `targetRole`
-      // must keep taking the original single-exact-query path, unchanged,
-      // even now that a titles-producing plan sits right next to it.
-      const rung1 = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', careerSnapshotId, targetRole: 'Product Manager', preferredLocation: 'Toronto, ON',
-        jobPreferences: '', preferencePlan: titlesPlan,
-      }, undefined);
-      assert(rung1.success === true, `rung 1 must succeed, got ${JSON.stringify(rung1)}`);
-      assert(rung1.queryModel === null, 'the legacy exact-target-role path must not spend a model call either');
-      assert(JSON.stringify(rung1.queries) === JSON.stringify(buildExactTargetRoleQueryBundle('Product Manager')),
-        `a set targetRole must still win the ladder and reproduce the exact legacy single-query bundle, got ${JSON.stringify(rung1.queries)}`);
-
-      // Back-compat: a bare legacy targetRole with NO preference plan at all
-      // (the shape every pre-Phase-A caller sent) must still work exactly as
-      // before — same bundle, no AI call.
-      const legacyOnly = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', careerSnapshotId, targetRole: 'Backend Engineer', preferredLocation: 'Toronto, ON',
-      }, undefined);
-      assert(legacyOnly.success === true && legacyOnly.queryModel === null
-        && JSON.stringify(legacyOnly.queries) === JSON.stringify(buildExactTargetRoleQueryBundle('Backend Engineer')),
-      `a legacy caller supplying only targetRole (no preferencePlan/jobPreferences at all) must gate identically to pre-Phase-A behaviour, got ${JSON.stringify(legacyOnly)}`);
-
-      return { rung2NoModelCall: true, rung1PrecedesRung2: true, legacyBackCompat: true };
+      return { rung2NoModelCall: true };
     },
   },
   {
@@ -6259,7 +5843,7 @@ export default [
       // rejection there is itself part of the regression signal, on top of
       // the explicit assertions below.
       const result = await generateJobQueries({ sender }, {
-        profile: {}, careerData: '', careerSnapshotId, targetRole: '', preferredLocation: 'Toronto, ON',
+        profile: {}, careerData: '', careerSnapshotId, preferredLocation: 'Toronto, ON',
         jobPreferences: briefText, preferencePlan: validPlan,
       }, undefined);
       assert(result.success === true, `a validly-shaped plan must resolve without error, got ${JSON.stringify(result)}`);

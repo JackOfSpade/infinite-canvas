@@ -16,7 +16,8 @@ import ai_models from './tests/ai-models.js';
 import fixtures_canvas from './tests/fixtures-canvas.js';
 import job_diagnostics from './tests/job-diagnostics.js';
 import job_scoring_cache from './tests/job-scoring-cache.js';
-import ai_task_corpus from './tests/ai-task-corpus.js';
+import claude_task_worker from './tests/claude-task-worker.js';
+import claude_pause_notice from './tests/claude-pause-notice.js';
 import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js';
 import jobs_location_language from './tests/jobs-location-language.js';
 import job_source_country_scope from './tests/job-source-country-scope.js';
@@ -44,7 +45,6 @@ import official_posting_gates from './tests/official-posting-gates.js';
 import official_posting_r2_subject from './tests/official-posting-r2-subject.js';
 import official_posting_r3_identities from './tests/official-posting-r3-identities.js';
 import official_posting_r3_fetch_session from './tests/official-posting-r3-fetch-session.js';
-import official_posting_r3_resolver from './tests/official-posting-r3-resolver.js';
 import official_posting_r3_service from './tests/official-posting-r3-service.js';
 import official_posting_r3_recovery from './tests/official-posting-r3-recovery.js';
 import official_posting_r4_bundle from './tests/official-posting-r4-bundle.js';
@@ -66,7 +66,6 @@ import official_posting_handoff_context from './tests/official-posting-handoff-c
 import official_posting_resilience from './tests/official-posting-resilience.js';
 import official_posting_r1_parsing from './tests/official-posting-r1-parsing.js';
 import official_posting_r1_legacy_binding from './tests/official-posting-r1-legacy-binding.js';
-import official_posting_match_integrity from './tests/official-posting-match-integrity.js';
 import official_posting_amendment3 from './tests/official-posting-amendment3.js';
 import official_posting_board_closed from './tests/official-posting-board-closed.js';
 import listing_liveness from './tests/listing-liveness.js';
@@ -89,24 +88,17 @@ import official_posting_scrape from './tests/official-posting-scrape.js';
 import official_posting_semantic from './tests/official-posting-semantic.js';
 import official_posting_discovery_diagnostics from './tests/official-posting-discovery-diagnostics.js';
 import official_posting_negative_policy from './tests/official-posting-negative-policy.js';
-import official_posting_render from './tests/official-posting-render.js';
 import official_posting_embedded_links from './tests/official-posting-embedded-links.js';
 import official_posting_resource_headers from './tests/official-posting-resource-headers.js';
 import official_posting_vendor_adapters from './tests/official-posting-vendor-adapters.js';
 import official_posting_page_data from './tests/official-posting-page-data.js';
-import official_posting_regional_ownership from './tests/official-posting-regional-ownership.js';
 import official_posting_careers_cms from './tests/official-posting-careers-cms.js';
 import official_posting_nuxt_data from './tests/official-posting-nuxt-data.js';
 import official_posting_paylocity_links from './tests/official-posting-paylocity-links.js';
-import official_posting_navigation_finality from './tests/official-posting-navigation-finality.js';
 import official_posting_ssg_navigation from './tests/official-posting-ssg-navigation.js';
-import official_posting_fetch_preloads from './tests/official-posting-fetch-preloads.js';
-import official_posting_read_only_ajax from './tests/official-posting-read-only-ajax.js';
 import official_posting_read_only_search from './tests/official-posting-read-only-search.js';
-import official_posting_semantic_resolution from './tests/official-posting-semantic-resolution.js';
 import official_posting_bridge from './tests/official-posting-bridge.js';
 import official_posting_service from './tests/official-posting-service.js';
-import official_posting_two_pass_rendering from './tests/official-posting-two-pass-rendering.js';
 import official_posting_search from './tests/official-posting-search.js';
 import official_posting_consumers from './tests/official-posting-consumers.js';
 import official_posting_freeze from './tests/official-posting-freeze.js';
@@ -150,7 +142,6 @@ import browser_tab_restore from './tests/browser-tab-restore.js';
 import schema_validation from './tests/schema-validation.js';
 import validation_failure from './tests/validation-failure.js';
 import job_resume_ingestion from './tests/job-resume-ingestion.js';
-import job_scoring_evidence from './tests/job-scoring-evidence.js';
 import job_analysis_operation_ledger from './tests/job-analysis-operation-ledger.js';
 import job_analysis_operation_authority_adversarial from './tests/job-analysis-operation-authority-adversarial.js';
 import job_continuation_authority_contract from './tests/job-continuation-authority-contract.js';
@@ -231,7 +222,6 @@ import interview_helper_privacy from './tests/interview-helper-privacy.js';
 import interview_helper_render from './tests/interview-helper-render.js';
 import interview_private_store_filesystem from './tests/interview-private-store-filesystem.js';
 import interview_preparation from './tests/interview-preparation.js';
-import interview_live_prepare_harness from './tests/interview-live-prepare-harness.js';
 import interview_snapshot_readonly from './tests/interview-snapshot-readonly.js';
 import interview_answer_bank from './tests/interview-answer-bank.js';
 import interview_answer_preparation from './tests/interview-answer-preparation.js';
@@ -317,7 +307,8 @@ const testGroups = [
   ['fixtures-canvas.js', fixtures_canvas],
   ['job-diagnostics.js', job_diagnostics],
   ['job-scoring-cache.js', job_scoring_cache],
-  ['ai-task-corpus.js', ai_task_corpus],
+  ['claude-task-worker.js', claude_task_worker],
+  ['claude-pause-notice.js', claude_pause_notice],
   ['marketplace-extractors-auth.js', marketplace_extractors_auth],
   ['jobs-location-language.js', jobs_location_language],
   ['job-source-country-scope.js', job_source_country_scope],
@@ -345,7 +336,6 @@ const testGroups = [
   ['official-posting-r2-subject.js', official_posting_r2_subject],
   ['official-posting-r3-identities.js', official_posting_r3_identities],
   ['official-posting-r3-fetch-session.js', official_posting_r3_fetch_session],
-  ['official-posting-r3-resolver.js', official_posting_r3_resolver],
   ['official-posting-r3-service.js', official_posting_r3_service],
   ['official-posting-r3-recovery.js', official_posting_r3_recovery],
   ['official-posting-r4-bundle.js', official_posting_r4_bundle],
@@ -367,7 +357,6 @@ const testGroups = [
   ['official-posting-resilience.js', official_posting_resilience],
   ['official-posting-r1-parsing.js', official_posting_r1_parsing],
   ['official-posting-r1-legacy-binding.js', official_posting_r1_legacy_binding],
-  ['official-posting-match-integrity.js', official_posting_match_integrity],
   ['official-posting-amendment3.js', official_posting_amendment3],
   ['official-posting-board-closed.js', official_posting_board_closed],
   ['listing-liveness.js', listing_liveness],
@@ -390,24 +379,17 @@ const testGroups = [
   ['official-posting-semantic.js', official_posting_semantic],
   ['official-posting-discovery-diagnostics.js', official_posting_discovery_diagnostics],
   ['official-posting-negative-policy.js', official_posting_negative_policy],
-  ['official-posting-render.js', official_posting_render],
   ['official-posting-embedded-links.js', official_posting_embedded_links],
   ['official-posting-resource-headers.js', official_posting_resource_headers],
   ['official-posting-vendor-adapters.js', official_posting_vendor_adapters],
   ['official-posting-page-data.js', official_posting_page_data],
-  ['official-posting-regional-ownership.js', official_posting_regional_ownership],
   ['official-posting-careers-cms.js', official_posting_careers_cms],
   ['official-posting-nuxt-data.js', official_posting_nuxt_data],
   ['official-posting-paylocity-links.js', official_posting_paylocity_links],
-  ['official-posting-navigation-finality.js', official_posting_navigation_finality],
   ['official-posting-ssg-navigation.js', official_posting_ssg_navigation],
-  ['official-posting-fetch-preloads.js', official_posting_fetch_preloads],
-  ['official-posting-read-only-ajax.js', official_posting_read_only_ajax],
   ['official-posting-read-only-search.js', official_posting_read_only_search],
-  ['official-posting-semantic-resolution.js', official_posting_semantic_resolution],
   ['official-posting-bridge.js', official_posting_bridge],
   ['official-posting-service.js', official_posting_service],
-  ['official-posting-two-pass-rendering.js', official_posting_two_pass_rendering],
   ['official-posting-search.js', official_posting_search],
   ['official-posting-consumers.js', official_posting_consumers],
   ['official-posting-freeze.js', official_posting_freeze],
@@ -456,7 +438,6 @@ const testGroups = [
   ['schema-validation.js', schema_validation],
   ['validation-failure.js', validation_failure],
   ['job-resume-ingestion.js', job_resume_ingestion],
-  ['job-scoring-evidence.js', job_scoring_evidence],
   ['job-analysis-operation-ledger.js', job_analysis_operation_ledger],
   ['job-analysis-operation-authority-adversarial.js', job_analysis_operation_authority_adversarial],
   ['job-continuation-authority-contract.js', job_continuation_authority_contract],
@@ -537,7 +518,6 @@ const testGroups = [
   ['interview-helper-render.js', interview_helper_render],
   ['interview-private-store-filesystem.js', interview_private_store_filesystem],
   ['interview-preparation.js', interview_preparation],
-  ['interview-live-prepare-harness.js', interview_live_prepare_harness],
   ['interview-snapshot-readonly.js', interview_snapshot_readonly],
   ['interview-answer-bank.js', interview_answer_bank],
   ['interview-answer-preparation.js', interview_answer_preparation],

@@ -156,8 +156,8 @@ explicit choice in `CAREER_WRITING_STAGE_PROFILES`:
 |---|---|---|
 | `qa-research` (web research for the brief) | Opus / high | Judgement over sources; web tools allowed only here. |
 | `qa-brief` (brief, disclosure mapping, practice order) | Opus / high | The application `pick` profile: choosing and structuring, not drafting. Order planning measured: effort makes no difference, Opus fastest. |
-| `qa-write` (spoken answers) | Opus / xhigh | The application `write` profile: the writing quality stage. |
-| `qa-fact-check` / `qa-fact-correction` / `qa-fact-recheck` | Sonnet / high | The application fact profiles: rule-following verification, shared code and prompts. |
+| `qa-write` (spoken answers) | Opus / xhigh | The writing quality stage. Set apart from the application `write` stage until tested. |
+| `qa-fact-check` / `qa-fact-correction` / `qa-fact-recheck` | Sonnet / high | Rule-following verification with shared code and prompts. The application stages moved to Opus high; these stay until tested. |
 | Live matcher (Listen) | Opus / default, warm, pool of 4 | Measured in docs/interview-live-ai-matching.md: fastest configuration whose quality stops improving, also under load. |
 | Practice interviewer | Chosen by the person in claude.ai | The starter is placed in the composer; the model picker is theirs. |
 

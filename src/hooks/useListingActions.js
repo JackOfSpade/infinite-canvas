@@ -126,40 +126,6 @@ export function useListingActions(id, data) {
     return result;
   }, [buildSearchQuery, canvasFilePath, id]);
 
-  // `overrides` lets the caller price an extra bundle item with ITS OWN query /
-  // condition / spec instead of the primary product's (defaults derive from the
-  // primary, so single-item callers pass just `comps`).
-  const synthesizePrice = useCallback(async (comps, overrides = {}) => {
-    if (!window.electronAPI?.synthesizePrice) throw new Error('synthesizePrice API unavailable');
-    const query = overrides.query || buildSearchQuery();
-    const result = await window.electronAPI.synthesizePrice({
-      query,
-      nodeId: id,
-      itemKey: overrides.itemKey || 'primary',
-      itemLabel: overrides.itemLabel || product.generated_title || query,
-      condition: overrides.condition || product.condition || 'Used - Good',
-      // Full spec (not just the broad search query) so the backend can rank comps
-      // by what actually distinguishes this item — color/model/title carry the
-      // discriminating signal the deliberately-broad query strips out.
-      productSpec: overrides.productSpec || {
-        model: product.model,
-        color: product.color,
-        title: product.generated_title,
-      },
-      // Per-item notes for multi-item bundles: each extra item carries its own
-      // pricing notes. Falls back to the hub-level notes for the primary item
-      // (and any caller that doesn't pass an override).
-      pricingNotes: overrides.pricingNotes !== undefined ? overrides.pricingNotes : (data.pricingNotes || ''),
-      comps,
-    });
-    if (!result.success) {
-      const err = new Error(result.error);
-      if (result.isRateLimit) err.isRateLimit = true;
-      throw err;
-    }
-    return result;
-  }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id]);
-
   // Versioned item-keyed path for fresh pricing work. The main process packs
   // independent bundle components into bounded manual handoffs and returns the
   // result keyed to the caller's stable item key, not response position.
@@ -234,7 +200,6 @@ export function useListingActions(id, data) {
     toggleJustification,
     scrapePriceComps,
     rescrapeSource,
-    synthesizePrice,
     synthesizePricesBatch,
     synthesizeBundlePrice,
   };

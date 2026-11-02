@@ -1,5 +1,6 @@
-import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, compsForPricing, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateJobHubTitleSourceSingleMode, migrateLegacyJobHubResults, migrateMergedTargetRoleIntoBrief, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, priceSynthesisMaxTokens, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
+import { CANVAS_ZOOM_LIMITS, CURRENT_SCHEMA_VERSION, migrateRetiredBatchScoringState, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, FILE_CATEGORIES, GLASSDOOR_EXTRACTOR, GOOGLE_JOBS_EXTRACTOR, JOB_AUTH_PREFLIGHT_SOURCE_IDS, JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_PAGE_CEILING, JOBBOARD_TRANSIENT_KEYS, JSDOM, MERCARI_SOLD_EXTRACTOR, MS_PER_WEEK, POSHMARK_SOLD_EXTRACTOR, SELLHUB_TRANSIENT_KEYS, TRANSIENT_PROCESSING_HUB_STATES, appendPhotoFiles, appendPhotoPaths, applyBugReportCode, applyFinalJobTitleRelevanceGate, assert, buildCustomizationDialogData, buildFilterSummaryMarkdown, buildGeoTermSet, buildJobTasks, calculatePriceDropSuggestion, canHubAcceptInitialDrop, canSellHubAcceptDisplayPhotoDrop, canSellHubReplaceFailedInitialPhotos, clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, cloneNode, codeIncludesFull, computeTidiedNodes, createJobSearchTestMode, createMarketplaceTestMode, createModuleRunQueue, createdAtMsFromCardId, decodeLocalFileRequestPath, deleteChildrenByHubId, describeJobCollectionLimits, distToSegment, edgeZoneForRadius, enqueueUniqueSourceResolve, extractIndeedJobsFromHtml, filesToDropPayloads, filesToProductImagePaths, filterJobsByAge, filterNodeCustomizationUpdates, filterWholeFeedJobsByTitleRelevance, findExactFilenameBelow, findNonOverlappingPlacement, fingerprint, fitViewDuration, fs, getConnectedHubCards, getFileCategoryInfo, getHubDropRejectLabel, getHubFileDropMode, getJobAuthPreflightSourceIds, getJobSearchTransientKeysForSave, getLocalFilePath, getMissingPreviewRelinkDiagnostics, getScopedCompSourceIds, glassdoorPostedBucket, gridSpacing, hasActiveExternalRunState, isCompSourceEnabledInScope, isPlaceholderIndeedJobKey, isPriceDropReminderDue, isProductImageExtension, isUnlimitedPages, jobRelevanceEvidence, jobRelevanceMatch, jobRelevanceRejection, jobScoringBatchSize, matchesQuery, matchesRedoShortcut, mergeNonRestorableEdgesFromLive, mergeNonRestorableNodeDataFromLive, migrateGroupNodes, migrateInterruptedJobHubResults, migrateJobHubPageCeiling, migrateJobHubTitleSourceSingleMode, migrateLegacyJobHubResults, migrateMergedTargetRoleIntoBrief, migrateStaleJobHubInputLock, migrateMarketplaceCardCreatedAt, nextSearchMatchIndex, nodeSupportsCustomization, normalizeJobCollectionLimits, normalizePhotoPathList, normalizePriceDropMustSellDate, normalizePriceDropReminderWeeks, normalizePriceDropStartingPrice, normalizePriceDropStartingTier, normalizePriceDropTargetPrice, oldestPriceDropCardCreatedAtIso, os, panDuration, parseJobSearchEnvBoolean, parseMarketplaceEnvBoolean, parsePostedDate, path, persistenceContentFingerprint, pixelEraseStroke, previewBugReportCode, priceDropDeadlineReminderDelayMs, priceDropMustSellDateMs, priceDropMustSellDayEndMs, priceDropReminderCountThroughMustSell, priceDropReminderDelayMs, priceDropStartingPrice, radialRadius, reassignCanvasDataIDs, refreshManualSourceUrlIndex, rememberMissingPreviewSearchRoot, removePhotoPathAt, resolveManualSourceStopReason, resolveMissingPreviewPath, resolvePageCeiling, resolvePendingApplicationWorkspaceForOwner, resolvePortableFilePaths, resolvePortableImagePath, resolvePriceDropStartingTier, runExtractorFixtureTest, runNodeMigrations, runZeroResultFixtureTest, sanitizeEdgesForSave, sanitizeNodesForSave, segmentCircleIntersections, shouldUseNativeTextUndo, spiralStep, summarizeFileExtensions, syncUncontrolledTextValue, toLocalFileUrl, viewportForZoomAtScreenPoint, sourceJobKey } from '../test-dependencies.js';
 import { getRecentLogs } from '../../electron/logger.js';
+import { BATCH_OUTPUT_TOKEN_BUDGET } from '../../electron/ipc/resultCaps.js';
 import { selectIndeedResumePlan } from '../test-dependencies.js';
 import { applyManualAiRetirementReceiptsToNodes } from '../test-dependencies.js';
 import { getJobSourceResolveConfig } from '../test-dependencies.js';
@@ -1285,7 +1286,6 @@ export default [
       const sourcesReady = getJobSearchTransientKeysForSave('sources-ready');
       assert(normal.includes('queuedModuleRun'), 'Transient jobhub save rules: default state should strip queuedModuleRun');
       assert(normal.includes('scrapeWarnings'), 'Transient jobhub save rules: default state should strip scrapeWarnings');
-      assert(normal.includes('pendingTargetRole'), 'Transient jobhub save rules: default state should strip pendingTargetRole');
       assert(normal.includes('pendingJobPreferences') && normal.includes('pendingJobPreferencesInterpretation')
         && normal.includes('pendingJobPreferencePlan') && normal.includes('activeJobPreferences'),
       'Transient jobhub save rules: interrupted runs must not retain frozen Job Preferences outside their manifest');
@@ -1964,7 +1964,6 @@ export default [
         type: 'jobhub',
         position: { x: 10, y: 20 },
         data: {
-          targetRole: 'Historical role',
           jobPreferences: 'Historical preferences',
           searchLocation: { city: 'Ottawa', country: 'Canada' },
           preferredLocation: 'Ottawa, Canada',
@@ -1991,7 +1990,6 @@ export default [
         ...historical,
         position: { x: 80, y: 90 },
         data: {
-          targetRole: 'Live role',
           jobPreferences: 'Live preferences',
           searchLocation: { city: 'Toronto', country: 'Canada' },
           preferredLocation: 'Toronto, Canada',
@@ -2019,7 +2017,7 @@ export default [
       const restored = mergeNonRestorableNodeDataFromLive([historical], [live])[0];
       assert(restored.position.x === historical.position.x && restored.position.y === historical.position.y,
         'Job Search undo must still restore node-level canvas properties');
-      for (const field of ['targetRole', 'jobPreferences', 'searchLocation', 'preferredLocation', 'remoteResidences', 'collectionLimits', 'enabledSourceIds', 'initialLookbackDays', 'locked']) {
+      for (const field of ['jobPreferences', 'searchLocation', 'preferredLocation', 'remoteResidences', 'collectionLimits', 'enabledSourceIds', 'initialLookbackDays', 'locked']) {
         assert(JSON.stringify(restored.data[field]) === JSON.stringify(historical.data[field]),
           `Job Search undo must restore the historical user setting ${field}`);
       }
@@ -2048,7 +2046,7 @@ export default [
         'the first-search lookback is undoable while setup is unlocked, but a role-locked Search keeps its live setting with every other frozen setting');
 
       const historicalRuntimeOnly = { ...historical, data: { ...historical.data, hubState: 'done', jobRunId: 'another-run', scoredJobs: [] } };
-      const historicalSettingEdit = { ...historical, data: { ...historical.data, targetRole: 'A different setting' } };
+      const historicalSettingEdit = { ...historical, data: { ...historical.data, jobPreferences: 'A different setting' } };
       assert(fingerprint({ nodes: [historical], edges: [], drawings: [] })
           === fingerprint({ nodes: [historicalRuntimeOnly], edges: [], drawings: [] })
         && fingerprint({ nodes: [historical], edges: [], drawings: [] })
@@ -5116,7 +5114,7 @@ export default [
         id: 'preferences-running', type: 'jobhub', position: { x: 0, y: 0 },
         data: {
           hubState: 'evaluating-preferences', inputLocked: true,
-          activeTargetRole: 'Product Manager', activeJobPreferences: 'Free lunch required',
+          activeJobPreferences: 'Free lunch required',
           pendingJobPreferences: 'Free lunch required', pendingJobPreferencePlan: { version: 1 },
           pendingJobPreferencesInterpretation: { version: 1 }, pendingJobs: [{ title: 'Stale run job' }],
           queuedModuleRun: { position: 1 }, errorMessage: 'stale error', scrapeWarnings: [{ sourceId: 'indeed' }],
@@ -5457,7 +5455,6 @@ export default [
         preferenceEvaluation: { summary: 'stale evaluation' },
         preferenceCandidatePool: [{ title: 'Stale candidate' }],
         canonicalLocation: 'X',
-        targetRole: 'ROLE',
         jobPreferences: 'Large established companies only.',
         preferredLocation: 'LOC',
         collectionLimits: {},
@@ -5478,11 +5475,11 @@ export default [
       assert(getHubFileDropMode({ type: 'jobhub', data: merged }) === 'initial-input',
         'a cleared hub must route the next file drop as initial input, otherwise fresh career files land as nothing at all');
 
-      for (const settingKey of ['targetRole', 'jobPreferences', 'preferredLocation', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
+      for (const settingKey of ['jobPreferences', 'preferredLocation', 'collectionLimits', 'enabledSourceIds', 'batchScoring']) {
         assert(!Object.prototype.hasOwnProperty.call(patch, settingKey),
           `clearing career files must not touch ${settingKey} — wiping search settings defeats the point of clearing in place instead of rebuilding the module`);
       }
-      assert(merged.targetRole === 'ROLE' && merged.jobPreferences === 'Large established companies only.' && merged.preferredLocation === 'LOC'
+      assert(merged.jobPreferences === 'Large established companies only.' && merged.preferredLocation === 'LOC'
         && merged.enabledSourceIds.length === 1 && merged.batchScoring === true,
       'a cleared hub that loses its role, location, collection depth, or platform selection forces the user to re-enter every search setting');
 
@@ -6358,16 +6355,7 @@ export default [
       const describedExplicit = describeJobCollectionLimits({ jobsPerPlatform: 12, pagesPerPlatform: 3 });
       assert(describedExplicit.jobs === '12' && describedExplicit.pages === '3',
         `describeJobCollectionLimits: explicit numbers render as plain strings, got ${JSON.stringify(describedExplicit)}`);
-      // compsForPricing is unbounded — a small set passes through in full...
-      const cSmall = compsForPricing(8, 4);
-      assert(cSmall.sold === 8 && cSmall.active === 4, 'Job date and cap helpers: small comp set should pass through unbounded');
-      // ...and a large set is bounded ONLY by the synthesis token budget (scaled
-      // proportionally, well above the old 25/15 caps), and the count actually fed
-      // must always receive a NON-clamped budget (i.e. it can't truncate).
-      const cBig = compsForPricing(1000, 1000);
-      assert(cBig.sold === cBig.active && cBig.sold > 15, 'Job date and cap helpers: large comp set should scale proportionally above the old caps');
-      assert(priceSynthesisMaxTokens(cBig.sold + cBig.active) < 24576, 'Job date and cap helpers: fed comp count must fit the synthesis token budget (no clamp/truncate)');
-      assert(jobScoringBatchSize() === 4, 'Job date and collection-limit helpers: whole-record scoring batches must reserve room for the complete gap audit');
+      assert(jobScoringBatchSize() === Math.floor((BATCH_OUTPUT_TOKEN_BUDGET - 1600) / 2800), 'Job date and collection-limit helpers: whole-record scoring batches must reserve room for the complete gap audit');
       return { filtered: filtered.length, scoringBatch: jobScoringBatchSize(), defaultPages: JOB_COLLECTION_LIMITS_DEFAULT.pagesPerPlatform };
     },
   },

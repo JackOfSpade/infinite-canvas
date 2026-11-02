@@ -18,25 +18,26 @@ export const CLAUDE_SONNET_MODEL = 'sonnet';
 export const CLAUDE_OPUS_MODEL = 'opus';
 export const CAREER_WRITING_DEFAULT_PROFILE = Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' });
 
-// Opus where a stage decides the writing (write) or picks it (pick); Sonnet
-// for rule-following repair, trim, fact and conversion stages.
+// Chosen on cost and quality, 2026-11-01 (docs/application-improvement-sessions.md).
+// Writing at Opus low cost a quarter of xhigh with no measurable loss in blind
+// panels; Opus high fact-checks catch ownership overstatements Sonnet passes.
 export const APPLICATION_STAGE_PROFILES = Object.freeze({
   'editorial-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
-  write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
+  write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   convert: Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'medium' }),
   'verify-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
   'fit-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fact-check': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fact-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
-  'fact-recheck': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+  'fact-check': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  'fact-correction': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  'fact-recheck': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
 });
-// Interview Q&A uses the same split: Opus researches and writes, and the
-// fact stages are the application's own profile objects, not copies.
+// Interview Q&A, tested the same way. Research results varied with blocked pages,
+// so its top setting is the safe reading of that test.
 export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
-  'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  'qa-brief': APPLICATION_STAGE_PROFILES.pick,
-  'qa-write': APPLICATION_STAGE_PROFILES.write,
+  'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
+  'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   'qa-fact-check': APPLICATION_STAGE_PROFILES['fact-check'],
   'qa-fact-correction': APPLICATION_STAGE_PROFILES['fact-correction'],
   'qa-fact-recheck': APPLICATION_STAGE_PROFILES['fact-recheck'],

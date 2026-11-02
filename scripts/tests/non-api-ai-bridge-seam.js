@@ -1,6 +1,7 @@
 // Safety gates for the bridge seam in electron/ipc/nonApiAi.js. Reviewed text
 // is plugin-only; these tests pin the route boundary, bridge acceptance, and
 // the remaining structurally manual recovery paths.
+import { __allowDurableTaskIdsForTests } from '../../electron/ipc/nonApiAi.js';
 import fs, { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -15,10 +16,10 @@ import {
 } from '../../electron/ipc/nonApiAi.js';
 import { callLLMRaw, getKnownTaskIds } from '../../electron/ipc/llm.js';
 import {
-  buildOfficialPostingMatchRequest, buildOfficialPostingResearchRequest, officialPostingResearchId,
+  buildOfficialPostingResearchRequest, officialPostingResearchId,
 } from '../../electron/ipc/officialPostingBridge.js';
+import { buildOfficialPostingJudgeRequest } from '../../electron/ipc/officialPostingJudge.js';
 import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
-import { unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 
 const source = readFileSync(new URL('../../electron/ipc/nonApiAi.js', import.meta.url), 'utf8');
 const dialogSource = readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
@@ -241,12 +242,12 @@ const SCENARIOS = [
 // K5 and K7 do not, by design. R1-R12 are the frozen acceptance rows in the
 // Phase 1 plan.
 const MATRIX_EXPECTATIONS = Object.freeze({
-  K1: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'validation', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
+  K1: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'accepted', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
   K2: Object.freeze(['free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text', 'free_text']),
-  K3: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'validation', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
+  K3: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'accepted', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
   K4: Object.freeze(['attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment', 'attachment']),
   K5: Object.freeze(['person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing', 'person_editing']),
-  K6: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'validation', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
+  K6: Object.freeze(['accepted', 'validation', 'validation', 'validation', 'validation', 'accepted', 'duplicate', 'not_pending', 'busy', 'cancelled_during_save', 'commit_failed', 'validation']),
   K7: Object.freeze(['task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed', 'task_not_allowed']),
 });
 
@@ -265,7 +266,7 @@ const MATRIX_KINDS = Object.freeze([
   // asked for web research reaches the shared accept body exactly like K1,
   // proving `grounded` carries no structural weight any more.
   { id: 'K6', task: TASK, grounding: true, expectedExclusion: null },
-  { id: 'K7', task: 'price-synthesis', expectedExclusion: 'task_not_allowed' },
+  { id: 'K7', task: 'price-synthesis-batch', expectedExclusion: 'task_not_allowed' },
 ]);
 
 const MATRIX_RESPONSES = Object.freeze([
@@ -469,7 +470,8 @@ async function runMatrixCell({ kind, row, via }) {
     await handler('complete-non-api-ai-run')({ sender }, { runId: secondRunId });
   } else {
     const result = await route(requests[0], matrixResponse(requests[0], row));
-    if (row === 'valid') assert(result.accepted === true, `${kind.id}/R1: valid answer accepts`);
+    // An answer that carries no handoff code is the normal one now: nothing asks the model to echo it.
+    if (row === 'valid' || row === 'missing_code') assert(result.accepted === true, `${kind.id}/${row}: valid answer accepts`);
     else {
       assert(result.accepted === false, `${kind.id}/${row}: invalid answer reissues`);
       assert((await route(requests[0], matrixResponse(requests[0], 'valid'))).accepted === true, `${kind.id}/${row}: correction accepts`);
@@ -539,6 +541,9 @@ function ruleError(lines, ids) {
     code: 'CAREER_SNAPSHOT_AUDIT_INVALID', correctionDetails: lines, correctionRuleIds: ids,
   });
 }
+
+// Synthetic task ids are not in the real task list; keep their durable steps across a reload.
+__allowDurableTaskIdsForTests(['test-manual-clipboard', 'test-manual-ipc-shape']);
 
 export default [
   {
@@ -701,7 +706,7 @@ export default [
         validationCode: 'CAREER_SNAPSHOT_PAGE_INVALID', validationDiagnostic: { stage: 'domain', reason, counts: {} } }, 'invalid').prompt;
       assert(correction('career-profile-compile', 'CAREER_PAGE_VALIDATION_FAILED').includes('Rebuild the complete career page shard'), 'compile guidance retains the existing whole-shard protocol');
       assert(correction('career-profile-audit-skills', 'CAREER_AUDIT_FINDINGS_INVALID').includes('Fix or drop each finding'), 'audit guidance permits removing invalid findings');
-      assert(dialogSource.includes('The same rule failed in 5 answers from ChatGPT.') && dialogSource.includes('The worker chat was replaced 3 times without an answer.'), 'the dock names both reasons plainly');
+      assert(dialogSource.includes('The same rule failed in 5 answers from Claude.') && dialogSource.includes('Claude was blocked 3 times without an answer.'), 'the dock names both reasons plainly');
     },
   },
   {
@@ -1127,40 +1132,6 @@ export default [
     },
   },
   {
-    name: 'non-API AI bridge seam: official posting shortlist uses ordinary validated JSON without comparative provenance',
-    run: async () => {
-      const { sender, waitFor } = freshHarness();
-      const task = 'job-official-posting-shortlist';
-      const nodeId = 'bridge-seam-official-shortlist';
-      const runId = `bridge-seam-official-shortlist-${process.pid}-${Date.now()}`;
-      handleSafe('bridge-seam-official-shortlist-workflow', async (_event, _args, signal) => ({
-        value: await callLLMRaw('SYNTHETIC bounded official posting shortlist', {
-          task, signal, responseSchema: SCHEMA,
-        }),
-      }));
-      const run = handler('bridge-seam-official-shortlist-workflow')({ sender }, { nodeId, manualAiRunId: runId });
-      const requests = await waitFor(1);
-      const request = requests[0];
-      try {
-        const allow = { allowTasks: new Set([task]), allowNodeIds: new Set([nodeId]) };
-        const listed = listBridgeableNonApiAiHandoffs(allow);
-        assert(request.task === task && request.mcpEligible && listed.handoffs.length === 1
-          && listed.handoffs[0].responseFormat === 'json', 'shortlisting must retain the reviewed JSON bridge route');
-        assert(!BRIDGE_RAW_RESEARCH_TASKS.includes(task), 'shortlisting cannot admit arbitrary raw research prose');
-        const identity = { requestId: request.requestId, handoffCode: request.handoffCode, ...allow };
-        const read = readBridgeableNonApiAiHandoff(identity);
-        assert(read.ok && read.responseFormat === 'json', 'ordinary shortlist reads require no comparative conversation proof');
-        const accepted = await submitNonApiAiResponseForBridge({ ...identity, response: answer(request, 'shortlisted') });
-        assert(accepted.accepted, 'ordinary shortlist answers require no A/B comparison provenance');
-        const result = await run;
-        assert(result.value.answer === 'shortlisted', 'callLLMRaw must return the schema-validated JSON result');
-      } finally {
-        await cancelAll(sender, requests);
-        await run.catch(() => {});
-      }
-    },
-  },
-  {
     name: 'non-API AI bridge seam: official posting research and comparative JSON judgment validate corrected answers through callLLMRaw',
     run: async () => {
       const { sender, waitFor } = freshHarness();
@@ -1169,8 +1140,9 @@ export default [
       const job = { title: 'Platform Engineer', company: 'Acme Talent Partners', location: 'Lakeview, Canada',
         snippet: 'Maintain dependable platform services with documented delivery practices.', url: 'https://listing.example.test/platform' };
       const description = 'Maintain dependable platform services with documented engineering delivery practices.';
-      const comparison = buildOfficialPostingMatchRequest({ job: { ...job, snippet: description }, run: 'A',
-        options: [{ id: 'P1', title: job.title, location: job.location, status: 'live', description }] });
+      const posting = 'https://jobs.ashbyhq.com/northwind-synthetic/platform';
+      const comparison = buildOfficialPostingJudgeRequest({ job: { ...job, snippet: description }, run: 'A', round: 1, snapshots: [],
+        leads: [{ id: 'P1', url: posting, kind: 'posting', employer: 'Northwind Labs' }] });
       const specs = [buildOfficialPostingResearchRequest([job]), comparison];
       handleSafe('bridge-seam-official-postings-workflow', async (_event, _args, signal) => ({
         values: await Promise.all(specs.map(({ prompt, ...options }) => callLLMRaw(prompt, { ...options, signal }))),
@@ -1194,7 +1166,9 @@ export default [
       const badResearch = await submitNonApiAiResponseForBridge({ ...identities(research), response: `Handoff: ${research.handoffCode}\n\nVERIFIED EMPLOYER: invented` });
       assert(readBridgeableNonApiAiHandoff(identities(match)).ok, 'the comparative judgment first receives trusted bridge conversation provenance');
       const badMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode,
-        choice: 'P1', evidence: [{ scrapedQuote: 'Unique invented quoted content that never appears in either supplied description.', officialQuote: 'Unique invented quoted content that never appears in either supplied description.' }], distinguishing: [], conflicts: [] }) });
+        choice: 'P1', postingUrl: posting, status: 'open', statusQuote: 'Apply for this job', employerLinked: false, employerPageUrl: '', employerLinkQuote: '',
+        title: job.title, employer: 'Northwind Labs', location: job.location, salary: '', description,
+        evidence: [{ scrapedQuote: 'Unique invented quoted content that never appears in either supplied description.', officialQuote: 'Unique invented quoted content that never appears in either supplied description.' }], conflicts: [] }) });
       assert(badResearch.outcome === 'rejected' && badResearch.isCorrection && /sections|marker/iu.test(badResearch.correction), 'malformed research must yield a section correction');
       assert(badMatch.outcome === 'rejected' && badMatch.isCorrection && /1 scraped/iu.test(badMatch.correction)
         && !badMatch.correction.includes('Unique invented'), 'a nonverbatim JSON answer must yield a source-free domain correction');
@@ -1205,7 +1179,8 @@ export default [
       const id = officialPostingResearchId(job);
       const validResearch = `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: 'https://careers.example.test/', postingUrl: 'https://jobs.ashbyhq.com/northwind-synthetic/platform', employer: 'Northwind Labs', employerDomain: 'https://northwind.example.test', ats: 'ashby' })}\nEND OFFICIAL POSTING RESEARCH ${id}`;
       const acceptedResearch = await submitNonApiAiResponseForBridge({ ...identities(research), response: `Handoff: ${research.handoffCode}\n\n${validResearch}` });
-      const acceptedMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode, choice: 'none', evidence: [], distinguishing: [], conflicts: [] }) });
+      const acceptedMatch = await submitNonApiAiResponseForBridge({ ...identities(match), response: JSON.stringify({ handoffCode: match.handoffCode, choice: 'none', postingUrl: '', status: 'unknown', statusQuote: '', employerLinked: false,
+        employerPageUrl: '', employerLinkQuote: '', title: '', employer: '', location: '', salary: '', description: '', evidence: [], conflicts: ['No lead is this posting.'] }) });
       assert(acceptedResearch.accepted && acceptedMatch.accepted, 'valid raw leads and a valid JSON miss must both accept');
       const completed = await run;
       assert(completed.values?.[0] === validResearch
@@ -1231,7 +1206,6 @@ export default [
         const channel = `bridge-seam-official-${mode}-workflow`;
         handleSafe(channel, async () => resolveOfficialPostings([job], {
           nodeId, manualAiRunId: runId, signal: controller.signal, timeoutMs: mode === 'timeout' ? 500 : 5000,
-          resolve: async source => unresolvedOfficialPosting(source),
           store: { save: async (_source, result) => result },
           callRaw: (prompt, options) => { handoffSignal = options.signal; return callLLMRaw(prompt, options); },
         }));
@@ -1269,12 +1243,12 @@ export default [
         values: await Promise.all([
           requestNonApiAi({ prompt: 'OK', task: TASK, responseSchema: SCHEMA, batch: 1, batchTotal: 7, signal }),
           requestNonApiAi({ prompt: 'WITH FILE', task: 'vision-product-analysis', responseSchema: SCHEMA, attachmentPaths: ['/Users/private/photo.png'], signal }),
-          requestNonApiAi({ prompt: 'WEB', task: 'job-compensation-research', responseSchema: SCHEMA, grounding: true, signal }),
-          requestNonApiAi({ prompt: 'OTHER TASK', task: 'price-synthesis', responseSchema: SCHEMA, signal }),
+          requestNonApiAi({ prompt: 'WEB', task: 'job-compensation-research-batch', responseSchema: SCHEMA, grounding: true, signal }),
+          requestNonApiAi({ prompt: 'OTHER TASK', task: 'price-synthesis-batch', responseSchema: SCHEMA, signal }),
           requestNonApiAi({ prompt: 'DRAFTED', task: TASK, responseSchema: SCHEMA, initialResponse: 'PRIVATE_DRAFT_TEXT typed by the person', batch: 5, batchTotal: 7, signal }),
           requestNonApiAi({ prompt: 'SCHEMALESS', task: TASK, requestKind: 'raw-text', signal }),
           requestNonApiAi({
-            prompt: 'VALIDATED RAW', task: 'job-preference-research', requestKind: 'raw-text', grounding: true, signal,
+            prompt: 'VALIDATED RAW', task: 'job-preference-research-batch', requestKind: 'raw-text', grounding: true, signal,
             responseValidator: value => { if (!value.includes('research evidence')) throw new Error(PRIVATE); },
           }),
         ]),
@@ -1282,15 +1256,15 @@ export default [
       const run = handler('bridge-seam-eligibility-workflow')({ sender }, { nodeId });
       const requests = await waitFor(7);
       const by = (text) => requests.find(request => request.prompt.includes(text));
-      const everything = { allowTasks: new Set([TASK, 'vision-product-analysis', 'job-compensation-research', 'job-preference-research', 'price-synthesis']), allowNodeIds: new Set([nodeId]) };
+      const everything = { allowTasks: new Set([TASK, 'vision-product-analysis', 'job-compensation-research-batch', 'job-preference-research-batch', 'price-synthesis-batch']), allowNodeIds: new Set([nodeId]) };
       const listed = listBridgeableNonApiAiHandoffs(everything);
-      const rawEntry = listed.handoffs.find(item => item.task === 'job-preference-research');
+      const rawEntry = listed.handoffs.find(item => item.task === 'job-preference-research-batch');
       assert(by('OK').mcpEligible === true && by('WEB').mcpEligible === true && by('OTHER TASK').mcpEligible === true
         && by('VALIDATED RAW').mcpEligible === true && by('WITH FILE').mcpEligible === false
         && by('SCHEMALESS').mcpEligible === false && by('DRAFTED').mcpEligible === false,
       'public requests carry a fixed main-owned MCP route for reviewed structured/raw text and an explicit manual route for attachments, unsafe raw text, and legacy drafts');
-      assert(listed.handoffs.length === 4 && listed.handoffs.some(item => item.task === 'price-synthesis') && listed.handoffs.some(item => item.task === 'job-compensation-research') && listed.handoffs.some(item => item.batch === 1) && rawEntry?.responseFormat === 'text', 'structured handoffs and the exact reviewed validated raw-research contract are bridgeable');
-      assert(listed.handoffs.filter(item => item.task !== 'job-preference-research').every(item => item.responseFormat === 'json'), 'structured seam entries use only the closed json response format');
+      assert(listed.handoffs.length === 4 && listed.handoffs.some(item => item.task === 'price-synthesis-batch') && listed.handoffs.some(item => item.task === 'job-compensation-research-batch') && listed.handoffs.some(item => item.batch === 1) && rawEntry?.responseFormat === 'text', 'structured handoffs and the exact reviewed validated raw-research contract are bridgeable');
+      assert(listed.handoffs.filter(item => item.task !== 'job-preference-research-batch').every(item => item.responseFormat === 'json'), 'structured seam entries use only the closed json response format');
       assert(listed.excluded.attachment === 1 && listed.excluded.free_text === 1 && listed.excluded.person_editing === 1 && !('grounded' in listed.excluded), 'each exclusion counted once under its own reason, and grounding is no longer one of them');
       assert(listBridgeableNonApiAiHandoffs().handoffs.length === 0 && listBridgeableNonApiAiHandoffs().excluded.task_not_allowed === 4, 'no allowlist offers nothing');
       const otherHub = listBridgeableNonApiAiHandoffs({ ...ALLOW, allowNodeIds: new Set(['another-hub']) });
@@ -1301,7 +1275,7 @@ export default [
       const attachment = readBridgeableNonApiAiHandoff({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, ...everything });
       const rawRead = readBridgeableNonApiAiHandoff({ requestId: by('VALIDATED RAW').requestId, handoffCode: by('VALIDATED RAW').handoffCode, ...everything });
       assert(drafted.reason === 'person_editing' && attachment.reason === 'attachment', 'reading re-applies the immutable route and structural rules');
-      assert(rawRead.ok && rawRead.responseFormat === 'text' && rawRead.prompt.includes('Expected response format: free text'), 'raw research read carries its closed format with the unchanged dock prompt');
+      assert(rawRead.ok && rawRead.responseFormat === 'text' && rawRead.prompt.includes('VALIDATED RAW') && !rawRead.prompt.includes('RESPONSE SCHEMA'), 'raw research read carries its closed format with the unchanged dock prompt');
       const rawAccepted = await submitNonApiAiResponseForBridge({
         requestId: by('VALIDATED RAW').requestId,
         handoffCode: by('VALIDATED RAW').handoffCode,
@@ -1312,7 +1286,7 @@ export default [
       const refused = await submitNonApiAiResponseForBridge({ requestId: by('WITH FILE').requestId, handoffCode: by('WITH FILE').handoffCode, response: answer(by('WITH FILE')), ...everything });
       assert(refused.outcome === 'ineligible' && refused.exclusion === 'attachment', 'submitting to an attachment handoff is refused untouched');
       assert(BRIDGE_EXCLUSION_REASONS.every(reason => reason in listed.excluded), 'every reason is reported');
-      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research,job-compensation-research-batch,job-preference-research,job-preference-research-batch,interview-brief-research,job-official-posting-research', 'raw bridge eligibility remains an exact reviewed task set');
+      assert(BRIDGE_RAW_RESEARCH_TASKS.join() === 'job-compensation-research-batch,job-preference-research-batch,job-official-posting-research', 'raw bridge eligibility remains an exact reviewed task set');
       await cancelAll(sender, requests);
       await run.catch(() => {});
     },
@@ -1524,7 +1498,7 @@ export default [
       assert(!beforeCall.includes('await '), 'no await between the eligibility checks and the accept body');
       const seam = between('// ── In-process bridge seam', 'export function registerNonApiAiHandlers(');
       assert(!/\.message|\.stack|validationErrors|validationError\b/.test(seam.replace(/record\.validationError\b/g, '')), 'the seam never reads an error message');
-      assert(source.split('\n').filter(line => /Rejected response for task|Ignoring invalid (legacy )?saved response/.test(line)).length === 3, 'the exactly-three log-line pin holds');
+      assert(source.split('\n').filter(line => /Rejected response for task|Ignoring invalid saved response/.test(line)).length === 2, 'the exactly-two log-line pin holds');
     },
   },
   {

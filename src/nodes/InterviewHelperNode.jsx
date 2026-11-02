@@ -36,7 +36,8 @@ const sameSafeFilenames = (left, right) => Array.isArray(left) && Array.isArray(
   && left.length === right.length && left.every((value, index) => value === right[index]);
 
 function sourceLabel(node, index) {
-  const title = boundedText(node?.data?.activeTargetRole) || boundedText(node?.data?.targetRole);
+  const roles = Array.isArray(node?.data?.resolvedRoles) && node.data.resolvedRoles.length > 0 ? node.data.resolvedRoles : node?.data?.pinnedTitles;
+  const title = boundedText(Array.isArray(roles) ? roles[0] : '');
   const city = boundedText(node?.data?.searchLocation?.city);
   return title ? `${title}${city ? ` · ${city}` : ''}` : `Job Search ${index + 1}`;
 }

@@ -9,7 +9,7 @@ import { compileSyntheticCareerSnapshot } from './careerIncrementalFixture.mjs';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __registerJobsHandlersForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, partitionPinnedScoringEvidenceForTests, registerJobsHandlers, scoringPromptFitsEnvelopeForTests, subdividePinnedScoringEvidenceForEnvelopeForTests } from '../../electron/ipc/jobs.js';
+import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __registerJobsHandlersForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers, scoringPromptFitsEnvelopeForTests } from '../../electron/ipc/jobs.js';
 import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
@@ -330,9 +330,9 @@ export default [
       assert(resolved.pinned && resolved.careerData.includes('APPROVED_EVIDENCE_AFTER_80K_')
         && !resolved.careerData.includes('RENDERER_RAW_SOURCE_ONLY')
         && resolved.profile.workHistory[0].id === 'role-1'
-        && planned.candidateEvidencePages?.some(page => page.text.includes('APPROVED_EVIDENCE_AFTER_80K_'))
+        && planned.cachedPrefix.includes('__HOST_PINNED_SCORING_EVIDENCE__') && !planned.cachedPrefix.includes('APPROVED_EVIDENCE_AFTER_80K_')
         && /missing, stale, or no longer approved/.test(missing?.message || ''),
-      'a pinned score input is reconstructed from the approved snapshot (including evidence beyond the former raw-prefix boundary), ignores renderer text, and fails closed when the pin cannot be read');
+      'a pinned score input is reconstructed from the approved snapshot (including evidence beyond the former raw-prefix boundary, carried by a host marker rather than inlined into the prefix), ignores renderer text, and fails closed when the pin cannot be read');
       return { pinned: true, approvedChars: resolved.careerData.length, missingRejected: true };
     },
   },
@@ -340,30 +340,12 @@ export default [
     name: 'pinned scoring measures the complete UTF-8 prompt envelope rather than only career-page characters',
     run: () => {
       const safe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'rubric', prompt: 'job plus page' });
-      const unsafe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'é'.repeat(90_000), prompt: 'job' });
+      // Each 'é' is two UTF-8 bytes, so half the limit plus one character exceeds it.
+      const { limit } = scoringPromptFitsEnvelopeForTests({ cachedPrefix: '', prompt: '' });
+      const unsafe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'é'.repeat(Math.floor(limit / 2) + 1), prompt: 'job' });
       assert(safe.fits && !unsafe.fits && unsafe.bytes > unsafe.limit,
         'the scoring envelope counts UTF-8 rubric/prefix/job/schema material and rejects an actual oversized complete prompt');
       return { safeBytes: safe.bytes, rejectedBytes: unsafe.bytes, limit: unsafe.limit };
-    },
-  },
-  {
-    name: 'pinned scoring recursively subdivides record groups without character leaves or source loss',
-    run: () => {
-      const source = Array.from({ length: 320 }, (_unused, index) => `RECORD_${String(index).padStart(4, '0')}\n`).join('');
-      const initial = partitionPinnedScoringEvidenceForTests(source);
-      const leaves = subdividePinnedScoringEvidenceForEnvelopeForTests(initial, page => Buffer.byteLength(page.text, 'utf8') <= 2_048);
-      const atomicSource = `ATOMIC_LONG_RECORD:${'x'.repeat(5_000)}`;
-      const atomic = subdividePinnedScoringEvidenceForEnvelopeForTests(
-        partitionPinnedScoringEvidenceForTests(atomicSource),
-        page => Buffer.byteLength(page.text, 'utf8') <= 2_048,
-      );
-      assert(leaves.length > initial.length
-        && leaves.every((page, index) => page.index === index && Buffer.byteLength(page.text, 'utf8') <= 2_048)
-        && leaves.map(page => page.text).join('') === source
-        && new Set(leaves.map(page => page.id)).size === leaves.length
-        && atomic.length === 1 && atomic[0].text === atomicSource,
-      'an envelope-too-large evidence page is recursively split into bounded record groups with exact concatenation, while an atomic long source record never becomes millions of character leaves');
-      return { initialPages: initial.length, leafPages: leaves.length, sourceChars: source.length, atomicChars: atomicSource.length };
     },
   },
   {

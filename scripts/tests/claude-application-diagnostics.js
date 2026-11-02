@@ -32,7 +32,7 @@ function writingFixture({ change = '', code = 'writer', context = 'synthetic-arm
     `FULL APPROVED CATALOG (2 items; every ID and full quote):\n\n## Standalone achievements\n[${ids[0]}] Updated a shared berth schedule.${change}\n[${ids[1]}] Sorted archive labels.\n`,
     'INDEX-ELIGIBLE SKILLS (exact item names and their only permitted skill-group citation IDs):\n[]',
   ].join('\n\n');
-  const prompt = `APPLICATION V2 HANDOFF\n{"stage":"write","candidateId":"synthetic-candidate"}\nReply within 10000 output tokens.\n${WRITE_VERIFY_SHORTLIST_STEP}\n\n${source}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON.\n`;
+  const prompt = `APPLICATION V2 HANDOFF\n{"stage":"write","candidateId":"synthetic-candidate"}\n${WRITE_VERIFY_SHORTLIST_STEP}\n\n${source}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON.\n`;
   const plan = {
     thesis: 'Support clear berth schedules with the supplied scheduling example.',
     paragraphs: [{ point: 'Updated a shared berth schedule.', jobNeed: 'Maintain clear berth schedules.', evidenceIds: [ids[0]], editorialNote: 'This directly relates to the target responsibility.' }],
@@ -157,7 +157,7 @@ export default [
       const runner = runnerFor(harness, api, async call => {
         calls.push(call);
         assert.match(call.sessionId, UUID);
-        assert.deepEqual([call.model, call.effort], ['opus', 'xhigh']);
+        assert.deepEqual([call.model, call.effort], ['opus', call.stage === 'editorial-plan' ? 'xhigh' : 'low']);
         if (call.stage === 'editorial-plan') {
           assert.ok(call.text.endsWith(fixture.source), 'the planner receives the complete original source');
           assert.equal(archivedPlans(harness).length, 0);

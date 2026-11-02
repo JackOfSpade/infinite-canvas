@@ -13,6 +13,7 @@ import {
   requeueBridgeableNonApiAiHandoff,
 } from '../../nonApiAi.js';
 import { snapshotActiveNodeTasks } from '../../ipcUtils.js';
+import { claudeTaskWorkerActive } from '../../claudeTaskWorker.js';
 import { CONSTANTS } from '../constants.js';
 
 // A complete table keeps unknown future tasks paste-only until explicitly
@@ -151,7 +152,7 @@ function workerKey(value) {
   return typeof value === 'string' && /^worker-[1-9][0-9]{0,2}$/.test(value) ? value : 'default';
 }
 
-export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS, comparisonPreferenceMs = COMPARISON_WORKER_PREFERENCE_MS, codeGuard = null, autoSelectHubs = false, experimentalAttachmentTasks = false } = {}) {
+export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNodeTasks, windows = new Map(), hubKey = null, now = Date.now, timers = globalThis, graceMs = SUCCESSOR_GRACE_MS, pollMs = GET_POLL_MS, comparisonPreferenceMs = COMPARISON_WORKER_PREFERENCE_MS, codeGuard = null, autoSelectHubs = false, experimentalAttachmentTasks = false, claudeWorkerActive = claudeTaskWorkerActive } = {}) {
   let guard = null;
   function setCodeGuard(value) {
     if (!value || typeof value.key !== 'function' || typeof value.digest !== 'function'
@@ -273,7 +274,8 @@ export function createPushSource({ seam = {}, activeNodeTasks = snapshotActiveNo
     return observed?.keys.has(conversationKey) === true;
   }
   function stateCurrent(value) { return Boolean(value && epochs.get(value.epochKey) === value); }
-  function policyTasks() { return new Set([
+  // The Claude worker answers every AI task, so while it runs no chat may be served one.
+  function policyTasks() { return claudeWorkerActive() ? new Set() : new Set([
     ...Object.entries(PUSH_TASK_POLICY).filter(([, item]) => item.mode === 'release_one').map(([task]) => task),
     ...(experimentalAttachmentTasks ? attachmentTasks : []),
   ]); }

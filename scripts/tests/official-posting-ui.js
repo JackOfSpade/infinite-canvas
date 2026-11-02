@@ -238,13 +238,13 @@ export default [
         assert.deepEqual(snapshotActiveNodeTasks(sender.id).map(item => item.nodeId).sort(), ['board', 'lookup-card']);
         const handoff = { requestId: 'synthetic-card-lookup', handoffCode: 'HANDOFF-ABCDEF',
           bridgeClaimId: '22222222-2222-4222-8222-222222222222', windowId: sender.id, nodeId,
-          runId: test.calls[0].manualAiRunId, task: 'job-official-posting-shortlist', promptChars: 24, codeEnforced: true };
+          runId: test.calls[0].manualAiRunId, task: 'job-official-posting-research', promptChars: 24, codeEnforced: true };
         source = createPushSource({ codeGuard: createHandoffCodeGuard(),
           windows: new Map([[sender.id, { __canvasFilePath: '/synthetic/lookup-canvas.json' }]]),
           hubKey: () => 'b'.repeat(64),
           seam: { list: async () => ({ handoffs: [handoff], excluded: {}, pending: 1 }),
             read: async () => ({ ok: true, requestId: handoff.requestId, handoffCode: handoff.handoffCode,
-              task: handoff.task, responseFormat: 'json', prompt: 'Synthetic lookup prompt.', attempt: 1 }) } });
+              task: handoff.task, responseFormat: 'text', prompt: 'Synthetic lookup prompt.', attempt: 1 }) } });
         assert.equal(source.selectHub({ windowId: sender.id, canvasFilePath: '/synthetic/lookup-canvas.json', nodeId: 'board' }), true);
         assert.equal((await source.get()).status, 'served', 'a selected Board worker must receive the card lookup');
         test.claim().cancel(); await pending;

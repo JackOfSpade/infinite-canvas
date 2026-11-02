@@ -55,7 +55,7 @@ const QUIT_PAUSE_WORK_CHANNELS = new Set([
   'evaluate-job-preferences', 'generate-job-queries', 'search-jobs', 'search-jobs-single-source', 'score-jobs',
   'research-job-compensation', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
   'queue-local-application', 'prepare-official-posting-for-generation', 'refresh-official-postings', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief',
-  'analyze-photos', 'scrape-price-comps', 'synthesize-price', 'synthesize-prices-batch', 'synthesize-bundle-price',
+  'analyze-photos', 'scrape-price-comps', 'synthesize-prices-batch', 'synthesize-bundle-price',
   'rescrape-source', 'resolve-captcha', 'assess-platform-fit',
 ]);
 // An admitted import may already be promoting output or issuing its export

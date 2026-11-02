@@ -449,20 +449,19 @@ const QUEUE_POOL_CLOSE_REASONS = new Set(['drained', 'source_ended', 'continued'
 const QUEUE_MAX_WORKERS = MAX_HANDOFF_CONCURRENCY;
 const QUEUE_ACTIVITY_LIMIT = 20;
 const QUEUE_PUSH_TASKS = new Set([
-  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match',
-  'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
-  'resume-parse', 'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
+  'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+  'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
-  'job-compensation-research', 'job-compensation-research-batch',
-  'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
-  'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
-  'job-compensation-assessment', 'job-compensation-assessment-batch',
+  'job-compensation-research-batch',
+  'job-preference-research-batch', 'job-query-generation', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
+  'job-taxonomy-plan', 'job-taxonomy-classify-batch',
+  'job-compensation-assessment-batch',
   'job-preference-interpretation', 'job-preference-evaluation',
-  'job-preference-research-assessment', 'job-preference-research-batch-assessment',
-  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
-  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
-  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
+  'job-preference-research-batch-assessment',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch',
+  'vision-product-analysis', 'marketplace-hub-scan-batch',
 ]);
 const QUEUE_PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];
 const QUEUE_MAX_PUSH_HUBS = 50;

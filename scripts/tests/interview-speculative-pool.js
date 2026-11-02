@@ -1,14 +1,12 @@
 import assert from 'node:assert/strict';
 import { createInterviewAiMatcher, interviewAiMatcherConfigFromEnv, interviewMatchPoolSize } from '../../electron/interviewAiMatcher.js';
-import { createInterviewAiTransport } from '../../electron/interviewAiTransports.js';
-import { INTERVIEW_AI_MATCH_SCHEMA } from '../../electron/interviewAiSelectionSchema.js';
 
 const bank = { cards: [{ id: 'a', question: 'Describe a project.', headline: 'A prepared project.' }] };
 const answer = JSON.stringify({ kind: 'question', cardId: 'a', confidence: 0.8 });
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function pool(config = {}, failed = -1) {
   const sessions = [];
-  const matcher = createInterviewAiMatcher({ bank, config: { transport: 'chatgpt-bridge', ...config }, transportFactory: () => {
+  const matcher = createInterviewAiMatcher({ bank, config, transportFactory: () => {
     const record = { starts: 0, calls: [], closes: 0, index: sessions.length };
     sessions.push(record);
     return { start(input) {
@@ -82,21 +80,5 @@ export default [
       assert.equal((await h.matcher.select({ text: 'Tell me about projects.' })).cardId, 'a');
       h.sessions[1].calls[0].resolve(answer);
     } finally { await h.matcher.close(); }
-  } },
-  { name: 'interview speculative pool: partial-aware per-turn message preserves strict response schema', async run() {
-    const requests = [];
-    const matcher = createInterviewAiMatcher({ bank, config: { transport: 'chatgpt-bridge', poolSize: 2 },
-      request: async request => { requests.push(request); return answer; }, transportFactory: createInterviewAiTransport });
-    try {
-      await matcher.start();
-      await matcher.select({ text: 'Tell me about projects', partial: true });
-      await matcher.select({ text: 'Tell me about projects.' });
-      assert.equal(requests.length, 2);
-      assert.deepEqual(requests.map(request => request.responseSchema), [INTERVIEW_AI_MATCH_SCHEMA, INTERVIEW_AI_MATCH_SCHEMA]);
-      const messages = requests.map(request => JSON.parse(request.prompt));
-      assert.equal(messages[0].partial, true); assert.equal(Object.hasOwn(messages[1], 'partial'), false);
-      assert.equal(requests[0].cachedPrefix, requests[1].cachedPrefix);
-      assert.match(requests[0].cachedPrefix, /When the user message has partial: true, the interviewer is still mid-sentence:/u);
-    } finally { await matcher.close(); }
   } },
 ];

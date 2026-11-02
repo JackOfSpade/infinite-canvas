@@ -280,12 +280,19 @@ export function deriveBridgeJobProgress(input) {
 // Push handoffs do not have an application lane or stage. A claim is made
 // only by ChatGPT's get_handoff call; awaitingClaim deliberately reports the
 // absence of that exact claim rather than borrowing a task name or guessing
-// from aggregate queue counts.
-export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, ownerWorker: rawOwnerWorker, awaitingClaim = false } = {}) {
+// from aggregate queue counts. `claudeWorker` replaces all of that: the local
+// Claude worker answers every push handoff itself.
+export function deriveBridgePushProgress({ chat: rawChat, bridge: rawBridge, ownerWorker: rawOwnerWorker, awaitingClaim = false, claudeWorker = false } = {}) {
   const chat = object(rawChat);
   const bridge = object(rawBridge);
   const ownerWorker = isObject(rawOwnerWorker) ? rawOwnerWorker : null;
   const steps = [{ key: 'handoff', label: 'Handoff', state: 'current' }];
+  // The local Claude worker takes the handoff itself: there is no chat to
+  // reach, no tunnel to cross and no worker to wake.
+  if (claudeWorker === true) {
+    const [headline, detail] = BRIDGE_PROGRESS_COPY.claudeWorking;
+    return build({ kind: 'push-working', steps }, { headline, detail, tone: 'working' });
+  }
   if (bridge.paused === true) {
     return build({ kind: 'push-paused', steps }, {
       headline: BRIDGE_COPY.health.paused[0], detail: BRIDGE_COPY.health.paused[1], tone: 'attention',

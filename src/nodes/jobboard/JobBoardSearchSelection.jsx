@@ -330,7 +330,7 @@ export function JobBoardSearchSelection({
 
       {running && waitingForWorkers && !progressState && (
         <p className="text-center text-[9px] leading-snug text-sky-200/75" role="status" aria-live="polite">
-          {progressState?.label || 'Waiting for ChatGPT workers or a live bridge connection to finish official posting lookups.'}
+          {progressState?.label || 'Waiting for Claude to finish official posting lookups.'}
         </p>
       )}
 

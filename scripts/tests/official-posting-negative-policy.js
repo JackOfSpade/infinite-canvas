@@ -7,7 +7,7 @@ import { officialPostingDisplay, officialPostingNeedsRefresh } from '../../src/u
 import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
 import { partitionOfficialPostingRows } from '../../electron/ipc/officialPostingService.js';
-import { resolveOfficialPosting, shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
+import { shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 
 const proof = { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) };
@@ -63,45 +63,6 @@ export default [
         });
         assert.deepEqual(result.unresolvedIndices, current ? [] : [0]);
       }
-    },
-  },
-  {
-    name: 'Current ownership-discovery negative remains durable after two eligible posting comparisons both return none',
-    async run() {
-      const root = 'https://northwind.test/'; const first = `${root}jobs/first`; const second = `${root}jobs/second`;
-      const description = 'Design reliable services and investigate delivery failures for dispatch teams. Maintain reporting workflows, improve data quality across scheduled pipelines, and document operational changes. Collaborate with product engineers to build clear interfaces, write focused tests, and improve the everyday tools used by customer support teams.';
-      const source = { title: 'Software Engineer', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada',
-        url: 'https://www.linkedin.com/jobs/view/synthetic-current-negative', snippet: description };
-      const page = title => `<script type="application/ld+json">${JSON.stringify({ '@type': 'JobPosting', title,
-        hiringOrganization: { name: source.company }, description,
-        jobLocation: { address: { addressLocality: 'Lakeview', addressRegion: 'Ontario', addressCountry: 'Canada' } } })}</script>`;
-      const pages = { [root]: '<title>Northwind Labs</title><a href="/careers">Careers</a>',
-        [`${root}careers`]: `<a href="${first}">First role</a><a href="${second}">Second role</a>`,
-        [first]: page('Reporting Engineer'), [second]: page('Support Engineer') };
-      let comparisons = 0;
-      const result = await resolveOfficialPosting(source, { semanticMatching: true, researchRan: true,
-        candidateUrls: [root, first, second], render: null,
-        fetch: async url => {
-          if (!pages[url]) throw Object.assign(new Error('Unavailable'), { code: 'closed' });
-          return { url, statusCode: 200, contentType: 'text/html', body: pages[url] };
-        },
-        match: async (_job, options) => {
-          comparisons++; assert.equal(options.length, 2, 'both employer-owned candidates are eligible');
-          return { choice: 'none', evidence: [], distinguishing: [], conflicts: ['Both postings describe different teams.'] };
-        },
-      });
-      assert.equal(comparisons, 2);
-      assert.equal(result.officialPosting.outcome, 'not-found');
-      assert.ok(result.officialPosting.trail.includes('comparative-none'));
-      assert.ok(result.officialPosting.trail.includes(OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL));
-      assert.equal(shouldPersistOfficialPostingResult(result, { researchRan: true }), true);
-      assert.equal(officialPostingLookupStatus(result.officialPosting).state, 'not-found');
-      const savedAt = Date.now();
-      const record = { version: 1, aliases: officialPostingAliases(source), savedAt, officialPosting: result.officialPosting };
-      const cached = await partitionOfficialPostingRows([{ ...source, officialPosting: result.officialPosting }], {
-        store: { find: async () => record }, now: () => savedAt,
-      });
-      assert.deepEqual(cached.unresolvedIndices, [], 'a genuine current negative comparison can be reused');
     },
   },
   {

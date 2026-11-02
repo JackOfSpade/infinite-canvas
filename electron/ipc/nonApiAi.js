@@ -21,7 +21,7 @@ import { abortNodeTasksAndWait, cancellationError, getCurrentIpcRequestContext, 
 import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { clipCorrectionItem, REJECTED_CAUTION } from './handoffBridge/framing.js';
-import { AI_TASK_CORPUS_DIR, createAiTaskCorpus } from './aiTaskCorpus.js';
+import { getKnownTaskIds } from './knownTasks.js';
 import { validationFailure, VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from './validationFailure.js';
 
 const { app, ipcMain, shell } = electronPkg;
@@ -55,15 +55,7 @@ const QUEUED_WORK_FORECAST_SCOPE_RE = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}
 // enters `pendingRequests`. Reserve a selected code synchronously in that gap
 // so two simultaneous handoffs cannot both observe it as free.
 const handoffCodeReservations = new Map();
-// A manual handoff has no reliable provider/model identity: the person chooses
-// their own chat application. Measurements from one process must therefore not
-// size a later process that may use a different model or output ceiling.
-const sessionCalibration = new Map();
 const DURABLE_HANDOFF_VERSION = 1;
-// New handoffs carry an explicit persisted verification contract. Existing
-// durable records lack this field, so they retain the code-free compatibility
-// path needed to replay work made before code enforcement was introduced.
-const HANDOFF_CODE_VERIFICATION_VERSION = 1;
 const DURABLE_HANDOFF_FILE = 'non-api-ai-handoffs.json';
 // A bridge correction can be generated again and again, but a response which
 // made no semantic progress must not cause a hot, self-feeding poll/reissue
@@ -232,14 +224,10 @@ export function __nonApiAiHandoffLifecycleAggregateCountForTests() {
 // test guessed private responses offline. This key never leaves memory and is
 // never persisted; lifecycle correlation is process-local already.
 const RESPONSE_RECEIPT_HMAC_KEY = crypto.randomBytes(32);
-// A durable step restored from a saved run that predates handoff-code
-// enforcement (`handoffCodeVerificationVersion` null) accepts a response
-// carrying no code at all — that is the exact compatibility gap that let one
-// 29,559-char answer be accepted into two different batches of the same run
-// on 2026-09-17, because nothing compared what was actually accepted against
-// what a DIFFERENT step had already accepted. This registry closes that hole
-// without needing any cooperation from the person pasting or the model: it
-// compares accepted text, not text the paste claims about itself. Keyed on
+// An answer carries no handoff code any more, so the host itself guards
+// against one answer being accepted into two different steps (the 29,559-char
+// answer accepted into two batches of one run on 2026-09-17). This registry
+// compares accepted text, not text the answer claims about itself. Keyed on
 // the LOGICAL step identity (`runId` + `stepKey`), never `requestId`, so a
 // re-issued or stepped-back request for the SAME step can still legitimately
 // re-accept identical text.
@@ -557,19 +545,32 @@ function durableFilePath() {
   }
 }
 
-let aiTaskCorpusCapture = null;
+// Test-only: synthetic task ids whose durable steps must survive a reload.
+const fixtureDurableTasks = new Set();
+export function __allowDurableTaskIdsForTests(ids) {
+  for (const id of ids) fixtureDurableTasks.add(id);
+}
 
-function captureAiTaskSample(sample) {
-  try {
-    if (!aiTaskCorpusCapture) {
-      const dir = app?.getPath?.('userData');
-      if (!dir) return Promise.resolve(false);
-      aiTaskCorpusCapture = createAiTaskCorpus({ dir: path.join(dir, AI_TASK_CORPUS_DIR) });
+// Steps saved under a task id the app no longer has belong to a retired
+// pipeline and are not replayed. A run left with no steps is removed, so its
+// workflow simply reissues the current pipeline's calls. Mutates `runs`; the
+// next durable write persists the cleanup. Returns the number of steps dropped.
+export function dropRetiredDurableSteps(runs, knownTasks = new Set([...getKnownTaskIds(), ...fixtureDurableTasks])) {
+  let dropped = 0;
+  for (const [runId, run] of Object.entries(runs)) {
+    const steps = run?.steps;
+    if (!steps || typeof steps !== 'object' || Array.isArray(steps)) continue;
+    let runDropped = 0;
+    for (const [stepKey, step] of Object.entries(steps)) {
+      if (step && typeof step === 'object' && knownTasks.has(step.task)) continue;
+      delete steps[stepKey];
+      runDropped += 1;
     }
-    return aiTaskCorpusCapture(sample);
-  } catch {
-    return Promise.resolve(false);
+    dropped += runDropped;
+    if (runDropped > 0 && Object.keys(steps).length === 0) delete runs[runId];
   }
+  if (dropped > 0) logger.warn(`[Non-API AI] Dropped ${dropped} saved handoff step(s) from retired task ids; those runs reissue the current calls.`);
+  return dropped;
 }
 
 async function loadDurableState() {
@@ -590,6 +591,7 @@ async function loadDurableState() {
       // persisted sample could be dangerously applied to a different output
       // ceiling. Older on-disk `calibration` data is ignored and is removed on
       // the next durable run-state write.
+      dropRetiredDurableSteps(runs);
       return { version: DURABLE_HANDOFF_VERSION, runs };
     } catch {
       return { version: DURABLE_HANDOFF_VERSION, runs: {} };
@@ -876,95 +878,8 @@ export async function durableRunSettlementSummary(runId) {
   };
 }
 
-/**
- * Read-only exact durable-step probe.
- *
- * Unlike durableRunHasAnyTask, this is deliberately identity-bound: it hashes
- * the reconstructed pre-code handoff exactly as requestNonApiAi does and only
- * reports a live accepted/pending record at that logical (or historical raw)
- * key. It must never fall back to task/batch metadata here. Callers use this
- * during a contract migration to retain the one old prompt a person already
- * has open while allowing unrelated, not-yet-issued work in the same run to
- * use the newer contract.
- */
-export async function durableRunHasExactStep(runId, {
-  materializedPrompt,
-  task,
-  nodeId = null,
-  batch = null,
-  batchTotal = null,
-  itemCount = null,
-  attachmentPaths = [],
-  attachmentIdentities = null,
-} = {}) {
-  return (await durableRunExactStepStatus(runId, {
-    materializedPrompt,
-    task,
-    nodeId,
-    batch,
-    batchTotal,
-    itemCount,
-    attachmentPaths,
-    attachmentIdentities,
-  })) !== null;
-}
-
-/**
- * Read-only exact durable-step status.  This is intentionally narrower than
- * the boolean compatibility probe: schedulers can consume an already accepted
- * reply before filling a visible manual-handoff wave, while a pending step
- * still reserves a position in that wave.  No response, draft, or code leaves
- * the durable store through this API.
- */
-export async function durableRunExactStepStatus(runId, {
-  materializedPrompt,
-  task,
-  nodeId = null,
-  batch = null,
-  batchTotal = null,
-  itemCount = null,
-  attachmentPaths = [],
-  attachmentIdentities = null,
-} = {}) {
-  const clean = cleanRunId(runId);
-  if (!clean || typeof materializedPrompt !== 'string' || !materializedPrompt) return null;
-  const cleanPaths = cleanAttachmentPaths(attachmentPaths);
-  const keys = durableStepKeys({
-    materializedPrompt,
-    task: typeof task === 'string' ? task : null,
-    nodeId: nodeId || null,
-    ...cleanBatchMetadata(batch, batchTotal),
-    itemCount: cleanBatchNumber(itemCount),
-    attachmentPaths: logicalAttachmentInputs(cleanPaths, cleanAttachmentIdentities(attachmentIdentities, cleanPaths)),
-  });
-  const saved = await durableStepByLogicalOrRawKey(clean, keys);
-  return saved?.step?.status === 'accepted' || saved?.step?.status === 'pending'
-    ? saved.step.status
-    : null;
-}
-
-function selectUniqueAcceptedLegacyStep(steps, { task, batch, batchTotal, itemCount }) {
-  if (!steps || typeof steps !== 'object') return null;
-  const matches = Object.entries(steps).filter(([, step]) => step?.status === 'accepted'
-    && (step.task || null) === (task || null)
-    && (step.batch || null) === (batch || null)
-    && (step.batchTotal || null) === (batchTotal || null)
-    && (step.itemCount || null) === (itemCount || null));
-  return matches.length === 1 ? { stepKey: matches[0][0], step: matches[0][1] } : null;
-}
-
-async function uniqueAcceptedLegacyStepByMetadata(runId, metadata) {
-  if (!runId) return null;
-  const state = await loadDurableState();
-  return selectUniqueAcceptedLegacyStep(state.runs?.[runId]?.steps, metadata);
-}
-
 export function __selectDurableStepForTests(steps, keys) {
   return selectDurableStepByLogicalOrRawKey(steps, keys);
-}
-
-export function __selectUniqueAcceptedLegacyStepForTests(steps, metadata) {
-  return selectUniqueAcceptedLegacyStep(steps, metadata);
 }
 
 function queueDurableMutation(work) {
@@ -992,7 +907,6 @@ function updateDurableStep(record, patch, { deferWrite = false } = {}) {
       // stored value is the only way to validate the pasted response with the
       // exact code the person saw originally.
       handoffCode: normalizeHandoffCode(record.handoffCode),
-      handoffCodeVerificationVersion: record.handoffCodeVerificationVersion || null,
       ...(record.comparisonGroup ? { comparisonGroup: record.comparisonGroup, comparisonRun: record.comparisonRun,
         comparisonInvalidCount: record.comparisonInvalidCount, comparisonProof: record.comparisonProof } : {}),
       updatedAt: Date.now(),
@@ -1012,143 +926,6 @@ function updateDurableStep(record, patch, { deferWrite = false } = {}) {
         void writeDurableState().catch(() => {});
       }, 200);
     }
-  });
-}
-
-// ── Output-size calibration ──────────────────────────────────────────────────
-// How many tokens one unit of structured output actually costs, measured from
-// accepted responses in THIS Electron process instead of guessed from schema
-// field caps. A guess was wrong by 3x once already and nothing in the system
-// could tell — it just silently tripled how many prompts a run cost.
-//
-// The window is continuously adaptive while the process is alive. We do not
-// persist it because this manual transport has no stable model/profile id: the
-// next session may use a different chat application's output ceiling.
-const CALIBRATION_WINDOW = 24;
-// Chars per token. GPT-5.6 Sol uses OpenAI's o200k_base tokenizer, documented
-// at roughly 4 chars/token for English (and ~4.24 on JS/TS, which it tokenizes
-// unusually well). Our payload is English prose inside JSON, so the structural
-// punctuation pushes the real ratio somewhat below the English figure.
-//
-// 3.4 is deliberately the PESSIMISTIC end of that range: a LOW divisor
-// OVER-estimates tokens, which shrinks batches. That is the safe direction —
-// overshooting the model's output ceiling truncates the response mid-JSON and
-// costs a whole re-paste, while undershooting costs only a little throughput.
-// (llm.js uses an even more conservative 2.5 for INPUT estimation.)
-//
-// Exact counting is possible in principle by bundling an o200k tokenizer, which
-// would remove this estimate entirely. Not done: it is a real dependency in a
-// signed, packaged app, and the loop above is self-correcting — a wrong ratio
-// biases the budget uniformly rather than drifting.
-const CALIBRATION_CHARS_PER_TOKEN = 3.4;
-// Which sample to size on, from the cheap end. Sizing high is the safe
-// direction: an UNDER-estimate of cost means an over-sized batch, which
-// truncates and costs a whole re-paste, while an over-estimate costs only a few
-// extra handoffs. So this drops roughly the top decile — enough that one freak
-// response cannot pin the batch small for a whole window — but only once the
-// window is big enough for "outlier" to mean anything. Below ten samples it
-// resolves to the MAX, because with thin evidence the worst case observed IS
-// the best estimate of the worst case, and discarding it would be sizing on
-// data we deliberately threw away.
-const CALIBRATION_DROP_FRACTION = 0.1;
-
-/**
- * Record what one accepted response actually cost. `units` is whatever the
- * caller sizes its batches by — for listing evaluation that is match objects
- * (listings x preference items), which is the thing output volume scales with.
- */
-function calibrationSeriesKey(task, planItemCount = null) {
-  const cleanPlanItems = cleanProgressCount(planItemCount);
-  return cleanPlanItems == null ? String(task || '') : `${task}\u0000plan-items:${cleanPlanItems}`;
-}
-
-function recordHandoffOutputSample({ task, units, responseChars, planItemCount = null }) {
-  const cleanUnits = Number(units);
-  const cleanChars = Number(responseChars);
-  if (!task || !Number.isFinite(cleanUnits) || cleanUnits < 1) return Promise.resolve();
-  if (!Number.isFinite(cleanChars) || cleanChars < 1) return Promise.resolve();
-  // A per-match rate learned from a dense preference plan cannot safely size a
-  // one-item plan: fixed row overhead was amortized across a different number
-  // of matches. Keep those series isolated by the plan-size dimension the
-  // caller already supplies in its handoff hints.
-  const seriesKey = calibrationSeriesKey(task, planItemCount);
-  const existing = sessionCalibration.get(seriesKey)?.samples || [];
-  sessionCalibration.set(seriesKey, {
-    samples: [...existing, { units: cleanUnits, chars: cleanChars }].slice(-CALIBRATION_WINDOW),
-    updatedAt: Date.now(),
-  });
-  return Promise.resolve();
-}
-
-/**
- * Measured tokens per unit for a task, or null while there is not yet enough
- * evidence to beat the static estimate. Callers treat null as "use the
- * conservative default".
- */
-export async function observedTokensPerUnit(task, { minSamples = 3, planItemCount = null } = {}) {
-  if (!task) return null;
-  const samples = sessionCalibration.get(calibrationSeriesKey(task, planItemCount))?.samples || [];
-  if (samples.length < minSamples) return null;
-  const perUnit = samples
-    .map(sample => Number(sample.chars) / Number(sample.units))
-    .filter(value => Number.isFinite(value) && value > 0)
-    .sort((a, b) => a - b);
-  if (perUnit.length < minSamples) return null;
-  const dropped = Math.floor(perUnit.length * CALIBRATION_DROP_FRACTION);
-  const index = Math.max(0, perUnit.length - 1 - dropped);
-  return perUnit[index] / CALIBRATION_CHARS_PER_TOKEN;
-}
-
-/**
- * The batch layout a run actually used, round by round. Replaying a run has to
- * reproduce its ORIGINAL prompts or the durable step keys miss and the person is
- * asked to redo work they already pasted — and an adaptive size would otherwise
- * differ on replay, because by then every sample already exists. So the first
- * pass records the size it chose and a resume reads it back.
- */
-export async function recallRunRoundSize(runId, round, passKey = 'default') {
-  const clean = cleanRunId(runId);
-  if (!clean || !Number.isInteger(round) || round < 0) return null;
-  const state = await loadDurableState();
-  const sizes = state.runs?.[clean]?.roundSizes?.[String(passKey)];
-  const entry = Array.isArray(sizes) ? sizes[round] : null;
-  // Entries are {size, rate}; a bare number is an older entry from before the
-  // rate was recorded.
-  const size = Number(entry && typeof entry === 'object' ? entry.size : entry);
-  if (!Number.isInteger(size) || size <= 0) return null;
-  const rate = Number(entry && typeof entry === 'object' ? entry.rate : NaN);
-  return { size, rate: Number.isFinite(rate) && rate > 0 ? rate : null };
-}
-
-export function rememberRunRoundSize(runId, round, size, passKey = 'default', rate = null) {
-  const clean = cleanRunId(runId);
-  const cleanSize = Number(size);
-  const cleanRate = Number(rate);
-  if (!clean || !Number.isInteger(round) || round < 0) return Promise.resolve();
-  if (!Number.isInteger(cleanSize) || cleanSize < 1) return Promise.resolve();
-  return queueDurableMutation(async () => {
-    const state = await loadDurableState();
-    const run = state.runs[clean] || { createdAt: Date.now(), steps: {} };
-    // Keyed by pass, not just round: one run can evaluate more than once and
-    // each pass restarts its round counter, so a bare round index would let a
-    // later pass inherit an earlier pass's layout.
-    const byPass = (run.roundSizes && !Array.isArray(run.roundSizes) && typeof run.roundSizes === 'object')
-      ? { ...run.roundSizes }
-      : {};
-    const key = String(passKey);
-    const sizes = Array.isArray(byPass[key]) ? [...byPass[key]] : [];
-    // Record the RATE with the size. The size alone makes the batch LAYOUT
-    // replayable, but the declared output budget is derived from the rate and is
-    // written into the prompt text ("Maximum output tokens: N") — which is
-    // hashed into the durable step key. Recomputing the rate on replay would
-    // pick up drift that arrived after the original send, changing the prompt
-    // and making every already-accepted step miss its cache.
-    sizes[round] = { size: cleanSize, rate: Number.isFinite(cleanRate) && cleanRate > 0 ? cleanRate : null };
-    byPass[key] = sizes;
-    run.roundSizes = byPass;
-    run.updatedAt = Date.now();
-    state.runs[clean] = run;
-    await writeDurableState();
   });
 }
 
@@ -1548,9 +1325,6 @@ export function _resetNonApiAiHandoffLifecycle() {
   handoffLifecycles.length = 0;
   handoffLifecycleAggregates.clear();
   handoffLifecycleAggregateReservations.clear();
-  // Calibration is process-session scoped. Tests share one process, so clear
-  // it alongside lifecycle receipts to keep their sizing evidence isolated.
-  sessionCalibration.clear();
   // Test-only restart simulation also starts with no in-flight reservations.
   // Pending records remain their own source of truth in `pendingRequests`.
   handoffCodeReservations.clear();
@@ -1588,43 +1362,6 @@ function cleanAttachmentIdentities(identities, paths) {
 // stable logical identity when the host supplied one, otherwise the pathname.
 function logicalAttachmentInputs(paths, identities) {
   return identities ? identities.map(identity => `logical-attachment:${identity}`) : paths;
-}
-
-// `handoffSettings` is deliberately rendered into a prompt. Keep this
-// boundary defensive so a future caller cannot accidentally turn an internal
-// credential-bearing option into text copied to a third-party chat.
-// Normalize camelCase first so `privateKey`, `authToken`, and `api_key` get
-// the same treatment. Keep this list specific enough not to hide harmless
-// settings such as maxOutputTokens, while treating every credential-shaped
-// field as unsafe for a prompt copied into an external chat application.
-const SENSITIVE_SETTING_KEY = /(?:^|_)(?:api_?key|private_?key|secret|password|credential|authorization|auth_?token|access_?token|refresh_?token|id_?token|bearer|session(?:_?token)?|cookie)(?:_|$)/i;
-const CHAT_IRRELEVANT_SETTING_KEYS = new Set([
-  'model', 'model_id', 'thinking', 'thinking_config', 'effort', 'temperature',
-  'format', 'output_config', 'generation_config', 'structured_output',
-  'native_provider_schema',
-  'model_fallback_policy', 'excluded_models', 'response_schema',
-  'response_mime_type',
-]);
-
-function isSensitiveSettingKey(key) {
-  const normalized = String(key || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2');
-  return SENSITIVE_SETTING_KEY.test(normalized);
-}
-
-function normalizedSettingKey(key) {
-  return String(key || '').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase();
-}
-
-function safeHandoffSettings(value, seen = new WeakSet()) {
-  if (value === null || typeof value !== 'object') return value;
-  if (seen.has(value)) return '[circular]';
-  seen.add(value);
-  if (Array.isArray(value)) return value.map(item => safeHandoffSettings(item, seen));
-  return Object.fromEntries(Object.entries(value).flatMap(([key, item]) => (
-    CHAT_IRRELEVANT_SETTING_KEYS.has(normalizedSettingKey(key))
-      ? []
-      : [[key, isSensitiveSettingKey(key) ? '[redacted]' : safeHandoffSettings(item, seen)]]
-  )));
 }
 
 function cleanBatchNumber(value) {
@@ -1968,12 +1705,6 @@ function replacePromptSection(value, startMarker, endMarker, replacement) {
   return `${value.slice(0, start)}${replacement}${value.slice(end)}`;
 }
 
-function replaceLastPromptLiteral(value, marker, replacement) {
-  const start = value.lastIndexOf(marker);
-  if (start < 0) return value;
-  return `${value.slice(0, start)}${replacement}${value.slice(start + marker.length)}`;
-}
-
 /**
  * Remove legacy pseudo-JSON examples from the copy shown to the chat while
  * retaining the caller's byte-identical source prompt for durable identity.
@@ -2015,68 +1746,28 @@ export function hardenStructuredTaskPrompt(task, value) {
       '\n\nNotes:',
       'Return one top-level entry for every listed platform id, using the exact id as its property name. Each entry must set "fit" to exactly "good" or "unfit". The "reason" field is required for unfit verdicts (one short sentence), and may be omitted or empty for good fits. The appended response schema is the authoritative JSON shape; do not return placeholders or alternative values joined by a pipe.',
     );
-  } else if (task === 'marketplace-hub-scan') {
-    prompt = replacePromptSection(
-      prompt,
-      'Return ONLY a JSON object:\n{',
-      '\n\nRules:',
-      'Return the summary and attention fields required by the appended response schema. Keep summary to one short line. Each attention item must use exactly one urgency ("high" or "low") and one allowed category, plus a short headline, grounded evidence, and the exact sourceUrl copied from its HUB PAGE header. Return an empty attention array when the hub is quiet. Do not return option lists, comments, or placeholder syntax in the JSON.',
-    );
-  }
-
-  if (task === 'price-synthesis') {
-    prompt = replaceLastPromptLiteral(
-      prompt,
-      '- match_quality: one of "strong" | "moderate" | "weak" — use exactly one of those three string values',
-      '- match_quality: use exactly one of these string values: "strong", "moderate", or "weak"',
-    );
   }
   return prompt;
 }
 
-const STRICT_JSON_SERIALIZATION_CHECK = [
-  '',
-  'STRICT JSON SERIALIZATION CHECK — perform this after composing the answer and before sending it:',
-  '- Emit an instance of the schema, not the schema itself or its examples/placeholders. Choose one actual value for every enum. Never emit placeholder syntax such as value1 | value2, comments, ellipses, or type annotations.',
-  '- In every string value, JSON-escape embedded double quotes, backslashes, tabs, carriage returns, and line breaks. A verbatim excerpt means the decoded string content remains verbatim; its JSON representation still requires escaping. Never place a literal control character or line break inside a JSON string.',
-  '- Check that every object member and array item has the required comma, every opening brace/bracket has a matching close, and there is no trailing comma.',
-  '- Run a strict JSON.parse-equivalent check on the exact code-block contents. Be concise only where the task and schema allow; never omit required rows, evidence, source facts, or document text. Always finish and close the JSON instead of truncating it or stopping mid-string.',
-];
-
-/** Materialize the copy/paste handoff's otherwise-out-of-band options in the prompt. */
+/**
+ * The prompt the Claude worker answers: the task, then the response schema and
+ * a plain JSON-only rule, plus the web tools for a grounded task. The schema is
+ * for the model to read; the host validates the reply against it again.
+ */
 export function materializeNonApiPrompt({
   prompt,
   cachedPrefix,
   task,
   responseSchema,
   grounding = false,
-  maxOutputTokens,
-  formulaSeed,
-  requestKind = 'text',
-  handoffSettings,
-  retryOnTruncation = true,
-  handoffCode = null,
-  batch = null,
-  batchTotal = null,
   hardenTaskPrompt = true,
-  includeStrictJsonSerializationCheck = true,
   // Callers may provide a copy aid that is intentionally DISPLAY-ONLY (for
   // example an actual-ID raw-research response skeleton). It is never included
   // in the base materialization used for durableStepKeys.
   displayOnlyPromptSuffix = '',
 } = {}) {
-  const effectiveTransport = NON_API_AI_TRANSPORT;
   const sections = [];
-
-  if (handoffCode) {
-    let batchPart = '';
-    if (batch != null && batchTotal != null) {
-      batchPart = ` · batch ${batch} of ${batchTotal}`;
-    } else if (batch != null) {
-      batchPart = ` · batch ${batch}`;
-    }
-    sections.push(`=== ${handoffCode} · ${task || 'default'}${batchPart} ===`);
-  }
 
   if (cachedPrefix) {
     sections.push(responseSchema && hardenTaskPrompt
@@ -2087,78 +1778,17 @@ export function materializeNonApiPrompt({
     ? hardenStructuredTaskPrompt(task, prompt)
     : String(prompt || ''));
 
-  const settings = [
-    '--- NON-API AI HANDOFF SETTINGS ---',
-    ...(handoffCode ? [`Handoff code: ${handoffCode}`] : []),
-    `Task: ${task || 'default'}`,
-    `Request kind: ${requestKind}`,
-    `Transport: ${effectiveTransport} (manual copy/paste; no API request, provider selection, or provider fallback)`,
-    `Expected response format: ${responseSchema ? 'JSON' : 'free text'}`,
-    `Maximum output tokens: ${Number.isFinite(maxOutputTokens) ? maxOutputTokens : 'unspecified'}`,
-    `Output-cap formula seed: ${Number.isFinite(formulaSeed) ? formulaSeed : 'unspecified'}`,
-    `Grounded/web research: ${grounding ? 'true — use your chat application\'s web research when available' : 'false'}`,
-    `Retry-on-truncation setting: ${retryOnTruncation ? 'true' : 'false'}`,
-  ];
-  if (handoffSettings && typeof handoffSettings === 'object' && !Array.isArray(handoffSettings)) {
-    settings.push('', 'Handoff configuration (non-secret):', JSON.stringify(safeHandoffSettings(handoffSettings), null, 2));
-  }
+  const rules = [];
   if (responseSchema) {
-    let renderedSchema = responseSchema;
-    if (handoffCode && responseSchema.type === 'object' && responseSchema.properties && typeof responseSchema.properties === 'object' && !Array.isArray(responseSchema.properties)) {
-      // Never let a future schema's own `handoffCode` declaration replace this
-      // request's const. The rendered property is transport-owned and must stay
-      // first so the model sees it at the top of the response shape.
-      const { handoffCode: _schemaHandoffCode, ...schemaProperties } = responseSchema.properties;
-      renderedSchema = {
-        ...responseSchema,
-        properties: {
-          handoffCode: { type: 'string', const: handoffCode },
-          ...schemaProperties,
-        },
-        required: [
-          'handoffCode',
-          ...(Array.isArray(responseSchema.required) ? responseSchema.required.filter(k => k !== 'handoffCode') : []),
-        ],
-      };
-    }
-
-    const codeInstruction = handoffCode
-      ? `The top-level \`handoffCode\` property must be copied verbatim from the header above ("${handoffCode}"). This is how the application confirms the response matches this exact request.`
-      : null;
-
-    settings.push(
-      '', '--- REQUIRED RESPONSE FORMAT ---', '',
-      'Return the complete response inside exactly one fenced JSON code block labelled `json`, and output nothing before or after that block. Inside the block, return only valid JSON matching this schema:',
-      JSON.stringify(renderedSchema, null, 2),
+    rules.push(
+      '--- RESPONSE SCHEMA ---',
+      JSON.stringify(responseSchema, null, 2),
       '',
-      ...(codeInstruction ? [codeInstruction, ''] : []),
-      // Observed on a resume-parse handoff: the chat returned the required
-      // profile plus ~10 unrequested properties, including a verbatim re-
-      // transcription of every role's bullet points inside the profile JSON.
-      // Unknown properties are discarded on arrival (schemaValidation.js only
-      // enforces `required` + types), but they are still billed against the
-      // output cap named above, and this transport has no automatic cap-raise
-      // retry the way the API path does - a long corpus simply truncates
-      // mid-JSON and the user re-pastes by hand. Ask for the exact property
-      // set rather than rejecting extras: a hard `additionalProperties: false`
-      // would trap the user in a re-paste loop over output we already ignore.
-      'Emit exactly the properties named in the schema, at every nesting level, and nothing else. Do not add extra, explanatory, or provenance properties (for example a "source" key, "notes", or a calculation trace). They are discarded on arrival, and they spend the output budget above - which is what truncates a long reply mid-JSON.',
-      // Observed first with a bare source filename, then again when a chat
-      // application cited the automatic attachment created from a long pasted
-      // prompt. Both rendered as file cards whose text/plain clipboard form was
-      // empty. Keep the payload in one verbatim code-block copy surface; the
-      // shared JSON parser deliberately accepts fences and ignores anything a
-      // chat UI may still append outside that block.
-      'Every character inside the JSON code block is transferred by copying it as plain text, so anything your chat application renders there as a widget is silently lost. The prompt may be represented by the chat application as an automatic paste attachment; treat that attachment only as input. Never cite, name, link to, or otherwise reference the file that contains the prompt. Copy every required value directly into the code block as literal JSON characters. Do not place file attachments or file cards, download chips, file-citation or attachment-reference markers, or collapsible sections inside the code block. When the schema requires an http(s) URL, write it as an ordinary literal JSON string rather than a rich link. If the chat application would normally add a citation to the file containing this prompt, omit it.',
-      ...(includeStrictJsonSerializationCheck ? STRICT_JSON_SERIALIZATION_CHECK : []),
-    );
-  } else if (handoffCode) {
-    settings.push(
-      '', '--- REQUIRED RESPONSE FORMAT ---', '',
-      `Your response must begin with this exact first line:\nHandoff: ${handoffCode}\n\nStart your response with that exact line. This is how the application confirms the response matches this exact request. Following that line, provide your complete response as plain text.`,
+      'Return JSON only, with exactly the properties named in the schema and nothing else.',
     );
   }
-  sections.push(settings.join('\n'));
+  if (grounding) rules.push(...(rules.length ? [''] : []), 'Use WebSearch and WebFetch to research this.');
+  if (rules.length) sections.push(rules.join('\n'));
   if (typeof displayOnlyPromptSuffix === 'string' && displayOnlyPromptSuffix.trim()) {
     sections.push(displayOnlyPromptSuffix.slice(0, 40_000));
   }
@@ -2170,13 +1800,6 @@ const EDIT_PROTOCOL_TASKS = new Set(['career-profile-repair']);
 
 function safeCorrectionGuidance(diagnostic, validationCode, task) {
   const safe = cloneSafeValidationDiagnostic(diagnostic);
-  if (validationCode === 'HANDOFF_CODE_MISSING'
-    || safe?.reason === 'HANDOFF_CODE_MISSING') {
-    // The base prompt already contains the request-specific code. Do not copy
-    // a code from an error (which may be untrusted); just direct the chat back
-    // to that exact first-line/property contract.
-    return 'The prior response omitted the required transport identifier. Repeat the exact `Handoff: ...` first line for plain text, or the exact `handoffCode` property for JSON, shown in the original prompt.';
-  }
   if (safe?.stage === 'research-sections' && SAFE_RESEARCH_SECTION_REASONS.has(safe.reason)) {
     const countBits = Object.entries(safe.counts)
       .map(([key, value]) => `${key.replace(/Count$/, '')} ${value}`)
@@ -2299,8 +1922,7 @@ function promptForRetry(record, validationError) {
         EDIT_PROTOCOL_TASKS.has(record.task)
           ? 'Return the complete corrected answer in exactly the required response format, built from the original inputs: every field and, for an edits array, every edit (the host applies them all together), not only the ones that failed. Do not return a rewritten page shard or an explanation of the mistake.'
           : 'Regenerate the entire answer from the original inputs. Do not return a patch, only the corrected field, or an explanation of the mistake.',
-        'Return exactly one complete `json` code block. Serialize the result once, then run a strict JSON.parse-equivalent check on the exact block before sending it.',
-        'Pay special attention to commas and closing braces, and JSON-escape every quote, backslash, or line break that occurs inside a string value.',
+        'Return JSON only.',
       ].join('\n')
     : [
         '--- CORRECTION REQUIRED ---',
@@ -2842,8 +2464,6 @@ export async function requestNonApiAi({
   task,
   responseSchema,
   grounding,
-  maxOutputTokens,
-  formulaSeed,
   attachmentPaths,
   attachmentReader = null,
   // Optional content-bound names for `attachmentPaths` (see
@@ -2854,7 +2474,6 @@ export async function requestNonApiAi({
   attachmentIdentities,
   hostStagedAttachments = false,
   requestKind,
-  handoffSettings,
   batch,
   batchTotal,
   itemCount,
@@ -2886,13 +2505,8 @@ export async function requestNonApiAi({
   planItemCount,
   attemptKind,
   rootBatchSize,
-  retryOnTruncation,
   displayOnlyPromptSuffix,
   responseValidator,
-  // An exact prior prompt/schema/validator triple used to consume accepted
-  // durable handoffs and to restore an exact pending legacy alias after a
-  // contract migration.
-  legacyReplay,
   // Optional: derive the true unit count from the VALIDATED response. The
   // hinted matchCount is what was ASKED for; a response can legitimately be
   // accepted covering fewer rows (the first pass allows partial coverage and
@@ -2917,7 +2531,7 @@ export async function requestNonApiAi({
   });
   notifyHandoffRoute(onHandoffRoute, prospectiveRoute);
   const comparative = task === COMPARATIVE_MATCH_TASK;
-  if (comparative && (!comparisonMetadataValid(comparisonGroup, comparisonRun) || initialResponse || legacyReplay)) throw comparisonError();
+  if (comparative && (!comparisonMetadataValid(comparisonGroup, comparisonRun) || initialResponse)) throw comparisonError();
   const context = getCurrentIpcRequestContext();
   const sender = context?.sender;
   if (!sender) {
@@ -2947,18 +2561,12 @@ export async function requestNonApiAi({
   // A restored manual route still checks confirmed renderer loss below.
   context.retainHandoffRendererLifecycle?.(prospectiveRoute.handoffRoute);
   const batchMeta = cleanBatchMetadata(batch, batchTotal);
-  // Stage 1: Build base prompt WITHOUT handoff code. This keeps durableStepKey
-  // hashing byte-identical to prior versions so existing durable steps stay reachable.
+  // Stage 1: the base prompt, unhardened, which is what durableStepKey hashes.
   const basePrompt = materializeNonApiPrompt({
-    prompt, cachedPrefix, task, responseSchema, grounding, maxOutputTokens,
-    formulaSeed, requestKind, retryOnTruncation,
-    handoffSettings,
-    // Prompt-format hardening is deliberately display-only. Durable identity
-    // must remain byte-compatible with handoffs created before these transport
-    // instructions changed, or a restart would ask the user to redo accepted
-    // work. Task semantics and the response schema still participate below.
+    prompt, cachedPrefix, task, responseSchema, grounding,
+    // Prompt hardening is display-only: durable identity hashes the task as the
+    // caller wrote it, so rewording a task-prompt shim cannot orphan accepted work.
     hardenTaskPrompt: false,
-    includeStrictJsonSerializationCheck: false,
   });
   const currentStepKeys = durableStepKeys({
     materializedPrompt: basePrompt, task, nodeId: context.nodeId || null,
@@ -2982,96 +2590,6 @@ export async function requestNonApiAi({
     if (comparative && Number(savedStep?.comparisonInvalidCount) >= 2) throw comparisonError('INVALID');
     if (comparative && savedStep?.status === 'accepted' && !comparisonProofValid(savedStep.comparisonProof, comparisonRun)) throw comparisonError();
     if (savedCurrent?.stepKey) stepKey = savedCurrent.stepKey;
-    let pendingLegacyReplay = null;
-    const validLegacyReplay = legacyReplay && typeof legacyReplay === 'object'
-      && typeof legacyReplay.prompt === 'string'
-      && legacyReplay.responseSchema && typeof legacyReplay.responseSchema === 'object'
-      && !Array.isArray(legacyReplay.responseSchema)
-      && typeof legacyReplay.responseValidator === 'function'
-      ? legacyReplay
-      : null;
-    // Check the current v2 key first. Only when it has no durable entry at all
-    // may an exact v1 alias be consulted; a pending v2 handoff must remain the
-    // user's active work, and a malformed v2 accepted response must be reissued
-    // as v2 rather than silently falling through to a positional contract.
-    if (!savedStep && validLegacyReplay && !(typeof initialResponse === 'string' && initialResponse)) {
-      const legacyBasePrompt = materializeNonApiPrompt({
-        prompt: validLegacyReplay.prompt, cachedPrefix, task,
-        responseSchema: validLegacyReplay.responseSchema, grounding, maxOutputTokens,
-        formulaSeed, requestKind, retryOnTruncation, handoffSettings,
-        hardenTaskPrompt: false,
-        includeStrictJsonSerializationCheck: false,
-      });
-      const legacyBatchMeta = cleanBatchMetadata(
-        Object.hasOwn(validLegacyReplay, 'batch') ? validLegacyReplay.batch : batch,
-        Object.hasOwn(validLegacyReplay, 'batchTotal') ? validLegacyReplay.batchTotal : batchTotal,
-      );
-      const legacyItemCount = cleanBatchNumber(
-        Object.hasOwn(validLegacyReplay, 'itemCount') ? validLegacyReplay.itemCount : itemCount,
-      );
-      const legacyStepKeys = durableStepKeys({
-        materializedPrompt: legacyBasePrompt, task, nodeId: context.nodeId || null,
-        ...legacyBatchMeta, itemCount: legacyItemCount,
-        attachmentPaths: keyedAttachmentInputs,
-      });
-      // First use the canonical v1 key, then the exact historical raw key when
-      // this newly generated boundary happens to reproduce it. Older random
-      // prompts cannot usually be reconstructed; the tightly-scoped metadata
-      // fallback below exists only for that legacy replay case.
-      let savedLegacy = await durableStepByLogicalOrRawKey(runId, legacyStepKeys);
-      if (!savedLegacy) {
-        savedLegacy = await uniqueAcceptedLegacyStepByMetadata(runId, {
-          task, ...legacyBatchMeta, itemCount: legacyItemCount,
-        });
-      }
-      const legacyStep = savedLegacy?.step;
-      if (legacyStep?.status === 'accepted') {
-        try {
-          const value = validateNonApiAiSubmission({
-            response: legacyStep.response,
-            responseSchema: validLegacyReplay.responseSchema,
-            responseValidator: validLegacyReplay.responseValidator,
-            task,
-            // Explicit null, never an omission: a pre-code legacy row has no
-            // code to compare against, and that has to be stated rather than
-            // fall out of a missing argument.
-            expectedHandoffCode: normalizeHandoffCode(legacyStep.handoffCode),
-            requireHandoffCode: legacyStep.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
-          });
-          // A validated durable hole was accepted in an earlier process. Count
-          // its explicit unit before this call returns so pending siblings on a
-          // resumed wave show the same accepted-submission truth.
-          commitDurableReplayProgress({ ...displayProgress, itemCount: legacyItemCount }, value, savedLegacy?.stepKey || null);
-          return replayLiveStepAdmission(admission, value, prospectiveRoute);
-        } catch (error) {
-          logger.warn(`[Non-API AI] Ignoring invalid legacy saved response for '${task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
-        }
-      }
-      // Pending aliases are restored ONLY when their exact logical/raw key was
-      // found above. The metadata fallback is intentionally accepted-only: a
-      // matching pending row could belong to a different prompt with coincident
-      // batch metadata, and restoring its draft to this request would be unsafe.
-      if (legacyStep?.status === 'pending' && savedLegacy?.stepKey) {
-        pendingLegacyReplay = {
-          step: legacyStep,
-          stepKey: savedLegacy.stepKey,
-          basePrompt: legacyBasePrompt,
-          batchMeta: legacyBatchMeta,
-          itemCount: legacyItemCount,
-          prompt: validLegacyReplay.prompt,
-          responseSchema: validLegacyReplay.responseSchema,
-          responseValidator: validLegacyReplay.responseValidator,
-        };
-        stepKey = savedLegacy.stepKey;
-      }
-    }
-    const effectivePrompt = pendingLegacyReplay?.prompt ?? prompt;
-    const effectiveResponseSchema = pendingLegacyReplay?.responseSchema ?? responseSchema;
-    const effectiveResponseValidator = pendingLegacyReplay?.responseValidator ?? responseValidator;
-    const effectiveBasePrompt = pendingLegacyReplay?.basePrompt ?? basePrompt;
-    const effectiveBatchMeta = pendingLegacyReplay?.batchMeta ?? batchMeta;
-    const effectiveItemCount = pendingLegacyReplay?.itemCount ?? cleanBatchNumber(itemCount);
-    const effectiveSavedStep = pendingLegacyReplay?.step ?? savedStep;
     // An exact legacy/raw alias can differ from today's logical key. Converge
     // those callers on the same owner before allocating a code or writing state.
     const effectiveIdentity = liveStepIdentity(runId, stepKey);
@@ -3086,7 +2604,7 @@ export async function requestNonApiAi({
       admission.keys.add(effectiveIdentity);
       liveStepRequests.set(effectiveIdentity, admission);
     }
-    const savedHandoffCode = normalizeHandoffCode(effectiveSavedStep?.handoffCode);
+    const savedHandoffCode = normalizeHandoffCode(savedStep?.handoffCode);
     const handoffReservationId = crypto.randomUUID();
     // A collision fallback selected when this step was first issued must be
     // reused after restart, even though the conflicting live request is gone.
@@ -3095,12 +2613,12 @@ export async function requestNonApiAi({
     const handoffCode = savedHandoffCode && !handoffCodeIsClaimed(savedHandoffCode)
       ? savedHandoffCode
       : deriveHandoffCode({
-        basePrompt: effectiveBasePrompt,
+        basePrompt,
         task,
         nodeId: context.nodeId || null,
-        batch: effectiveBatchMeta.batch,
-        batchTotal: effectiveBatchMeta.batchTotal,
-        itemCount: effectiveItemCount,
+        batch: batchMeta.batch,
+        batchTotal: batchMeta.batchTotal,
+        itemCount: cleanBatchNumber(itemCount),
         attachmentPaths: keyedAttachmentInputs,
         pendingMap: pendingRequests,
         reservationMap: handoffCodeReservations,
@@ -3111,15 +2629,9 @@ export async function requestNonApiAi({
     handoffCodeReservations.set(handoffCode, handoffReservationId);
     reservedCode = handoffCode;
     reservedId = handoffReservationId;
-    // Stage 2: Materialize final prompt with handoff header and schema injection.
+    // Stage 2: the prompt the worker is given.
     const materializedPrompt = materializeNonApiPrompt({
-      prompt: effectivePrompt, cachedPrefix, task, responseSchema: effectiveResponseSchema, grounding, maxOutputTokens,
-      formulaSeed, requestKind, retryOnTruncation,
-      handoffSettings,
-      handoffCode,
-      batch: effectiveBatchMeta.batch,
-      batchTotal: effectiveBatchMeta.batchTotal,
-      displayOnlyPromptSuffix,
+      prompt, cachedPrefix, task, responseSchema, grounding, displayOnlyPromptSuffix,
     });
     // A Back action deliberately reissues a previously accepted prompt with its
     // old response as an editable draft. Never auto-consume that accepted value.
@@ -3131,9 +2643,9 @@ export async function requestNonApiAi({
           responseValidator,
           task,
           expectedHandoffCode: handoffCode,
-          requireHandoffCode: savedStep.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+          requireHandoffCode: false,
         });
-        commitDurableReplayProgress({ ...displayProgress, itemCount: effectiveItemCount }, value, savedCurrent?.stepKey || stepKey || null);
+        commitDurableReplayProgress({ ...displayProgress, itemCount: cleanBatchNumber(itemCount) }, value, savedCurrent?.stepKey || stepKey || null);
         releaseHandoffCodeReservation(handoffCode, handoffReservationId);
         return replayLiveStepAdmission(admission, value, prospectiveRoute);
       } catch (error) {
@@ -3151,14 +2663,6 @@ export async function requestNonApiAi({
       bridgeClaimId: crypto.randomUUID(),
       handoffCode,
       handoffReservationId,
-      // A pre-enforcement legacy pending alias must remain code-optional when
-      // restored. The same applies to an exact-key pending step created before
-      // enforcement: finding it under today's key must not silently upgrade the
-      // response contract while the user already has that prompt open. Only a
-      // genuinely new step opts into the persisted requirement.
-      handoffCodeVerificationVersion: effectiveSavedStep
-        ? (effectiveSavedStep.handoffCodeVerificationVersion || null)
-        : HANDOFF_CODE_VERIFICATION_VERSION,
       runId,
       stepKey,
       comparisonGroup: comparative ? comparisonGroup : null,
@@ -3168,7 +2672,7 @@ export async function requestNonApiAi({
       onHandoffAssigned: typeof onHandoffAssigned === 'function' ? onHandoffAssigned : null,
       routeObservers: new Set(typeof onHandoffRoute === 'function' ? [onHandoffRoute] : []),
       handoffAssigned: false,
-      comparisonInvalidCount: comparative ? Math.min(2, cleanRetryRejectionCount(effectiveSavedStep?.comparisonInvalidCount)) : 0,
+      comparisonInvalidCount: comparative ? Math.min(2, cleanRetryRejectionCount(savedStep?.comparisonInvalidCount)) : 0,
       // Pending replay must earn fresh trusted bridge provenance again.
       comparisonProof: null,
       bridgeRequeueCount: 0,
@@ -3176,8 +2680,8 @@ export async function requestNonApiAi({
       sender,
       nodeId: context.nodeId || null,
       channel: typeof context.channel === 'string' ? context.channel : null,
-      ...effectiveBatchMeta,
-      itemCount: effectiveItemCount,
+      ...batchMeta,
+      itemCount: cleanBatchNumber(itemCount),
       itemsDone: cleanProgressCount(itemsDone),
       itemsTotal: cleanProgressCount(itemsTotal),
       progressScopeId,
@@ -3191,8 +2695,10 @@ export async function requestNonApiAi({
       attemptKind: cleanAttemptKind(attemptKind),
       rootBatchSize: cleanBatchNumber(rootBatchSize),
       task,
-      responseSchema: effectiveResponseSchema,
-      responseValidator: typeof effectiveResponseValidator === 'function' ? effectiveResponseValidator : null,
+      // The shared text as it appears in the prompt, so a local worker can cache it.
+      cachedPrefix: cachedPrefix ? (responseSchema ? hardenStructuredTaskPrompt(task, cachedPrefix) : String(cachedPrefix)) : '',
+      responseSchema,
+      responseValidator: typeof responseValidator === 'function' ? responseValidator : null,
       // Keep the raw/structured distinction private and closed. The bridge may
       // use it to choose one of two reviewed wire formats, but arbitrary caller
       // request-kind strings never reach MCP tools, status, logs, or reports.
@@ -3208,7 +2714,7 @@ export async function requestNonApiAi({
       stepBackLabel: cleanStepBackLabel(stepBackLabel),
       initialResponse: typeof initialResponse === 'string' && initialResponse
         ? initialResponse
-        : (typeof effectiveSavedStep?.draft === 'string' ? effectiveSavedStep.draft : ''),
+        : (typeof savedStep?.draft === 'string' ? savedStep.draft : ''),
       settling: false,
       validationError: null,
       validationCode: null,
@@ -3216,17 +2722,17 @@ export async function requestNonApiAi({
       // Pending handoffs keep their numbered problems across a relaunch
       // (re-cleaned, so a hand-edited file cannot
       // smuggle control characters or an over-long list into a prompt).
-      validationCorrectionDetails: effectiveSavedStep?.status === 'accepted'
+      validationCorrectionDetails: savedStep?.status === 'accepted'
         ? []
-        : cleanCorrection({ correctionDetails: effectiveSavedStep?.validationCorrectionDetails }).lines,
+        : cleanCorrection({ correctionDetails: savedStep?.validationCorrectionDetails }).lines,
       // These are restored only from the durable step and are later discarded
       // for local/manual routes. They carry no prompt or answer content.
-      retryRejectionCount: cleanRetryRejectionCount(effectiveSavedStep?.retryRejectionCount),
-      retryNotBefore: cleanRetryNotBefore(effectiveSavedStep?.retryNotBefore),
+      retryRejectionCount: cleanRetryRejectionCount(savedStep?.retryRejectionCount),
+      retryNotBefore: cleanRetryNotBefore(savedStep?.retryNotBefore),
       // Rule-shape digests and the escalation they caused survive a relaunch, so
       // restarting the app cannot hand a non-converging handoff back to ChatGPT.
-      bridgeRejectionCauses: cleanBridgeRejectionCauses(effectiveSavedStep?.bridgeRejectionCauses),
-      bridgeEscalation: ['rejection_cap', 'worker_restart_cap'].includes(effectiveSavedStep?.bridgeEscalation) ? effectiveSavedStep.bridgeEscalation : null,
+      bridgeRejectionCauses: cleanBridgeRejectionCauses(savedStep?.bridgeRejectionCauses),
+      bridgeEscalation: ['rejection_cap', 'worker_restart_cap'].includes(savedStep?.bridgeEscalation) ? savedStep.bridgeEscalation : null,
       retryTimer: null,
       presentationRetryTimer: null,
       presentationRetryDelay: 0,
@@ -3485,11 +2991,10 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       responseValidator: record.responseValidator,
       task: record.task,
       expectedHandoffCode: record.handoffCode,
-      requireHandoffCode: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+      requireHandoffCode: false,
     });
-    // A legacy step restored before handoff-code enforcement existed has no
-    // code in the paste for the check above to compare against, so this is
-    // the remaining guard against the same pasted answer being accepted
+    // The prompt no longer asks the model to echo the handoff code, so this is
+    // the guard against the same answer being accepted
     // into two different steps (see acceptedResponseFingerprints near the
     // top of this file). Must run before any durable write or resolution
     // below — a rejection here must leave this request exactly as pending
@@ -3517,40 +3022,7 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     const acceptedChars = typeof args.response === 'string' ? args.response.length : null;
     const responseHash = responseReceiptHash(args.response);
     updateHandoffLifecycle(record, { accepted: true, responseChars: acceptedChars, responseHash });
-    void captureAiTaskSample({
-      task: record.task,
-      transport,
-      requestKind: record.requestKind,
-      grounded: record.grounded,
-      comparisonRun: record.comparisonRun,
-      attemptKind: record.attemptKind,
-      rejections: record.retryRejectionCount,
-      attachments: record.attachmentPaths?.length || 0,
-      prompt: record.materializedPrompt,
-      responseSchema: record.responseSchema,
-      response: args.response,
-    });
     publishProgressScope(progressScope, record);
-    // Teach this process's sizer what the response actually cost. This update
-    // is deliberately non-durable and must never fail an accepted answer.
-    let measuredUnits = record.matchCount ?? record.itemCount;
-    if (record.measureResponseUnits) {
-      try {
-        const actual = record.measureResponseUnits(value);
-        // `>= 0`, not `> 0`: a schema-valid response really can contain zero
-        // units, and falling back to the full intended count there would
-        // charge a near-empty response against a large denominator — the
-        // artificially-cheap sample this measurement exists to prevent.
-        // recordHandoffOutputSample drops a zero-unit sample outright.
-        if (Number.isFinite(actual) && actual >= 0) measuredUnits = actual;
-      } catch { /* a measurement must never fail an accepted answer */ }
-    }
-    void recordHandoffOutputSample({
-      task: record.task,
-      units: measuredUnits,
-      responseChars: acceptedChars,
-      planItemCount: record.planItemCount,
-    }).catch(() => {});
     settle(record, { accepted: true });
     record.resolve(value);
     return { accepted: true, reason: 'accepted' };
@@ -3717,11 +3189,8 @@ export const BRIDGE_EXCLUSION_REASONS = Object.freeze([
 // Schema-less responses are otherwise indistinguishable from arbitrary prose.
 // Keep the exception literal and cross-pinned to the push policy in tests.
 export const BRIDGE_RAW_RESEARCH_TASKS = Object.freeze([
-  'job-compensation-research',
   'job-compensation-research-batch',
-  'job-preference-research',
   'job-preference-research-batch',
-  'interview-brief-research',
   'job-official-posting-research',
 ]);
 const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
@@ -3732,19 +3201,18 @@ const bridgeRawResearchTasks = new Set(BRIDGE_RAW_RESEARCH_TASKS);
 // source policy imports this list and adds its explicit never rows, so a new
 // task is manual by default until it is deliberately reviewed here.
 export const BRIDGE_RELEASE_ONE_TASKS = Object.freeze([
-  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match',
-  'bundle-price-synthesis', 'job-compensation-assessment', 'job-compensation-assessment-batch',
-  'job-compensation-research', 'job-compensation-research-batch', 'job-preference-evaluation',
-  'job-preference-interpretation', 'job-preference-research', 'job-preference-research-assessment',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
+  'bundle-price-synthesis', 'job-compensation-assessment-batch',
+  'job-compensation-research-batch', 'job-preference-evaluation',
+  'job-preference-interpretation',
   'job-preference-research-batch', 'job-preference-research-batch-assessment', 'job-query-generation',
   'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
-  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence', 'job-taxonomy-classify',
-  'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment', 'price-synthesis',
-  'price-synthesis-batch', 'resume-parse',
-  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
-  'marketplace-hub-scan', 'marketplace-hub-scan-batch',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
+  'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment',
+  'price-synthesis-batch',
+  'marketplace-hub-scan-batch',
 ]);
 const bridgeReleaseOneTasks = new Set(BRIDGE_RELEASE_ONE_TASKS);
 // Enable attachment tasks individually only after their live checks pass.
@@ -3885,8 +3353,7 @@ function bridgeQueuedWorkForecast(record) {
   // then includes batches that have already completed. Progress scopes update
   // every live record at each durable acceptance, so their item counter is
   // the authoritative live remaining-work signal when a stable root batch
-  // size is available. Old runs did not retain that size and deliberately
-  // continue through the explicit/ordinal compatibility paths below.
+  // size is available.
   if (record?.task === 'job-preference-research-batch') {
     const unitSize = cleanBatchNumber(record?.rootBatchSize);
     const itemsDone = cleanProgressCount(record?.itemsDone);
@@ -3907,8 +3374,7 @@ function bridgeQueuedWorkForecast(record) {
   // size can vary between adaptive planning groups, but the live progress
   // counter is still the authoritative answer for an already-materialized
   // root. Prefer it to the issue-time forecast so a straggler cannot keep
-  // advertising work that later siblings have already completed. Older
-  // records without usable progress metadata retain their explicit estimate.
+  // advertising work that later siblings have already completed.
   if (record?.task === 'job-preference-evaluation') {
     const unitSize = cleanBatchNumber(record?.rootBatchSize) ?? cleanBatchNumber(record?.itemCount);
     const itemsDone = cleanProgressCount(record?.itemsDone);
@@ -3922,22 +3388,7 @@ function bridgeQueuedWorkForecast(record) {
       if (live) return live;
     }
   }
-  const explicit = cleanQueuedWorkForecast(record?.queuedWorkForecast, record?.progressScopeId);
-  if (explicit) return explicit;
-  // Existing in-flight preference runs predate queuedWorkForecast, but they
-  // already carry bounded progress counters. Derive the same aggregate only
-  // for this reviewed task so an app update can size a pool for the CURRENT
-  // run rather than waiting until a wholly new run starts.
-  if (record?.task === 'job-preference-research-batch') {
-    const batch = cleanBatchNumber(record?.batch);
-    const batchTotal = cleanBatchNumber(record?.batchTotal);
-    if (!batch || !batchTotal || batch > batchTotal) return null;
-    return cleanQueuedWorkForecast({
-      scopeId: record?.progressScopeId,
-      remainingUnits: batchTotal - batch + 1,
-    }, record?.progressScopeId);
-  }
-  return null;
+  return cleanQueuedWorkForecast(record?.queuedWorkForecast, record?.progressScopeId);
 }
 
 function bridgeListEntry(record) {
@@ -3964,9 +3415,8 @@ function bridgeListEntry(record) {
     promptChars: record.materializedPrompt.length,
     // Main-process source planning only; MCP framing and status omit this.
     hasAttachments: record.attachmentPaths.length > 0,
-    // False only for a step restored from before code enforcement: `{}` may be a
-    // valid answer there, so the bridge must not treat it as junk.
-    codeEnforced: record.handoffCodeVerificationVersion >= HANDOFF_CODE_VERIFICATION_VERSION,
+    // Answers carry no code, so `{}` can be a valid one and is never junk.
+    codeEnforced: false,
     durable: Boolean(record.stepKey),
     issuedAt: record.lifecycle?.issuedAt ?? null,
     // Private main-process planning metadata. The push source folds this into
@@ -4057,6 +3507,7 @@ export function readBridgeableNonApiAiHandoff({ requestId, handoffCode, allowTas
     handoffCode: record.handoffCode,
     task: record.task || null,
     responseFormat: bridgeResponseFormat(record),
+    cachedPrefix: record.cachedPrefix,
     ...bridgeRetryView(record),
   });
 }

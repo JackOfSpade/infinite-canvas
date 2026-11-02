@@ -128,7 +128,7 @@ function clearTransientAccidentalRunUi(data) {
   // were still active.
   for (const key of [
     'queuedModuleRun', 'errorMessage', 'retryOperation', 'retryOperationFor',
-    'rerunOutcome', 'rerunNotice', 'pendingJobs', 'pendingTargetRole',
+    'rerunOutcome', 'rerunNotice', 'pendingJobs',
     'pendingCareerData', 'pendingJobPreferences', 'pendingJobPreferencePlan',
     'pendingJobPreferencesInterpretation',
   ]) data[key] = null;

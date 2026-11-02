@@ -1,7 +1,7 @@
 // The career-file compiler is a family of manual-AI stages: attachment
 // inventory/transcription (`career-file-*`), the evidence-linked profile
 // compile, its six independent audits and every repair round
-// (`career-profile-*`), and the legacy `resume-parse`.  Renderer code that
+// (`career-profile-*`).  Renderer code that
 // needs to know "is this handoff part of the career compiler?" must ask here
 // rather than keep its own list: two separate hand-maintained lists silently
 // fell behind when the attachment inventory and boundary-audit stages were
@@ -13,7 +13,6 @@
 // main process knows about is classified one way or the other.
 export function isCareerCompilerTask(task) {
   return typeof task === 'string'
-    && (task === 'resume-parse'
-      || task.startsWith('career-file-')
+    && (task.startsWith('career-file-')
       || task.startsWith('career-profile-'));
 }

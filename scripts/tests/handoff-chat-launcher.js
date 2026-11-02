@@ -1194,7 +1194,7 @@ export default [
     ui.dispose();
   } },
   { name: 'chat launcher: career compile work retains the application work flag; other push work does not', async run() {
-    for (const [task, expected] of [['career-profile-audit-skills', true], ['resume-parse', true], ['job-scoring', false]]) {
+    for (const [task, expected] of [['career-profile-audit-skills', true], ['job-scoring', false]]) {
       const handlers = new Map();
       const seen = [];
       const snapshot = { autoLaunchChats: true, serving: 'live', windows: { canvasOpen: true }, config: { pluginName: 'Infinite Canvas' },

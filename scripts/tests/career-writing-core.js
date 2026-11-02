@@ -37,7 +37,7 @@ export default [
     assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch'], 'research tools are offered and allowed; nothing else');
     assert(!golden.cliArgs.includes('--allowedTools'), 'application runs never allow tools');
     assert.equal(CLAUDE_STAGE_PROFILES, APPLICATION_STAGE_PROFILES, 'the application runner reads the shared table');
-    assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'xhigh' });
+    assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'medium' });
     assert.equal(careerWritingStageProfile('qa-fact-check'), careerWritingStageProfile('fact-check'), 'Q&A checks use the application fact-check profile object');
     assert.deepEqual(careerWritingStageProfile('qa-fact-correction'), careerWritingStageProfile('fact-correction'));
   } },

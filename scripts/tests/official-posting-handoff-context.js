@@ -9,7 +9,7 @@ import { callLLMRaw } from '../../electron/ipc/llm.js';
 import { listBridgeableNonApiAiHandoffs, readBridgeableNonApiAiHandoff, registerNonApiAiHandlers,
   submitNonApiAiResponseForBridge } from '../../electron/ipc/nonApiAi.js';
 import { registerObservedWorkerAvailability } from '../../electron/ipc/handoffBridge/observedChatContext.js';
-import { resolveOfficialPostingsByChat } from '../../electron/ipc/officialPostingService.js';
+import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
 import { officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 
@@ -77,7 +77,7 @@ export default ['outside-ipc', 'foreign-ipc'].map(publication => ({
     const releaseWorkers = registerObservedWorkerAvailability(() => liveWorkers > 0, null, () => liveWorkers);
     const store = createOfficialPostingStore(path.join(root, 'official-postings'));
     const context = { sender, nodeId, manualAiRunId: runId, channel: 'refresh-official-postings' };
-    const running = __runWithIpcRequestContextForTests(context, () => resolveOfficialPostingsByChat(rows, {
+    const running = __runWithIpcRequestContextForTests(context, () => resolveOfficialPostings(rows, {
       nodeId, manualAiRunId: runId, signal: controller.signal, store, bypassCache: true,
       onProgress: progress => { settledRows = progress.completed; },
       callMatch: callLLMRaw,

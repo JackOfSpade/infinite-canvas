@@ -16,7 +16,7 @@ let application;
 try {
   const search = { id: 'hidden-search', type: 'jobhub', position: { x: 0, y: 0 }, data: {
     hubState: 'empty', locked: true, manualAiResume: {
-      runId: 'synthetic-accepted-run', task: 'job-preference-research', pausedByUser: true,
+      runId: 'synthetic-accepted-run', task: 'job-preference-research-batch', pausedByUser: true,
       preSearchRecovery: { stage: 'preferences', syntheticAcceptedText: 'Keep this exact recovery payload' },
     },
   } };

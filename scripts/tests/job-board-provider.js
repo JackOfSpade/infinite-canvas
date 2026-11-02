@@ -44,7 +44,7 @@ export default [
         let pauses = 0;
         const props = { modules: [{ id: 'hub-a', label: 'Hub A' }, { id: 'hub-b', label: 'Hub B' }], selectedIds: ['hub-a', 'hub-b'],
           running: true, showPauseSave: true, onPause: () => { pauses += 1; }, onCancel: () => {}, onToggle: () => {},
-          progress: { label: 'Waiting for ChatGPT workers', completed: 0, total: 2 } };
+          progress: { label: 'Waiting for Claude', completed: 0, total: 2 } };
         const pauseButton = () => [...window.document.querySelectorAll('button')].find(button => button.textContent.includes('Pause & save'));
         try {
           await act(async () => root.render(React.createElement(JobBoardSearchSelection, props)));
@@ -75,7 +75,7 @@ export default [
       const pauseButton = selector.slice(pauseStart, selector.indexOf('</button>', pauseStart));
       assert(pauseButton.includes('onClick={onPause}') && pauseButton.includes('Pause &amp; save')
         && !pauseButton.includes('handoff'), 'the button is not coupled to a mounted handoff dock');
-      assert(board.includes('Waiting for ChatGPT workers or a live bridge connection to finish search resolution for')
+      assert(board.includes('Waiting for Claude to finish search resolution for')
         && selector.includes('Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.'),
       'the waiting state and cancellation effect are explicit');
     },
@@ -294,7 +294,7 @@ export default [
             snapshotError: new Error('Synthetic storage failure'), searchResult: { runId: 'saved-run' }, resumedRunId: 'saved-run',
             pinnedCareerSnapshotId: pin, admittedResumeCareerSnapshotId: pin, foundJobs: gathered,
             activeCareerData: 'synthetic career data', liveData: { careerData: 'synthetic career data' },
-            activeTargetRole: '', activeJobPreferences: '', jobPreferencesInterpretation: null,
+            activeJobPreferences: '', jobPreferencesInterpretation: null,
             visibleGatheredCount: 3, finalWarnings: [], finalCollectionScopeCaveats: [],
             pendingJobsRef: ref(priorPending), gatheredCountRef: ref(2), scrapeWarningsRef: ref([]),
             exactJobRunCareerSnapshotBindingMatches: (data, expected) => data.jobRunId === expected.runId && data.careerSnapshotId === expected.careerSnapshotId,
@@ -340,7 +340,7 @@ export default [
             hubState: 'sources-ready', locked: lockedAtEntry, jobRunId: 'saved-run',
             careerSnapshotId: 'a'.repeat(64), pendingCareerSnapshotId: 'a'.repeat(64),
             pendingJobs: pending, resumeProfile: {}, pendingCareerData: 'synthetic career data',
-            pendingTargetRole: '', pendingJobPreferences: '', gatheredCount: 2,
+            pendingJobPreferences: '', gatheredCount: 2,
             scoredJobs: priorScores, scrapeWarnings: [], locationSnapshot: {},
             analysisOperation: { authority: { operationId: 'saved-authority' } },
           } };
@@ -470,7 +470,7 @@ export default [
       const ref = (current = null) => ({ current });
       const canada = { id: 'ca', type: 'jobhub', data: { hubState: 'done', jobRunId: 'ca-run', careerSnapshotId: 'pin', resultDisposition: 'scored', scoredJobs: [{ id: 'retained' }], terminalFinalizationRecovery: { kind: 'terminal-finalization', runId: 'ca-run', careerSnapshotId: 'pin', resultDisposition: 'scored' } } };
       canada.data.terminalFinalizationRecovery.fingerprint = moduleFingerprint(canada.data.scoredJobs);
-      const usa = { id: 'us', type: 'jobhub', data: { hubState: 'empty', jobRunId: 'us-run', manualAiResume: { runId: 'us-ai', task: 'job-preference-research', orchestratorNodeId: 'board', boardRunId: 'board-run' } } };
+      const usa = { id: 'us', type: 'jobhub', data: { hubState: 'empty', jobRunId: 'us-run', manualAiResume: { runId: 'us-ai', task: 'job-preference-research-batch', orchestratorNodeId: 'board', boardRunId: 'board-run' } } };
       const rollback = sourceId => ({ version: 1, sourceId, previousData: {} });
       const plan = { version: 1, phase: 'searches', boardRunId: 'board-run', startedAt: 123,
         selectedSearchModuleIds: ['ca', 'us'], completedSourceRuns: {}, baselineSourceRuns: {}, freshImportCapabilities: {}, backgroundChildRequests: {},
@@ -5469,8 +5469,7 @@ export default [
         && board.includes('const manualHandoffMatchesPausedGeneration = !Object.hasOwn(')
         && board.includes('sourceData.manualAiResume?.jobRunId === expectedRunId')
         && search.includes("const boundJobRunId = sameRun && Object.hasOwn(existing, 'jobRunId')")
-        && search.includes('jobRunId: boundJobRunId')
-        && solve.includes('hubData.pendingTargetRole\n            ?? hubData.activeTargetRole\n            ?? hubData.targetRole'),
+        && search.includes('jobRunId: boundJobRunId'),
       'Score-current and source Skip/Dismiss must reject stale generations before changing warnings or card state, while Solve keeps the card token through post-lease Board validation and a waiting Board fences new manual-AI markers to that same paused generation');
 
       const rerunStart = search.indexOf('const handleRerun = useCallback');

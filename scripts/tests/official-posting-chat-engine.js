@@ -25,6 +25,7 @@ const DESCRIPTION = 'Northwind Labs is hiring a Dispatch Engineer to build relia
   + 'Requirements: five years building backend services in TypeScript or Go.';
 const job = (extra = {}) => ({ title: 'Dispatch Engineer', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada',
   snippet: DESCRIPTION, url: 'https://www.linkedin.com/jobs/view/synthetic-dispatch', sourceJobKey: 'dispatch-1', ...extra });
+const SUMMARY = 'A compact scraped summary describes entirely different responsibilities.';
 const POSTING = 'https://job-boards.greenhouse.io/northwind/jobs/4455667';
 const CAREERS = 'https://northwind.test/careers';
 const leads = [{ id: 'P1', url: POSTING, kind: 'posting', employer: 'Northwind Labs' }, { id: 'P2', url: CAREERS, kind: 'careers', employer: 'Northwind Labs' }];
@@ -759,15 +760,15 @@ export default [
           const before = getOfficialPostingDiscoveryDiagnosticsSnapshot();
           assert.equal(before.observations.length, 1);
           const observation = before.observations[0];
-          assert.equal(observation.candidateCount, 2); assert.equal(observation.eligibleCount, null);
-          assert.equal(observation.comparisonRuns, 2); assert.equal(observation.stage, 'final');
+          assert.equal(observation.candidateCount, 2);
+          assert.equal(observation.comparisonRuns, 2);
           assert.equal(observation.outcome, 'found'); assert.equal(observation.settled, true);
           assert.deepEqual(observation.chatStats, { finderCalls: 1, judgeRounds: 1, judgeCalls: 2,
             snapshotReads: 0, snapshotFailures: 2, truncatedSnapshots: 0 });
           await resolveOfficialPostings([row], { store, snapshotFetch: offline, callRaw: () => { throw new Error('cached'); } });
           assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot(), before);
           const markdown = buildOfficialPostingDiscoveryMarkdown();
-          assert.match(markdown, /candidates 2 · eligible not assessed/);
+          assert.match(markdown, /candidates 2 · validated comparison runs 2/);
           assert.match(markdown, /finder calls 1 · judge rounds 1 · judge calls 2 · snapshots read 0 · snapshot failures 2/);
           for (const privateText of [DESCRIPTION, POSTING, CAREERS, row.company, row.title]) assert.equal(markdown.includes(privateText), false);
         });
@@ -816,7 +817,6 @@ export default [
           };
           await resolveOfficialPostings([job()], { store, snapshotFetch: offline, callRaw });
           const observation = getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0];
-          assert.equal(observation.eligibleCount, null);
           if (mode === 'link-only') {
             assert.equal(observation.outcome, 'link-only'); assert.equal(observation.settled, true);
             assert.deepEqual(observation.resolutionReasons, []);
@@ -825,7 +825,6 @@ export default [
             assert.deepEqual(observation.resolutionReasons, ['source-unproven']);
             const markdown = buildOfficialPostingDiscoveryMarkdown();
             assert.match(markdown, /Chat resolution reasons: source-unproven/);
-            assert.match(markdown, /source eligibility rejections not assessed/);
             assert.doesNotMatch(markdown, /rejected source-unproven=0/);
           }
         });
@@ -1384,7 +1383,7 @@ export default [
         assert.equal(posting.dataUrl, 'https://boards-api.greenhouse.io/v1/boards/northwind/jobs/4455667?questions=false');
         assert.equal(careers.dataUrl, undefined, 'a careers page has no board data address');
         assert.match(buildOfficialPostingJudgeRequest({ job: job(), leads: [{ id: 'P1', url: POSTING, kind: 'posting', dataUrl: posting.dataUrl }], run: 'A' }).prompt,
-          /When a lead has a dataUrl, open it/u);
+          /when a lead has a dataUrl, its snapshot \(source "board-data"\) holds that board's own current data/u);
       });
     },
   },
@@ -1420,6 +1419,78 @@ export default [
         const posting = result.jobs[0].officialPosting;
         assert.ok(posting.trail.includes('research-miss'));
         assert.equal(officialPostingLookupStatus(posting).retryable, true);
+      });
+    },
+  },
+  {
+    name: 'A settled miss is reused without new chats for twenty-four hours and asked again afterwards',
+    async run() {
+      let time = Date.parse('2026-01-01T00:00:00Z');
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-chat-'));
+      try {
+        const store = createOfficialPostingStore(path.join(root, 'official-postings'), { now: () => time });
+        const row = job(); let calls = 0;
+        const callRaw = async (prompt, options) => {
+          calls += 1;
+          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
+          return JSON.stringify(unresolvedAnswer('none'));
+        };
+        const first = await resolveOfficialPostings([row], { store, now: () => time, snapshotFetch: offline, callRaw });
+        assert.equal(first.jobs[0].officialPosting.outcome, 'not-found'); assert.equal(officialResearchSettled(first.jobs[0].officialPosting), true);
+        const settledCalls = calls;
+        time += 1000;
+        const recent = await resolveOfficialPostings([row], { store, now: () => time, snapshotFetch: offline, callRaw: () => { throw new Error('a recent settled miss asks no chat'); } });
+        assert.equal(calls, settledCalls); assert.ok(recent.jobs[0].officialPosting.trail.includes('recent-miss'));
+        assert.equal(recent.jobs[0].officialPosting.outcome, 'not-found');
+        time += 24 * 60 * 60 * 1000;
+        const expired = await resolveOfficialPostings([row], { store, now: () => time, snapshotFetch: offline, callRaw });
+        assert.ok(calls > settledCalls, 'a miss older than twenty-four hours is researched again');
+        assert.equal(expired.jobs[0].officialPosting.trail.includes('recent-miss'), false);
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'Official text that materially differs from the scraped listing is flagged on the durable record and counted',
+    async run() {
+      await withStore(async store => {
+        const row = job({ snippet: SUMMARY });
+        const callRaw = async (prompt, options) => {
+          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
+          return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id, description: `${DESCRIPTION}\n${SUMMARY}`,
+            evidence: [{ scrapedQuote: SUMMARY, officialQuote: SUMMARY }] }));
+        };
+        const result = await resolveOfficialPostings([row], { store, snapshotFetch: offline, callRaw });
+        const posting = result.jobs[0].officialPosting;
+        assert.equal(posting.outcome, 'found'); assert.ok(posting.trail.includes('material-jd-change'));
+        assert.equal(result.telemetry.materialJdChange, 1);
+        assert.ok((await store.find(row)).officialPosting.trail.includes('material-jd-change'), 'the durable verified record retains the material-change code');
+      });
+    },
+  },
+  {
+    name: 'Material-change feedback compares the complete record and preserves a concurrent proof upgrade',
+    async run() {
+      await withStore(async store => {
+        const row = job({ snippet: SUMMARY });
+        let compared = false; let upgraded = null;
+        const racingStore = { ...store, save: async (savedJob, payload) => {
+          if (payload.expectedRecord) {
+            compared = true;
+            upgraded = await store.save(savedJob, { officialPosting: { ...payload.expectedRecord.officialPosting, trail: [...payload.expectedRecord.officialPosting.trail, 'reverified'] } });
+          }
+          return store.save(savedJob, payload);
+        } };
+        const callRaw = async (prompt, options) => {
+          if (options.task === 'job-official-posting-research') return research(requestedIds(prompt));
+          return JSON.stringify(chosen({ choice: hostLeads(prompt).find(lead => lead.url === POSTING).id, description: `${DESCRIPTION}\n${SUMMARY}`,
+            evidence: [{ scrapedQuote: SUMMARY, officialQuote: SUMMARY }] }));
+        };
+        const result = await resolveOfficialPostings([row], { store: racingStore, snapshotFetch: offline, callRaw });
+        assert.equal(compared, true); assert.equal(result.telemetry.materialJdChange, 1);
+        const current = await store.find(row);
+        assert.ok(current.officialPosting.trail.includes('reverified'), 'the concurrent upgrade survives');
+        assert.equal(current.officialPosting.trail.includes('material-jd-change'), false, 'a stale feedback write never replaces a newer record');
+        assert.equal(current.officialPosting.contentHash, upgraded.officialPosting.contentHash);
       });
     },
   },
@@ -1576,6 +1647,30 @@ export default [
       const shortSnap = await snap('<html><body><p>Short posting text about dispatch routing.</p></body></html>');
       assert.ok(shortSnap.pageText.includes('Short posting text'));
       assert.ok(!('pageTextTruncated' in shortSnap));
+    },
+  },
+  {
+    name: 'The judge prompt makes the app\'s page snapshots the main input and keeps WebFetch and WebSearch for leads without one',
+    run() {
+      const snapshots = [{ id: 'P1', at: '2026-11-02T00:00:00.000Z', source: 'page', read: true, title: 'Dispatch Engineer', description: DESCRIPTION }];
+      const withSnaps = buildOfficialPostingJudgeRequest({ job: job(), leads, run: 'A', snapshots }).prompt;
+      assert.match(withSnaps, /^Independent official posting judgment run A\./u);
+      assert.match(withSnaps, /Judge the supplied page text\./u);
+      assert.match(withSnaps, /Use WebFetch or WebSearch only for a lead that has no usable snapshot/u);
+      assert.match(withSnaps, /copy only text that a fetch returns word for word, and never present a summary as a copy/u);
+      assert.match(withSnaps, /description is the complete job description copied verbatim from the posting's snapshot/u);
+      assert.ok(withSnaps.includes('BEGIN UNTRUSTED APP PAGE SNAPSHOTS JSON'));
+      assert.doesNotMatch(withSnaps, /The app recorded no page snapshots/u);
+      // No browser, no earlier conversation: every run is its own session.
+      assert.doesNotMatch(withSnaps, /Use your web browsing|Open every lead yourself|in this conversation|Open the leads yourself/iu);
+      const without = buildOfficialPostingJudgeRequest({ job: job(), leads, run: 'A' }).prompt;
+      assert.match(without, /The app recorded no page snapshots for these leads, so every lead has no usable snapshot\./u);
+      assert.ok(!without.includes('BEGIN UNTRUSTED APP PAGE SNAPSHOTS JSON'));
+      // The truth rules are unchanged: quotes still come from the scraped evidence and the judge's own copy.
+      for (const text of [withSnaps, without]) {
+        assert.match(text, /scrapedQuote copied verbatim from the scraped evidenceText and officialQuote copied verbatim from your own title, location, salary or description/u);
+        assert.match(text, /Never force a match\./u);
+      }
     },
   },
   {

@@ -13,15 +13,19 @@ export const TAXONOMY_CORRECTION_TEMPLATES = templatesFor('taxonomy.');
 
 import { JOB_TAXONOMY_PLAN_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_ROLE_FAMILY_LIMIT } from './aiSchemas.js';
 import crypto from 'node:crypto';
+import { BATCH_OUTPUT_TOKEN_BUDGET } from './resultCaps.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../../src/utils/handoffScheduler.js';
 
-const LEGACY_JOB_TAXONOMY_CHUNK_SIZE = 24;
 // One terse integer role index per compact row. The shared output estimator is
-// 1,024 + 32/row, so 448 rows fill the 15,360-token usable manual-chat ceiling
-// exactly. The input is title/direction/salary only, not full descriptions.
-export const JOB_TAXONOMY_CHUNK_SIZE = 448;
+// 1,024 + 32/row, so as many rows fit as BATCH_OUTPUT_TOKEN_BUDGET allows. The
+// input is title/direction/salary only, not full descriptions.
+const JOB_TAXONOMY_BASE_TOKENS = 1024;
+const JOB_TAXONOMY_ROW_TOKENS = 32;
+export const JOB_TAXONOMY_CHUNK_SIZE = Math.floor(
+  (BATCH_OUTPUT_TOKEN_BUDGET - JOB_TAXONOMY_BASE_TOKENS) / JOB_TAXONOMY_ROW_TOKENS,
+);
 const PLAN_DIRECTION_LIMIT = 24;
 const PLAN_REPRESENTATIVE_LIMIT = 18;
 const SALARY_BIN_WIDTH = 10_000;
@@ -322,9 +326,8 @@ function snapshotModelDiagnostics(meta) {
   };
 }
 
-// Fresh classifier chunks are independent and dispatch together; legacy
-// durable chunks remain serialized to reproduce their old request order.
-// Merge diagnostics only after the sequence settles, in source-chunk order,
+// Classifier chunks are independent and dispatch together. Merge diagnostics
+// only after the sequence settles, in source-chunk order,
 // so completion timing cannot reorder the report.
 function mergeModelDiagnostics(meta, diagnostics) {
   if (!meta) return;
@@ -358,17 +361,12 @@ export async function runBoundedJobTaxonomy(jobs, {
   signal,
   meta = null,
   onProgress = null,
-  // Kept for explicit full-v1 callers/tests. A resumed production run should
-  // use the exact-step probe so one old prompt does not pin every untouched
-  // row to the retired 24-row contract.
-  useLegacyClassifierBatches = false,
-  legacyClassifierStepProbe = null,
 } = {}) {
   if (typeof callText !== 'function') throw new Error('runBoundedJobTaxonomy requires callText.');
   const list = Array.isArray(jobs) ? jobs : [];
   if (!list.length) throw new Error('Job taxonomy requires at least one job.');
   abortIfNeeded(signal);
-  const chunkSize = useLegacyClassifierBatches ? LEGACY_JOB_TAXONOMY_CHUNK_SIZE : JOB_TAXONOMY_CHUNK_SIZE;
+  const chunkSize = JOB_TAXONOMY_CHUNK_SIZE;
   const summary = buildJobTaxonomyPlanSummary(list);
   onProgress?.({ stage: 'planning', completedBatches: 0, batchCount: 0, processed: 0, total: list.length,
     chunkSize, representativeCount: summary.representativeJobs.length,
@@ -400,41 +398,10 @@ export async function runBoundedJobTaxonomy(jobs, {
     else unmapped.push({ index, job: list[index] });
   }
   const plannedAssignments = list.length - unmapped.length;
-  const legacyCandidates = Array.from({ length: Math.ceil(unmapped.length / LEGACY_JOB_TAXONOMY_CHUNK_SIZE) }, (_, batch) => (
-    unmapped.slice(batch * LEGACY_JOB_TAXONOMY_CHUNK_SIZE, (batch + 1) * LEGACY_JOB_TAXONOMY_CHUNK_SIZE)
+  const chunks = Array.from({ length: Math.ceil(unmapped.length / JOB_TAXONOMY_CHUNK_SIZE) }, (_, batch) => (
+    unmapped.slice(batch * JOB_TAXONOMY_CHUNK_SIZE, (batch + 1) * JOB_TAXONOMY_CHUNK_SIZE)
   ));
-  const legacyDescriptors = [];
-  const freshEntries = [];
-  if (useLegacyClassifierBatches) {
-    legacyCandidates.forEach((chunk, legacyBatch) => legacyDescriptors.push({ chunk, legacyBatch }));
-  } else if (typeof legacyClassifierStepProbe === 'function') {
-    // v1 task identities include this exact fixed partition and its original
-    // progress metadata. Probe each one, never broadly by task name.
-    for (let legacyBatch = 0; legacyBatch < legacyCandidates.length; legacyBatch += 1) {
-      abortIfNeeded(signal);
-      const chunk = legacyCandidates[legacyBatch];
-      const exists = await legacyClassifierStepProbe({
-        prompt: buildJobTaxonomyChunkPrompt(chunk.map(entry => entry.job), plan.value.roleFamilies),
-        task: 'job-taxonomy-classify',
-        responseSchema: JOB_TAXONOMY_CLASSIFY_SCHEMA,
-        hints: {
-          itemCount: chunk.length,
-          batch: legacyBatch + 1,
-          batchTotal: legacyCandidates.length,
-          itemsDone: plannedAssignments + legacyBatch * LEGACY_JOB_TAXONOMY_CHUNK_SIZE,
-          itemsTotal: list.length,
-        },
-      });
-      if (exists) legacyDescriptors.push({ chunk, legacyBatch });
-      else freshEntries.push(...chunk);
-    }
-  } else {
-    freshEntries.push(...unmapped);
-  }
-  const freshChunks = Array.from({ length: Math.ceil(freshEntries.length / JOB_TAXONOMY_CHUNK_SIZE) }, (_, batch) => (
-    freshEntries.slice(batch * JOB_TAXONOMY_CHUNK_SIZE, (batch + 1) * JOB_TAXONOMY_CHUNK_SIZE)
-  ));
-  const batchCount = legacyDescriptors.length + freshChunks.length;
+  const batchCount = chunks.length;
   onProgress?.({ stage: batchCount ? 'classifying' : 'planned', completedBatches: 0, batchCount, processed: plannedAssignments, total: list.length,
     chunkSize, vocabularySize: plan.value.roleFamilies.length, representativeCount: summary.representativeJobs.length,
     plannedAssignments, classifiedAssignments: 0 });
@@ -445,37 +412,25 @@ export async function runBoundedJobTaxonomy(jobs, {
   let processed = plannedAssignments;
   const classifyAbort = new AbortController();
   const classifySignal = signal ? AbortSignal.any([signal, classifyAbort.signal]) : classifyAbort.signal;
-  // Display-only accepted-progress scope. Legacy replays and fresh chunks can
-  // run in the same classification pass, so they must share one denominator
-  // while retaining distinct accepted work-unit identities.
+  // Display-only accepted-progress scope: every chunk shares one denominator
+  // while retaining a distinct accepted work-unit identity.
   const classifyProgressScopeId = crypto.randomUUID();
-  const classifyChunk = async ({ chunk, legacy = false, legacyBatch = 0, freshBatch = 0, progressBatch = 0 }) => {
+  const classifyChunk = async (chunk, batchIndex) => {
     abortIfNeeded(classifySignal);
     const batchMeta = {};
     const classified = await callText(buildJobTaxonomyChunkPrompt(chunk.map(entry => entry.job), plan.value.roleFamilies), {
       signal: classifySignal,
-      task: legacy ? 'job-taxonomy-classify' : 'job-taxonomy-classify-batch',
-      hints: legacy
-        ? {
-            itemCount: chunk.length,
-            batch: legacyBatch + 1,
-            batchTotal: legacyCandidates.length,
-            itemsDone: plannedAssignments,
-            itemsTotal: list.length,
-            progressScopeId: classifyProgressScopeId,
-            progressUnitId: `legacy:${legacyBatch + 1}`,
-            progressUnits: chunk.length,
-          }
-        : {
-            itemCount: chunk.length,
-            batch: freshBatch + 1,
-            batchTotal: freshChunks.length,
-            itemsDone: plannedAssignments,
-            itemsTotal: list.length,
-            progressScopeId: classifyProgressScopeId,
-            progressUnitId: `fresh:${freshBatch + 1}`,
-            progressUnits: chunk.length,
-          },
+      task: 'job-taxonomy-classify-batch',
+      hints: {
+        itemCount: chunk.length,
+        batch: batchIndex + 1,
+        batchTotal: chunks.length,
+        itemsDone: plannedAssignments,
+        itemsTotal: list.length,
+        progressScopeId: classifyProgressScopeId,
+        progressUnitId: `classify:${batchIndex + 1}`,
+        progressUnits: chunk.length,
+      },
       responseSchema: JOB_TAXONOMY_CLASSIFY_SCHEMA, meta: batchMeta,
       responseValidator: (value) => {
         const shape = inspectJobTaxonomyRoleIndexes(value?.roleByIndex, chunk.length, plan.value.roleFamilies.length);
@@ -486,7 +441,7 @@ export async function runBoundedJobTaxonomy(jobs, {
           for (const i of shape.nonIntegerIndices) issues.add('taxonomy.chunk-non-integer', i);
           for (const i of shape.outOfRangeIndices) issues.add('taxonomy.chunk-out-of-range', i);
           if (shape.extraCount) issues.add('taxonomy.chunk-extra', '', { raw: shape.extraCount });
-          issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${progressBatch + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
+          issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${batchIndex + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
         }
       },
     });
@@ -499,7 +454,7 @@ export async function runBoundedJobTaxonomy(jobs, {
           for (const i of shape.nonIntegerIndices) issues.add('taxonomy.chunk-non-integer', i);
           for (const i of shape.outOfRangeIndices) issues.add('taxonomy.chunk-out-of-range', i);
           if (shape.extraCount) issues.add('taxonomy.chunk-extra', '', { raw: shape.extraCount });
-          issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${progressBatch + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
+          issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${batchIndex + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
     }
     completedBatches += 1;
     processed += chunk.length;
@@ -510,21 +465,13 @@ export async function runBoundedJobTaxonomy(jobs, {
   };
   const classifiedChunks = [];
   try {
-    const freshDescriptors = freshChunks.map((chunk, freshBatch) => {
-      return { chunk, freshBatch, progressBatch: legacyDescriptors.length + freshBatch };
-    });
-    // Exact v1 replays and untouched v2 chunks classify disjoint rows. Their
-    // task identities differ, but there is no data dependency, so they share
-    // one bounded automatic roster. A freed slot immediately claims the next
-    // descriptor while output remains in this original descriptor order.
-    const descriptors = [
-      ...legacyDescriptors.map((descriptor, progressBatch) => ({ ...descriptor, legacy: true, progressBatch })),
-      ...freshDescriptors,
-    ];
+    // Chunks classify disjoint rows with no data dependency, so they share one
+    // bounded automatic roster. A freed slot immediately claims the next
+    // chunk while output remains in chunk order.
     const output = await mapAutomaticHandoffs(
-      descriptors,
+      chunks,
       HANDOFF_CONCURRENCY,
-      descriptor => classifyChunk(descriptor),
+      (chunk, batchIndex) => classifyChunk(chunk, batchIndex),
     );
     classifiedChunks.push(...output);
   } catch (error) {

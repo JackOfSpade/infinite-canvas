@@ -1054,12 +1054,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           // rows actually get screened, since those handlers deliberately
           // skip screening themselves — one AI call per source would be far
           // too expensive.
-          targetRole: (
-            hubData.pendingTargetRole
-            ?? hubData.activeTargetRole
-            ?? hubData.targetRole
-            ?? ''
-          ).trim(),
           resumeState,
           continuationIntentId: continuationIntent.intentId,
           continuationLeaseToken,
@@ -1079,14 +1073,6 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           operationAuthority: continuationIntent.operationAuthority,
           preferredLocation: getNode(data.hubId)?.data?.canonicalLocation || '',
           secondTabUrl: pendingWarning?.openSecondTab ? pendingUrl : null,
-          // Legacy snapshot/display data only — see the resumeJobSource
-          // branch above; the gate this used to feed is gone.
-          targetRole: (
-            hubData.pendingTargetRole
-            ?? hubData.activeTargetRole
-            ?? hubData.targetRole
-            ?? ''
-          ).trim(),
           continuationIntentId: continuationIntent.intentId,
           continuationLeaseToken,
         });

@@ -4,7 +4,6 @@ import { createInterviewWindowController } from '../../electron/interviewWindow.
 import { createInterviewAiMatcher } from '../../electron/interviewAiMatcher.js';
 import { buildInterviewPlan, isDependentInterviewFollowUp } from '../../src/utils/interviewHelper.js';
 import { matchInterviewAnswerCard } from '../../src/utils/interviewAnswerMatching.js';
-import { getCurrentIpcRequestContext } from '../../electron/ipc/ipcUtils.js';
 import { createInterviewWindowE2EFixture } from '../fixtures/interview-window-e2e.mjs';
 
 const SEMANTIC_QUESTION = 'Describe how you enabled peers to exercise sound judgement without taking their decisions away.';
@@ -29,7 +28,7 @@ class Window extends EventEmitter {
   isDestroyed() { return !!this.destroyed; }
   close() { if (this.destroyed) return; this.emit('close'); this.destroyed = true; this.emit('closed'); Window.all.delete(this.webContents); }
 }
-async function harness({ launchQuestion = null, initialResponses = [], bridge = false, requestAi, poolSize = 1 } = {}) {
+async function harness({ launchQuestion = null, initialResponses = [], poolSize = 1 } = {}) {
   const fixture = createInterviewWindowE2EFixture();
   const owner = new Window(); const handlers = new Map(); const transports = []; const queue = [...initialResponses];
   let time = 0; let bank = fixture.bank; let failPlan = false; let audioInput; let active = false; let transcript = ''; let endpointId = 0;
@@ -41,9 +40,8 @@ async function harness({ launchQuestion = null, initialResponses = [], bridge = 
     loadPreparedBrief: async () => fixture.brief, loadAnswerBank: async () => bank,
     buildPlan: options => { if (failPlan) throw new Error('Synthetic projection failure.'); return buildInterviewPlan(options); },
     createMatcher: options => createInterviewAiMatcher({ ...options, config: { ...options.config, poolSize }, now: () => time }),
-    matcherConfig: bridge ? { transport: 'chatgpt-bridge' } : { transport: 'claude-warm', timeoutMs: 5000 },
-    requestAi,
-    matcherTransportFactory: bridge ? undefined : () => {
+    matcherConfig: { timeoutMs: 5000 },
+    matcherTransportFactory: () => {
       const record = { starts: [], matches: [], closes: 0 };
       transports.push(record);
       return { start: async input => { record.starts.push(input); },
@@ -759,28 +757,6 @@ export default [
         const request = h.transports[0].matches.at(-1);
         assert.equal(request.question, question); assert.equal(request.previousCardId, 'leadership'); assert.equal(request.previousQuestion, SEMANTIC_QUESTION);
         assert.equal(display.answerCard.id, 'leadership'); assert.equal(display.matching.kind, 'follow-up');
-      } finally { h.cleanup(); }
-    },
-  },
-  {
-    name: 'interview AI window: default ChatGPT bridge matching is a bounded compact task owned by the canvas IPC context',
-    async run() {
-      const calls = [];
-      const h = await harness({ bridge: true, requestAi: async options => {
-        await Promise.resolve(); calls.push({ options, context: getCurrentIpcRequestContext() }); return pick('leadership');
-      } });
-      try {
-        assert.equal(calls.length, 0, 'warming the selected bridge stages context without a paid selection call');
-        const display = await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
-        assert.equal(display.answerCard.id, 'leadership'); assert.equal(display.matching.source, 'ai'); assert.equal(calls.length, 1);
-        const { options, context } = calls[0];
-        assert.equal(context.sender, h.owner.webContents); assert.equal(context.nodeId, 'ai_window_test'); assert.equal(context.channel, 'interview-window:submit-question');
-        assert.equal(options.task, 'interview-live-match'); assert.equal(options.requestKind, 'structured-text'); assert.equal(options.grounding, false);
-        assert.equal(options.maxOutputTokens, 80); assert.equal(options.signal.aborted, false); assert.deepEqual(JSON.parse(options.prompt), { question: SEMANTIC_QUESTION });
-        assert.deepEqual(options.responseSchema.required, ['kind', 'cardId', 'confidence']);
-        assert.match(options.cachedPrefix, /Cards \(id,question,headline\)/u); assert.doesNotMatch(options.cachedPrefix, /"quotes"|"evidenceIds"/u);
-        assert.equal(getCurrentIpcRequestContext(), null, 'the owner context does not leak outside the matching request');
-        assert.equal(h.transports.length, 0, 'the bridge uses no CLI process adapter');
       } finally { h.cleanup(); }
     },
   },

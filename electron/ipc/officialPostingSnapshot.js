@@ -3,10 +3,10 @@ import { officialHttpsUrl } from './officialPostingFields.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
 import { extractAtsTenant } from './officialSourceHosts.js';
 
-// ChatGPT's browser cannot run JavaScript and often cannot open job-board data
-// addresses, so the app downloads each lead once and hands the judges what it
-// returned. This is transport only: no field here decides identity, status or
-// ownership. The judges read it as untrusted page content, like the listing.
+// Claude's WebFetch cannot run JavaScript and returns a summary of a page rather than
+// its text, so the app downloads each lead once and hands the judges what it
+// returned: their main input. This is transport only: no field here decides identity,
+// status or ownership. The judges read it as untrusted page content, like the listing.
 
 export const SNAPSHOT_DESCRIPTION_CHARS = 30_000;
 export const SNAPSHOT_TOTAL_CHARS = 100_000;

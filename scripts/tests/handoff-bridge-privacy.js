@@ -845,7 +845,7 @@ export default [
         served: 1, held: 2,
         discovered: [
           { key: selected, pending: 9, tasks: [{ task: 'job-role-screen-batch', pending: 9 }, { task: secret, pending: 99 }], secret },
-          { key: unselected, pending: 2, tasks: [{ task: 'price-synthesis', pending: 2 }], secret },
+          { key: unselected, pending: 2, tasks: [{ task: 'price-synthesis-batch', pending: 2 }], secret },
         ],
         diagnostics: {
           refreshAttempts: 3, refreshFailures: 1, lastRefreshAt: 96_000, lastRefreshOk: true,

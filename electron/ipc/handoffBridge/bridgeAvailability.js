@@ -2,16 +2,21 @@ import { resolveHandoffConcurrency } from '../../../src/utils/handoffScheduler.j
 import { LAUNCHER_AVAILABILITY_REASONS } from '../../../src/utils/handoffBridgeStatus.js';
 import { CONSTANTS } from './constants.js';
 import { getBridgeLauncherAvailability, liveObservedWorkerCount } from './observedChatContext.js';
+import { CLAUDE_TASK_CONCURRENCY, claudeTaskWorkerActive } from '../claudeTaskWorker.js';
 
 /** A linked single chat can serve search-time handoffs without a worker pool. */
-export const bridgeLinked = status => status?.enabled === true && status?.link?.state === 'linked';
+export const bridgeLinked = status => claudeTaskWorkerActive() || (status?.enabled === true && status?.link?.state === 'linked');
 
 /** A pool is one supported transport; a linked single chat can also serve handoffs. */
-export const bridgeWorkerPoolActive = status => bridgeLinked(status) && status?.chat?.pool?.active === true;
+export const bridgeWorkerPoolActive = status => bridgeLinked(status) && (claudeTaskWorkerActive() || status?.chat?.pool?.active === true);
 
 /** Main-owned evidence distinguishes live chats and actual launches from
  * minted starters and demand-derived pool recommendations. Busy chats count. */
 export function bridgeHandoffAvailability(status) {
+  // The Claude worker has no chats to wait for.
+  if (claudeTaskWorkerActive()) {
+    return { liveWorkers: CLAUDE_TASK_CONCURRENCY, launchesInProgress: 0, launchPending: false, autoLaunchAvailable: true, launcherReason: 'launcher-unavailable' };
+  }
   const launcher = getBridgeLauncherAvailability();
   const serving = bridgeLinked(status) && (status?.serving === undefined || status.serving === 'live');
   const singleChatLive = ['reached', 'working'].includes(status?.chat?.state);
@@ -36,6 +41,7 @@ export function bridgeHandoffAvailability(status) {
  * up, the resolver can admit another request without flooding a slow launcher.
  * A linked chat without a pool always retains serial admission. */
 export function bridgeHandoffCapacity(status, evidence = bridgeHandoffAvailability(status)) {
+  if (claudeTaskWorkerActive()) return CLAUDE_TASK_CONCURRENCY;
   if (!bridgeWorkerPoolActive(status)) return 1;
   const count = value => Number.isSafeInteger(value) && value > 0 ? value : 0;
   const demand = count(evidence.liveWorkers) + count(evidence.launchesInProgress) + 1;
@@ -45,6 +51,7 @@ export function bridgeHandoffCapacity(status, evidence = bridgeHandoffAvailabili
 /** Observed-worker absence applies only to pool transport. A linked single
  * chat has no worker roster and must remain eligible through its own timeout. */
 export function bridgeComparisonAvailable(status, observedWorkerAvailable) {
+  if (claudeTaskWorkerActive()) return true;
   if (!bridgeLinked(status)) return false;
   if (status?.serving !== undefined && status.serving !== 'live') return false;
   if (!bridgeWorkerPoolActive(status)) return true;

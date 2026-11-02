@@ -51,27 +51,26 @@ const MAX_APPLICATION_MATCH_LIVE_WAVE = 10;
 // check below) and must not depend on one source implementation's internal
 // task-policy table to decide which consent boundary a served task needs.
 const MARKETPLACE_PUSH_TASKS = new Set([
-  'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
-  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
+  'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+  'vision-product-analysis', 'marketplace-hub-scan-batch',
 ]);
 // Status is a public, privacy-reduced surface. Keep its task labels closed so
 // an injected/generic push port cannot turn arbitrary task text into report
 // telemetry. This is the release_one policy vocabulary from sources/push.js.
 const STATUS_PUSH_TASKS = new Set([
-  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-shortlist', 'job-official-posting-match',
-  'price-synthesis', 'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
-  'resume-parse', 'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
+  'job-listing-liveness', 'job-official-posting-research', 'job-official-posting-match',
+  'price-synthesis-batch', 'bundle-price-synthesis', 'platform-fit-assessment',
+  'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
-  'job-compensation-research', 'job-compensation-research-batch',
-  'job-preference-research', 'job-preference-research-batch', 'job-query-generation', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
-  'job-taxonomy-plan', 'job-taxonomy-classify', 'job-taxonomy-classify-batch',
-  'job-compensation-assessment', 'job-compensation-assessment-batch',
+  'job-compensation-research-batch',
+  'job-preference-research-batch', 'job-query-generation', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
+  'job-taxonomy-plan', 'job-taxonomy-classify-batch',
+  'job-compensation-assessment-batch',
   'job-preference-interpretation', 'job-preference-evaluation',
-  'job-preference-research-assessment', 'job-preference-research-batch-assessment',
-  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen', 'job-role-screen-batch',
-  'interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank', 'interview-live-match',
-  'vision-product-analysis', 'marketplace-hub-scan', 'marketplace-hub-scan-batch',
+  'job-preference-research-batch-assessment',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch',
+  'vision-product-analysis', 'marketplace-hub-scan-batch',
 ]);
 const SCORING_PUSH_TASKS = new Set([...STATUS_PUSH_TASKS].filter(task => !MARKETPLACE_PUSH_TASKS.has(task)));
 const PUSH_EXCLUSION_REASONS = ['ending', 'settling', 'attachment', 'free_text', 'task_not_allowed', 'node_not_allowed', 'person_editing'];

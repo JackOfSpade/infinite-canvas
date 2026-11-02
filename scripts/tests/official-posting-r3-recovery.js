@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import { createOfficialPostingRecoveryPassResolver, officialPostingDedup, resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
-import { unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 import { scoreSafeRowsWithBoardClosed } from '../../electron/ipc/officialPostingBoardClosed.js';
 import { filterNonEnglishJobs } from '../../src/utils/jobLanguage.js';
 
@@ -11,8 +10,6 @@ const job = (id, extra = {}) => ({ source: 'google', title: 'Dispatch Engineer',
   snippet: description, url: `https://mirror.test/jobs/${id}`, ...extra });
 const metadata = (extra = {}) => ({ level: 'L1', outcome: 'found', employer: 'Northwind Labs', title: 'Dispatch Engineer',
   sourceUrl: 'https://northwind.test/jobs/dispatch', officialApplyUrl: 'https://northwind.test/jobs/dispatch', trail: [], ...extra });
-const response = prompt => prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ').map(id =>
-  `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
 function result(rows, telemetry = null) {
   const dedup = officialPostingDedup(rows);
   return { jobs: dedup.kept, officialPosting: telemetry, officialDedupDropped: dedup.dropped.length, officialDedupDrops: dedup.dropped };
@@ -64,15 +61,13 @@ export default [
       const resolveRows = async rows => {
         calls.push(rows.map(row => row.url));
         const resolved = await resolveOfficialPostings(rows, { store: { find: async () => null, save: async () => { saves++; throw new Error('transient results must not save'); } },
-          fetch: () => { throw new Error('injected host resolver must not fetch'); },
-          resolve: async row => unresolvedOfficialPosting(row, { trail: ['fetch-failed'] }),
-          callRaw: async prompt => { handoffs++; return response(prompt); } });
+          callRaw: async () => { handoffs++; throw Object.assign(new Error('Synthetic research timeout.'), { code: 'bridge-timeout' }); } });
         return result(resolved.jobs, resolved.telemetry);
       };
       const glue = actualGenericGlue(resolveRows, first, checkpoints);
       await glue.persist([first]);
       assert.equal(checkpoints.length, 1, 'score-safe checkpoint completes before publication');
-      assert.ok(checkpoints[0].jobs[0].officialPosting.trail.includes('fetch-failed'));
+      assert.ok(checkpoints[0].jobs[0].officialPosting.trail.includes('bridge-timeout'));
       const cleaned = { ...first, snippet: 'Requirements include newly cleaned dispatch responsibilities.', salary: '$80 - $90 per hour' };
       const published = await glue.publish([cleaned, fresh]);
       assert.deepEqual(calls, [[first.url], [cleaned.url, fresh.url]]); assert.equal(handoffs, 2, 'the changed source and new row share one fresh research chunk');

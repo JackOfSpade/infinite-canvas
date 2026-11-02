@@ -4,7 +4,7 @@ The reproduced root cause is loss of the originating IPC async context when a br
 
 ## Failure path
 
-`resolveOfficialPostingsByChat` subscribes its queue drain to bridge status. The bridge invokes subscribers synchronously in the publisher's async context. When a pool-capacity update releases waiting judges, the old drain called `cappedHandoff` in that context. `callLLMRaw` / `callLLMText` ultimately obtain sender, node and run identity from `getCurrentIpcRequestContext()`, not from the options passed by the posting service.
+`resolveOfficialPostings` subscribes its queue drain to bridge status. The bridge invokes subscribers synchronously in the publisher's async context. When a pool-capacity update releases waiting judges, the old drain called `cappedHandoff` in that context. `callLLMRaw` / `callLLMText` ultimately obtain sender, node and run identity from `getCurrentIpcRequestContext()`, not from the options passed by the posting service.
 
 A publication outside IPC therefore reaches `requestNonApiAi` without a sender and throws `BRIDGE_RENDERER_UNAVAILABLE` immediately. A publication from another invoke can instead give the waiting work that invoke's sender, node and durable run identity. The earlier dock retry fix cannot protect either case: no registry request has been admitted yet.
 

@@ -164,9 +164,7 @@ const NONTERMINAL_JOB_HUB_STATES = new Set([
 const CLONED_JOB_HUB_RUN_KEYS = new Set([
   'queuedModuleRun',
   'pendingJobs',
-  'pendingTargetRole',
   'pendingCareerData',
-  'activeTargetRole',
   'activeJobPreferences',
   'pendingJobPreferences',
   'pendingJobPreferencesInterpretation',

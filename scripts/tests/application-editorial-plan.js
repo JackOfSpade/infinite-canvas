@@ -28,7 +28,7 @@ function fixture(domain = DOMAINS[0]) {
     `FULL APPROVED CATALOG (2 items; every ID and full quote):\n\n## Standalone achievements\n[${ids[0]}] ${domain.evidence}\n[${ids[1]}] ${domain.omission}\n`,
     `INDEX-ELIGIBLE SKILLS (exact item names and their only permitted skill-group citation IDs):\n${JSON.stringify([{ name: 'Not a catalog row', evidenceIds: [offCatalog] }])}`,
   ].join('\n\n');
-  const prompt = `APPLICATION V2 HANDOFF\n{"stage":"write","candidateId":"synthetic-candidate"}\nReply within 10000 output tokens.\n${WRITE_VERIFY_SHORTLIST_STEP}\n\n${source}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON.\n`;
+  const prompt = `APPLICATION V2 HANDOFF\n{"stage":"write","candidateId":"synthetic-candidate"}\n${WRITE_VERIFY_SHORTLIST_STEP}\n\n${source}\n\nOUTPUT FORMAT FOR THIS ARM:\nWrite the résumé and cover letter as plain text. No JSON.\n`;
   const plan = {
     thesis: `The candidate proposes to support this need: ${domain.need.toLowerCase()}.`,
     paragraphs: [{

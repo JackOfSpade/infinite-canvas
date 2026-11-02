@@ -396,7 +396,6 @@ export function backgroundJobResumeRequest(node, offer, canvasFilePath) {
     preferredLocation: location,
     rawLocation: String(data.preferredLocation || ''),
     profileLocations: Array.isArray(data.resumeProfile?.locations) ? data.resumeProfile.locations : [],
-    targetRole: offer.targetRole || '',
     jobPreferences: offer.jobPreferences || '',
     preferencePlan: offer.jobPreferencePlan || null,
     countryScope: data.canonicalCountry || '',
@@ -484,7 +483,6 @@ function lateSourceContinuationEntry(node, intent, canvasFilePath, boardIds) {
     collectionLimits,
     enabledSourceIds,
     preferredLocation,
-    targetRole: String(data.activeTargetRole ?? data.targetRole ?? '').trim(),
     jobPreferences: data.activeJobPreferences ?? data.jobPreferences ?? '',
     preferencePlan: data.jobPreferencePlan ?? data.jobPreferencesInterpretation ?? null,
   };
@@ -536,7 +534,6 @@ function lateSourceContinuationEntry(node, intent, canvasFilePath, boardIds) {
       nodeId: node.id,
       jobRunId: intent.parentRunId,
       preferredLocation,
-      targetRole: operationInput.targetRole,
       jobPreferences: operationInput.jobPreferences,
       preferencePlan: operationInput.preferencePlan,
       operationAuthority,

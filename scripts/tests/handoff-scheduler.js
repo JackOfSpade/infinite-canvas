@@ -1,6 +1,7 @@
 import { strict as nodeAssert } from 'node:assert';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import { evaluateJobPreferences } from '../test-dependencies.js';
+import { JOB_PREFERENCE_RESEARCH_MAX_ITEMS } from '../../electron/ipc/resultCaps.js';
 
 const assert = (condition, message) => nodeAssert.ok(condition, message);
 
@@ -162,9 +163,10 @@ export default [
     },
   },
   {
-    name: 'handoff scheduler integration: a slow legacy probe cannot barrier compatibility raw work',
+    name: 'handoff scheduler integration: the two-phase resume branch refills raw work beside a slow sibling',
     run: async () => {
-      const jobs = Array.from({ length: 13 }, (_, index) => ({
+      // One full research batch plus one trailing employer.
+      const jobs = Array.from({ length: JOB_PREFERENCE_RESEARCH_MAX_ITEMS + 1 }, (_, index) => ({
         title: 'Engineer',
         company: `Accepted Replay Company ${index + 1}`,
       }));
@@ -181,21 +183,12 @@ export default [
       let acceptedReleased = false;
       const acceptedGate = new Promise(resolve => { releaseAccepted = resolve; });
       const rawStarts = [];
-      let legacyProbeCalls = 0;
       const run = evaluateJobPreferences({
         jobs,
         jobPreferences: 'Published training budget',
         preferencePlan,
-        // The IPC run-level durable-task gate passes false on a fresh run.
-        // This deliberately never-settling probe proves the compatibility
-        // discovery seam cannot become a preflight barrier in that case.
-        legacyResearchMigrationNeeded: false,
-        legacyResearchStepProbe: async () => {
-          legacyProbeCalls += 1;
-          return new Promise(() => {});
-        },
-        // Exercise the two-phase compatibility branch too: the old status
-        // probe is gone, so its raw work still starts through one roster.
+        // Exercise the two-phase resume branch: its raw work still starts
+        // through one rolling roster.
         companyResearchPipelineEligible: false,
         callRaw: async (prompt, options) => {
           const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/g) || [])];
@@ -230,16 +223,17 @@ export default [
       releaseAccepted();
       const result = await run;
       assert(visibleStartedBeforeAcceptedSettled
-        && result.acceptedJobs.length === jobs.length
-        && legacyProbeCalls === 0,
-      `compatibility raw work must bypass a slow legacy probe and refill beside a slow sibling, got ${JSON.stringify({ rawStarts, legacyProbeCalls, accepted: result.acceptedJobs.length })}`);
-      return { rawStarts, accepted: result.acceptedJobs.length, legacyProbeBarrierSkipped: true };
+        && result.acceptedJobs.length === jobs.length,
+      `two-phase raw work must refill beside a slow sibling, got ${JSON.stringify({ rawStarts, accepted: result.acceptedJobs.length })}`);
+      return { rawStarts, accepted: result.acceptedJobs.length };
     },
   },
   {
     name: 'handoff scheduler integration: fallback raw rows never inflate overlapping assessment totals',
     run: async () => {
-      const jobs = Array.from({ length: 28 }, (_, index) => ({
+      // The failed first raw batch is full; a 16-row second batch follows.
+      const trailingRows = 16;
+      const jobs = Array.from({ length: JOB_PREFERENCE_RESEARCH_MAX_ITEMS + trailingRows }, (_, index) => ({
         title: 'Engineer',
         company: `Fallback Progress Company ${index + 1}`,
       }));
@@ -284,14 +278,14 @@ export default [
       });
       const hints = assessmentHints[0] || {};
       assert(assessmentHints.length === 1
-        && hints.itemCount === 16
+        && hints.itemCount === trailingRows
         && !Object.hasOwn(hints, 'itemsTotal')
         && !Object.hasOwn(hints, 'batchTotal')
         && !Object.hasOwn(hints, 'progressScopeId')
         && !Object.hasOwn(hints, 'progressUnitId')
-        && result.acceptedJobs.length === 16
-        && result.filteredJobs.length === 12,
-      `a 12-row raw fallback must produce one 16-row assessment without impossible 28/2 totals, got ${JSON.stringify({ assessmentHints, accepted: result.acceptedJobs.length, filtered: result.filteredJobs.length })}`);
+        && result.acceptedJobs.length === trailingRows
+        && result.filteredJobs.length === JOB_PREFERENCE_RESEARCH_MAX_ITEMS,
+      `a full-batch raw fallback must produce one ${trailingRows}-row assessment without impossible overlapping totals, got ${JSON.stringify({ assessmentHints, accepted: result.acceptedJobs.length, filtered: result.filteredJobs.length })}`);
       return { assessmentItems: hints.itemCount, accepted: result.acceptedJobs.length, filtered: result.filteredJobs.length };
     },
   },

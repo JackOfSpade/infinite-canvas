@@ -102,7 +102,7 @@ export default [
         let fetches = 0; let research = 0;
         const result = await refreshOfficialPostingEntries({ nodeId: 'board-cache', manualAiRunId: `refresh-cache:${mode}`, force: false,
           entries: [{ cardId: 'cache-card', job: current }] }, { store, bridgeStatus: status,
-          fetch: async () => { fetches++; throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
+          snapshotFetch: async () => { fetches++; throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
           callRaw: async prompt => { research++; return prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
             .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'); },
         });
@@ -127,14 +127,14 @@ export default [
         let research = 0;
         const refresh = () => refreshOfficialPostingEntries({ nodeId: 'board-miss-cache', manualAiRunId: 'refresh-miss-cache', force: false,
           entries: [{ cardId: 'miss-card', job: { ...original, officialPosting: miss } }] }, { store, now: () => clock, bridgeStatus: status,
-          fetch: async () => { throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
+          snapshotFetch: async () => { throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
           callRaw: async prompt => { research++; return prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
             .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'); } });
         assert.ok((await refresh()).entries[0].officialPosting.trail.includes('recent-miss'));
         assert.equal(research, 0);
         clock += 24 * 60 * 60_000;
         assert.equal((await refresh()).entries[0].officialPosting.trail.includes('recent-miss'), false);
-        assert.equal(research, 1);
+        assert.equal(research, 2, 'the expired miss is researched again with one extra search');
       }, { now: () => clock });
     },
   },
@@ -152,9 +152,7 @@ export default [
       const refreshed = await refreshOfficialPostingEntries(request, { bridgeStatus: status, store: { find: async () => null },
         projectJob: row => ({ title: row.title, company: row.company, location: row.location, snippet: row.snippet, url: row.url, sourceJobKey: row.sourceJobKey }),
         resolve: async (rows, options) => {
-          assert.equal(options.semanticMatching, true); assert.equal(options.bypassCache, true);
-          // Production refresh lets ChatGPT read the pages: no host fetch session is opened.
-          assert.equal(options.fetchSession, undefined);
+          assert.equal(options.bypassCache, true);
           assert.deepEqual(options.candidateUrlsByRow, [['https://card-lead.test/jobs/one', officialUrl], ['https://card-lead.test/jobs/two', officialUrl], ['https://card-lead.test/jobs/one', officialUrl]]);
           assert.equal(rows[0].description, text); assert.equal(rows[0].remote, true);
           assert.equal(rows[0].remoteCountry, 'Canada'); assert.equal(rows[0].workMode, 'remote');
@@ -257,17 +255,22 @@ export default [
     },
   },
   {
-    name: 'shared official resolver keeps per-row refresh leads isolated across discovery and research passes',
+    name: 'shared official resolver keeps per-row refresh leads isolated across the finder and judge passes',
     async run() {
       const rows = [job({ title: 'Engineer One', sourceJobKey: 'one' }), job({ title: 'Engineer Two', sourceJobKey: 'two', url: 'https://mirror.example/jobs/two' })];
       const calls = [];
-      const result = await resolveOfficialPostings(rows, { store: { find: async () => null },
-        semanticMatching: false, candidateUrls: ['https://shared.test/careers'], candidateUrlsByRow: [['https://one.test/job'], ['https://two.test/job']],
-        resolve: async (row, options) => { calls.push({ title: row.title, leads: options.candidateUrls }); return { officialPosting: { level: 'L5', outcome: 'not-found', employer: row.company, trail: ['fetch-failed'] } }; },
+      const result = await resolveOfficialPostings(rows, { store: { find: async () => null, save: async () => null },
+        snapshotFetch: async () => { throw Object.assign(new Error('Unavailable'), { code: 'fetch-failed' }); },
+        candidateUrls: ['https://shared.test/careers'], candidateUrlsByRow: [['https://one.test/job'], ['https://two.test/job']],
         callRaw: async prompt => [...prompt.matchAll(/Requested ids: ([a-f0-9, ]+)\./gu)][0][1].split(', ').map(id =>
-          `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n') });
-      assert.equal(result.jobs.length, 2); assert.equal(calls.length, 4);
-      for (const call of calls) assert.deepEqual(call.leads, ['https://shared.test/careers', call.title === 'Engineer One' ? 'https://one.test/job' : 'https://two.test/job']);
+          `BEGIN OFFICIAL POSTING RESEARCH ${id}\nNOT FOUND\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'),
+        callMatch: async prompt => {
+          const leads = JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
+          calls.push({ title: prompt.includes('Engineer One') ? 'Engineer One' : 'Engineer Two', leads: leads.map(lead => lead.url).sort() });
+          throw new Error('Synthetic judge failure.');
+        } });
+      assert.equal(result.jobs.length, 2); assert.equal(calls.length, 4, 'each row reaches its judge with its own leads, twice for the injected retry');
+      for (const call of calls) assert.deepEqual(call.leads, ['https://shared.test/careers', call.title === 'Engineer One' ? 'https://one.test/job' : 'https://two.test/job'].sort());
     },
   },
   {
@@ -705,7 +708,7 @@ export default [
     },
   },
   {
-    name: 'semantic generation reruns current host fetches and both shared AI comparisons on every unchanged cached posting',
+    name: 'semantic generation reruns the finder, snapshots and both judge runs on every unchanged cached posting',
     async run() {
       await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: semanticPosting(original), description: text });
@@ -713,12 +716,17 @@ export default [
         const fetch = network({ [officialUrl]: page(), 'https://northwind.test/': '<title>Northwind Labs</title>' }, requests);
         for (let attempt = 0; attempt < 2; attempt++) {
           const prepared = await prepareSemanticOfficialPostingForGeneration(args(original), { store, bridgeStatus: status, fetch,
-            callRaw: async () => { throw new Error('A verified fresh source needs final comparisons before broader research.'); },
-            callMatch: async (_prompt, options) => {
+            callRaw: async prompt => prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ')
+              .map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: 'https://northwind.test/', postingUrl: officialUrl,
+                employer: 'Northwind Labs', employerDomain: 'https://northwind.test', ats: '' })}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n'),
+            callMatch: async (prompt, options) => {
               comparisons.push(options.manualHandoff.comparisonRun);
-              return { choice: 'P1', evidence: [{ scrapedQuote: 'Software Engineer', officialQuote: 'Software Engineer' }], distinguishing: [], conflicts: [] };
+              const leads = JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
+              return JSON.stringify({ choice: leads.find(lead => lead.url === officialUrl).id, postingUrl: officialUrl, status: 'open', statusQuote: 'Apply now',
+                employerLinked: true, employerPageUrl: 'https://northwind.test/', employerLinkQuote: 'Careers', title: original.title, employer: 'Northwind Labs',
+                location: place, salary: '', description: text, evidence: [{ scrapedQuote: text, officialQuote: text }], conflicts: [] });
             } });
-          assert.equal(prepared.officialPosting.level, 'L1');
+          assert.equal(prepared.officialPosting.outcome, 'found');
           assert.equal(prepared.officialPosting.trail.includes('reverified'), false);
           assert.equal(prepared.officialPosting.trail.includes('cache-hit'), false);
           const receipt = getPreparedOfficialPosting(prepared.resolutionId, original);
@@ -729,7 +737,7 @@ export default [
             assert.equal(getPreparedOfficialPosting(prepared.resolutionId, { ...original, ...change }), null);
           }
         }
-        assert.equal(requests.filter(url => url === officialUrl).length, 2, 'each Generate owns a fresh host fetch session');
+        assert.equal(requests.filter(url => url === officialUrl).length, 2, 'each Generate owns a fresh snapshot session');
         assert.deepEqual(comparisons, ['A', 'B', 'A', 'B']);
       });
     },

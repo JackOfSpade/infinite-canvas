@@ -297,7 +297,7 @@ export function registerHandoffBridgeUi({
   // effort as application generation: it runs once per exact file and every
   // later application is written from its output.
   const careerCompilePending = snapshot => (snapshot?.queue?.scoring?.tasks || [])
-    .some(item => (item?.task === 'resume-parse' || String(item?.task || '').startsWith('career-profile-'))
+    .some(item => (String(item?.task || '').startsWith('career-profile-'))
       && (Number(item?.pending) || 0) > 0);
   const applicationWorkPending = snapshot => {
     const applications = snapshot?.queue?.applications;

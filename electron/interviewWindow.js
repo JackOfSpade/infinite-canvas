@@ -5,8 +5,6 @@ import { pathToFileURL } from 'node:url';
 import { buildInterviewPlan, buildInterviewFollowUpPlan, isDependentInterviewFollowUp, canonicalInterviewJobUrl, INTERVIEW_HELPER_MAX_STEPS } from '../src/utils/interviewHelper.js';
 import { createInterviewAiMatcher, interviewAiMatcherConfigFromEnv } from './interviewAiMatcher.js';
 import { prepareInterviewExtensionCandidates } from './ipc/interviewAnswerExtensions.js';
-import { requestNonApiAi } from './ipc/nonApiAi.js';
-import { runWithIpcRequestContext } from './ipc/ipcUtils.js';
 import { loadInterviewPreparationBundle, loadInterviewPreparedBrief, loadInterviewPreparedAnswerBank } from './ipc/interviewPreparation.js';
 import { loadInterviewQaLiveCards } from './ipc/interviewQaStore.js';
 import { isInterviewAnswerBank } from './ipc/interviewAnswerBank.js';
@@ -458,7 +456,6 @@ export function createInterviewWindowController({
   createMatcher = createInterviewAiMatcher,
   matcherConfig = interviewAiMatcherConfigFromEnv(process.env),
   matcherTransportFactory,
-  requestAi = requestNonApiAi,
   preloadPath = path.join(process.cwd(), 'dist-electron', 'interviewWindowPreload.js'),
   devServerUrl = null,
   distHtmlPath = path.join(process.cwd(), 'dist', 'index.html'),
@@ -518,8 +515,6 @@ export function createInterviewWindowController({
     }
     session.matcher = createMatcher({ bank, config: matcherConfig, transportFactory: matcherTransportFactory,
       context: { extensions },
-      request: options => runWithIpcRequestContext({ sender: session.owner.webContents, nodeId: session.nodeId,
-        channel: 'interview-window:submit-question' }, () => requestAi(options)),
     });
     session.speculative?.dispose();
     session.speculative = createInterviewSpeculativeMatcher({ matcher: session.matcher, bank,

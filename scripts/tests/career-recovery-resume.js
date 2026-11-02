@@ -11,6 +11,7 @@
 //   3. the banner called every one of these an "exact saved checkpoint" resume.
 // Nothing here names a person, employer, or file: the invariants are about
 // content-bound identity and honest recovery.
+import { __allowDurableTaskIdsForTests } from '../../electron/ipc/nonApiAi.js';
 import { execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -126,6 +127,9 @@ const SYNTHETIC_DOMAINS = [
   { label: 'culinary', name: 'Kitchen History.txt', text: 'Sous chef for a tasting-menu line. Rebuilt the prep checklist and supplier rota.\n' },
   { label: 'freight', name: 'Dispatch Summary.txt', text: 'Synthetic dispatch record: routed regional deliveries and audited carrier invoices.\n' },
 ];
+
+// Synthetic task ids are not in the real task list; keep their durable steps across a reload.
+__allowDurableTaskIdsForTests(['test-career-compile-step', 'test-manual-stale-pending']);
 
 export default [
   {
@@ -402,11 +406,11 @@ export default [
     name: 'career recovery: every career-* compiler stage the main process knows is recognised by the renderer, and job stages are not',
     run: () => {
       const known = [...getKnownTaskIds()];
-      const careerTasks = known.filter(task => task.startsWith('career-') || task === 'resume-parse');
+      const careerTasks = known.filter(task => task.startsWith('career-'));
       assert(careerTasks.includes('career-profile-compile') && !careerTasks.some(task => task.startsWith('career-file-')),
       'career files are read locally, so no career-file-* transcription stage exists');
       for (const task of careerTasks) assert(isCareerCompilerTask(task), `${task} must be recognised as career compiler work`);
-      for (const task of known.filter(task => !task.startsWith('career-') && task !== 'resume-parse')) {
+      for (const task of known.filter(task => !task.startsWith('career-'))) {
         assert(!isCareerCompilerTask(task), `${task} is not career compiler work`);
       }
       assert(!isCareerCompilerTask(undefined) && !isCareerCompilerTask(null) && !isCareerCompilerTask('') && !isCareerCompilerTask({}),
