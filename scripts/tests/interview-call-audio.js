@@ -255,6 +255,7 @@ export default [
     assert.equal(interviewAudioHelperPath({ packaged: true, resourcesPath: '/tmp/resources' }), '/tmp/resources/interview-audio/Interview Audio Helper.app/Contents/MacOS/interview-audio-helper');
     const pipeline = fs.readFileSync(new URL('../build-macos.mjs', import.meta.url), 'utf8');
     assert.match(pipeline, /buildInterviewAudioHelper\(\{ projectDir, identity \}\)/u);
-    assert.throws(() => buildInterviewAudioHelper({ identity: '-' }), /ad-hoc/u);
+    // Off macOS the helper refuses earlier, before it looks at the identity.
+    assert.throws(() => buildInterviewAudioHelper({ identity: '-' }), process.platform === 'darwin' ? /ad-hoc/u : /macOS SDK/u);
   } },
 ];

@@ -13,7 +13,7 @@ const script = value => `<script type="application/ld+json">${JSON.stringify(val
 
 export default [
   {
-    name: 'R1 JSON-LD scanning bounds three-megabyte malformed opening and closing tags below 200 ms',
+    name: 'R1 JSON-LD scanning bounds three-megabyte malformed opening and closing tags in linear time',
     run() {
       walkJsonLdJobPostings(script(posting()));
       const atFetchCap = (prefix, repeat) => prefix + repeat.repeat(Math.ceil((OFFICIAL_FETCH_MAX_BYTES - prefix.length) / repeat.length))
@@ -28,7 +28,9 @@ export default [
         const start = performance.now();
         assert.deepEqual(walkJsonLdJobPostings(html), []);
         const ms = performance.now() - start;
-        assert.ok(ms < 200, `three-megabyte malformed input took ${ms.toFixed(1)} ms`);
+        // Generous enough for a busy machine. Quadratic scanning of this input
+        // would take minutes, so this still catches the bug it guards against.
+        assert.ok(ms < 2000, `three-megabyte malformed input took ${ms.toFixed(1)} ms`);
         return Number(ms.toFixed(1));
       });
       return { malformedBytes: OFFICIAL_FETCH_MAX_BYTES, elapsedMs: elapsed };

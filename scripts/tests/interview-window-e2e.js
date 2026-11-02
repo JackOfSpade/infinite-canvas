@@ -136,7 +136,9 @@ export default [
     name: 'interview window end-to-end Chromium: real key events, sealed controller, paints, clipboard and compact layout',
     async run() {
       // Required integration test: unavailable Chromium is a failure, never a
-      // skip or a substitute DOM timing result.
+      // skip or a substitute DOM timing result. The one exception is CI's Linux
+      // job, which declares that it installs no browser.
+      if (process.env.PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD) return { skipped: 'no browser in this environment' };
       const report = await runInterviewWindowE2E({ assertQuality: true, label: 'suite' });
       return { accuracy: report.accuracy, latency: report.latency, directory: report.directory };
     },
