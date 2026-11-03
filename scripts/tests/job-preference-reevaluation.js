@@ -287,6 +287,16 @@ export default [
     },
   },
   {
+    name: 'Board status panel: a saved run waiting for Continue is not listed as running',
+    run: () => {
+      const board = fs.readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      assert.match(board, /const boardWorkRunning = boardRunVisible && !savedRunAwaitsContinue;/);
+      assert.match(board, /const savedRunAwaitsContinue = !scanning && !combining && \(!!recoveryError/);
+      assert.match(board, /marker\?\.pausedByUser === true \|\| marker\?\.autoResumeEligible === false/);
+      assert.match(board, /usePublishJobRunStatus\(id, boardWorkRunning \?/);
+    },
+  },
+  {
     name: 'Job Search and Board wiring: a connected brief is read-only and copyable, and an all-removed Board keeps application cards',
     run: () => {
       const done = fs.readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');

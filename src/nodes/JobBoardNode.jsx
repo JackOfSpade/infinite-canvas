@@ -7007,7 +7007,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     connectedModules.find(module => module.id === sourceId)?.label || 'selected Job Search');
   const awaitingSourceLabel = awaitingSourceLabels.length ? awaitingSourceLabels.join(', ') : null;
   const waitingForWorkers = data.boardScanResume?.phase === 'searches' && awaitingSourceIds.length > 0;
-  const showPauseSave = boardRunVisible && data.boardScanResume?.phase === 'searches';
+  // The side panel lists work in progress. A saved run waiting for its Continue
+  // or Retry button runs nothing, and the Board itself says so. A run stopped
+  // for a source Solve is still in progress.
+  const savedRunAwaitsContinue = !scanning && !combining && (!!recoveryError
+    || [data.boardScanResume, data.manualAiResume].some(marker => marker?.pausedByUser === true || marker?.autoResumeEligible === false));
+  const boardWorkRunning = boardRunVisible && !savedRunAwaitsContinue;
+  const showPauseSave = boardWorkRunning && data.boardScanResume?.phase === 'searches';
   const pauseDisabledReason = !showPauseSave ? 'Pause & save is available only during the searches phase.'
     : data.locked ? 'Unlock this Job Board before pausing the search.'
       : pauseSaving ? 'Saving the active Search continuation…'
@@ -7026,7 +7032,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           ? `Waiting for ${awaitingSourceLabel} to finish manual source resolution…`
           : 'Recovering the interrupted Board run…' }
         : null, selectedSearchModuleIds.length);
-  usePublishJobRunStatus(id, boardRunVisible ? {
+  usePublishJobRunStatus(id, boardWorkRunning ? {
     label: 'Job Board',
     headline: boardProgress?.label || 'Processing',
     lines: boardProgress?.completed != null && boardProgress?.total != null ? [`${boardProgress.completed} of ${boardProgress.total} searches`] : [],

@@ -55,12 +55,12 @@ export default [
     run() {
       const board = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       const selector = readFileSync(new URL('../../src/nodes/jobboard/JobBoardSearchSelection.jsx', import.meta.url), 'utf8');
-      assert(board.includes("const showPauseSave = boardRunVisible && data.boardScanResume?.phase === 'searches'")
+      assert(board.includes("const showPauseSave = boardWorkRunning && data.boardScanResume?.phase === 'searches'")
         && board.includes('const boardRunId = getNode(id)?.data?.boardScanResume?.boardRunId')
         && board.includes('pauseSearchModule: sourceId => jobSearchCoordinator.pauseSearchModule(sourceId)')
         && board.includes('isQuitPauseCurrent: isCurrentSearchRun'),
       'the searches-phase action is keyed to the current Board run and pauses its Search owners through the quit-pause path');
-      assert(board.includes('usePublishJobRunStatus(id, boardRunVisible ? {') && board.includes('onPause: showPauseSave ? pauseSearchesAndSave : null')
+      assert(board.includes('usePublishJobRunStatus(id, boardWorkRunning ? {') && board.includes('onPause: showPauseSave ? pauseSearchesAndSave : null')
         && !selector.includes('onPause'), 'the Board publishes its pause to the side panel and the selector has none');
       assert(board.includes('Waiting for Claude to finish search resolution for')
         && selector.includes('Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.'),
