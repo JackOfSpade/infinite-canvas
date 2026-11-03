@@ -6,6 +6,7 @@ import { evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJo
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { savedJobsReevaluationKeepsScores } from '../../src/utils/jobSearchSplitClear.js';
 import { carryBoardRescores } from '../../src/nodes/jobboard/jobBoardResearchStage.js';
+import { pauseOwnerStatus, showsOwnPauseButton } from '../../src/utils/jobRunStatusStore.js';
 import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { runBoardPreferenceOverrideStage } from '../../src/nodes/jobboard/jobBoardPreferenceOverrideStage.js';
 import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView, jobBoardPreferenceSeed } from '../../src/utils/jobBoardPreferenceOverride.js';
@@ -284,6 +285,28 @@ export default [
       const clear = board.slice(board.indexOf('const handlePreferenceOverrideClear'), board.indexOf('const careerOverrideView ='));
       assert.doesNotMatch(clear, /requestEmptyReplacement/);
       assert.match(clear, /clearBoardChildren\(\{ preserveNodeIds: applicationCardIds \}\)/);
+    },
+  },
+  {
+    name: 'Pause & save: one button per run, and the handoff row pauses the whole Board run',
+    run: () => {
+      const pause = () => ({ success: true });
+      const board = { nodeId: 'board', onPause: pause, pauseKeys: ['node:board', 'node:ca', 'node:us'] };
+      const canada = { nodeId: 'ca', onPause: pause, pauseKeys: ['node:ca'] };
+      const alone = { nodeId: 'solo', onPause: pause, pauseKeys: ['node:solo'] };
+      const all = [board, canada, alone];
+      assert.equal(pauseOwnerStatus('ca', all), board);
+      assert.equal(pauseOwnerStatus('solo', all), alone);
+      assert.equal(pauseOwnerStatus('missing', all), null);
+      const shown = handoff => all.filter(entry => showsOwnPauseButton(entry, handoff, all)).map(entry => entry.nodeId);
+      assert.deepEqual(shown('ca'), ['solo'], 'the handoff row owns the Board run, and its searches show none');
+      assert.deepEqual(shown('board'), ['solo']);
+      assert.deepEqual(shown(null), ['board', 'solo'], 'with no handoff, the Board card holds the run button');
+      const combining = [{ ...board, onPause: null }, canada];
+      assert.equal(pauseOwnerStatus('ca', combining), canada, 'a Board with no pause does not cover its search');
+      const dialog = fs.readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      assert.match(dialog, /onSave=\{pauseOwnerStatus\(activeRequest\.nodeId\)\?\.onPause/);
+      assert.match(fs.readFileSync(new URL('../../src/components/ClaudeRunStatus.jsx', import.meta.url), 'utf8'), /showPause=\{showsOwnPauseButton\(entry, pauseOwnedBy, statuses\)\}/);
     },
   },
   {

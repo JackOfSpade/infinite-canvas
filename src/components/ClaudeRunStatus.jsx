@@ -4,7 +4,7 @@ import { ChevronDown, ChevronUp, ClipboardCopy, PauseCircle, PlayCircle } from '
 import { ClaudeProgressCard } from './ClaudeProgress';
 import { claudeNodePauseKey, getClaudePauseFlow, resumeClaude, startClaudePause, stopRunningClaude, subscribeClaudePauseFlows } from '../utils/claudePauseFlow';
 import { getClaudeTaskActivity, subscribeClaudeTaskActivity } from '../utils/claudeTaskActivityStore';
-import { getJobRunStatus, getJobRunStatuses, subscribeJobRunStatuses } from '../utils/jobRunStatusStore';
+import { getJobRunStatus, getJobRunStatuses, showsOwnPauseButton, subscribeJobRunStatuses } from '../utils/jobRunStatusStore';
 
 const BUTTON = 'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
 const AMBER = `${BUTTON} border-amber-400/30 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20`;
@@ -53,7 +53,7 @@ function RunStatusCard({ entry, showPause }) {
       contextLabel={entry.label}
       headline={entry.headline}
       detail={entry.lines.join(' · ')}
-      footer={showPause && entry.onPause ? (
+      footer={showPause ? (
         <div className="mt-2">
           <ClaudePauseControl
             pauseKeys={entry.pauseKeys.length ? entry.pauseKeys : [claudeNodePauseKey(entry.nodeId)]}
@@ -66,10 +66,10 @@ function RunStatusCard({ entry, showPause }) {
   );
 }
 
-/** Every running module's status. pauseOwnedBy has its Pause in the handoff's own row. */
+/** Every running module's status. pauseOwnedBy names the handoff whose row holds that run's Pause. */
 export function JobRunStatusSection({ pauseOwnedBy = null }) {
   const statuses = useSyncExternalStore(subscribeJobRunStatuses, getJobRunStatuses, getJobRunStatuses);
-  return statuses.map(entry => <RunStatusCard key={entry.nodeId} entry={entry} showPause={entry.nodeId !== pauseOwnedBy} />);
+  return statuses.map(entry => <RunStatusCard key={entry.nodeId} entry={entry} showPause={showsOwnPauseButton(entry, pauseOwnedBy, statuses)} />);
 }
 
 let minimized = false;

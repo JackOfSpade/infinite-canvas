@@ -9,7 +9,7 @@ import { careerCompilationProgressForRequest, recordCareerCompilationProgress } 
 import { ClaudeProgress, ClaudeTaskProgress } from './ClaudeProgress';
 import { ClaudePauseControl, JobRunStatusDock, JobRunStatusSection } from './ClaudeRunStatus';
 import { claudeApplicationPauseKey, claudeNodePauseKey } from '../utils/claudePauseFlow';
-import { getJobRunStatus } from '../utils/jobRunStatusStore';
+import { pauseOwnerStatus } from '../utils/jobRunStatusStore';
 import { ClaudePauseNotice } from './ClaudePauseNotice';
 import { isJobSearchPauseEligible } from '../utils/jobHubManualAiOwnership';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
@@ -2045,10 +2045,10 @@ export function NonApiAiDialog() {
                   <div className="flex flex-wrap items-center justify-end gap-2">
                     {activeRequest.nodeId && (
                       <ClaudePauseControl
-                        key={activeRequest.nodeId}
-                        pauseKeys={getJobRunStatus(activeRequest.nodeId)?.pauseKeys?.length ? getJobRunStatus(activeRequest.nodeId).pauseKeys : [claudeNodePauseKey(activeRequest.nodeId)]}
-                        onSave={getJobRunStatus(activeRequest.nodeId)?.onPause
-                          ? () => getJobRunStatus(activeRequest.nodeId).onPause()
+                        key={pauseOwnerStatus(activeRequest.nodeId)?.nodeId || activeRequest.nodeId}
+                        pauseKeys={pauseOwnerStatus(activeRequest.nodeId)?.pauseKeys?.length ? pauseOwnerStatus(activeRequest.nodeId).pauseKeys : [claudeNodePauseKey(activeRequest.nodeId)]}
+                        onSave={pauseOwnerStatus(activeRequest.nodeId)?.onPause
+                          ? () => pauseOwnerStatus(activeRequest.nodeId).onPause()
                           : canPauseAndSaveJobSearch
                             ? () => requestJobSearchPauseAndSave({ nodeId: activeRequest.nodeId, runId: activeRequest.runId, requestId: activeRequest.requestId })
                             : null}

@@ -31,6 +31,20 @@ export function clearJobRunStatus(nodeId) {
 export const getJobRunStatuses = () => snapshot;
 export const getJobRunStatus = nodeId => entries.get(nodeId) || null;
 
+/** Whose Pause & save covers this module: a Board running it, otherwise the module itself. */
+export function pauseOwnerStatus(nodeId, statuses = snapshot) {
+  const key = `node:${nodeId}`;
+  return statuses.find(entry => entry.nodeId !== nodeId && entry.onPause && entry.pauseKeys.includes(key))
+    || statuses.find(entry => entry.nodeId === nodeId)
+    || null;
+}
+
+/** One button per pausable run. The handoff row holds its owner's button, so that card shows none. */
+export function showsOwnPauseButton(entry, handoffNodeId = null, statuses = snapshot) {
+  if (!entry?.onPause || pauseOwnerStatus(entry.nodeId, statuses)?.nodeId !== entry.nodeId) return false;
+  return !handoffNodeId || pauseOwnerStatus(handoffNodeId, statuses)?.nodeId !== entry.nodeId;
+}
+
 export function subscribeJobRunStatuses(listener) {
   listeners.add(listener);
   return () => listeners.delete(listener);
