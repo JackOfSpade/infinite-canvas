@@ -9,7 +9,10 @@ import {
   CLAUDE_STAGE_TIMEOUT_MS,
   ClaudeRunnerError,
 } from './claudeApplicationRunner.js';
+import { claudeResetTimeMs, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
+
+export { describeClaudeSdkMessage };
 
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
 const SAFEGUARD_MESSAGE = 'Claude blocked this request with its safeguards. The private run log contains the provider message. Review the request before retrying.';
@@ -70,6 +73,7 @@ export async function runClaudeSdkStage({
   let terminal = null;
   let summaryCount = 0;
   let summaryChars = 0;
+  let usageResetsAt = null;
   let outputBytes = 0;
   let interrupted = null;
   let timer = null;
@@ -116,6 +120,7 @@ export async function runClaudeSdkStage({
       summaryCount,
       summaryChars,
       thinkingDisplay: 'summarized',
+      ...(usageResetsAt !== null ? { resetsAt: usageResetsAt } : {}),
       ...(refuse || {}),
     };
   }
@@ -158,8 +163,9 @@ export async function runClaudeSdkStage({
       if (item.done) break;
       const message = item.value;
       if (!message || typeof message !== 'object') continue;
+      if (message.type === 'rate_limit_event' && message.rate_limit_info?.status === 'rejected') usageResetsAt = claudeResetTimeMs(message.rate_limit_info.resetsAt);
       // Never awaited: activity reporting must not fail or slow a stage.
-      try { if (typeof onActivity === 'function') onActivity(); } catch { /* liveness only */ }
+      try { if (typeof onActivity === 'function') onActivity(describeClaudeSdkMessage(message)); } catch { /* liveness only */ }
 
       if (message.type === 'assistant' && !message.parent_tool_use_id && !message.agent_id) {
         // SDK modelUsage also includes auxiliary calls. Only main assistant

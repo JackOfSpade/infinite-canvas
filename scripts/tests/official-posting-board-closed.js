@@ -11,6 +11,7 @@ import {
   mergeResolvedDescriptionRecoveryCandidate, reconcileSearchFunnel, registerJobsHandlers, retiredListingKeys,
   snapshotDescriptionRecoveryJobs,
 } from '../../electron/ipc/jobs.js';
+import { RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
 import { claimJobAnalysisOperationAuthority } from '../../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 import { readRunState, sanitizeLastRunReceipt } from '../../electron/ipc/jobRunStaging.js';
 import { buildJobRecoverySnapshot, buildJobsPipelineSnapshot } from '../../electron/ipc/bugReport/jobsSnapshot.js';
@@ -851,7 +852,7 @@ const pureTests = [
 
   // ── Every score-safe path ────────────────────────────────────────────────
   {
-    name: 'board-closed pipeline wiring: every score-safe path hands set-aside rows to the resolver boundary',
+    name: 'board-closed pipeline wiring: every score-safe path hands set-aside rows to the scrape-settlement boundary',
     run() {
       const source = read('electron/ipc/jobs.js');
       const block = (start, end) => source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
@@ -863,24 +864,37 @@ const pureTests = [
       assert.match(main, /job\?\.postedBy, job\?\.officialPosting, job\?\.boardClosed, job\?\.listingLiveness/u,
         'a paired liveness change makes the final search checkpoint dirty');
       assert.match(main, /finalDeduped\[index\]\?\.boardClosed, finalDeduped\[index\]\?\.listingLiveness/u);
-      assert.ok(main.indexOf('const finalDeduped = dedupByTitleCompany(kept') < main.indexOf('await resolveScoreSafePostings(kept,'));
+      assert.ok(main.indexOf('const finalDeduped = dedupByTitleCompany(kept') < main.indexOf('await settleScrapedRowsForScoring(kept,'));
+      assert.equal(source.includes('resolveScoreSafePostings'), false, 'the research-before-scoring resolver is gone');
       assert.match(main, /dedupByTitleCompany\(preferOpenRows\(platformCap\.jobs\)/u, 'the admission dedup also prefers open rows');
       assert.match(main, /\? \{ boardClosedSetAside: boardClosedAside\.length, boardClosedDropped \}/u);
       const single = block("handleSafe('search-jobs-single-source',", "handleSafe('prepare-board-jobs-history',");
       assert.match(single, /kept = scoreSafeRowsWithBoardClosed\(descriptionEvidence\);/u);
-      assert.match(single, /await resolveScoreSafePostings\(kept,/u);
+      assert.match(single, /await settleScrapedRowsForScoring\(kept,/u);
       const linked = block('const isLinkedInReEnrich =', "// Use the source's ordinary list extractor");
-      assert.match(linked, /resolveScoreSafePostings\(\s*scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(overlayResolvedRecoveryRows\(rows, snapshotRecoveryJobs\)\)\)/u);
+      assert.match(linked, /settleScrapedRowsForScoring\(\s*scoreSafeRowsWithBoardClosed\(filterJobsByDescriptionEvidence\(overlayResolvedRecoveryRows\(rows, snapshotRecoveryJobs\)\)\)/u);
       const generic = block('const runGenericResolve = async () =>', "checkpointContinuationBeforeReply('resolve-job-source')");
       assert.equal([...generic.matchAll(/scoreSafeRowsWithBoardClosed\(/gu)].length, 2, 'snapshot persistence and the final reply');
       assert.match(generic, /descriptionEvidence\.dropped\.filter\(job => listingStateRank\(job\) < 3\)/u, 'terminal rows never read as "still lack a description"');
       const indeed = block("handleSafe('resume-job-source',", "checkpointContinuationBeforeReply('resume-job-source')");
-      assert.equal([...indeed.matchAll(/await resolveScoreSafePostings\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\),/gu)].length, 2, 'retry-descriptions and native resume');
+      assert.equal([...indeed.matchAll(/await settleScrapedRowsForScoring\(scoreSafeRowsWithBoardClosed\(descriptionEvidence\),/gu)].length, 2, 'retry-descriptions and native resume');
       assert.match(indeed, /\]\.filter\(key => key && !boardClosedOutcome\.keptKeys\.has\(key\) && !boardClosedOutcome\.deferredKeys\.has\(key\)\)\)\]/u);
-      // The resolver boundary settles every board-closed row, including the failure path.
+      // The scrape-settlement boundary settles every board-closed row from what is known now,
+      // including the failure path, and spends no research: that waits for a fit score.
       const boundary = block('const settleBoardClosed = async', 'void pruneStaleUnsavedAnalysisArtifacts();');
-      assert.equal([...boundary.matchAll(/await settleBoardClosed\(/gu)].length, 2);
-      assert.match(boundary, /const settled = await settleBoardClosed\(deduped\.kept, signal, expiryCandidatesConfirmedClosed\);/u);
+      assert.equal([...boundary.matchAll(/await settleBoardClosed\(/gu)].length, 1);
+      assert.match(boundary, /const settled = await settleBoardClosed\(kept, signal\);/u);
+      assert.equal([...boundary.matchAll(/researchDeferred: true/gu)].length >= 3, true, 'every scrape-time settlement defers research');
+      for (const forbidden of ['resolveOfficialPostings', 'recheckPendingListings', 'officialPostingDedup(', 'createListingLivenessSearchSession']) {
+        assert.equal(boundary.includes(forbidden), false, `the scrape-settlement boundary never calls ${forbidden}`);
+      }
+      // Board research settles only what is at or above the fit threshold, then reports closed rows.
+      const research = block("handleSafe('settle-board-research',", "handleSafe('confirm-job-location-consolidations',");
+      assert.match(research, /recheckPendingListings\(/u);
+      assert.match(research, /officialPostingDedup\(/u);
+      assert.match(research, /settleBoardClosedRowsForHandler\(eligibleIndexes\(\)\.map\(index => rows\[index\]\), \{\s*requireSemantic: true, researchDeferred: true,/u);
+      assert.match(research, /rescoreMaterialOfficialText\(/u);
+      assert.match(research, /researchDeferredJobPreferences\(/u);
       // Description-recovery bookkeeping treats a board-closed row as terminal.
       assert.match(source, /emptyRows: evidence\.dropped\.filter\(job => job\?\.source === sourceId && listingStateRank\(job\) < 3\)/u);
       assert.match(source, /filterJobsByDescriptionEvidence\(sourceRecovery\)\.dropped\.filter\(job => listingStateRank\(job\) < 3\)/u);
@@ -905,7 +919,7 @@ async function withSearchHarness(run) {
   }
 }
 
-async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, resolveOfficialPostings, getOfficialPostingView, extraDependencies = {} }) {
+async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, resolveOfficialPostings = async jobs => ({ jobs }), getOfficialPostingView, extraDependencies = {}, onProgress = null }) {
   const authority = await claimJobAnalysisOperationAuthority({ canvasFilePath, hubId: nodeId, operationId: `op-${nodeId}`,
     semanticBase: { kind: 'search', careerSnapshotId, runId: null, fingerprint: `synthetic-${nodeId}`,
       analysisRevisionId: null, continuationId: null, sourceArtifactFingerprint: null } });
@@ -937,7 +951,8 @@ async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, resol
     getOfficialPostingView,
     ...extraDependencies,
   });
-  const sender = { id: 71933, isDestroyed: () => false, once() {}, on() {}, removeListener() {}, send() {} };
+  const sender = { id: 71933, isDestroyed: () => false, once() {}, on() {}, removeListener() {},
+    send: (channel, payload) => { onProgress?.({ channel, payload }); } };
   const result = await ipcMain.__getInvokeHandler('search-jobs')({ sender }, {
     queries: ['platform engineer'], nodeId, canvasFilePath, careerSnapshotId, operationAuthority: authority.receipt,
     enabledSourceIds: [...bySource.keys()], targetRole: '', preferredLocation: '',
@@ -947,7 +962,7 @@ async function runSearch({ canvasFilePath, careerSnapshotId, nodeId, rows, resol
 
 handlerTests.push(
   {
-    name: 'board-closed pipeline: set-aside rows merge into the final dedup and resolver, then keep or drop by rule, and the funnel reconciles',
+    name: 'board-closed pipeline: set-aside rows merge into the final dedup and scrape settlement, then keep or drop by rule with zero research, and the funnel reconciles',
     async run() {
       await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const nodeId = 'board-closed-search-hub';
@@ -959,28 +974,25 @@ handlerTests.push(
           confirmedClosedRow({ title: 'Site Reliability Engineer', company: 'Tailspin Works', url: 'https://www.linkedin.com/jobs/view/sre' }),
           confirmedClosedRow({ title: 'Security Engineer', company: 'Litware Group', url: 'https://www.linkedin.com/jobs/view/sec' }),
         ];
-        const workerUp = ['Support Engineer', 'Security Engineer', 'Platform Engineer'];
+        const progress = [];
         const { result, calls } = await runSearch({
           canvasFilePath, careerSnapshotId, nodeId, rows,
-          getOfficialPostingView: viewOf(longText('Official Northwind posting')),
-          resolveOfficialPostings: async jobs => ({
-            jobs: jobs.map(job => ({ ...job, officialPosting: job.title === 'Data Engineer' ? posting({ employer: 'Contoso Systems', title: 'Data Engineer' })
-              : miss(workerUp.includes(job.title) ? ['worker-research'] : ['worker-unavailable'], { employer: job.company }) })),
-            telemetry: { total: jobs.length, levels: { L2: 1, L5: jobs.length - 1 }, outcomes: { found: 1, 'not-found': jobs.length - 1 } },
-          }),
+          getOfficialPostingView: async () => { throw new Error('no official view is read while scraping'); },
+          resolveOfficialPostings: async () => { throw new Error('no official lookup runs while scraping'); },
+          onProgress: message => progress.push(message),
         });
         assert.equal(result.success, true, result.error);
-        assert.equal(calls.length, 1);
-        assert.equal(calls[0].length, 6, 'the resolver received the score-safe rows AND the three set-aside description-less board-closed rows');
-        assert.deepEqual(calls[0].slice(-3).map(job => job.title).sort(), ['Data Engineer', 'QA Engineer', 'Support Engineer'], 'set-aside rows follow the open rows');
+        assert.equal(calls.length, 0, 'searching researches nothing: no official lookup for any row');
+        assert.equal(JSON.stringify(progress).includes('Finding official postings'), false, 'no official-posting progress is reported while scraping');
         const titles = result.jobs.map(job => job.title).sort();
-        // Platform: open. Data: L2 official text. SRE: described, worker research unavailable -> kept unchecked.
-        // Support/QA: no description, no official text -> gone as before. Security: described, settled miss -> gone.
-        assert.deepEqual(titles, ['Data Engineer', 'Platform Engineer', 'Site Reliability Engineer']);
+        // Platform: open. SRE and Security: described, closed, never researched -> kept unchecked (research waits for a fit score).
+        // Data/Support/QA: closed with no description -> nothing to score and no later check -> dropped, even where an
+        // official posting might exist; the scraped text alone decides now.
+        assert.deepEqual(titles, ['Platform Engineer', 'Security Engineer', 'Site Reliability Engineer']);
         const byTitle = Object.fromEntries(result.jobs.map(job => [job.title, job]));
-        assert.equal(byTitle['Data Engineer'].officialPosting.level, 'L2'); assert.equal(byTitle['Data Engineer'].snippet, '', 'identity and scraped text are never rewritten');
-        assert.equal(byTitle['Data Engineer'].boardClosed.board, 'ziprecruiter');
+        for (const job of result.jobs) assert.equal(job.officialPosting, undefined, 'a scraped row carries no officialPosting');
         assert.equal(byTitle['Site Reliability Engineer'].boardClosed.board, 'linkedin');
+        assert.equal(byTitle['Security Engineer'].boardClosed.board, 'linkedin');
         assert.equal(byTitle['Platform Engineer'].boardClosed, undefined);
 
         const search = getJobsTelemetry().search;
@@ -989,25 +1001,25 @@ handlerTests.push(
         assert.equal(search.kept, 3);
         assert.equal(search.reconciliation.reconciled, true, JSON.stringify(search.reconciliation));
         assert.deepEqual(search.officialPosting.boardClosed, {
-          ziprecruiter: { detected: 2, keptOfficial: 1, keptUnchecked: 0, dropped: 1 },
+          ziprecruiter: { detected: 2, keptOfficial: 0, keptUnchecked: 0, dropped: 2 },
           indeed: { detected: 1, keptOfficial: 0, keptUnchecked: 0, dropped: 1 },
-          linkedin: { detected: 2, keptOfficial: 0, keptUnchecked: 1, dropped: 1 },
+          linkedin: { detected: 2, keptOfficial: 0, keptUnchecked: 2, dropped: 0 },
         });
         const state = await readRunState(canvasFilePath, Date.now(), { nodeId });
         const staged = state.stagedJobs.map(entry => entry.job?.title);
-        assert.ok(staged.includes('Data Engineer') && staged.includes('Site Reliability Engineer'), 'kept board-closed rows reach the durable checkpoint');
+        assert.ok(staged.includes('Security Engineer') && staged.includes('Site Reliability Engineer'), 'kept board-closed rows reach the durable checkpoint');
 
         // The bug report states the stages and counts, never a listing.
         const report = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
         assert.match(report, /board-closed-rescued: 3/u); assert.match(report, /board-closed-dropped: 3/u);
-        assert.match(report, /Board-closed listings[^\n]*`ziprecruiter` detected 2 · kept \(official\) 1 · kept \(official posting not checked\) 0 · dropped 1/u);
-        assert.match(report, /`linkedin` detected 2 · kept \(official\) 0 · kept \(official posting not checked\) 1 · dropped 1/u);
+        assert.match(report, /Board-closed listings[^\n]*`ziprecruiter` detected 2 · kept \(official\) 0 · kept \(official posting not checked\) 0 · dropped 2/u);
+        assert.match(report, /`linkedin` detected 2 · kept \(official\) 0 · kept \(official posting not checked\) 2 · dropped 0/u);
         assert.equal(report.includes('Contoso Systems') || report.includes('Litware Group'), false);
       });
     },
   },
   {
-    name: 'board-closed pipeline: an open copy beats a closed copy of the same posting at both dedup stages, and resolver failure follows the unresolved rule',
+    name: 'board-closed pipeline: an open copy beats a closed copy of the same posting at both dedup stages, and a bare closed row leaves with zero research',
     async run() {
       await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const nodeId = 'board-closed-dedup-hub';
@@ -1016,25 +1028,27 @@ handlerTests.push(
           row({ source: 'remoteok', title: 'Platform Engineer', company: 'Northwind Labs', url: 'https://remoteok.example.test/open' }),
           confirmedClosedRow({ source: 'weworkremotely', title: 'Cloud Engineer', company: 'Fabrikam Cloud', snippet: '', url: 'https://weworkremotely.example.test/bare' }),
         ];
-        const { result } = await runSearch({
+        const { result, calls } = await runSearch({
           canvasFilePath, careerSnapshotId, nodeId, rows,
-          getOfficialPostingView: viewOf(longText('Official')),
-          resolveOfficialPostings: async () => { throw new Error('the resolver is down'); },
+          getOfficialPostingView: async () => { throw new Error('no official view is read while scraping'); },
+          resolveOfficialPostings: async () => { throw new Error('no official lookup runs while scraping'); },
         });
         assert.equal(result.success, true, result.error);
+        assert.equal(calls.length, 0, 'searching researches nothing');
         assert.deepEqual(result.jobs.map(job => `${job.source}:${job.title}`), ['remoteok:Platform Engineer'],
-          'the open copy survived; the closed duplicate lost the tie; the bare closed row left as before');
+          'the open copy survived; the closed duplicate lost the tie; the bare closed row left with no later check to wait for');
+        assert.equal(result.jobs[0].officialPosting, undefined);
         const search = getJobsTelemetry().search;
         assert.equal(search.boardClosedSetAside, 1); assert.equal(search.boardClosedDropped, 1);
         assert.equal(search.reconciliation.reconciled, true, JSON.stringify(search.reconciliation));
-        assert.equal(search.officialPosting.failed, 2, 'only the open row and the bare closed row reached the resolver');
+        assert.equal(search.officialPosting.failed || 0, 0, 'no official lookup was attempted, so none failed');
         assert.deepEqual(search.officialPosting.boardClosed, { linkedin: { detected: 1, keptOfficial: 0, keptUnchecked: 0, dropped: 1 } },
-          'the closed duplicate never reached the resolver boundary; the bare row, resolution failed, is dropped as before');
+          'the closed duplicate never reached the settlement boundary; the bare row is dropped as having no description');
       });
     },
   },
   {
-    name: 'board-closed pipeline: a resolver outage keeps a described board-closed row unchecked, flagged and visible',
+    name: 'board-closed pipeline: a described board-closed row is kept unchecked, flagged and visible, with no research at scrape time',
     async run() {
       await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const nodeId = 'board-closed-outage-hub';
@@ -1052,7 +1066,7 @@ handlerTests.push(
     },
   },
   {
-    name: 'production resolver failure cannot keep or retire a described row using legacy inline official metadata',
+    name: 'scrape settlement cannot keep or retire a described row using legacy inline official metadata',
     async run() {
       await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const rows = [
@@ -1084,7 +1098,7 @@ handlerTests.push(
           attemptedDescriptions: 3, recoveredDescriptions: 0, remainingDescriptions: 0, boardClosedKept: 2,
           unavailableDescriptions: [{ key: 'k1', title: 'Gone Engineer', url: 'https://www.indeed.com/viewjob?jk=gone', reason: 'job-unavailable' }] } };
         const report = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
-        assert.match(report, /\*\*1 unavailable listing\(s\) removed\*\* · 2 board-closed listing\(s\) kept for the official-posting check/u);
+        assert.match(report, /\*\*1 unavailable listing\(s\) removed\*\* · 2 board-closed listing\(s\) kept with their description/u);
         assert.equal(report.includes('Gone Engineer'), false, 'details withheld');
       } finally {
         Object.assign(telemetry, saved);
@@ -1109,9 +1123,9 @@ handlerTests.push(
           sources: { ziprecruiter: { count: 9, providerGathered: 10, unavailableDetailDropped: 1, boardClosedDetailKept: 2, stopReason: 'end-of-results' } },
         }), 'utf8');
         const recovery = buildJobRecoverySnapshot(canvas, new Set([nodeId]));
-        assert.match(recovery, /description evidence 4 · board-closed: 3 rescued from the evidence gate for the official-posting check, 2 dropped after it/u);
+        assert.match(recovery, /description evidence 4 · board-closed: 3 set aside by the evidence gate, 2 dropped/u);
         assert.match(recovery, /1 confirmed-unavailable detail listing dropped/u);
-        assert.match(recovery, /2 board-closed detail listings kept for the official-posting check/u, 'the kept counter stays apart from the dropped one');
+        assert.match(recovery, /2 board-closed detail listings kept with their description/u, 'the kept counter stays apart from the dropped one');
       } finally {
         telemetry.pipeline = savedPipeline;
         fs.rmSync(directory, { recursive: true, force: true });
@@ -1119,14 +1133,15 @@ handlerTests.push(
     },
   },
   {
-    name: 'board-closed retry-descriptions: kept rows replace, settled misses retire, and deferred rows remain pending',
+    name: 'board-closed retry-descriptions: described rows replace, description-less closed rows retire, pending-closed rows remain pending, and nothing is researched',
     async run() {
-      for (const failure of ['none', 'settlement', 'resolution']) await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
+      // 'settlement' makes the settlement step throw: its conservative fallback must decide the same way,
+      // because the scrape-time rule reads only the scraped text.
+      for (const failure of ['none', 'settlement']) await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const nodeId = `board-closed-retry-${failure}-hub`;
         const seed = await runSearch({
           canvasFilePath, careerSnapshotId, nodeId, rows: [row({ title: 'Seed Engineer', company: 'Seed Co' })],
           getOfficialPostingView: viewOf(longText('Official')),
-          resolveOfficialPostings: async jobs => ({ jobs, telemetry: { total: jobs.length } }),
         });
         assert.equal(seed.result.success, true, seed.result.error);
         const telemetry = getJobsTelemetry();
@@ -1136,9 +1151,17 @@ handlerTests.push(
         const goneRow = indeedRow('Gone Engineer', 'gone1');
         const deferredRow = indeedRow('Deferred Engineer', 'defer1');
         const officialClosed = indeedRow('Employer Closed', 'emp1');
-        const flag = job => ({ ...job, descriptionDeferredReason: 'indeed-job-unavailable', boardClosed: marker('indeed', 'indeed-job-unavailable'),
+        // Confirmed closed with a recovered description: nothing researches it now, so it stays, flagged.
+        const describedClosed = job => ({ ...job, snippet: longText('Recovered'), boardClosed: marker('indeed', 'indeed-job-unavailable'),
           listingLiveness: liveness('closed', 'structural', 'indeed') });
+        // Confirmed closed and blank: there is nothing to score, so it retires.
+        const blankClosed = job => ({ ...job, descriptionDeferredReason: 'indeed-job-unavailable', boardClosed: marker('indeed', 'indeed-job-unavailable'),
+          listingLiveness: liveness('closed', 'structural', 'indeed') });
+        // Only the board marker, no verdict yet, blank: not confirmed, so it stays pending for a retry.
+        const blankPending = job => ({ ...job, descriptionDeferredReason: 'indeed-job-unavailable', boardClosed: marker('indeed', 'indeed-job-unavailable') });
+        const flag = job => job.title === 'Kept Engineer' ? describedClosed(job) : job.title === 'Deferred Engineer' ? blankPending(job) : blankClosed(job);
         let retryCalls = 0;
+        let viewReads = 0;
         __registerJobsHandlersForTests({
           resolveRequiredPinnedCareerInput: async () => ({ profile: {}, careerData: '', pinned: true }),
           retryIndeedJobDescriptions: async jobs => {
@@ -1148,16 +1171,8 @@ handlerTests.push(
               attempted: 4, recovered: 0, remaining: 0, challengeReason: null,
               unavailable: jobs.map(job => ({ key: sourceJobKey(job), title: job.title, url: job.url, reason: 'job-unavailable' })) };
           },
-          getOfficialPostingView: viewOf(longText('Official Kept posting')),
-          resolveOfficialPostings: async jobs => {
-            if (failure === 'resolution') throw new Error('synthetic official resolution failure');
-            return ({
-            jobs: jobs.map(job => ({ ...job, officialPosting: semanticPosting(job, job.title === 'Kept Engineer'
-              ? posting({ employer: 'Kept Engineer Co', title: 'Kept Engineer' })
-              : currentMiss(job.title === 'Deferred Engineer' ? ['worker-unavailable'] : ['worker-research'])) })),
-            telemetry: { total: jobs.length },
-            });
-          },
+          getOfficialPostingView: async () => { viewReads += 1; throw new Error('no official view is read while retrying descriptions'); },
+          resolveOfficialPostings: async () => { throw new Error('no official lookup runs while retrying descriptions'); },
           ...(failure === 'settlement' ? { settleBoardClosedRowsForTests: async () => { throw new Error('synthetic settlement read failure'); } } : {}),
         });
         const reply = await ipcMain.__getInvokeHandler('resume-job-source')({ sender: seed.sender }, {
@@ -1166,25 +1181,27 @@ handlerTests.push(
           resumeState: { mode: 'retry-descriptions', jobs: [keptRow, goneRow, deferredRow, officialClosed] },
         });
         assert.equal(retryCalls, 1);
+        assert.equal(viewReads, 0, 'no official view is read');
         assert.equal(reply.resolved, true, JSON.stringify(reply));
-        assert.deepEqual(reply.items.map(job => job.title), failure === 'none' ? ['Kept Engineer'] : [],
-          'official text rescues only the primary pass; fallback still preserves deferred retirement');
-        if (failure === 'none') assert.equal(reply.items[0].boardClosed.board, 'indeed');
+        assert.deepEqual(reply.items.map(job => job.title), ['Kept Engineer'], 'only the described row is returned');
+        assert.equal(reply.items[0].boardClosed.board, 'indeed');
+        assert.equal(reply.items[0].officialPosting, undefined, 'a retried row carries no officialPosting');
         assert.equal(reply.replaceMatchingItems, true);
-        assert.equal(reply.removedItemKeys.includes(sourceJobKey(keptRow)), failure === 'settlement',
-          'an L2 blank row needs its official text view to be kept');
-        assert.equal(reply.removedItemKeys.includes(sourceJobKey(goneRow)), failure !== 'resolution', 'an unsettled resolution failure keeps the blank row available for retry');
-        assert.equal(reply.removedItemKeys.includes(sourceJobKey(deferredRow)), false, 'unsettled research defers rather than retires the row');
+        assert.equal(reply.removedItemKeys.includes(sourceJobKey(keptRow)), false, 'a kept board-closed row is replaced in place, not retired');
+        assert.equal(reply.removedItemKeys.includes(sourceJobKey(goneRow)), true, 'a blank confirmed-closed row retires: it can never be scored or researched');
+        assert.equal(reply.removedItemKeys.includes(sourceJobKey(deferredRow)), false, 'an unconfirmed blank row remains pending rather than retired');
         assert.equal(reply.removedItemKeys.includes(sourceJobKey(officialClosed)), true, 'the employer-host verdict retires as before');
         const unavailableKeys = telemetry.resolves.indeed.unavailableDescriptions.map(item => item.key);
         assert.equal(unavailableKeys.includes(sourceJobKey(deferredRow)), false, 'deferred row is not counted as unavailable');
-        assert.equal(unavailableKeys.includes(sourceJobKey(goneRow)), failure !== 'resolution', 'only settled miss is counted as unavailable');
+        assert.equal(unavailableKeys.includes(sourceJobKey(goneRow)), true, 'the retired blank row is counted as unavailable');
+        assert.equal(unavailableKeys.includes(sourceJobKey(keptRow)), false, 'the kept row is not counted as unavailable');
+        assert.equal(telemetry.resolves.indeed.boardClosedKept, 1);
         assert.equal(new Set(reply.removedItemKeys).size, reply.removedItemKeys.length);
       });
     },
   },
   {
-    name: 'board-closed search: a liveness partition is recency-sorted after the official pass clears the ranks',
+    name: 'board-closed search: the open-first liveness partition is recency-sorted again after scrape settlement',
     async run() {
       await withSearchHarness(async ({ canvasFilePath, careerSnapshotId }) => {
         const newer = row({ title: 'Synthetic Newer Engineer', url: 'https://remoteok.com/remote-jobs/synthetic-newer',
@@ -1192,15 +1209,56 @@ handlerTests.push(
         const older = row({ title: 'Synthetic Older Engineer', url: 'https://remoteok.com/remote-jobs/synthetic-older',
           posted: 'yesterday', listingLiveness: liveness('open', 'open-marker', 'remoteok') });
         const { result } = await runSearch({ canvasFilePath, careerSnapshotId, nodeId: 'board-closed-resort-hub', rows: [newer, older],
-          getOfficialPostingView: viewOf(''),
-          resolveOfficialPostings: async jobs => ({ jobs: jobs.map(job => ({ ...job,
-            listingLiveness: liveness('pending', 'neither', 'remoteok'), officialPosting: miss(['worker-unavailable']) })),
-          telemetry: { total: jobs.length } }),
-        });
+          getOfficialPostingView: viewOf('') });
         assert.equal(result.success, true, result.error);
         assert.deepEqual(result.jobs.map(job => job.title), [newer.title, older.title],
           'the temporary open-first partition must not become the final recency order');
       });
+    },
+  },
+  {
+    name: 'board research: eligible board-closed rows are kept or retired by official evidence, a below-fit confirmed-closed row is reported, and nothing is rescored or rechecked',
+    async run() {
+      const eligible = RESEARCH_MIN_FIT_SCORE + 15;
+      const scored = (job, matchScore = eligible) => ({ ...job, matchScore });
+      // The Board's official stage has already looked these rows up; the posting rides on the row with its semantic receipt.
+      const withPosting = (job, value) => ({ ...job, officialPosting: semanticPosting(job, value) });
+      const officialText = withPosting(scored(confirmedClosedRow({ title: 'Data Engineer', company: 'Contoso Systems', snippet: '',
+        url: 'https://www.ziprecruiter.com/jobs/data' })), posting({ employer: 'Contoso Systems', title: 'Data Engineer' }));
+      const settledMiss = withPosting(scored(confirmedClosedRow({ title: 'Security Engineer', company: 'Litware Group',
+        url: 'https://www.linkedin.com/jobs/view/sec' })), currentMiss(['worker-research'], { employer: 'Litware Group' }));
+      const unsettledMiss = withPosting(scored(confirmedClosedRow({ title: 'Site Reliability Engineer', company: 'Tailspin Works',
+        url: 'https://www.linkedin.com/jobs/view/sre' })), miss(['worker-unavailable'], { employer: 'Tailspin Works' }));
+      const blankSettledMiss = withPosting(scored(confirmedClosedRow({ title: 'Support Engineer', company: 'Fabrikam Cloud', snippet: '',
+        url: 'https://www.linkedin.com/jobs/view/support' })), currentMiss(['worker-research'], { employer: 'Fabrikam Cloud' }));
+      const open = scored(row({ title: 'Platform Engineer', company: 'Northwind Labs' }));
+      const belowClosed = scored(confirmedClosedRow({ title: 'QA Engineer', company: 'Adventure Works', snippet: '',
+        url: 'https://www.indeed.com/viewjob?jk=qa' }), RESEARCH_MIN_FIT_SCORE - 25);
+      const belowOpen = scored(row({ title: 'Cloud Engineer', company: 'Fabrikam Cloud', url: 'https://listing.example.test/cloud' }), RESEARCH_MIN_FIT_SCORE - 25);
+      const jobs = [officialText, settledMiss, unsettledMiss, blankSettledMiss, open, belowClosed, belowOpen];
+      const calls = [];
+      const trap = name => async () => { calls.push(name); throw new Error(`${name} must not be called`); };
+      __registerJobsHandlersForTests({
+        callListingLiveness: trap('liveness'), runScoreBatch: trap('score'), runGapReview: trap('gap'),
+        getOfficialPostingView: viewOf(longText('Official Contoso posting')),
+      });
+      try {
+        const sender = { id: 71934, isDestroyed: () => false, once() {}, on() {}, removeListener() {}, send() {} };
+        const result = await ipcMain.__getInvokeHandler('settle-board-research')({ sender }, { jobs, nodeId: 'board-closed-research-hub' });
+        assert.equal(result.success, true, result.error);
+        assert.deepEqual(calls, [], 'no liveness, scoring or gap-review call: nothing is pending and no official text changed materially');
+        assert.deepEqual(result.jobs, jobs, 'rows come back in request order and unchanged');
+        const reasons = Object.fromEntries(result.dropped.map(entry => [entry.index, entry.reason]));
+        assert.deepEqual(reasons, { 1: 'closed', 3: 'closed', 5: 'below-fit-closed' },
+          'official text keeps a blank closed row; a settled miss retires the described one and the blank one; an unsettled miss stays; below fit and closed is reported');
+        assert.equal(result.counts.eligible, 5);
+        assert.equal(result.counts.skippedBelowFit, 2);
+        assert.equal(result.counts.closedDropped, 2);
+        assert.equal(result.counts.belowFitClosedDropped, 1);
+        assert.equal(result.counts.rescoreAttempted, 0);
+      } finally {
+        registerJobsHandlers();
+      }
     },
   },
 );

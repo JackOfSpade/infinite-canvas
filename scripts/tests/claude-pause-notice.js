@@ -117,7 +117,7 @@ export default [
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-claude-working-'));
       const entry = path.join(directory, 'WorkingProbe.jsx');
-      await fsPromises.writeFile(entry, `import React from 'react';\nimport { ClaudeWorkingRow } from ${JSON.stringify(path.resolve('src/components/ClaudeProgress.jsx'))};\nexport function WorkingProbe() { return React.createElement(ClaudeWorkingRow); }\n`);
+      await fsPromises.writeFile(entry, `import React from 'react';\nimport { ClaudeTaskProgress } from ${JSON.stringify(path.resolve('src/components/ClaudeProgress.jsx'))};\nimport { applyClaudeTaskActivity } from ${JSON.stringify(path.resolve('src/utils/claudeTaskActivityStore.js'))};\nexport { applyClaudeTaskActivity };\nexport function WorkingProbe() { return React.createElement(ClaudeTaskProgress, { requestId: 'a' }); }\n`);
       const controller = new AbortController();
       let bundle;
       try {
@@ -131,8 +131,20 @@ export default [
             });
             const region = window.document.querySelector('section[aria-label="Claude progress"]');
             assert(region, 'the working row is a labelled Claude progress region');
-            assert.equal(region.textContent.trim(), 'Claude is working on this handoff');
+            assert.match(region.textContent, /Waiting for Claude to pick this up/);
             assert.equal(window.document.querySelectorAll('button, a, input, select').length, 0, 'the row has no controls');
+            await bundle.module.act(async () => {
+              bundle.module.applyClaudeTaskActivity({ running: 1, waiting: 0, tasks: { a: {
+                state: 'running', phase: 'tool', tool: 'WebSearch', target: 'Acme careers', model: 'opus', effort: 'low', round: 1,
+                toolTurns: 3, maxTurns: 16, firstStartedAt: Date.now() - 65000, phaseStartedAt: Date.now() - 5000, lastActivityAt: Date.now() - 1000,
+                steps: [{ at: Date.now() - 5000, label: 'Searching the web: Acme careers' }],
+              } } });
+            });
+            assert.match(region.textContent, /Searching the web/);
+            assert.match(region.textContent, /Web research turn 3 of 16/);
+            assert.match(region.textContent, /Total elapsed: 1 min/);
+            assert.equal(window.document.querySelector('ol li span').textContent, 'Searching the web: Acme careers');
+            assert.equal(window.document.querySelectorAll('button, a, input, select').length, 0, 'live steps add no controls');
           } finally { await bundle.module.act(async () => rootNode.unmount()); }
         });
       } finally {
@@ -146,8 +158,8 @@ export default [
     name: 'claude pause notice: the dock answers every worker-routed handoff with the Claude working row, not a bridge panel',
     run() {
       const dock = source('src/components/NonApiAiDialog.jsx');
-      assert(dock.includes('<ClaudeWorkingRow />'), 'the dock renders the Claude working row');
-      assert(dock.indexOf('isMcpRoutedRequest && (') < dock.indexOf('<ClaudeWorkingRow />'), 'the row sits inside the worker-routed branch');
+      assert(dock.includes('<ClaudeTaskProgress requestId={activeRequest.requestId} />'), 'the dock renders live Claude progress');
+      assert(dock.indexOf('isMcpRoutedRequest && (') < dock.indexOf('<ClaudeTaskProgress requestId={activeRequest.requestId} />'), 'the row sits inside the worker-routed branch');
       assert(!/ChatGPT|handoffBridge|BridgeProgress/.test(dock), 'the dock names no ChatGPT or bridge component');
     },
   },

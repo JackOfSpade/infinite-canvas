@@ -34,6 +34,7 @@ import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } 
 import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, stopLocalApplicationJob, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
+import { reportClaudeUsageLimit, waitForClaudeUsage } from './ipc/claudePause.js';
 import { createClaudeApplicationRunner, registerClaudeApplicationRunnerHandlers } from './ipc/claudeApplicationRunner.js';
 import { registerApplicationGenerationGateHandlers } from './ipc/applicationGenerationGate.js';
 import { registerApplicationBundleWatchHandlers } from './ipc/applicationBundleWatch.js';
@@ -48,7 +49,7 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
-import { registerClaudeTaskStatusHandler, startClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
+import { registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
 import { beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
 import { startPracticeConnector, stopPracticeConnector } from './ipc/practiceConnector/index.js';
 import fs from 'fs';
@@ -1411,6 +1412,7 @@ if (!gotTheLock) {
       const claudeRunnerRoot = path.join(app.getPath('userData'), 'claude-application-runner');
       let claudeRunnerNotify = () => {};
       claudeApplicationRunner = createClaudeApplicationRunner({
+        usage: { report: reportClaudeUsageLimit, wait: waitForClaudeUsage },
         api: {
           getHandoff: getLocalApplicationHandoff,
           submitHandoff: submitLocalApplicationHandoff,
@@ -1445,8 +1447,10 @@ if (!gotTheLock) {
     registerSettingsHandlers();
     registerNonApiAiHandlers();
     // Every AI task is answered by the local Claude Code CLI.
-    startClaudeTaskWorker({ userData: app.getPath('userData'), nativeImage: electronPkg.nativeImage });
+    startClaudeTaskWorker({ userData: app.getPath('userData'), nativeImage: electronPkg.nativeImage, getAllWindows: () => BrowserWindow.getAllWindows() });
     registerClaudeTaskStatusHandler({ ipcMain: electronPkg.ipcMain });
+    registerClaudeTaskActivityHandler({ ipcMain: electronPkg.ipcMain });
+    registerClaudePauseHandlers({ ipcMain: electronPkg.ipcMain });
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by an external design source and replaced
     // wholesale from time to time; this never throws or blocks startup — its

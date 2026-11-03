@@ -1,5 +1,5 @@
 import { runInNewContext } from 'node:vm';
-import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, COMPENSATION_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
+import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, RESEARCH_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
 import { buildCompensationAssessmentListings, buildCompensationPersonalSalaryEvidence, compensationContextForSalary, compensationPersonalizationSignature, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -694,14 +694,14 @@ export default [{
 }, {
   name: 'classifyCompensationFitEligibility: the configured boundary is inclusive and an unscored job is not a low-scoring job',
   run: () => {
-    const opts = { minScore: COMPENSATION_MIN_FIT_SCORE, unscoredSentinel: 50 };
-    const justBelowThreshold = COMPENSATION_MIN_FIT_SCORE - 1;
+    const opts = { minScore: RESEARCH_MIN_FIT_SCORE, unscoredSentinel: 50 };
+    const justBelowThreshold = RESEARCH_MIN_FIT_SCORE - 1;
     // The configured boundary must be INCLUSIVE — an off-by-one here silently
     // denies the check to exactly the jobs sitting on the bar. The user asked
     // for "70% hiring fit or above", so this pins the constant itself too.
-    assert(COMPENSATION_MIN_FIT_SCORE === 70, `COMPENSATION_MIN_FIT_SCORE must be 70 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
-    assert(classifyCompensationFitEligibility(COMPENSATION_MIN_FIT_SCORE, opts) === 'eligible',
-      `${COMPENSATION_MIN_FIT_SCORE} must be eligible (threshold is inclusive)`);
+    assert(RESEARCH_MIN_FIT_SCORE === 70, `RESEARCH_MIN_FIT_SCORE must be 70 per the shared contract, got ${RESEARCH_MIN_FIT_SCORE}`);
+    assert(classifyCompensationFitEligibility(RESEARCH_MIN_FIT_SCORE, opts) === 'eligible',
+      `${RESEARCH_MIN_FIT_SCORE} must be eligible (threshold is inclusive)`);
     assert(classifyCompensationFitEligibility(justBelowThreshold, opts) === 'below-threshold',
       `${justBelowThreshold} must be below the threshold`);
     assert(classifyCompensationFitEligibility(100, opts) === 'eligible', '100 must be eligible');
@@ -717,9 +717,9 @@ export default [{
         `a non-numeric score must read as score-unavailable → ${String(missing)}`);
     }
     // With no sentinel configured, 50 is an ordinary score like any other.
-    assert(classifyCompensationFitEligibility(50, { minScore: COMPENSATION_MIN_FIT_SCORE }) === 'below-threshold',
+    assert(classifyCompensationFitEligibility(50, { minScore: RESEARCH_MIN_FIT_SCORE }) === 'below-threshold',
       'with no sentinel configured, 50 is an ordinary below-threshold score');
-    return { threshold: COMPENSATION_MIN_FIT_SCORE };
+    return { threshold: RESEARCH_MIN_FIT_SCORE };
   },
 }, {
   name: 'A JD-derived experience band produces a salary verdict from researched cash evidence',
@@ -1489,7 +1489,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   },
 }, {
   // Contracts A + C: the compensation-research fit gate. The gate's boundary
-  // check itself (rawScore >= COMPENSATION_MIN_FIT_SCORE, and the unscored-vs-
+  // check itself (rawScore >= RESEARCH_MIN_FIT_SCORE, and the unscored-vs-
   // known-low-score branch) lives inline in the non-exported async
   // researchCompensationAssessments (electron/ipc/jobs.js ~1939-1963) — it is
   // not exposed as an importable pure function, so it cannot be exercised
@@ -1500,8 +1500,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   // unscored skip retain distinct reason codes as well as distinct prose.
   name: 'Compensation fit gate: threshold constant and distinct skip shapes',
   run: () => {
-    const justBelowThreshold = COMPENSATION_MIN_FIT_SCORE - 1;
-    assert(COMPENSATION_MIN_FIT_SCORE === 70, `COMPENSATION_MIN_FIT_SCORE must be 70 per the shared contract, got ${COMPENSATION_MIN_FIT_SCORE}`);
+    const justBelowThreshold = RESEARCH_MIN_FIT_SCORE - 1;
+    assert(RESEARCH_MIN_FIT_SCORE === 70, `RESEARCH_MIN_FIT_SCORE must be 70 per the shared contract, got ${RESEARCH_MIN_FIT_SCORE}`);
 
     // Mirrors jobs.js's compensationFallback(job, 'below_fit_threshold', ...)
     // for a job that DOES have a real, parseable salary but scored below the
@@ -1512,7 +1512,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const knownLowScoreSkip = compensationAssessment({
       offer: knownLowOffer,
       reasonCode: 'below_fit_threshold',
-      justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored ${justBelowThreshold}.`,
+      justification: `The competitive-pay check is reserved for stronger matches (fit score ${RESEARCH_MIN_FIT_SCORE} or above); this job scored ${justBelowThreshold}.`,
     });
     assert(knownLowScoreSkip.status === 'not_evaluated' && knownLowScoreSkip.reasonCode === 'below_fit_threshold' && knownLowScoreSkip.offered?.max === 90000,
       'a known below-threshold score must be skipped with reasonCode below_fit_threshold while still carrying the real parsed offer');
@@ -1526,7 +1526,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const unknownScoreSkip = compensationAssessment({
       offer: knownLowOffer,
       reasonCode: 'fit_score_unavailable',
-      justification: `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
+      justification: `The competitive-pay check is reserved for stronger matches (fit score ${RESEARCH_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
     });
     assert(unknownScoreSkip.status === 'not_evaluated' && unknownScoreSkip.reasonCode === 'fit_score_unavailable', 'an unscored job must remain not evaluated with its own fit_score_unavailable reason code');
     const attemptedWithoutEvidence = compensationAssessment({ offer: knownLowOffer, researchAttempted: true });
@@ -1538,14 +1538,14 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
 
     // Pin this fallback-shape test to the same importable gate used by the
     // pipeline instead of restating the configured numeric boundary here.
-    assert(classifyCompensationFitEligibility(COMPENSATION_MIN_FIT_SCORE, {
-      minScore: COMPENSATION_MIN_FIT_SCORE,
+    assert(classifyCompensationFitEligibility(RESEARCH_MIN_FIT_SCORE, {
+      minScore: RESEARCH_MIN_FIT_SCORE,
     }) === 'eligible'
       && classifyCompensationFitEligibility(justBelowThreshold, {
-        minScore: COMPENSATION_MIN_FIT_SCORE,
+        minScore: RESEARCH_MIN_FIT_SCORE,
       }) === 'below-threshold',
     'the fit gate must be boundary-inclusive at the shared threshold and reject one point below it');
 
-    return { minFitScore: COMPENSATION_MIN_FIT_SCORE };
+    return { minFitScore: RESEARCH_MIN_FIT_SCORE };
   },
 }];

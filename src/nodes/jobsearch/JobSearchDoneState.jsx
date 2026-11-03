@@ -1,3 +1,4 @@
+import { CopyBriefButton } from './CopyBriefButton';
 import React, { useId, useState } from 'react';
 import { LiveCareerCompilationProgress } from '../../components/CareerCompilationProgress';
 import { RefreshCw, LayoutGrid } from 'lucide-react';
@@ -419,7 +420,7 @@ export function JobSearchDoneState({
               onClick={onReanalyze}
               onPointerDown={(e) => e.stopPropagation()}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 rounded-full bg-violet-500/15 text-violet-300/90 hover:bg-violet-500/25 text-[10px] transition-colors border border-violet-500/20"
-              title="Re-evaluate saved jobs with this search’s saved preferences and hiring fit; does not search or scrape again"
+              title="Re-check saved jobs against this search’s brief and score only newly passing jobs; does not search or scrape again"
             >
               <RefreshCw size={9} />
               Re-evaluate Saved Jobs
@@ -512,14 +513,18 @@ export function JobSearchDoneState({
           onPointerDown={(e) => e.stopPropagation()}
         >
           <summary className="cursor-pointer text-[9px] text-white/45">
-            Search setup{settingsFrozen ? ' · brief editable' : ''}
+            Search setup{settingsFrozen && !managedByJobBoard ? ' · brief editable' : ''}
           </summary>
           <div className="mt-1.5 flex flex-col items-stretch gap-1.5">
           <label className="flex flex-col gap-1 text-[10px] text-white/40">
-            <span>Search Brief <span className="text-white/25">(optional)</span></span>
+            <span className="flex items-center justify-between gap-2">
+              <span>Search Brief <span className="text-white/25">(optional)</span></span>
+              <CopyBriefButton brief={jobPreferences} />
+            </span>
             <textarea
               data-native-undo="true"
               value={jobPreferences}
+              readOnly={managedByJobBoard}
               onChange={(e) => setJobPreferences?.(e.target.value)}
               rows={3}
               maxLength={4000}
@@ -528,7 +533,9 @@ export function JobSearchDoneState({
               className="w-full resize-y px-2 bg-white/5 border border-white/10 rounded text-white/70 text-[10px] py-1 focus:outline-none focus:border-purple-400/50 placeholder:text-white/25 leading-snug disabled:cursor-not-allowed disabled:opacity-50"
             />
             <span id={preferencesHelpId} className="text-[9px] leading-snug text-white/25">
-              {settingsFrozen
+              {managedByJobBoard
+                ? 'This brief set up the scan. To change preferences on these jobs, use Preferences for these jobs on the Job Board.'
+                : settingsFrozen
                 ? 'You can revise this brief, then re-evaluate saved jobs to regenerate roles and assessments without scraping again. Other search settings stay fixed for re-scan consistency.'
                 : 'Describe roles, priorities, and deal-breakers. Use “must”, “only”, and “no” for strict requirements.'}
             </span>

@@ -154,7 +154,7 @@ export {
   priceSynthesisBatchFits,
   priceSynthesisBatchMaxComps,
   priceSynthesisBatchMaxTokens,
-  COMPENSATION_MIN_FIT_SCORE,
+  RESEARCH_MIN_FIT_SCORE,
 } from '../electron/ipc/resultCaps.js';
 export { JOB_COLLECTION_LIMITS_DEFAULT, JOB_COLLECTION_LIMITS_MAX, JOB_COLLECTION_AUTO_LIMITS, JOB_COLLECTION_PAGE_CEILING, normalizeJobCollectionLimits, isUnlimitedPages, isAutoJobCollection, resolveJobsPerPlatform, resolvePageCeiling, resolveBrowserPageBudgets, describeJobCollectionLimits } from '../src/utils/jobCollectionLimits.js';
 export { normalizeEnabledJobSourceIds, getEnabledJobSourceIds, getJobPlatformSelectionStatus, getRunnableJobSourceIds } from '../src/utils/jobPlatformSelection.js';

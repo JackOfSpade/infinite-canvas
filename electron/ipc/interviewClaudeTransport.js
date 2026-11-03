@@ -12,6 +12,8 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { claudeChildEnv, resolveClaudeBinary, runClaudeStage } from './claudeApplicationRunner.js';
+import { reportClaudeUsageLimit, trackClaudeCall, waitForClaudeRelease, waitForClaudeUsage } from './claudePause.js';
+import { standaloneClaudeActivity } from './claudeTaskActivity.js';
 import { careerWritingStageProfile } from './careerWritingCore.js';
 
 // Research is the only stage allowed tools, and only these read-only web tools.
@@ -57,6 +59,11 @@ function rejectionPrompt(error) {
   return `YOUR PREVIOUS REPLY WAS REJECTED BY THE APP. The app's checks returned the text below verbatim. Reply again with the complete corrected answer in the same format as before; change only what the text names.\n${message}`;
 }
 
+function stepLabel(task) {
+  const words = String(task || 'Claude call').replace(/^interview-/u, '').replace(/-/gu, ' ');
+  return `${words[0].toUpperCase()}${words.slice(1)}`;
+}
+
 export function createInterviewClaudeTransport({
   runStage = runClaudeStage,
   resolveBinary = () => resolveClaudeBinary({ env: process.env, homedir: os.homedir() }),
@@ -74,17 +81,38 @@ export function createInterviewClaudeTransport({
     return bound;
   };
 
-  async function call(prompt, opts = {}, { json }) {
+  async function call(prompt, opts = {}, { json, scope = null }) {
     const { signal, task, responseSchema, responseValidator, claudeStage } = opts;
     const stage = interviewClaudeStage(task, claudeStage);
     const profile = careerWritingStageProfile(stage);
     const tools = stage === 'qa-research' ? INTERVIEW_RESEARCH_TOOLS : '';
-    const sessionId = crypto.randomUUID();
+    let sessionId = crypto.randomUUID();
     let text = `${prompt}${json ? schemaInstruction(responseSchema) : ''}`;
     let lastError = null;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const started = Date.now();
-      const reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: attempt > 0, tools });
+      if (scope) {
+        await waitForClaudeUsage(signal);
+        await waitForClaudeRelease(scope.key, signal);
+        standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: profile.model, effort: profile.effort, countRound: false });
+        standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+      }
+      let reply;
+      const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
+      try {
+        reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: attempt > 0, tools,
+          ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
+      } catch (error) {
+        if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;
+        // Earlier stages are saved; this one waits for the reset and asks again.
+        reportClaudeUsageLimit({ resetsAt: standaloneClaudeActivity.view(scope.key)?.rateLimitResetsAt ?? null });
+        standaloneClaudeActivity.note(scope.key, 'Claude usage limit reached');
+        standaloneClaudeActivity.released(scope.key);
+        if (attempt === 0) sessionId = crypto.randomUUID();
+        attempt -= 1;
+        continue;
+      } finally { callEnded(); }
+      if (scope) standaloneClaudeActivity.checking(scope.key);
       onStage({ task, stage, attempt, model: reply?.model, durationMs: Date.now() - started });
       try {
         const value = json ? firstJsonObject(reply?.text) : String(reply?.text ?? '');
@@ -106,5 +134,10 @@ export function createInterviewClaudeTransport({
   return Object.freeze({
     callText: (prompt, opts) => call(prompt, opts, { json: true }),
     callRaw: (prompt, opts) => call(prompt, opts, { json: !!opts?.responseSchema }),
+    // The same calls, reporting their live steps under one panel's key.
+    withActivity: (key, nodeId = null) => ({
+      callText: (prompt, opts) => call(prompt, opts, { json: true, scope: { key, nodeId } }),
+      callRaw: (prompt, opts) => call(prompt, opts, { json: !!opts?.responseSchema, scope: { key, nodeId } }),
+    }),
   });
 }

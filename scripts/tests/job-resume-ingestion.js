@@ -693,12 +693,25 @@ export default [
       const finalizationStart = source.indexOf("jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finalizing-search'");
       const gatheredStage = source.indexOf("await setJobRunStage(canvasFilePath, 'gathered'", finalizationStart);
       const finalization = source.slice(finalizationStart, gatheredStage);
-      const officialResolution = source.indexOf('const officialResolution = await resolveScoreSafePostings(kept, {');
+      const officialResolution = source.indexOf('const officialResolution = await settleScrapedRowsForScoring(kept, {');
       const finalCheckpoint = source.indexOf('await recordSourcePage(canvasFilePath, {', finalizationStart);
       assert(officialResolution > source.indexOf('kept = finalDeduped;')
         && finalCheckpoint > officialResolution && gatheredStage > finalCheckpoint
-        && source.includes('const officialResolutionChanged = officialDedupDropped > 0'),
-      'legacy gathered rows must resolve after dedup and checkpoint changed official metadata before the gathered stage advances');
+        && source.includes('const officialResolutionChanged = officialDedupDropped > 0 || boardClosedDropped > 0'),
+      'legacy gathered rows settle after dedup and checkpoint changed listing metadata before the gathered stage advances');
+      // Search paths no longer research: a resumed gathered row must not trigger
+      // an official-posting lookup, so from the settlement call to the gathered
+      // stamp nothing resolves postings and no lookup progress is published.
+      const settleWindow = source.slice(officialResolution, gatheredStage);
+      const settleBody = source.slice(source.indexOf('const settleScrapedRowsForScoring = async'),
+        source.indexOf('void pruneStaleUnsavedAnalysisArtifacts();'));
+      assert(!source.includes('resolveScoreSafePostings')
+        && !settleWindow.includes('resolveOfficialPostings')
+        && !settleWindow.includes('Finding official postings')
+        && settleBody.length > 0
+        && !settleBody.includes('resolveOfficialPostings')
+        && !settleBody.includes('Finding official postings'),
+      'legacy gathered rows must no longer resolve official postings at resume: finalization only settles board-closed state without research');
       assert(finalization.includes('const finalScoreSafeBySource = new Map()')
         && finalization.includes('if (!resumeGatheredOnly || officialResolutionChanged)')
         && finalization.includes('await recordSourcePage(canvasFilePath, {')

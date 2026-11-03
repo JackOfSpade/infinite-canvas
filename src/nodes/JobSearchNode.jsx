@@ -20,6 +20,7 @@ import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSou
 // gather, without over-collapsing distinct same-title/company reqs in
 // different cities. See the policy note in jobIdentity.js.
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../utils/jobIdentity';
+import { isResearchEligible } from '../../electron/ipc/researchGate.js';
 import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
@@ -81,7 +82,9 @@ import {
 import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
 import { exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../utils/jobBoardRecoveryAdmission';
 import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
-import { buildJobHubCareerOnlyClearPatch, buildJobHubScrapeClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
+import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../utils/jobSearchPreferenceReevaluation';
+import { CopyBriefButton } from './jobsearch/CopyBriefButton';
+import { buildJobHubCareerOnlyClearPatch, buildJobHubScrapeClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability, retryableCancelledJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
 import { pausedCareerImportCompilation, restartCareerImportCompilationPatch, approveCareerImportCompilation, beginCareerImportCompilation, careerCompileResumeExplanation, careerImportCompilationAdmission, careerResumeBannerStatus, careerImportCompilationMatches, careerResumeInputPaths, currentApprovedCareerImportSnapshot, failCareerImportCompilation, resumableCareerImportCompilation } from '../utils/jobCareerCompilationReceipt';
@@ -11764,6 +11767,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const requestedFingerprint = reanalysisInputFingerprint(requestedData);
     const existingScoredJobs = Array.isArray(requestedData.scoredJobs) ? requestedData.scoredJobs : [];
     const scoringOnlyRepair = hasLegacyPageScoring(requestedData);
+    const keepCurrentScores = !scoringOnlyRepair && savedJobsReevaluationKeepsScores(requestedData);
     // The pool must be a SUPERSET of what the hub is displaying, never an
     // alternative to it. `finishScoringAndSpawn` below REPLACES `scoredJobs`
     // with whatever this analyses, so any path that leaves the pool holding a
@@ -11800,17 +11804,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // confidence, fitAssessment, rawScore, adjustedScore, adjustments, or
     // calibration would make that placeholder look like the old assessment.
     // Listing and compensation evidence intentionally remain intact.
-    const jobsToReanalyze = (scoringOnlyRepair ? existingScoredJobs : savedCandidatePool).map(job => {
+    const listingWithoutScore = (job, extraFields = []) => {
       const listing = { ...(job || {}) };
       [
         'matchScore', 'reasoning', 'careerDirection', 'requirementAssessments',
         'materialGaps', 'strengths', 'experienceAssessment', 'confidence',
         'fitAssessment', 'rawScore', 'adjustedScore', 'adjustments', 'calibration',
         'scoreStatus',
-        ...(!scoringOnlyRepair ? ['preferenceAssessment'] : []),
+        ...extraFields,
       ].forEach(field => delete listing[field]);
       return listing;
-    });
+    };
+    const jobsToReanalyze = (scoringOnlyRepair ? existingScoredJobs : savedCandidatePool).map(job => listingWithoutScore(job, scoringOnlyRepair ? [] : ['preferenceAssessment']));
+    const jobsWithStoredVerdicts = keepCurrentScores ? savedCandidatePool.map(job => listingWithoutScore(job)) : [];
     const admissionToken = Symbol(`reanalyze-saved-jobs:${id}`);
     if (!boardManaged) localQueueAdmissionRef.current = admissionToken;
     let processingToken = null;
@@ -11980,13 +11986,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // future re-scans use the new brief too, but never invoke a provider or
       // touch seen-history here. resolveSearchRoles also handles an empty
       // brief without an AI call, producing the correct empty role list.
-      let jobPreferencesInterpretation = scoringOnlyRepair
-        ? (runData.searchBriefPlan || runData.jobPreferencePlan || runData.jobPreferencesInterpretation || null)
-        : null;
+      // With the brief unchanged, each job's stored rule-by-rule results still
+      // answer the same questions, so only the removal rule runs again.
+      const savedRolePlan = runData.searchBriefPlan || runData.jobPreferencePlan || runData.jobPreferencesInterpretation || null;
+      const reuseStoredVerdicts = keepCurrentScores
+        && !!savedRolePlan
+        && roleLockMatchesBrief(runData, admittedReanalysisCareerSnapshotId)
+        && careerSnapshotBindingMatches({ careerSnapshotId: runData.preferenceCareerSnapshotId }, admittedReanalysisCareerSnapshotId)
+        && hasStoredPreferenceVerdicts(jobsWithStoredVerdicts, savedRolePlan)
+        && typeof window.electronAPI?.reapplyJobPreferences === 'function';
+      let jobPreferencesInterpretation = scoringOnlyRepair || reuseStoredVerdicts ? savedRolePlan : null;
       let refreshedRoleLockPatch = null;
-      if (scoringOnlyRepair) {
-        // This fixes assessment logic only. Keep the exact scored job selection
-        // and its saved preference decisions for a controlled comparison.
+      if (scoringOnlyRepair || reuseStoredVerdicts) {
+        // A scoring repair fixes assessment logic only: keep the exact scored job
+        // selection and its saved preference decisions for a controlled comparison.
       } else if (window.electronAPI?.resolveSearchRoles) {
         updateGlobal(currentId, () => cancelled() ? null : { hubState: 'interpreting-preferences' });
         const resolveResult = await window.electronAPI.resolveSearchRoles({
@@ -12083,7 +12096,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         evaluation: runData.preferenceEvaluation || null,
         matchedCount: runData.preferenceMatchedCount,
         filteredCount: runData.preferenceFilteredCount,
-      } : await evaluatePreferencesForRun({
+      } : reuseStoredVerdicts ? await (async () => {
+        const reapplied = await window.electronAPI.reapplyJobPreferences({ jobs: jobsWithStoredVerdicts, preferencePlan: savedRolePlan });
+        if (reapplied?.success === false) throw new Error(reapplied.error || 'Failed to re-apply the saved preference results');
+        return normalizePreferenceEvaluation(reapplied, jobsWithStoredVerdicts);
+      })() : await evaluatePreferencesForRun({
         jobs: jobsToReanalyze,
         profile: runData.resumeProfile,
         careerData: runData.careerData,
@@ -12098,9 +12115,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
       if (cancelled()) return searchRunOutcome('cancelled');
       if (!reanalysisSnapshotStillCurrent()) return searchRunOutcome('superseded');
-      if (preferenceResult.jobs.length === 0) {
+      const { jobsToScore, keptScoredJobs } = keepCurrentScores
+        ? splitKeptScores(preferenceResult.jobs, existingScoredJobs, admittedReanalysisCareerSnapshotId)
+        : { jobsToScore: preferenceResult.jobs, keptScoredJobs: [] };
+      const preferenceChangeToast = () => {
+        if (!keepCurrentScores || cancelled()) return;
+        addToast({
+          title: 'Saved Jobs Re-evaluated',
+          description: `${jobsToScore.length} newly passing job${jobsToScore.length === 1 ? '' : 's'} scored, ${keptScoredJobs.length} existing score${keptScoredJobs.length === 1 ? '' : 's'} kept, ${preferenceResult.filteredCount ?? 0} removed by your preferences.`,
+          type: 'success',
+        });
+      };
+      if (jobsToScore.length === 0) {
         // Every completed re-analysis deserves a recovery generation, even
-        // when the revised brief filters every saved row before scoring. Save
+        // when the revised brief leaves nothing to score. Save
         // the evaluated candidate pool without manufacturing a score handoff;
         // otherwise this useful new brief/evaluation would be absent from the
         // three-generation backup rotation.
@@ -12145,13 +12173,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         }
         const emptyReanalysisOutcome = await finishScoringAndSpawn({
           jobRunId: reanalysisRunId,
-          scoredJobs: [],
+          scoredJobs: mergeScoredJobs([], keptScoredJobs),
           careerSnapshotId: normalizedJobCareerSnapshotId(runData.careerSnapshotId),
           gatheredCount: runData.gatheredCount,
           // `scrapedCount` is the score-ready stage of the current funnel.
           // Keep the original found total, but an all-filtered re-evaluation
           // has zero current score-ready jobs.
-          scrapedCount: 0,
+          scrapedCount: keptScoredJobs.length,
           scrapeWarnings: Array.isArray(runData.scrapeWarnings) ? runData.scrapeWarnings : [],
           // Re-evaluation only changes the score pass. Keep collection facts
           // from the completed search rather than clearing its source caveats.
@@ -12160,7 +12188,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           preferenceFilteredCount: preferenceResult.filteredCount,
           preferenceEvaluation: preferenceResult.evaluation,
           preferenceCandidatePool: preferenceResult.candidatePool,
-          resultDisposition: 'preference-filtered',
+          resultDisposition: keptScoredJobs.length > 0 ? 'scored' : 'preference-filtered',
           cancelled,
           analysisOperation: reanalysisOperation,
           canCommit: () => !cancelled() && canCommitAnalysisOperation(reanalysisOperation),
@@ -12174,6 +12202,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             : null
         ));
         await completeManualAiRun(manualAiRunId);
+        preferenceChangeToast();
         return reanalysisCompletedOutcome();
       }
       setScoringProgress(null);
@@ -12181,7 +12210,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       updateGlobal(currentId, (node) => {
         if (cancelled() || !careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, admittedReanalysisCareerSnapshotId)) return null;
         reanalysisScoringStateAccepted = true;
-        return { hubState: 'scoring', jobCount: preferenceResult.jobs.length };
+        return { hubState: 'scoring', jobCount: jobsToScore.length };
       });
       if (!await waitForJobRendererCommit({
         isCurrent: () => !cancelled() && reanalysisSnapshotStillCurrent(),
@@ -12189,7 +12218,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         waitForFrame: waitForRendererCommitFrame,
       })) return searchRunOutcome('superseded', { error: 'The saved scoring state was not published for the current operation.' });
       const scoreResult = await window.electronAPI.scoreJobs({
-        jobs: preferenceResult.jobs,
+        jobs: jobsToScore,
         operationAuthority: operationAuthorityFor(reanalysisOperation),
         profile: runData.resumeProfile,
         careerData: runData.careerData,
@@ -12236,7 +12265,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
       const scoredReanalysisOutcome = await finishScoringAndSpawn({
         jobRunId: reanalysisRunId,
-        scoredJobs: scoreResult.scoredJobs,
+        scoredJobs: mergeScoredJobs(scoreResult.scoredJobs, keptScoredJobs),
         careerSnapshotId: normalizedJobCareerSnapshotId(runData.careerSnapshotId),
         gatheredCount: runData.gatheredCount,
         // Re-analysis does not collect anything, so gatheredCount remains the
@@ -12276,7 +12305,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       await completeManualAiRun(manualAiRunId);
       if (!reanalysisSnapshotStillCurrent()) return searchRunOutcome('superseded');
 
-      if (!cancelled()) {
+      if (keepCurrentScores) preferenceChangeToast();
+      else if (!cancelled()) {
         addToast({
           title: scoringOnlyRepair ? 'Saved Job Scores Repaired' : 'Saved Jobs Re-evaluated',
           description: scoringOnlyRepair
@@ -14422,7 +14452,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const careerCompilationUnstarted = hasCareerIdentity && !data.careerImportCompilation
     && careerResumeInputPaths(data).length > 0;
   const officialLookupsIncomplete = (Array.isArray(data.scoredJobs) ? data.scoredJobs : [])
-    .filter(job => job?.officialPosting && officialPostingLookupStatus(job.officialPosting).retryable).length;
+    .filter(job => job?.officialPosting && isResearchEligible(job) && officialPostingLookupStatus(job.officialPosting).retryable).length;
 
 
   const banner = (
@@ -14443,7 +14473,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       {manualAiRecoveryBanner}
       {officialLookupsIncomplete > 0 && (
         <div className="m-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-100/80" role="status">
-          {officialLookupsIncomplete} official {officialLookupsIncomplete === 1 ? 'lookup is' : 'lookups are'} incomplete. Continue retries these before scoring.
+          {officialLookupsIncomplete} official {officialLookupsIncomplete === 1 ? 'lookup is' : 'lookups are'} incomplete. Combine on a Job Board retries these.
         </div>
       )}
       {data.terminalFinalizationRecovery && !data.errorMessage ? (
@@ -14641,7 +14671,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 onPointerDown={(e) => e.stopPropagation()}
               >
                 <label className="flex flex-col gap-1">
-                  <span>Search Brief <span className="text-white/25">(optional)</span></span>
+                  <span className="flex items-center justify-between gap-2">
+                    <span>Search Brief <span className="text-white/25">(optional)</span></span>
+                    <CopyBriefButton brief={jobPreferences} />
+                  </span>
                   <textarea
                     data-native-undo="true"
                     value={jobPreferences}
@@ -14752,6 +14785,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         {isProcessing && (
           <JobSearchProcessingState
             nodeId={id}
+            moduleLabel={[data.resolvedRoles?.[0] || data.pinnedTitles?.[0], data.preferredLocation || data.canonicalLocation].filter(Boolean).join(' · ') || 'Job Search'}
             careerRunId={data.careerImportCompilation?.manualAiRunId || null}
             statusLabel={statusLabel}
             hubState={hubState}

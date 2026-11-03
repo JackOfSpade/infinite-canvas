@@ -106,6 +106,20 @@ export default [
     },
   },
   {
+    name: 'Board research counts survive the taxonomy call that follows them in one Combine',
+    async run() {
+      __resetJobsTelemetryForTests();
+      const owner = sender(8105);
+      __registerJobsHandlersForTests({ runBoardTaxonomy: async rows => taxonomy(rows) });
+      assert.equal((await invoke('settle-board-research', owner, { nodeId: 'board-a', jobs: jobs(2), officialLookups: 0 })).success, true);
+      assert.equal((await invoke('bucket-jobs', owner, { nodeId: 'board-a', jobs: jobs(2) })).success, true);
+      const [record] = report(owner, ['board-a']);
+      assert.equal(record.research.total, 2);
+      assert.equal(record.research.skippedBelowFit, 2);
+      assert.equal(record.bucketing.input, 2);
+    },
+  },
+  {
     name: 'Board compensation and history handlers remain reportable without a fresh source Search',
     async run() {
       __resetJobsTelemetryForTests();

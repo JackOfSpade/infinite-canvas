@@ -283,8 +283,9 @@ export default [
         && !Object.hasOwn(hints, 'batchTotal')
         && !Object.hasOwn(hints, 'progressScopeId')
         && !Object.hasOwn(hints, 'progressUnitId')
-        && result.acceptedJobs.length === trailingRows
-        && result.filteredJobs.length === JOB_PREFERENCE_RESEARCH_MAX_ITEMS,
+        && result.acceptedJobs.length === trailingRows + JOB_PREFERENCE_RESEARCH_MAX_ITEMS
+        && result.filteredJobs.length === 0
+        && result.counts.strictUnverified === JOB_PREFERENCE_RESEARCH_MAX_ITEMS,
       `a full-batch raw fallback must produce one ${trailingRows}-row assessment without impossible overlapping totals, got ${JSON.stringify({ assessmentHints, accepted: result.acceptedJobs.length, filtered: result.filteredJobs.length })}`);
       return { assessmentItems: hints.itemCount, accepted: result.acceptedJobs.length, filtered: result.filteredJobs.length };
     },

@@ -1,3 +1,4 @@
+import { classifyResearchEligibility, RESEARCH_ELIGIBILITY } from '../../electron/ipc/researchGate.js';
 import {
   normalizeOfficialPosting, officialPostingLookupStatus, officialResearchSettled,
   OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL,
@@ -6,7 +7,7 @@ import {
 
 export const OFFICIAL_REPORT_MAX_NODES = 20_000;
 export const OFFICIAL_REPORT_MAX_CARDS = 1000;
-export const OFFICIAL_REPORT_STATES = Object.freeze(['verified', 'not-found', 'ambiguous', 'closed', 'incomplete', 'unchecked']);
+export const OFFICIAL_REPORT_STATES = Object.freeze(['verified', 'not-found', 'ambiguous', 'closed', 'incomplete', 'unchecked', 'not-researched']);
 export const OFFICIAL_REPORT_FETCH_CODES = Object.freeze(['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']);
 export const OFFICIAL_REPORT_PROOFS = Object.freeze(['complete', 'input-only', 'absent']);
 
@@ -18,7 +19,8 @@ export function sanitizeOfficialPostingReportRow(value) {
     && OFFICIAL_POSTING_OUTCOMES.includes(value.outcome) && OFFICIAL_REPORT_STATES.includes(value.state)
     && typeof value.retryable === 'boolean' && typeof value.settled === 'boolean';
   if (!valid) return { id, record: value?.record === 'absent' ? 'absent' : 'invalid',
-    level: 'none', outcome: 'none', state: 'unchecked', retryable: true, settled: false,
+    level: 'none', outcome: 'none', ...(value?.record === 'absent' && value.state === 'not-researched'
+      ? { state: 'not-researched', retryable: false } : { state: 'unchecked', retryable: true }), settled: false,
     trail: [], fetchFailures: [], semanticProof: 'absent' };
   const trail = [...new Set((Array.isArray(value.trail) ? value.trail.slice(0, 32) : [])
     .filter(code => OFFICIAL_POSTING_TRAIL.includes(code)))];
@@ -53,10 +55,13 @@ export function collectOfficialPostingReport(nodes, { flat = false } = {}) {
       const raw = node.data?.officialPosting;
       const posting = normalizeOfficialPosting(raw);
       const status = officialPostingLookupStatus(posting);
+      // Below the fit threshold, no automatic lookup is a decision rather than a failed one.
+      const notResearched = raw == null && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible
+        && (typeof node.data?.matchScore === 'number' || typeof node.data?.scoreStatus === 'string');
       rows.push(sanitizeOfficialPostingReportRow({ id: node.id,
         record: posting ? 'valid' : raw == null ? 'absent' : 'invalid',
-        level: posting?.level, outcome: posting?.outcome, state: status.state,
-        retryable: status.retryable, settled: officialResearchSettled(posting),
+        level: posting?.level, outcome: posting?.outcome, state: notResearched ? 'not-researched' : status.state,
+        retryable: notResearched ? false : status.retryable, settled: officialResearchSettled(posting),
         trail: posting?.trail, fetchFailures: posting?.fetchFailures,
         semanticProof: posting?.semanticMatch?.sourceHash ? 'complete' : posting?.semanticMatch ? 'input-only' : 'absent',
       }));

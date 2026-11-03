@@ -155,10 +155,10 @@ export default [
     },
   },
   {
-    name: 'Official posting consumers: location confirmations retain raw pair IDs and the complete official middle through context splits',
+    name: 'Official posting consumers: location confirmations retain raw pair IDs and the complete official middle through context splits, and only pairs with an eligible row are confirmed',
     async run() {
       const rawDescription = 'The platform role builds reliable service infrastructure and mentors engineers across production operations. '.repeat(12);
-      const jobs = [0, 1, 2].map(index => ({ ...rawJob(), location: `Raw city ${index}`,
+      const jobs = [0, 1, 2].map(index => ({ ...rawJob(), location: `Raw city ${index}`, matchScore: index === 2 ? 40 : 88,
         description: `${rawDescription} Raw distinct variant ${index}.`, url: `https://board.example.test/${index}` }));
       const before = structuredClone(jobs);
       const middle = 'OFFICIAL_MIDDLE_REQUIREMENT';
@@ -181,6 +181,27 @@ export default [
       assert.deepEqual(checked, [3, 2, 1, 1, 1]); assert.deepEqual(issued, expected);
       assert.deepEqual(result.confirmedPairIds, expected); assert.equal(result.batchCount, 3);
       assert.deepEqual(jobs, before);
+      // Only the pair between the two below-threshold rows is left out when a single row is eligible.
+      const oneEligible = jobs.map((job, index) => ({ ...job, matchScore: index === 0 ? 88 : 40 }));
+      const pairs = findSimilarLocationCandidates(oneEligible);
+      const withEligible = pairs.filter(pair => pair.leftIndex === 0 || pair.rightIndex === 0).map(pair => pair.id);
+      assert.equal(pairs.length, 3); assert.equal(withEligible.length, 2);
+      const asked = [];
+      const partial = await confirmSimilarJobLocationPairs(oneEligible, {
+        postingJob: job => shadows[oneEligible.indexOf(job)], checkFits: async () => ({ fits: true }),
+        callText: async (prompt, options) => {
+          const confirmations = [...prompt.matchAll(/"pairId":"([^"]+)"/gu)].map(match => ({ pairId: match[1], sameJob: true }));
+          const value = { confirmations }; options.responseValidator(value); asked.push(...confirmations.map(row => row.pairId)); return value;
+        },
+      });
+      assert.deepEqual(asked, withEligible); assert.deepEqual(partial.confirmedPairIds, withEligible);
+      // With no eligible row at all, no AI call is made and nothing is confirmed.
+      const noneEligible = jobs.map(job => ({ ...job, matchScore: 40 }));
+      const none = await confirmSimilarJobLocationPairs(noneEligible, {
+        postingJob: job => job, checkFits: async () => { throw new Error('No fit check expected'); },
+        callText: () => { throw new Error('Below-threshold pairs must not be confirmed'); },
+      });
+      assert.deepEqual(none, { candidateCount: 0, batchCount: 0, confirmedPairIds: [] });
       await assert.rejects(() => confirmSimilarJobLocationPairs(jobs.slice(0, 2), {
         postingJob: job => shadows[jobs.indexOf(job)], checkFits: async () => ({ fits: false }),
         callText: () => { throw new Error('Oversized pair was dispatched'); },

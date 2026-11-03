@@ -58,7 +58,7 @@ import { clearBrowserSession, getBrowserSessionResetBlocker, resetPlatformSessio
 import { buildPhysicalCardWalkPlan, scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions, preloadResolvedJobList } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, markManualSolveRequired, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow, openNativeIndeedChallengeWindow } from './browser/authWindows.js';
-import { jobScoringBatchSize, JOB_SCORE_CAP, COMPENSATION_MIN_FIT_SCORE, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT } from './resultCaps.js';
+import { jobScoringBatchSize, JOB_SCORE_CAP, RESEARCH_MIN_FIT_SCORE, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT } from './resultCaps.js';
 import { logger } from '../logger.js';
 import {
   ZIPRECRUITER_EXTRACTOR, ZIPRECRUITER_CONFIG,
@@ -128,18 +128,19 @@ import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, re
 import { parseGuaranteedCashOffer, compensationAssessment, mergeCompetitiveRanges, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource, classifyCompensationLocationGap } from './jobCompensation.js';
 import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
-import { getOfficialPostingView, resolveOfficialPostings, officialPostingDedup, partitionOfficialPostingRows, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
+import { getOfficialPostingView, officialPostingDedup, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialPostingLookupStatus } from './officialPostingFields.js';
 import { bumpListingLivenessCount, listingLivenessTelemetryBlock, mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
-import { listingEvidenceKey, officialExpiryCandidatesConfirmedClosed, readListingEvidence } from './listingLivenessStore.js';
+import { listingEvidenceKey, readListingEvidence } from './listingLivenessStore.js';
 import { createListingLivenessSearchSession } from './listingLivenessSearch.js';
 import { recheckPendingListings } from './listingLivenessRecheck.js';
+import { classifyResearchEligibility, isResearchEligible, RESEARCH_ELIGIBILITY, summarizeResearchEligibility } from './researchGate.js';
 import { createListingLivenessProbe } from './listingLivenessProbe.js';
 import { carryListingAlternates, collectListingAlternates, restoreListingAlternates } from './listingLivenessAlternates.js';
 import { getListingLivenessCalibrationStore } from './listingLivenessCalibration.js';
 import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
-import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
+import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 
@@ -4352,6 +4353,152 @@ function buildCalibratedScore(score, fitAssessment) {
  * is intentionally exported as a pure seam: semantic validation failures must
  * count as visible placeholders, not quietly retain the provider's raw score.
  */
+/**
+ * Rescores, once, the eligible rows whose official text materially differs from
+ * the scrape they were scored on. Elsewhere a second score would only re-roll
+ * noise: repeat scoring of identical text moved scores about as much as the
+ * official text did. A failed rescore keeps the original score and is counted.
+ */
+/** One career record's scoring pass, outside any Search snapshot. A row with no valid score comes back in `failed`. */
+async function scoreRowsOnCareerRecord({ jobs, careerSnapshotId, nodeId, signal, callScore, runGapReview, readPinned, attemptKind }) {
+  const pinned = await readPinned({ careerSnapshotId });
+  const postingJob = await officialPostingConsumerMap(jobs);
+  const { scoringBatches, slimBatch, cachedPrefix, snapshot } = buildJobAnalysisSnapshot({ jobs, postingJob, profile: pinned.profile,
+    careerData: pinned.careerData, careerSnapshotId, approvedScoringSnapshot: pinned.pinned, nodeId });
+  const prefix = materializeScoringCareerEvidence(cachedPrefix, snapshot.careerData);
+  const candidate = { candidateText: snapshot.careerData, candidateRoles: Array.isArray(pinned.profile?.workHistory) ? pinned.profile.workHistory : [] };
+  const updates = [];
+  const failed = [];
+  for (const [position, batch] of scoringBatches.entries()) {
+    const parts = buildJobScoringRequestParts(`JOBS TO SCORE (array, indexed):\n${JSON.stringify(slimBatch(batch))}`, prefix, scoringBatches.length);
+    const response = await callScore(parts.prompt, { signal, task: 'job-scoring', cachedPrefix: parts.cachedPrefix, responseSchema: JOB_SCORING_SCHEMA,
+      hints: { itemCount: batch.length, batch: position + 1, batchTotal: scoringBatches.length, attemptKind },
+      responseValidator: value => validateJobScoringSubmission(value, batch.map(postingJob), { ...candidate, requireComplete: true }),
+      retryOnTruncation: false });
+    const aligned = planPartialScoreRecovery(response?.scores, batch.length).alignedScores || [];
+    const { scores } = prepareLiveScoringResults(aligned, batch.map(postingJob), candidate);
+    batch.forEach((job, row) => { if (scores[row]) updates.push({ job, score: scores[row] }); else failed.push(job); });
+  }
+  const scored = updates.map(({ job, score }) => buildScoredJob(job, { ...score,
+    scoringEvidenceReceipt: { ...score.scoringEvidenceReceipt, contract: JOB_SCORING_CONTRACT, careerSnapshotId, mode: 'complete-career-record' },
+  }, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull: false }));
+  await runGapReviewPass(scored, { postingJob, candidateText: candidate.candidateText, signal, runGapReview });
+  return { scored, sources: updates.map(({ job }) => job), failed };
+}
+
+async function rescoreMaterialOfficialText({ rows, indexes, counts, nodeId, signal, callScore, runGapReview, readPinned }) {
+  const targets = indexes.filter(index => {
+    const posting = normalizeOfficialPosting(rows[index]?.officialPosting);
+    return posting?.contentHash && posting.trail?.includes('material-jd-change')
+      && rows[index].officialRescore?.contentHash !== posting.contentHash;
+  });
+  const bySnapshot = new Map();
+  for (const index of targets) {
+    const id = normalizeCareerSnapshotIdentifier(rows[index].scoringEvidenceReceipt?.careerSnapshotId || rows[index].careerSnapshotId);
+    if (!id) { counts.rescoreFailed += 1; continue; }
+    if (!bySnapshot.has(id)) bySnapshot.set(id, []);
+    bySnapshot.get(id).push(index);
+  }
+  for (const [careerSnapshotId, group] of bySnapshot) {
+    counts.rescoreAttempted += group.length;
+    try {
+      const jobs = group.map(index => rows[index]);
+      const { scored: rescored, sources, failed } = await scoreRowsOnCareerRecord({ jobs, careerSnapshotId, nodeId, signal, callScore, runGapReview, readPinned, attemptKind: 'official-rescore' });
+      counts.rescoreFailed += failed.length;
+      rescored.forEach((row, at) => {
+        const index = group[jobs.findIndex(job => job === sources[at] || sourceJobKey(job) === sourceJobKey(sources[at]))];
+        const previousScore = rows[index].matchScore;
+        const posting = normalizeOfficialPosting(row.officialPosting);
+        rows[index] = { ...row, officialRescore: { contentHash: posting.contentHash, careerSnapshotId, previousScore } };
+        if (row.matchScore !== previousScore) counts.rescoreChanged += 1;
+        if (!isResearchEligible(row)) counts.rescoreFellBelow += 1;
+      });
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason || error;
+      counts.rescoreFailed += group.length;
+      logger.warn(`[Jobs][${nodeId}] Official-text rescore failed: ${error?.code || error?.name || 'Error'}`);
+    }
+  }
+}
+
+/**
+ * One small handoff on jobs a ceiling capped across the bar, asking only about
+ * the rows that caused the cap (jobGapReview.js). Updates `scoredJobs` in place.
+ * A failed review leaves the calibrated scores as they were and says so in telemetry.
+ */
+async function runGapReviewPass(scoredJobs, { postingJob, candidateText, signal, runGapReview, assertCurrent = async () => {}, onProviderCall = () => {}, onStart = () => {} }) {
+  const threshold = RESEARCH_MIN_FIT_SCORE;
+  const telemetry = { threshold, candidates: 0, batches: 0, reviewedJobs: 0, skippedOversized: 0, failed: null };
+  const indexes = selectGapReviewCandidates(scoredJobs, { threshold });
+  telemetry.candidates = indexes.length;
+  if (indexes.length === 0 || signal?.aborted) return { telemetry, attempted: false };
+  const reviewUnits = indexes.map(index => ({
+    index,
+    rows: gapReviewRowsForJob(scoredJobs[index]),
+    jobText: jobEvidenceTextForFit(postingJob(scoredJobs[index])),
+  }));
+  const reviewBatches = [];
+  for (let start = 0; start < reviewUnits.length; start += JOB_GAP_REVIEW_BATCH_SIZE) {
+    reviewBatches.push(reviewUnits.slice(start, start + JOB_GAP_REVIEW_BATCH_SIZE));
+  }
+  const runReviewBatch = async (units, topLevelBatch) => {
+    const batch = units.map((unit, position) => ({ index: position, jobText: unit.jobText, rows: unit.rows }));
+    const prompt = buildGapReviewPrompt({ jobs: batch, candidateText });
+    const envelope = scoringPromptFitsEnvelopeForTests({ prompt, responseSchema: JOB_GAP_REVIEW_SCHEMA });
+    if (!envelope.fits) {
+      if (units.length > 1) {
+        const mid = Math.ceil(units.length / 2);
+        await runReviewBatch(units.slice(0, mid), topLevelBatch);
+        await runReviewBatch(units.slice(mid), topLevelBatch);
+        return;
+      }
+      // One job's posting plus the career evidence does not fit a single
+      // handoff. Its calibrated score stands; the report counts the skip.
+      telemetry.skippedOversized += 1;
+      logger.warn(`[Jobs] Gap review prompt for one job is ${envelope.bytes.toLocaleString()} UTF-8 bytes, above the ${envelope.limit.toLocaleString()}-byte handoff envelope; leaving its calibrated score as is.`);
+      return;
+    }
+    await assertCurrent();
+    telemetry.batches += 1;
+    onProviderCall();
+    const response = await runGapReview(prompt, {
+      signal,
+      task: JOB_GAP_REVIEW_TASK,
+      responseSchema: JOB_GAP_REVIEW_SCHEMA,
+      meta: {},
+      hints: {
+        itemCount: units.length,
+        reviewRowCount: units.reduce((count, unit) => count + unit.rows.length, 0),
+        batch: topLevelBatch,
+        batchTotal: reviewBatches.length,
+      },
+      // A rejected response re-prompts with the exact observation (which
+      // row, what was not found); the same validator runs again below so
+      // nothing reaches a card on the transport's word alone.
+      responseValidator: value => validateGapReviewSubmission(value, batch, { candidateText }),
+      retryOnTruncation: false,
+    });
+    await assertCurrent();
+    const { reviews } = validateGapReviewSubmission(response, batch, { candidateText });
+    for (const review of reviews) {
+      const unit = units[review.index];
+      scoredJobs[unit.index] = applyGapReview(scoredJobs[unit.index], review, {
+        candidateText, jobText: unit.jobText, threshold,
+      });
+      telemetry.reviewedJobs += 1;
+    }
+  };
+  try {
+    onStart(indexes.length);
+    for (const [position, units] of reviewBatches.entries()) await runReviewBatch(units, position + 1);
+  } catch (error) {
+    if (isJobOperationSupersededError(error) || signal?.aborted) throw error;
+    telemetry.failed = String(error?.message || error).slice(0, 240);
+    logger.warn('[Jobs] Gap review handoff failed; capped scores stay as calibrated:', error?.message || error);
+  }
+  return { telemetry, attempted: true };
+}
+
 export function prepareLiveScoringResults(rawScores, batch, options = {}) {
   const raw = Array.isArray(rawScores) ? rawScores : [];
   const jobs = Array.isArray(batch) ? batch : [];
@@ -5118,6 +5265,7 @@ function createJobsTelemetry() {
   //   failures: [{ cohort, reason }],
   //   roleBandFailureDetails: [{ role, reason }] }  // detail lists capped at 5
   compensation: null,
+  boardResearch: null,
   bucketing: null, // { ts, input, categories, placed, missing, duplicated, model, strategy, blocked, capability, errorCode, error } — failure details distinguish an explicit capability denial from a provider error; neither produces a new board
   // Per-source job-source-progress event trail for the current search, captured
   // in the main process so it survives the source-card nodes being deleted (the
@@ -5181,6 +5329,7 @@ const LEGACY_JOBS_TELEMETRY_CHANNELS = new Set([
   'append-jobs-history',
   'research-job-compensation',
   'bucket-jobs',
+  'settle-board-research',
 ]);
 let jobsTelemetryBySender = new WeakMap();
 let latestJobsTelemetryBySender = new WeakMap();
@@ -5211,7 +5360,10 @@ function boardJobsTelemetry(context, sender, nodeId) {
   // Each bucket call starts a new latest attempt. A predecessor's pinned
   // callbacks can finish only its old record, never the replacement's stages.
   if (!telemetry || context.channel === 'bucket-jobs') {
+    // The research stage runs just before taxonomy within the same Combine.
+    const boardResearch = telemetry?.boardResearch;
     telemetry = createJobsTelemetry();
+    if (boardResearch) telemetry.boardResearch = boardResearch;
     telemetry.boardNodeId = nodeId;
     telemetry.windowId = sender.id ?? null;
     jobsBoardTelemetryCanvasScope.set(telemetry, canvasScope);
@@ -5480,6 +5632,10 @@ const BOARD_COMPENSATION_COUNTS = ['ts', 'scoredInput', 'eligible', 'preResearch
   'roleBandFailureJobs', 'roleBandUnavailable', 'roleBandUnavailableJobs', 'roleBandInterruptedJobs',
   'roleBandFallbackJobs', 'marketCandidates', 'cohorts', 'researched', 'failedCohorts', 'marketCohortFailures',
   'assessed', 'minFitScore', 'cacheHits'];
+const BOARD_RESEARCH_COUNTS = ['ts', 'minFitScore', 'total', 'eligible', 'skippedBelowFit', 'skippedUnscored', 'officialLookups',
+  'livenessVisited', 'livenessRechecked', 'livenessStillPending', 'officialDuplicatesDropped', 'closedDropped', 'belowFitClosedDropped',
+  'rescoreAttempted', 'rescoreChanged', 'rescoreFellBelow', 'rescoreFailed',
+  'preferenceRows', 'preferenceRequests', 'preferenceFiltered', 'preferenceFailed'];
 const BOARD_LOCATION_COUNTS = ['postings', 'jobs', 'handoffs', 'cacheHit', 'overflowPostings', 'noIdentityJobs',
   'resolved', 'foundUnresolved', 'rejected', 'notFound', 'failed', 'interrupted'];
 const BOARD_TAXONOMY_STAGES = new Set(['planning', 'planned', 'classifying', 'complete']);
@@ -5546,6 +5702,7 @@ export function getJobsBoardTelemetryForReport(boardIds, reportWindowId = null, 
           skips: boardTelemetryCounts(displayed.skips, ['noKey', 'url', 'titleCompany', 'inBatch']), error: Boolean(displayed.error) }
         : null;
       return { boardNodeId, windowId: telemetry.windowId, bucketing, compensation,
+        research: boardTelemetryStage(telemetry.boardResearch, BOARD_RESEARCH_COUNTS),
         history: boardDisplay ? { boardDisplay } : null };
     });
 }
@@ -9955,7 +10112,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       // when its record is missing; its untrusted facts stay out of the view.
       if (postingJob(job)?.officialPosting || normalizeOfficialPosting(job?.officialPosting)) continue;
       if (classifyCompensationFitEligibility(job.matchScore, {
-        minScore: COMPENSATION_MIN_FIT_SCORE,
+        minScore: RESEARCH_MIN_FIT_SCORE,
         unscoredSentinel: UNSCORED_FALLBACK_SCORE,
       }) !== 'eligible') continue;
       const lookupContext = compensationContextForSalary(job, job.compensationContext || {});
@@ -10013,7 +10170,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     // and came up short. Treat it the same as a missing score: not eligible,
     // but say the score was unavailable rather than claiming it was low.
     const fitEligibility = classifyCompensationFitEligibility(rawScore, {
-      minScore: COMPENSATION_MIN_FIT_SCORE,
+      minScore: RESEARCH_MIN_FIT_SCORE,
       unscoredSentinel: UNSCORED_FALLBACK_SCORE,
     });
     if (fitEligibility !== 'eligible') {
@@ -10026,13 +10183,13 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
         ? compensationFallback(
           postingJob(job),
           'below_fit_threshold',
-          `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job scored ${Math.round(rawScore)}. No judgment was made on whether the pay itself is good or bad.`,
+          `The competitive-pay check is reserved for stronger matches (fit score ${RESEARCH_MIN_FIT_SCORE} or above); this job scored ${Math.round(rawScore)}. No judgment was made on whether the pay itself is good or bad.`,
           null,
         )
         : compensationFallback(
           postingJob(job),
           'fit_score_unavailable',
-          `The competitive-pay check is reserved for stronger matches (fit score ${COMPENSATION_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
+          `The competitive-pay check is reserved for stronger matches (fit score ${RESEARCH_MIN_FIT_SCORE} or above); this job's fit score was unavailable, so no comparison was made.`,
           null,
         );
       processed++; progress();
@@ -10297,7 +10454,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     // compatibility with existing bug-report snapshots.
     marketCohortFailures: failedCohorts,
     assessed,
-    minFitScore: COMPENSATION_MIN_FIT_SCORE,
+    minFitScore: RESEARCH_MIN_FIT_SCORE,
     cacheHits,
     failures,
     roleBandFailureDetails,
@@ -10459,170 +10616,94 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const runHttpSources = dependencies.fetchHttpSources || fetchHttpSources;
   const beforeSearchStageWrite = dependencies.beforeSearchStageWrite || (async () => {});
   const afterSearchProviderResult = dependencies.afterSearchProviderResult || (async () => {});
-  const runOfficialPostings = dependencies.resolveOfficialPostings || resolveOfficialPostings;
   const readOfficialPostingView = dependencies.getOfficialPostingView || getOfficialPostingView;
   const callListingLiveness = dependencies.callListingLiveness || callLLMText;
   const listingLivenessCalibrationStore = dependencies.listingLivenessCalibrationStore || getListingLivenessCalibrationStore();
   const retryIndeedDescriptions = dependencies.retryIndeedJobDescriptions || retryIndeedJobDescriptions;
   const settleBoardClosedRowsForHandler = dependencies.settleBoardClosedRowsForTests || settleBoardClosedRows;
-  // After resolution: keep or retire every row an aggregator board reported
-  // closed. Official text counts as description evidence here (stored view), and
-  // a failure of this step is contained to the conservative rule: a board-closed
-  // row without a score-safe description leaves, everything else stays.
+  // Before scoring: keep or retire every row an aggregator board reported
+  // closed. A failure of this step is contained to the conservative rule: a
+  // board-closed row without a score-safe description leaves, everything else stays.
   const settleBoardClosed = async (rows, signal, expiryCandidatesConfirmedClosed = null) => {
     const setAsideKeys = getCurrentIpcRequestContext()?.listingSetAsideKeys
       || new Set((Array.isArray(rows) ? rows : []).filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
     try {
       return await settleBoardClosedRowsForHandler(rows, { scoreSafe: hasResolvedJobDescription,
-        requireSemantic: true,
+        requireSemantic: true, researchDeferred: true,
         getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
         minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
       logger.warn(`[OfficialPosting] Board-closed settlement failed: ${error?.code || error?.name || 'Error'}`);
       return settleBoardClosedRows(rows, { scoreSafe: hasResolvedJobDescription,
-        requireSemantic: true,
+        requireSemantic: true, researchDeferred: true,
         minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     }
   };
   // Every provider and recovery path crosses this boundary after its existing
-  // evidence gate. Identity rows stay scraped; only resolution fields are added.
+  // evidence gate. It spends no AI or web call: research waits until a job has
+  // a real fit score (settle-board-research and the Board's official stage).
   // Board-closed rows the evidence gate dropped arrive here too (see
-  // scoreSafeRowsWithBoardClosed) and are kept or removed after resolution.
-  const resolveScoreSafePostings = async (rows, { event, nodeId, signal, jobRunId = null, alternateReceipts = null, progressSourceId = null } = {}) => {
+  // scoreSafeRowsWithBoardClosed) and are kept or removed by what is known now.
+  const settleScrapedRowsForScoring = async (rows, { signal, alternateReceipts = null } = {}) => {
     const context = getCurrentIpcRequestContext();
     if (context) context.listingSetAsideKeys = new Set((Array.isArray(rows) ? rows : [])
       .filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
-    const onProgress = ({ completed = 0, total = rows.length } = {}) => {
-      if (signal?.aborted || event?.sender?.isDestroyed?.()) return;
-      const payload = { nodeId, jobRunId, sourceId: progressSourceId || 'official-posting',
-        ...(progressSourceId ? { activity: 'official-posting', activityCompleted: completed, activityTotal: total } : { count: 0 }),
-        // A source Solve still has to checkpoint and reconcile its warning.
-        // Only its final reply can mark that provider card complete.
-        status: !progressSourceId && completed >= total ? 'done' : 'searching',
-        detail: `Finding official postings ${completed} / ${total}`, warning: null };
-      // This is a progress stage with zero provider volume. The existing
-      // searching detail renders it without adding a provider card or count.
-      recordJobSourceProgress(payload, { updatePipeline: false, expectedNodeId: nodeId });
-      event?.sender?.send?.('job-source-progress', payload);
-    };
+    let kept = Array.isArray(rows) ? rows : [];
+    const alternatesByKey = alternateReceipts
+      ? collectListingAlternates({ ...alternateReceipts, officialDrops: [], finalKept: kept }) : null;
+    let alternateRestored = [];
     try {
-      onProgress({ completed: 0, total: rows.length });
-      const partition = await partitionOfficialPostingRows(rows, { store: dependencies.officialPostingStore, signal });
-      const unresolved = partition.unresolvedIndices.map(index => partition.jobs[index]);
-      const carriedCount = rows.length - unresolved.length;
-      const resolved = unresolved.length ? await runOfficialPostings(unresolved, { signal, nodeId: context?.nodeId || nodeId,
-        manualAiRunId: context?.manualAiRunId || null,
-        onProgress: progress => onProgress({ completed: carriedCount + (progress?.completed || 0), total: rows.length }),
-      }) : { jobs: [], telemetry: null };
-      if (signal?.aborted) throw signal.reason || nodeCancellationError();
-      if (!Array.isArray(resolved?.jobs) || resolved.jobs.length !== unresolved.length) throw new TypeError('Official posting resolution returned incomplete rows.');
-      const complete = [...partition.jobs];
-      partition.unresolvedIndices.forEach((rowIndex, index) => { complete[rowIndex] = resolved.jobs[index]; });
-      const expiryCandidateKeys = new Set(partition.unresolvedIndices.flatMap((rowIndex, index) =>
-        Array.isArray(resolved.expiryCandidates?.[index]) && resolved.expiryCandidates[index].length
-          ? [listingEvidenceKey(complete[rowIndex])] : []));
-      const expiryCandidatesConfirmedClosed = row => !expiryCandidateKeys.has(listingEvidenceKey(row))
-        || officialExpiryCandidatesConfirmedClosed(row);
-      let deduped = officialPostingDedup(complete);
-      const alternatesByKey = alternateReceipts
-        ? collectListingAlternates({ ...alternateReceipts, officialDrops: deduped.dropped,
-          finalKept: deduped.kept }) : null;
-      const livenessSession = createListingLivenessSearchSession({
-        callText: callListingLiveness,
-        calibrationStore: listingLivenessCalibrationStore, signal,
-        nodeId: context?.nodeId || nodeId, manualAiRunId: context?.manualAiRunId || null,
-        abortError: nodeCancellationError,
-      });
-      let alternateRestored = [];
-      let alternateClassified = new Map();
-      try {
-        deduped = { ...deduped, kept: await livenessSession.classifyPrimary(deduped.kept) };
-        if (alternatesByKey instanceof Map && alternatesByKey.size > 0) {
-          const alternateResult = await restoreListingAlternates(deduped.kept, {
-            alternatesByKey, scoreSafe: hasResolvedJobDescription,
-            shouldTryWinner: async winner => {
-              const preliminary = await settleBoardClosedRows([winner], {
-                requireSemantic: true,
-                scoreSafe: hasResolvedJobDescription,
-                getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
-                minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
-                setAsideKeys: context?.listingSetAsideKeys || null,
-                expiryCandidatesConfirmedClosed,
-              });
-              return preliminary.dispositions.get(winner) !== 'kept-official';
-            },
-            hasEvidence: row => Boolean(readListingEvidence(row)),
-            classifyPending: candidates => livenessSession.classifyAlternates(candidates), signal,
-          });
-          deduped = { ...deduped, kept: alternateResult.rows };
-          alternateRestored = alternateResult.restored;
-          alternateClassified = alternateResult.classified || new Map();
-        }
-        await livenessSession.classifyExpiryCandidates(deduped.kept);
-        if (alternatesByKey instanceof Map) deduped = { ...deduped,
-          kept: carryListingAlternates(deduped.kept, { alternatesByKey,
-            restored: alternateRestored, classified: alternateClassified }) };
-      } catch (error) {
-        if (signal?.aborted) throw signal.reason || error;
-        logger.warn(`[ListingLiveness] Search check failed: ${error?.code || error?.name || 'Error'}`);
+      if (alternatesByKey instanceof Map && alternatesByKey.size > 0) {
+        const alternateResult = await restoreListingAlternates(kept, {
+          alternatesByKey, scoreSafe: hasResolvedJobDescription,
+          shouldTryWinner: async winner => {
+            const preliminary = await settleBoardClosedRows([winner], {
+              requireSemantic: true,
+              researchDeferred: true,
+              scoreSafe: hasResolvedJobDescription,
+              getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
+              minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
+              setAsideKeys: context?.listingSetAsideKeys || null,
+            });
+            return preliminary.dispositions.get(winner) !== 'kept-official';
+          },
+          signal,
+        });
+        kept = alternateResult.rows;
+        alternateRestored = alternateResult.restored;
       }
-      if (signal?.aborted) throw signal.reason || nodeCancellationError();
-      // A page on an ATS host is the employer's own listing authority. Its
-      // AI-confirmed close is terminal after cross-source alternate recovery.
-      const officialClosedDrops = [];
-      deduped = { ...deduped, kept: deduped.kept.filter(row => {
-        const evidence = readListingEvidence(row);
-        if (row?.listingLiveness?.verdict !== 'closed' || row.listingLiveness.basis !== 'ai'
-          || evidence?.finalHostClass !== 'ats') return true;
-        officialClosedDrops.push({ kept: null, dropped: row, reason: 'dropped-official-closed',
-          stage: 'board-closed', retire: true });
-        return false;
-      }) };
-      const settled = await settleBoardClosed(deduped.kept, signal, expiryCandidatesConfirmedClosed);
-      const restoredCounts = {};
-      for (const { row } of alternateRestored) {
-        const board = row?.listingLiveness?.board || row?.source;
-        if (board) bumpListingLivenessCount(restoredCounts, board, 'alternateRestored');
-      }
-      const expiryCounts = {};
-      for (const row of deduped.kept) {
-        const posting = normalizeOfficialPosting(row?.officialPosting);
-        if (posting?.outcome !== 'not-found' || !posting.trail?.includes('closed')) continue;
-        const board = row?.listingLiveness?.board || row?.boardClosed?.board;
-        if (board) bumpListingLivenessCount(expiryCounts, board, 'expiryOnlyClosedCopies');
-      }
-      const listingLiveness = mergeListingLivenessTelemetry(
-        listingLivenessTelemetryBlock({ input: rows, settled, officialClosedDrops }),
-        livenessSession.telemetry().listingLiveness, restoredCounts, expiryCounts);
-      onProgress({ completed: rows.length, total: rows.length });
-      const officialLookupsIncomplete = settled.kept.filter(row => officialPostingLookupStatus(row?.officialPosting).retryable).length;
-      return { jobs: settled.kept,
-        officialPosting: { ...mergeOfficialPostingTelemetry(partition.settledTelemetry, resolved.telemetry,
-          { boardClosed: boardClosedTelemetryBlock({ input: rows, settled, officialDedupDrops: deduped.dropped }),
-            listingLiveness }), officialLookupsIncomplete },
-        officialDedupDropped: deduped.dropped.length, officialDedupDrops: deduped.dropped,
-        boardClosedDropped: settled.dropped.length + officialClosedDrops.length,
-        boardClosedDrops: [...officialClosedDrops, ...settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
-          reason: entry.disposition, stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' }))] };
+      if (alternatesByKey instanceof Map) kept = carryListingAlternates(kept, { alternatesByKey, restored: alternateRestored });
     } catch (error) {
       if (signal?.aborted) throw signal.reason || error;
-      logger.warn(`[OfficialPosting] Search resolution failed: ${error?.code || error?.name || 'Error'}`);
-      // Resolution failure never fails the run; board-closed rows then follow the
-      // same rule as an unresolved pass (no description: gone; description: kept).
-      const settled = await settleBoardClosed(rows, signal);
-      const boardClosed = boardClosedTelemetryBlock({ input: rows, settled });
-      const listingLiveness = listingLivenessTelemetryBlock({ input: rows, settled });
-      return { jobs: settled.kept, officialPosting: { total: rows.length, failed: rows.length,
-        officialLookupsIncomplete: settled.kept.filter(row => officialPostingLookupStatus(row?.officialPosting).retryable).length,
-        levels: {}, outcomes: { failed: rows.length }, rejections: { failed: rows.length },
-        ...(Object.keys(boardClosed).length ? { boardClosed } : {}),
-        ...(Object.keys(listingLiveness).length ? { listingLiveness } : {}) },
-      officialDedupDropped: 0, officialDedupDrops: [],
-      boardClosedDropped: settled.dropped.length,
-      boardClosedDrops: settled.dropped.map(entry => ({ kept: null, dropped: entry.row, reason: entry.disposition,
-        stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' })) };
+      logger.warn(`[ListingLiveness] Alternate restoration failed: ${error?.code || error?.name || 'Error'}`);
     }
+    if (signal?.aborted) throw signal.reason || nodeCancellationError();
+    // A resumed older row can already hold an AI-confirmed close from an ATS page.
+    const officialClosedDrops = [];
+    kept = kept.filter(row => {
+      const evidence = readListingEvidence(row);
+      if (row?.listingLiveness?.verdict !== 'closed' || row.listingLiveness.basis !== 'ai'
+        || evidence?.finalHostClass !== 'ats') return true;
+      officialClosedDrops.push({ kept: null, dropped: row, reason: 'dropped-official-closed',
+        stage: 'board-closed', retire: true });
+      return false;
+    });
+    const settled = await settleBoardClosed(kept, signal);
+    const restoredCounts = {};
+    for (const { row } of alternateRestored) {
+      const board = row?.listingLiveness?.board || row?.source;
+      if (board) bumpListingLivenessCount(restoredCounts, board, 'alternateRestored');
+    }
+    const listingLiveness = mergeListingLivenessTelemetry(
+      listingLivenessTelemetryBlock({ input: rows, settled, officialClosedDrops }), restoredCounts);
+    return { jobs: settled.kept,
+      officialPosting: { ...mergeOfficialPostingTelemetry({ boardClosed: boardClosedTelemetryBlock({ input: rows, settled }), listingLiveness }),
+        officialLookupsIncomplete: settled.kept.filter(row => row?.officialPosting && officialPostingLookupStatus(row.officialPosting).retryable).length },
+      officialDedupDropped: 0, officialDedupDrops: [],
+      boardClosedDropped: settled.dropped.length + officialClosedDrops.length,
+      boardClosedDrops: [...officialClosedDrops, ...settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
+        reason: entry.disposition, stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' }))] };
   };
   void pruneStaleUnsavedAnalysisArtifacts();
   void pruneStaleCareerInputStages();
@@ -10926,6 +11007,12 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // This intentionally runs after history filtering and description enrichment
   // in the renderer pipeline. It neither changes professional matchScore nor
   // appends rejected rows to seen history.
+  handleSafe('reapply-job-preferences', async (_event, { jobs, preferencePlan } = {}) => {
+    const result = reapplyStoredJobPreferences({ jobs, preferencePlan });
+    if (!result) throw new Error('A saved job has no stored preference results to re-apply.');
+    return { success: true, ...result };
+  });
+
   handleSafe('evaluate-job-preferences', async (_event, { jobs, jobPreferences, preferencePlan, jobPreferencePlan, jobPreferencesInterpretation, profile, careerData, careerSnapshotId } = {}, signal) => {
     const pinned = await resolvePinnedScoringInput({ careerSnapshotId, profile, careerData });
     profile = pinned.profile;
@@ -11002,6 +11089,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       callText: callLLMText,
       callRaw: callLLMRaw,
       companyResearchPipelineEligible: !(await hasPackedCompanyAssessment),
+      deferCompanyResearch: true,
       meta,
     });
     // Job Preferences remove rows BETWEEN search admission and scoring, so
@@ -13621,10 +13709,9 @@ Return a JSON object with four arrays of search query strings:
       logger.info(`[Jobs] Final enrichment-ready dedup removed ${finalDedupDropped} duplicate score-safe listing(s)`);
     }
     kept = finalDeduped;
-    jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'finding-official-postings', ts: Date.now(), active: true, pendingSources: [] };
     await assertSearchCurrent();
-    const officialResolution = await resolveScoreSafePostings(kept, {
-      event, nodeId, signal: combinedSignal, jobRunId: activeRunId,
+    const officialResolution = await settleScrapedRowsForScoring(kept, {
+      signal: combinedSignal,
       alternateReceipts: { admissionDrops: dedupDrops, finalDrops: finalDedupDrops },
     });
     await assertSearchCurrent();
@@ -13650,8 +13737,7 @@ Return a JSON object with four arrays of search query strings:
       ...officialResolution.officialDedupDrops.map(entry => ({ ...entry, stage: 'official-posting' })),
     ]);
 
-    // Filter by the English share of the final description after official-posting
-    // resolution. Keep English-majority bilingual jobs; dropped rows never reach
+    // Filter by the English share of the scraped description. Keep English-majority bilingual jobs; dropped rows never reach
     // scoring or seen-history. Tally the pre-filter list after the helper tags
     // only the dropped rows, so diagnostics retain their languages and samples.
     const languageFilter = filterNonEnglishJobs(kept);
@@ -14818,13 +14904,12 @@ Return a JSON object with four arrays of search query strings:
     normalizeJobsMarkup(kept);
     kept = kept.map(reconcileGlassdoorSalaryFromDescription);
     const descriptionEvidence = filterJobsByDescriptionEvidence(kept);
-    // Board-closed rows without a score-safe description still reach the
-    // official-posting pass; it keeps or removes them afterwards.
+    // Board-closed rows without a score-safe description are settled next.
     kept = scoreSafeRowsWithBoardClosed(descriptionEvidence);
     if (descriptionEvidence.dropped.length > 0) {
       logger.info(`[Jobs][${sourceId}] Deferred ${descriptionEvidence.dropped.length} description-incomplete listing(s) (explicit=${descriptionEvidence.quality.deferred}, empty=${descriptionEvidence.quality.empty}, short=${descriptionEvidence.quality.short}; threshold=400 chars) — not returned or marked seen`);
     }
-    const officialResolution = await resolveScoreSafePostings(kept, { event, nodeId, signal, jobRunId });
+    const officialResolution = await settleScrapedRowsForScoring(kept, { signal });
     kept = officialResolution.jobs;
     const languageFilter = filterNonEnglishJobs(kept);
     kept = languageFilter.jobs;
@@ -14928,60 +15013,14 @@ Return a JSON object with four arrays of search query strings:
     }
     const scoringProfile = pinnedScoringInput.profile;
     const scoringCareerData = pinnedScoringInput.careerData;
-    let scoringJobs = Array.isArray(jobs) ? jobs : [];
-    // A direct or legacy score request may contain no official-posting field
-    // at all; that is not evidence of an interrupted lookup to resume. Retry
-    // only rows that carry a prior resolver result whose state is retryable.
-    const retryableOfficialRows = scoringJobs.filter(job => job?.officialPosting
-      && officialPostingLookupStatus(job.officialPosting).retryable);
-    if (retryableOfficialRows.length > 0) {
-      await assertScoringCurrent();
-      const retry = await runOfficialPostings(retryableOfficialRows.map(job => ({ ...job })), {
-        signal, nodeId, manualAiRunId,
-      });
-      await assertScoringCurrent();
-      if (!Array.isArray(retry?.jobs)) throw new TypeError('Official posting retry returned invalid rows.');
-      // The resolver can retire an official duplicate. Merge only resolver-owned
-      // fields back onto the exact score inputs so retries never alter scraped
-      // identity, evidence, or the row order used by scoring.
-      const retryByKey = new Map();
-      retry.jobs.forEach(row => {
-        const key = sourceJobKey(row);
-        if (!key) return;
-        const queue = retryByKey.get(key) || [];
-        queue.push(row);
-        retryByKey.set(key, queue);
-      });
-      const positions = new Map();
-      scoringJobs = scoringJobs.map(job => {
-        if (!officialPostingLookupStatus(job?.officialPosting).retryable) return job;
-        const key = sourceJobKey(job);
-        const candidates = retryByKey.get(key) || [];
-        const position = positions.get(key) || 0;
-        positions.set(key, position + 1);
-        const resolved = candidates[position];
-        return resolved ? { ...job, officialPosting: resolved.officialPosting, postedBy: resolved.postedBy } : job;
-      });
-    }
-    const officialLookupsIncomplete = scoringJobs.filter(job => job?.officialPosting
-      && officialPostingLookupStatus(job.officialPosting).retryable).length;
+    // Scoring reads the scraped listing. A row already holding an official
+    // posting from an older run keeps that view, so its accepted batches replay.
+    // Older retryable lookups and pending listings wait for the Board's research
+    // stage, which takes them only at or above the threshold.
+    const scoringJobs = Array.isArray(jobs) ? jobs : [];
     if (jobsTelemetry.search?.runId === snapshotContext?.runId) {
-      jobsTelemetry.search.officialLookupsIncomplete = officialLookupsIncomplete;
-    }
-    if (scoringJobs.some(job => normalizeListingLiveness(job?.listingLiveness)?.verdict === 'pending')) {
-      await assertScoringCurrent();
-      const recheck = await recheckPendingListings(scoringJobs, { signal,
-        createProbe: dependencies.createListingLivenessProbe || createListingLivenessProbe,
-        createSession: () => createListingLivenessSearchSession({
-          callText: callListingLiveness,
-          calibrationStore: listingLivenessCalibrationStore, signal, nodeId, manualAiRunId,
-          abortError: nodeCancellationError,
-        }) });
-      await assertScoringCurrent();
-      scoringJobs = recheck.rows;
-      if (jobsTelemetry.search?.runId === snapshotContext?.runId) {
-        jobsTelemetry.search.listingRecheck = { visited: recheck.visited, rechecked: recheck.rechecked, stillPending: recheck.stillPending };
-      }
+      jobsTelemetry.search.officialLookupsIncomplete = scoringJobs.filter(job => job?.officialPosting
+        && officialPostingLookupStatus(job.officialPosting).retryable).length;
     }
     const postingJob = await officialPostingConsumerMap(scoringJobs);
     await assertScoringCurrent();
@@ -15457,80 +15496,15 @@ Return a JSON object with four arrays of search query strings:
     // quote and recomputes the score with the same rules, so a review can
     // never lift a score above the model's raw number. A failed review leaves
     // the calibrated scores exactly as they were and says so in telemetry.
-    const gapReviewThreshold = COMPENSATION_MIN_FIT_SCORE;
-    const gapReviewTelemetry = {
-      threshold: gapReviewThreshold, candidates: 0, batches: 0, reviewedJobs: 0, skippedOversized: 0, failed: null,
-    };
-    const gapReviewIndexes = selectGapReviewCandidates(scoredJobs, { threshold: gapReviewThreshold });
-    gapReviewTelemetry.candidates = gapReviewIndexes.length;
-    if (gapReviewIndexes.length > 0 && !signal?.aborted) {
-      const reviewUnits = gapReviewIndexes.map(index => ({
-        index,
-        rows: gapReviewRowsForJob(scoredJobs[index]),
-        jobText: jobEvidenceTextForFit(postingJob(scoredJobs[index])),
-      }));
-      const reviewBatches = [];
-      for (let start = 0; start < reviewUnits.length; start += JOB_GAP_REVIEW_BATCH_SIZE) {
-        reviewBatches.push(reviewUnits.slice(start, start + JOB_GAP_REVIEW_BATCH_SIZE));
-      }
-      const runReviewBatch = async (units, topLevelBatch) => {
-        const batch = units.map((unit, position) => ({ index: position, jobText: unit.jobText, rows: unit.rows }));
-        const prompt = buildGapReviewPrompt({ jobs: batch, candidateText: candidateFitText });
-        const envelope = scoringPromptFitsEnvelopeForTests({ prompt, responseSchema: JOB_GAP_REVIEW_SCHEMA });
-        if (!envelope.fits) {
-          if (units.length > 1) {
-            const mid = Math.ceil(units.length / 2);
-            await runReviewBatch(units.slice(0, mid), topLevelBatch);
-            await runReviewBatch(units.slice(mid), topLevelBatch);
-            return;
-          }
-          // One job's posting plus the career evidence does not fit a single
-          // handoff. Its calibrated score stands; the report counts the skip.
-          gapReviewTelemetry.skippedOversized += 1;
-          logger.warn(`[Jobs] Gap review prompt for one job is ${envelope.bytes.toLocaleString()} UTF-8 bytes, above the ${envelope.limit.toLocaleString()}-byte handoff envelope; leaving its calibrated score as is.`);
-          return;
-        }
-        await assertScoringCurrent();
-        gapReviewTelemetry.batches += 1;
-        providerCalls += 1;
-        const reviewMeta = {};
-        const response = await runGapReview(prompt, {
-          signal,
-          task: JOB_GAP_REVIEW_TASK,
-          responseSchema: JOB_GAP_REVIEW_SCHEMA,
-          meta: reviewMeta,
-          hints: {
-            itemCount: units.length,
-            reviewRowCount: units.reduce((count, unit) => count + unit.rows.length, 0),
-            batch: topLevelBatch,
-            batchTotal: reviewBatches.length,
-          },
-          // A rejected response re-prompts with the exact observation (which
-          // row, what was not found); the same validator runs again below so
-          // nothing reaches a card on the transport's word alone.
-          responseValidator: value => validateGapReviewSubmission(value, batch, { candidateText: candidateFitText }),
-          retryOnTruncation: false,
-        });
-        await assertScoringCurrent();
-        const { reviews } = validateGapReviewSubmission(response, batch, { candidateText: candidateFitText });
-        for (const review of reviews) {
-          const unit = units[review.index];
-          scoredJobs[unit.index] = applyGapReview(scoredJobs[unit.index], review, {
-            candidateText: candidateFitText, jobText: unit.jobText, threshold: gapReviewThreshold,
-          });
-          gapReviewTelemetry.reviewedJobs += 1;
-        }
-      };
-      try {
-        emitScoringProgress(completedScoringJobCount, {
-          phase: 'gap-review', batch: scoringBatches.length, attemptSize: gapReviewIndexes.length,
-        });
-        for (const [position, units] of reviewBatches.entries()) await runReviewBatch(units, position + 1);
-      } catch (error) {
-        if (isJobOperationSupersededError(error) || signal?.aborted) throw error;
-        gapReviewTelemetry.failed = String(error?.message || error).slice(0, 240);
-        logger.warn('[Jobs] Gap review handoff failed; capped scores stay as calibrated:', error?.message || error);
-      }
+    const gapReviewThreshold = RESEARCH_MIN_FIT_SCORE;
+    const { telemetry: gapReviewTelemetry, attempted: gapReviewAttempted } = await runGapReviewPass(scoredJobs, {
+      postingJob, candidateText: candidateFitText, signal, runGapReview, assertCurrent: assertScoringCurrent,
+      onProviderCall: () => { providerCalls += 1; },
+      onStart: count => emitScoringProgress(completedScoringJobCount, {
+        phase: 'gap-review', batch: scoringBatches.length, attemptSize: count,
+      }),
+    });
+    if (gapReviewAttempted) {
       if (!await scoringIsCurrent()) {
         scoringSuperseded = true;
         return { jobs: [], operationSuperseded: true, error: 'This Job Search operation was superseded during the gap review.' };
@@ -15578,7 +15552,7 @@ Return a JSON object with four arrays of search query strings:
       // How often the deterministic evidence-gap ceilings moved a score, and
       // how many jobs they moved from at-or-above the application bar to
       // below it. Count-only; the per-job detail lives in each card's audit.
-      calibration: summarizeFitCalibration(scoredJobs, { threshold: COMPENSATION_MIN_FIT_SCORE }),
+      calibration: summarizeFitCalibration(scoredJobs, { threshold: RESEARCH_MIN_FIT_SCORE }),
       // The targeted gap review's own counts (candidates, handoffs, failures)
       // plus the per-job outcomes read back from each reviewed audit.
       gapReview: { ...gapReviewTelemetry, ...summarizeGapReviews(scoredJobs, { threshold: gapReviewThreshold }) },
@@ -15703,6 +15677,122 @@ Return a JSON object with four arrays of search query strings:
       for (const job of jobs) delete job?.compensationRemoteResidences;
     }
   });
+
+  // ── Board research for jobs at or above the fit threshold ────────────────
+  // The Board's official-posting stage has already looked up the eligible rows.
+  // This stage finishes what used to run before scoring, for those rows only:
+  // listing recheck, official dedup, closed-listing settlement, one rescore when
+  // official text materially differs, and deferred company research. Rows below
+  // the threshold pass through untouched; a confirmed-closed one is reported for
+  // removal. Indexes are into the request, so the renderer can keep protected cards.
+  // Jobs a Board's own preferences pass that their Search never scored. Their
+  // scores live on the Board, so the Search's result and scoring snapshot stay.
+  handleSafe('score-board-preference-jobs', async (_event, { jobs, careerSnapshotId, nodeId } = {}, signal) => {
+    if (!Array.isArray(jobs)) throw new Error('Board preference scoring requires a jobs array.');
+    if (jobs.length === 0) return { success: true, scoredJobs: [] };
+    const { scored, failed } = await scoreRowsOnCareerRecord({ jobs, careerSnapshotId, nodeId, signal, callScore: runScoreBatch, runGapReview,
+      readPinned: resolvePinnedScoringInputForHandler, attemptKind: 'board-preferences' });
+    const unscored = failed.map(job => buildScoredJob(job, null, { fallbackScore: UNSCORED_FALLBACK_SCORE, allNull: false }));
+    return { success: true, scoredJobs: [...scored, ...unscored].map(row => ({ ...row, careerSnapshotId })) };
+  });
+
+  handleSafe('settle-board-research', async (event, { jobs, nodeId, manualAiRunId, officialLookups = 0 } = {}, signal) => {
+    if (!Array.isArray(jobs)) throw new Error('Board research requires a jobs array.');
+    const telemetry = getScopedJobsTelemetry();
+    const rows = jobs.slice();
+    const counts = { ...summarizeResearchEligibility(rows), officialLookups: Math.max(0, Number(officialLookups) || 0),
+      livenessVisited: 0, livenessRechecked: 0, livenessStillPending: 0, officialDuplicatesDropped: 0, closedDropped: 0,
+      belowFitClosedDropped: 0, rescoreAttempted: 0, rescoreChanged: 0, rescoreFellBelow: 0, rescoreFailed: 0,
+      preferenceRows: 0, preferenceRequests: 0, preferenceFiltered: 0, preferenceFailed: 0 };
+    telemetry.boardResearch = { ts: Date.now(), ...counts };
+    const dropped = new Map();
+    try {
+    const eligibleIndexes = () => rows.flatMap((job, index) => (!dropped.has(index) && isResearchEligible(job) ? [index] : []));
+
+    if (eligibleIndexes().some(index => normalizeListingLiveness(rows[index]?.listingLiveness)?.verdict === 'pending')) {
+      const indexes = eligibleIndexes();
+      const recheck = await recheckPendingListings(indexes.map(index => rows[index]), { signal,
+        createProbe: dependencies.createListingLivenessProbe || createListingLivenessProbe,
+        createSession: () => createListingLivenessSearchSession({
+          callText: callListingLiveness, calibrationStore: listingLivenessCalibrationStore, signal, nodeId, manualAiRunId,
+          abortError: nodeCancellationError,
+        }) });
+      indexes.forEach((index, position) => { rows[index] = recheck.rows[position]; });
+      counts.livenessVisited = recheck.visited;
+      counts.livenessRechecked = recheck.rechecked;
+      counts.livenessStillPending = recheck.stillPending;
+    }
+
+    // A page on an ATS host is the employer's own listing authority, so its
+    // AI-confirmed close needs no further check.
+    for (const index of eligibleIndexes()) {
+      const row = rows[index];
+      if (row?.listingLiveness?.verdict === 'closed' && row.listingLiveness.basis === 'ai' && readListingEvidence(row)?.finalHostClass === 'ats') {
+        dropped.set(index, 'closed');
+        counts.closedDropped += 1;
+      }
+    }
+
+    // First copy wins the official dedup, so the best score goes first.
+    const byScore = eligibleIndexes().sort((a, b) => rows[b].matchScore - rows[a].matchScore || a - b);
+    const positionOfRow = new Map(byScore.map(index => [rows[index], index]));
+    for (const { dropped: row } of officialPostingDedup(byScore.map(index => rows[index])).dropped) {
+      dropped.set(positionOfRow.get(row), 'official-duplicate');
+      counts.officialDuplicatesDropped += 1;
+    }
+
+    const settled = await settleBoardClosedRowsForHandler(eligibleIndexes().map(index => rows[index]), {
+      requireSemantic: true, researchDeferred: true, scoreSafe: hasResolvedJobDescription,
+      getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
+      minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
+    });
+    for (const { row } of settled.dropped) {
+      dropped.set(positionOfRow.get(row), 'closed');
+      counts.closedDropped += 1;
+    }
+    rows.forEach((job, index) => {
+      // A live employer page outranks the board's closed verdict at any score.
+      if (classifyResearchEligibility(job) === RESEARCH_ELIGIBILITY.belowThreshold && listingStateRank(job) === 4
+        && !['found', 'link-only'].includes(normalizeOfficialPosting(job?.officialPosting)?.outcome)) {
+        dropped.set(index, 'below-fit-closed');
+        counts.belowFitClosedDropped += 1;
+      }
+    });
+
+    await rescoreMaterialOfficialText({ rows, indexes: eligibleIndexes(), counts, nodeId, signal,
+      callScore: runScoreBatch, runGapReview, readPinned: resolvePinnedScoringInputForHandler });
+
+    const pendingPreference = eligibleIndexes().filter(index => rows[index]?.preferenceAssessment?.companyResearchPending);
+    if (pendingPreference.length) {
+      counts.preferenceRows = pendingPreference.length;
+      try {
+        // Criteria are researched against the official employer, not a recruiter that posted the job.
+        const researched = await researchDeferredJobPreferences({ jobs: await officialPostingConsumerJobs(pendingPreference.map(index => rows[index])),
+          signal, callText: callLLMText, callRaw: callLLMRaw,
+          companyResearchPipelineEligible: !(await durableRunHasAnyTask(manualAiRunId, ['job-preference-research-batch-assessment'], { batchTotal: 'present' })) });
+        counts.preferenceRequests = researched.requests;
+        pendingPreference.forEach((index, position) => {
+          rows[index] = restoreOfficialPostingConsumerIdentity(researched.jobs[position]);
+          if (rows[index].preferenceAssessment.status === 'filtered') {
+            dropped.set(index, 'preference-filtered');
+            counts.preferenceFiltered += 1;
+          }
+        });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason || error;
+        // Unverified stays unverified: the job remains visible and says so.
+        counts.preferenceFailed = pendingPreference.length;
+        logger.warn(`[Jobs][${nodeId}] Deferred company research failed: ${error?.code || error?.name || 'Error'}`);
+      }
+    }
+    telemetry.boardResearch = { ts: Date.now(), ...counts };
+    logger.info(`[Jobs][${nodeId}] Board research: ${counts.eligible}/${counts.total} at or above ${counts.minFitScore}, ${dropped.size} removed`);
+    return { success: true, jobs: rows, dropped: [...dropped].map(([index, reason]) => ({ index, reason })), counts };
+    } catch (error) {
+      telemetry.boardResearch = { ts: Date.now(), ...counts, error: true, errorCode: error?.code || null };
+      throw error;
+    }
+  }, { captureListingLiveness: true });
 
   // ── Confirm near-identical multi-location postings ───────────────────────
   // The renderer has already excluded preference-filtered rows before this
@@ -16198,8 +16288,8 @@ Return a JSON object with four arrays of search query strings:
           : allLinkedInRaw.slice(0, normalizedCollectionLimits.jobsPerPlatform);
         const needEnrich = filterJobsByDescriptionEvidence(allLinkedIn).dropped;
         const admitForScoring = async rows => {
-          const officialResolution = await resolveScoreSafePostings(
-            scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { event, nodeId, signal, jobRunId, progressSourceId: 'linkedin' },
+          const officialResolution = await settleScrapedRowsForScoring(
+            scoreSafeRowsWithBoardClosed(filterJobsByDescriptionEvidence(overlayResolvedRecoveryRows(rows, snapshotRecoveryJobs))), { signal },
           );
           // This branch publishes directly, before the generic Solve filter.
           const languageFilter = filterNonEnglishJobs(officialResolution.jobs);
@@ -16493,7 +16583,7 @@ Return a JSON object with four arrays of search query strings:
     let sourceRecoverySnapshot = null;
     let sourceRecoveryJobs = [];
     const resolveGenericPostings = createOfficialPostingRecoveryPassResolver(rows =>
-      resolveScoreSafePostings(rows, { event, nodeId, signal, jobRunId }), { signal });
+      settleScrapedRowsForScoring(rows, { signal }), { signal });
     // Load the recovery snapshot for ANY source whose Solve can recover
     // descriptions, not just Google: a Glassdoor panel-429 strands rows exactly
     // the same way, and without the snapshot the postprocessor below falls back
@@ -17245,7 +17335,7 @@ Return a JSON object with four arrays of search query strings:
       repairJobsMojibake(retriedItems);
       normalizeJobsMarkup(retriedItems);
       const descriptionEvidence = filterJobsByDescriptionEvidence(retriedItems);
-      const officialResolution = await resolveScoreSafePostings(scoreSafeRowsWithBoardClosed(descriptionEvidence), { event, nodeId, signal, jobRunId });
+      const officialResolution = await settleScrapedRowsForScoring(scoreSafeRowsWithBoardClosed(descriptionEvidence), { signal });
       let items = officialResolution.jobs;
       const boardClosedOutcome = boardClosedRetirement(officialResolution);
       const retriedUnavailable = Array.isArray(retried.unavailable) ? retried.unavailable : [];
@@ -17589,7 +17679,7 @@ Return a JSON object with four arrays of search query strings:
     repairJobsMojibake(items);
     normalizeJobsMarkup(items);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
-    const officialResolution = await resolveScoreSafePostings(scoreSafeRowsWithBoardClosed(descriptionEvidence), { event, nodeId, signal, jobRunId });
+    const officialResolution = await settleScrapedRowsForScoring(scoreSafeRowsWithBoardClosed(descriptionEvidence), { signal });
     items = officialResolution.jobs;
     // Keep the resumed scoring queue on the same majority-English policy.
     const languageFilter = filterNonEnglishJobs(items);

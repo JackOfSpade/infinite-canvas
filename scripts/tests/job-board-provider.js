@@ -35,27 +35,17 @@ export default [
   ...jobBoardCancellationAuthorityTests,
   ...careerCompilationQueueTests,
   {
-    name: 'Board Pause & save renders and fires in the searches phase with nothing else mounted, and explains a disabled state',
+    name: 'Board Pause & save moved to the side panel: the Board publishes it and draws no status of its own',
     async run() {
       await withDom(async window => {
         const bundle = await bundleComponent(path.resolve('src/nodes/jobboard/JobBoardSearchSelection.jsx'), {});
         const { React, act, createRoot, JobBoardSearchSelection } = bundle.module;
         const root = createRoot(window.document.getElementById('root'));
-        let pauses = 0;
-        const props = { modules: [{ id: 'hub-a', label: 'Hub A' }, { id: 'hub-b', label: 'Hub B' }], selectedIds: ['hub-a', 'hub-b'],
-          running: true, showPauseSave: true, onPause: () => { pauses += 1; }, onCancel: () => {}, onToggle: () => {},
-          progress: { label: 'Waiting for Claude', completed: 0, total: 2 } };
-        const pauseButton = () => [...window.document.querySelectorAll('button')].find(button => button.textContent.includes('Pause & save'));
         try {
-          await act(async () => root.render(React.createElement(JobBoardSearchSelection, props)));
-          assert(pauseButton() && !pauseButton().disabled, 'Pause & save is enabled with no handoff dock in the tree');
-          await act(async () => pauseButton().click());
-          assert(pauses === 1, 'the button reaches the Board pause handler');
-          await act(async () => root.render(React.createElement(JobBoardSearchSelection, { ...props, pauseDisabledReason: 'Saving is already in progress.' })));
-          assert(pauseButton().disabled && window.document.body.textContent.includes('Saving is already in progress.'),
-            'a disabled button says why');
-          await act(async () => root.render(React.createElement(JobBoardSearchSelection, { ...props, showPauseSave: false })));
-          assert(!pauseButton(), 'the action is limited to the searches phase');
+          await act(async () => root.render(React.createElement(JobBoardSearchSelection, { modules: [{ id: 'hub-a', label: 'Hub A' }], selectedIds: ['hub-a'], running: true, onCancel: () => {}, onToggle: () => {} })));
+          assert(![...window.document.querySelectorAll('button')].some(button => button.textContent.includes('Pause & save')), 'no second Pause on the node');
+          assert(!window.document.querySelector('progress'), 'no progress bar on the node');
+          assert([...window.document.querySelectorAll('button')].some(button => button.textContent.includes('Cancel current run')), 'Cancel stays with the Board');
         } finally { await act(async () => root.unmount()); await bundle.dispose(); }
       });
     },
@@ -70,11 +60,8 @@ export default [
         && board.includes('pauseSearchModule: sourceId => jobSearchCoordinator.pauseSearchModule(sourceId)')
         && board.includes('isQuitPauseCurrent: isCurrentSearchRun'),
       'the searches-phase action is keyed to the current Board run and pauses its Search owners through the quit-pause path');
-      const pauseCondition = selector.indexOf('{running && showPauseSave && (\n          <button');
-      const pauseStart = selector.indexOf('<button', pauseCondition);
-      const pauseButton = selector.slice(pauseStart, selector.indexOf('</button>', pauseStart));
-      assert(pauseButton.includes('onClick={onPause}') && pauseButton.includes('Pause &amp; save')
-        && !pauseButton.includes('handoff'), 'the button is not coupled to a mounted handoff dock');
+      assert(board.includes('usePublishJobRunStatus(id, boardRunVisible ? {') && board.includes('onPause: showPauseSave ? pauseSearchesAndSave : null')
+        && !selector.includes('onPause'), 'the Board publishes its pause to the side panel and the selector has none');
       assert(board.includes('Waiting for Claude to finish search resolution for')
         && selector.includes('Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.'),
       'the waiting state and cancellation effect are explicit');
@@ -6116,7 +6103,7 @@ export default [
         && confirm.includes('const liveBlockReason = emptyReplacementIneligibilityReason({')
         && confirm.includes('readyModuleCount: liveInputs.ready.length')
         && confirm.includes('reason=${liveBlockReason}')
-        && confirm.indexOf('if (liveBlockReason)') < confirm.indexOf('clearBoardChildren();'),
+        && confirm.indexOf('if (liveBlockReason)') < confirm.indexOf('clearBoardChildren({ preserveNodeIds: applicationCardIds });'),
       'confirmation must re-read the live graph and refuse a newly locked, running, nonterminal, positive, or current Board before deleting its cascade');
       return { staleEmptyPrompts: true, currentEmptyDoesNotPrompt: true, changedInputsBlocked: true };
     },
@@ -6371,7 +6358,7 @@ export default [
         && retirement.includes('retirementReceipt.retryCombineAfterRetirement === true')
         && retirement.includes('combineManualAiRunId: null,')
         && retirement.includes('const retryPlanReleased = retirementReceipts.get(runId)?.retryCombineAfterRetirement !== true')
-        && (combine.match(/completeManualAiRun\(manualAiRunId, \{ retryCombineAfterRetirement: true \}\)/g) || []).length === 2,
+        && (combine.match(/completeManualAiRun\(manualAiRunId, \{ retryCombineAfterRetirement: true \}\)/g) || []).length === 3,
       'backend completion must not become a mount-local retired tombstone until marker/receipt removal is observable; a delayed canvas update must throw into the durable retry-receipt path');
       assert(combine.includes('rememberBoundedRunId(committedCombineManualAiRunIdsRef.current, manualAiRunId);')
         && manualCancelledHandler.includes('if (!cancelledRunId) {')

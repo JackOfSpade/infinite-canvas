@@ -1,6 +1,7 @@
 import { boardClosedBoardLabel, normalizeBoardClosed, normalizeOfficialPosting, officialPostingLookupStatus, OFFICIAL_POSTING_LABELS } from '../../electron/ipc/officialPostingFields.js';
 import { normalizeJobListingExternalUrl } from './jobListingUrl.js';
 import { officialPostingNegativeNeedsRecheck } from '../../electron/ipc/officialPostingNegativePolicy.js';
+import { researchSkipReason, RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
 
 const sameName = (left, right) => String(left || '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase()
   === String(right || '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
@@ -21,7 +22,7 @@ export function officialPostingNeedsRefresh(job = {}) {
     || officialPostingLookupStatus(posting).retryable;
 }
 
-/** A row the job board reported closed stays visible only because the official source decides, so say which case this is. */
+/** A row the job board reported closed can stay visible on its description or official source, so say which case this is. */
 function boardClosedStatus(job, status) {
   const closed = normalizeBoardClosed(job.boardClosed);
   const board = closed ? boardClosedBoardLabel(closed.board) : '';
@@ -35,9 +36,15 @@ export function officialPostingDisplay(job = {}) {
   const posting = normalizeOfficialPosting(job.officialPosting);
   const savedStatus = officialPostingLookupStatus(posting);
   const outdated = !!posting && (!hasSemanticReceipt(posting) || officialPostingNegativeNeedsRecheck(posting));
-  const status = outdated && !savedStatus.retryable ? { ...savedStatus, state: 'outdated', retryable: true,
+  const currentStatus = outdated && !savedStatus.retryable ? { ...savedStatus, state: 'outdated', retryable: true,
     label: savedStatus.state === 'verified' ? 'Previous official posting · check again' : 'Outdated lookup · check again',
     detail: 'This saved result predates the current verification checks. Check the official posting again to get a current result.' } : savedStatus;
+  // A row outside a scored Board (an application dock entry, an export) has no fit to report.
+  const skipReason = typeof job.matchScore === 'number' || typeof job.scoreStatus === 'string' ? researchSkipReason(job) : null;
+  // Only a job with no lookup at all is "not researched"; a saved result keeps its own state.
+  const researchSkipped = Boolean(skipReason) && !posting;
+  const status = researchSkipped ? { ...currentStatus, label: skipReason,
+    detail: `Automatic research runs for jobs with a fit score of ${RESEARCH_MIN_FIT_SCORE} or above. Generate or this card's lookup still checks this job.` } : currentStatus;
   const unknown = posting?.level === 'L6';
   const unnamedOfficial = posting?.level === 'L4' && !text(posting.employer);
   const employer = unknown || unnamedOfficial ? '' : text(posting?.employer) || text(job.company);
@@ -57,6 +64,7 @@ export function officialPostingDisplay(job = {}) {
     statusLabel: [unknown ? 'poster, employer unknown' : '', boardClosedStatus(job, status) ?? status.label].filter(Boolean).join(' · '),
     statusDetail: status.detail,
     lookupState: status.state,
+    researchSkipped,
     lookupRetryable: status.retryable,
     lookupNeedsRefresh: officialPostingNeedsRefresh(job),
     lookupActionLabel: savedStatus.state === 'unchecked' ? 'Check official posting' : 'Retry lookup',

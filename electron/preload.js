@@ -129,6 +129,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // on the hub node and never calls this again until career data is cleared.
   resolveSearchRoles: (args) => ipcRenderer.invoke('resolve-search-roles', args),
   evaluateJobPreferences: (args) => ipcRenderer.invoke('evaluate-job-preferences', args),
+  reapplyJobPreferences: (args) => ipcRenderer.invoke('reapply-job-preferences', args),
   resolveJobSearchLocation: (args) => ipcRenderer.invoke('resolve-job-search-location', args),
   searchJobs: (args) => ipcRenderer.invoke('search-jobs', args),
   searchJobsSingleSource: (args) => ipcRenderer.invoke('search-jobs-single-source', args),
@@ -267,6 +268,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Board Combine runs this after global taxonomy validation and before cards
   // are built, so compensation context is still available on the full jobs.
   researchJobCompensation: (args) => ipcRenderer.invoke('research-job-compensation', args),
+  settleBoardResearch: (args) => ipcRenderer.invoke('settle-board-research', args),
+  scoreBoardPreferenceJobs: (args) => ipcRenderer.invoke('score-board-preference-jobs', args),
 
   // ── Non-API AI handoff ─────────────────────────────────────────────────
   // The main process emits a fully materialized prompt here when a job task
@@ -291,6 +294,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath }),
   // Whether the Claude worker is held up by a usage limit or a sign-in problem.
   getClaudeTaskStatus: () => ipcRenderer.invoke('get-claude-task-status'),
+  getClaudeTaskActivity: () => ipcRenderer.invoke('get-claude-task-activity'),
+  onClaudeTaskActivity: createListener('claude-task:activity'),
+  holdClaude: key => ipcRenderer.invoke('claude-pause:hold', { key }),
+  releaseClaude: key => ipcRenderer.invoke('claude-pause:release', { key }),
+  drainClaude: key => ipcRenderer.invoke('claude-pause:drain', { key }),
+  stopRunningClaude: key => ipcRenderer.invoke('claude-pause:stop-running', { key }),
+  resumeClaudeUsageNow: () => ipcRenderer.invoke('claude-usage:resume-now'),
 
   // ── Price Check Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),

@@ -1,3 +1,7 @@
+import { StringDecoder } from 'node:string_decoder';
+import { applicationProgressStageLabel } from '../../src/utils/applicationProgress.js';
+import { isClaudeHeld, trackClaudeCall, waitForClaudeRelease } from './claudePause.js';
+import { createClaudeTaskActivity, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { APPLICATION_ROUTE_CLAUDE_RUNNER } from './applicationRuleTally.js';
 // Main-process Claude Code application runner.
 //
@@ -94,8 +98,7 @@ export function claudeCliArgs({
   resume = false,
   // Application stages run with no tools. Interview research alone opts into
   // a named allow-list (web search/fetch); no file, shell or MCP tools.
-  tools = '',
-} = {}) {
+  tools = '', partialMessages = false } = {}) {
   let sessionArgs = [];
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     sessionArgs = resume === true ? ['--resume', sessionId] : ['--session-id', sessionId];
@@ -114,6 +117,7 @@ export function claudeCliArgs({
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
+    ...(partialMessages ? ['--include-partial-messages'] : []),
   ];
 }
 
@@ -257,6 +261,7 @@ export function runClaudeStage({
   sessionId,
   resume = false,
   tools = '',
+  onActivity = null,
   spawnImpl = childProcess.spawn,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   setTimeoutImpl = globalThis.setTimeout,
@@ -269,7 +274,7 @@ export function runClaudeStage({
     }
     let child;
     try {
-      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools, partialMessages: typeof onActivity === 'function' }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)
@@ -283,6 +288,8 @@ export function runClaudeStage({
     let killed = false;
     const stdoutChunks = [];
     const stderrChunks = [];
+    const stdoutDecoder = new StringDecoder('utf8');
+    let activityTail = '';
     let stdoutBytes = 0;
     let stderrBytes = 0;
 
@@ -290,6 +297,17 @@ export function runClaudeStage({
       killChild();
       finish(new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled));
     };
+
+    // Liveness only: the answer is still parsed from the whole output on close.
+    function reportActivity(buffer) {
+      if (typeof onActivity !== 'function') return;
+      activityTail += stdoutDecoder.write(buffer);
+      const lines = activityTail.split('\n');
+      activityTail = lines.pop();
+      for (const line of lines) {
+        try { onActivity(describeClaudeSdkMessage(JSON.parse(line))); } catch { /* not a whole frame */ }
+      }
+    }
 
     function killChild() {
       if (killed) return;
@@ -332,6 +350,7 @@ export function runClaudeStage({
         return;
       }
       stdoutChunks.push(buffer);
+      reportActivity(buffer);
     });
     child.stderr?.on('data', chunk => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
@@ -592,6 +611,7 @@ export function createClaudeApplicationRunner({
   // other private files; null turns the log off.
   runLogPath = defaultRunLogPath,
   capturePrompts = true,
+  usage = null,
 } = {}) {
   const { getHandoff, submitHandoff, subscribeDiscards } = api;
   const stageRunner = typeof runStage === 'function' ? runStage : createProductionRunStage({ workspaceDir, fsImpl });
@@ -600,6 +620,8 @@ export function createClaudeApplicationRunner({
   const runCounts = new Map();
   // jobId -> time of the last activity-only emit (never part of a state).
   const activityEmits = new Map();
+  // jobId -> what Claude is doing in this job's current action, for the dock.
+  const liveActivity = createClaudeTaskActivity({ now });
   const drivers = new Map();
   // jobId -> Map(laneKey -> { sessionId, started, contextKey, stage }); laneKey is 'main' or a matchTaskId.
   const sessions = new Map();
@@ -723,6 +745,7 @@ export function createClaudeApplicationRunner({
       ...(patch.progress !== undefined ? { progress: patch.progress } : previous?.progress ? { progress: previous.progress } : {}),
       activity: patch.activity || 'running',
       ...(sameAction && Number.isFinite(previous.lastActivityAt) ? { lastActivityAt: previous.lastActivityAt } : {}),
+      ...(patch.status === 'running' && liveActivity.view(jobId) ? { live: liveActivity.view(jobId) } : {}),
       ...(patch.status === 'running' ? {
         activeCalls: [...(drivers.get(jobId)?.actions?.values() || [])].filter(row => row.activity === 'running').length,
         waitingCalls: [...(drivers.get(jobId)?.actions?.values() || [])].filter(row => row.activity === 'waiting').length,
@@ -731,6 +754,7 @@ export function createClaudeApplicationRunner({
       ...(patch.reason ? { reason: patch.reason } : {}),
       ...(patch.stop ? { stop: patch.stop } : {}),
     };
+    if (patch.status !== 'running') liveActivity.remove(jobId);
     states.set(jobId, state);
     activityEmits.delete(jobId);
     emit({ ...state });
@@ -744,14 +768,19 @@ export function createClaudeApplicationRunner({
   }
 
   // Liveness from the provider stream. updatedAt stays the stage start (it
-  // drives the Elapsed clock); only lastActivityAt moves, emitted throttled.
-  function touchActivity(jobId) {
+  // drives the Elapsed clock); only lastActivityAt moves, emitted throttled. A
+  // new step goes out at once. With parallel calls only the shown one reports.
+  function touchActivity(jobId, event = null, shown = true) {
     const state = states.get(jobId);
     if (!state || state.status !== 'running') return;
     const at = now();
     state.lastActivityAt = at;
+    const stepsBefore = liveActivity.stepSeq(jobId);
+    if (shown) liveActivity.event(jobId, event);
+    const live = liveActivity.view(jobId);
+    if (live) state.live = live;
     const last = activityEmits.get(jobId);
-    if (last !== undefined && at - last < CLAUDE_ACTIVITY_EMIT_INTERVAL_MS) return;
+    if (liveActivity.stepSeq(jobId) === stepsBefore && last !== undefined && at - last < CLAUDE_ACTIVITY_EMIT_INTERVAL_MS) return;
     activityEmits.set(jobId, at);
     emit({ ...state });
   }
@@ -760,6 +789,7 @@ export function createClaudeApplicationRunner({
     const previous = states.get(jobId);
     states.delete(jobId);
     activityEmits.delete(jobId);
+    liveActivity.remove(jobId);
     emit({ jobId, canvasFilePath: previous?.canvasFilePath ?? canvasFilePath, status: 'done', stage: previous?.stage ?? null, updatedAt: now() });
   }
 
@@ -872,11 +902,25 @@ export function createClaudeApplicationRunner({
       const queuedAt = now();
       entry.actions.set(actionId, { stage, activity: 'waiting', progress: handoff?.progress || null, updatedAt: queuedAt });
       publishActiveAction(entry);
-      const release = await semaphore.acquire(signal);
+      // A held bundle starts no new stage. A slot can take a while, so a hold set
+      // during that wait is honoured too, without keeping the slot from other jobs.
+      const pauseKey = `application:${jobId}`;
+      let release;
+      for (;;) {
+        await waitForClaudeRelease(pauseKey, signal);
+        release = await semaphore.acquire(signal);
+        if (!isClaudeHeld(pauseKey) || signal.aborted) break;
+        release();
+      }
       const acquiredAt = now();
       entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: acquiredAt });
-      publishActiveAction(entry);
       const profile = claudeStageProfile(stage);
+      const actionShown = () => [...entry.actions.entries()].find(([, row]) => row.activity === 'running')?.[0] === actionId;
+      if (actionShown()) {
+        liveActivity.begin(jobId, { model: profile.model, effort: profile.effort, countRound: false });
+        liveActivity.note(jobId, applicationProgressStageLabel(stage) || 'Claude stage');
+      }
+      publishActiveAction(entry);
       const record = {
         version: 2, runId: crypto.randomUUID(), jobId, stage, ...(matchTaskId ? { matchTaskId } : {}),
         sessionId, resume,
@@ -899,9 +943,10 @@ export function createClaudeApplicationRunner({
         // visible. No provider call is made if this cannot be recorded.
         await logRun(jobId, canvasFilePath, { ...record, event: 'started', ...(capturePrompts ? { prompt: text } : {}) });
         try {
+          const callEnded = trackClaudeCall(pauseKey);
           const result = await stageRunner({
             text, pageImages, signal, stage, sessionId, resume, model: profile.model, effort: profile.effort,
-            onActivity: () => touchActivity(jobId),
+            onActivity: event => touchActivity(jobId, event, actionShown()),
             onThinkingSummary: summary => {
               if (!acceptingSummaries) return Promise.reject(new ClaudeRunnerError('CLAUDE_LOG_ERROR', 'Claude returned a diagnostic summary after its run had ended.'));
               const write = summaryChain.then(async () => {
@@ -920,7 +965,7 @@ export function createClaudeApplicationRunner({
               write.catch(() => {});
               return write;
             },
-          });
+          }).finally(callEnded);
           acceptingSummaries = false;
           await summaryChain;
           // Keep returned text before submission, cancellation or transcript cleanup.
@@ -1044,7 +1089,10 @@ export function createClaudeApplicationRunner({
       let submitted;
       try {
         if ([...entry.actions.values()].some(row => row.activity === 'running')) publishActiveAction(entry);
-        else setState(jobId, canvasFilePath, { status: 'running', stage: 'host-verification', progress: handoff?.progress || null });
+        else {
+          liveActivity.note(jobId, 'Checking the response');
+          setState(jobId, canvasFilePath, { status: 'running', stage: 'host-verification', progress: handoff?.progress || null });
+        }
         submitted = await submitHandoff({
           jobId,
           canvasFilePath,
@@ -1140,6 +1188,7 @@ export function createClaudeApplicationRunner({
       promise: null,
     };
     drivers.set(jobId, entry);
+    let restartAfterUsage = false;
     setState(jobId, canvasFilePath, { status: 'running', stage: null });
     const needsReview = async stop => {
       const previous = states.get(jobId);
@@ -1168,6 +1217,21 @@ export function createClaudeApplicationRunner({
         if (entry.abortReason === 'discard') { await dropSessions(jobId); return; }
         if (entry.abortReason === 'shutdown') return;
         const raw = entry.abortReason === 'failed' && entry.firstError ? entry.firstError : caught;
+        // Not a failure of this bundle: finished stages are saved, so wait out the
+        // limit and carry on from them with the same recovery Retry uses.
+        if (raw?.code === 'CLAUDE_USAGE_LIMIT' && usage) {
+          usage.report({ resetsAt: raw.detail?.resetsAt ?? null });
+          liveActivity.note(jobId, 'Claude usage limit reached');
+          setState(jobId, canvasFilePath, { status: 'running', stage: entry.stage, activity: 'waiting' });
+          // A parallel lane's failure already aborted entry.controller, so that
+          // signal cannot time this wait. Only a discard or shutdown may end it.
+          entry.usageWait = new AbortController();
+          await usage.wait(entry.usageWait.signal);
+          if (entry.abortReason === 'discard') { await dropSessions(jobId); return; }
+          if (entry.abortReason === 'shutdown') return;
+          restartAfterUsage = true;
+          return;
+        }
         if (raw?.code === 'CLAUDE_TOO_MANY_RUNS' && typeof api.stopHandoff === 'function') {
           try {
             const result = await api.stopHandoff({ jobId, canvasFilePath, reason: 'run-budget', runs: entry.runs, limit: maxRunsPerJob });
@@ -1181,6 +1245,7 @@ export function createClaudeApplicationRunner({
         await persist();
       } finally {
         if (drivers.get(jobId) === entry) drivers.delete(jobId);
+        if (restartAfterUsage && !shuttingDown) startDriver(jobId, canvasFilePath);
       }
     })();
     return { status: 'running', stage: null };
@@ -1222,6 +1287,7 @@ export function createClaudeApplicationRunner({
     const entry = drivers.get(jobId);
     if (entry) {
       entry.abortReason = 'discard';
+      entry.usageWait?.abort();
       entry.controller.abort();
       removeState(jobId, entry.canvasFilePath);
       return;
@@ -1244,7 +1310,9 @@ export function createClaudeApplicationRunner({
     shuttingDown = true;
     const pending = [];
     for (const entry of drivers.values()) {
-      if (!entry.abortReason) entry.abortReason = 'shutdown';
+      // A driver failed by a parallel lane may be waiting out a usage limit.
+      if (!entry.abortReason || entry.usageWait) entry.abortReason = 'shutdown';
+      entry.usageWait?.abort();
       entry.controller.abort();
       pending.push(entry.promise);
     }

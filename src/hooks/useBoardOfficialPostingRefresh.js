@@ -1,3 +1,4 @@
+import { isResearchEligible, RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation, officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../utils/officialPostingPreparation.js';
 import { boardOfficialPostingRefreshCardMatches, refreshBoardOfficialPostingJobs, summarizeBoardOfficialPostingChecks } from '../utils/jobBoardOfficialPostingRefresh.js';
@@ -92,7 +93,7 @@ export function useBoardOfficialPostingRefresh(options) {
       const scopeKey = getScopeKey();
       const snapshots = [];
       for (const card of getNodes()) {
-        if (card?.type !== 'jobcard' || card.data?.hubId !== nodeId || card.data.locked || isJobWorkflowDeletionPending(card.id)) continue;
+        if (card?.type !== 'jobcard' || card.data?.hubId !== nodeId || card.data.locked || isJobWorkflowDeletionPending(card.id) || !isResearchEligible(card.data)) continue;
         const claim = beginOfficialPostingPreparation({ canvasFilePath, nodeId: card.id, purpose: 'lookup', cancel });
         if (!claim) continue;
         claims.push(claim);
@@ -101,7 +102,7 @@ export function useBoardOfficialPostingRefresh(options) {
           posting: JSON.stringify(card.data.officialPosting ?? null), postedBy: card.data.postedBy });
       }
       if (!snapshots.length) {
-        addToast({ title: 'No available job cards', description: 'Unlock the cards or finish their current lookups, then retry.', type: 'info' });
+        addToast({ title: 'No available job cards', description: `Only unlocked cards with a fit score of ${RESEARCH_MIN_FIT_SCORE} or above are refreshed. Use a card's own lookup for any other job.`, type: 'info' });
         return;
       }
       if (mounted.current) setProgress({ completed: 0, total: snapshots.length });

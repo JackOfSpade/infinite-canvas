@@ -1,3 +1,4 @@
+import { RESEARCH_MIN_FIT_SCORE } from './researchGate.js';
 import { validationFailure } from './validationFailure.js';
 import { collector, templatesFor } from './validationLines.js';
 export const TAXONOMY_CORRECTION_TEMPLATES = templatesFor('taxonomy.');
@@ -390,11 +391,15 @@ export async function runBoundedJobTaxonomy(jobs, {
   const plannedRoles = new Map(plan.value.directionRoleIndexes.map(({ direction, roleIndex }) => (
     [direction, plan.value.roleFamilies[roleIndex]]
   )));
+  // The plan validator requires this family.
+  const otherRole = plan.value.roleFamilies.find(role => role.toLocaleLowerCase() === 'other');
   const unmapped = [];
   for (let index = 0; index < list.length; index += 1) {
     const direction = compactText(list[index]?.careerDirection, 100) || '(blank)';
     const role = plannedRoles.get(direction);
     if (role) roleByIndex[index] = role;
+    // A rare direction costs an AI classification only at or above the fit bar.
+    else if (typeof list[index]?.matchScore === 'number' && list[index].matchScore < RESEARCH_MIN_FIT_SCORE) roleByIndex[index] = otherRole;
     else unmapped.push({ index, job: list[index] });
   }
   const plannedAssignments = list.length - unmapped.length;

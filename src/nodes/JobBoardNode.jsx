@@ -1,3 +1,5 @@
+import { usePublishJobRunStatus } from '../hooks/usePublishJobRunStatus';
+import { normalizeProgress } from './jobboard/jobBoardProgress';
 import { pauseBoardCombine } from './jobboard/boardRecoveryNotice';
 import { settlePreFenceCanvasBatches } from '../utils/quitCommitSettle';
 import { jobWorkflowNeedsQuitPause, savedWorkflowQuitPausePatch } from '../utils/quitWorkflowPause';
@@ -16,7 +18,7 @@ import { useToast } from '../components/ToastProvider';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { useBoardOfficialPostingRefresh } from '../hooks/useBoardOfficialPostingRefresh';
-import { carryBoardOfficialPostingResults, refreshBoardOfficialPostingJobs } from '../utils/jobBoardOfficialPostingRefresh';
+import { carryBoardOfficialPostingResults } from '../utils/jobBoardOfficialPostingRefresh';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
@@ -24,12 +26,16 @@ import { hubCardFilter } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
+import { runBoardResearchStage } from './jobboard/jobBoardResearchStage.js';
 import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } from '../utils/jobLocationConsolidation';
 // Shown only for a restored marker: 'Saved AI handoff ready. Choose Continue saved AI handoff…'
 import { SAVED_HANDOFF_READY_MESSAGE, isLiveCombineOwnedMarker, combineCommitMismatchReason } from './jobboard/boardRecoveryNotice';
 import { JobBoardDoneState } from './jobboard/JobBoardDoneState';
 import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
 import { JobBoardCareerOverridePanel } from './jobboard/JobBoardCareerOverridePanel';
+import { JobBoardPreferenceOverridePanel } from './jobboard/JobBoardPreferenceOverridePanel';
+import { runBoardPreferenceOverrideStage } from './jobboard/jobBoardPreferenceOverrideStage';
+import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView, jobBoardPreferenceSeed } from '../utils/jobBoardPreferenceOverride';
 import { CareerCanvasFileImportDialog } from '../components/CareerCanvasFileImportDialog';
 import { canvasCareerImportCandidates, reconcileCareerCanvasFileSelections, selectedCareerCanvasFiles, toggleCareerCanvasFileSelection } from '../utils/careerCanvasFileImport';
 import { filesToDropPayloads } from '../utils/fileDropUtils';
@@ -682,6 +688,9 @@ function liveCombineInputs(boardId, nodes, edges) {
         count,
         fingerprint: moduleCombineFingerprint(snapshotScopedJobs, remoteResidences),
         scoredJobs: snapshotScopedJobs,
+        preferenceCandidatePool: Array.isArray(data.preferenceCandidatePool) ? data.preferenceCandidatePool : [],
+        jobPreferences: data.jobPreferences || '',
+        searchBriefPlan: data.searchBriefPlan || null,
         remoteResidences,
         hubState: data.hubState || 'empty',
         include: !!terminal && isMergeableTerminalJobSearchOutcome(node, terminal)
@@ -690,7 +699,9 @@ function liveCombineInputs(boardId, nodes, edges) {
       };
     });
   const completed = all.filter(module => module.include);
-  return { all, completed, ready: completed.filter(module => module.count > 0) };
+  // Board preferences can pass a saved job the Search's own rules filtered out.
+  const overrideActive = !!activeJobBoardPreferenceOverride((Array.isArray(nodes) ? nodes : []).find(node => node?.id === boardId)?.data);
+  return { all, completed, ready: completed.filter(module => module.count > 0 || (overrideActive && module.preferenceCandidatePool.length > 0)) };
 }
 
 function boardInputSignature(completedModules, connectedModules) {
@@ -909,6 +920,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // progress uses the same main-process event as a Job Search node, but the
   // node id below keeps concurrent boards/searches completely isolated.
   const [compensationProgress, setCompensationProgress] = useState(null);
+  const [combineResearchProgress, setCombineResearchProgress] = useState(null);
   const [combineTrace, setCombineTrace] = useState(null);
   const combineTraceRef = useRef(null);
   const combineAttemptRef = useRef(0);
@@ -1410,13 +1422,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // Keep every valid terminal input in the staleness signature, INCLUDING a
   // genuinely completed zero-result re-run. Only positive-result modules
   // contribute jobs to the actual merge.
+  const preferenceOverrideActive = !!activeJobBoardPreferenceOverride(data);
   const completedModules = useMemo(
     () => mergeableModules.filter((m) => m.hubState === 'done' && (m.hasPositiveResults || m.isAuthoritativeEmpty)),
     [mergeableModules],
   );
   const readyModules = useMemo(
-    () => completedModules.filter((m) => m.count > 0),
-    [completedModules],
+    () => completedModules.filter((m) => m.count > 0 || (preferenceOverrideActive && (getNode(m.id)?.data?.preferenceCandidatePool?.length || 0) > 0)),
+    [completedModules, getNode, preferenceOverrideActive],
   );
   const allConnectedModulesDone = connectedModules.length > 0 && completedModules.length === connectedModules.length;
   // Signature of every terminal module (id + data fingerprint). Compared against
@@ -1701,10 +1714,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       return;
     }
     document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
-    clearBoardChildren();
+    // A card tied to an application outlives its listing, as it does in Combine.
+    const applicationCardIds = getNodes().filter(node => node?.data?.hubId === id && isProtectedJobCard(node)).map(node => node.id);
+    clearBoardChildren({ preserveNodeIds: applicationCardIds });
     const perModule = liveInputs.completed.map((m) => ({ label: m.label, count: m.count }));
     updateGlobal(id, {
-      hubState: 'done', resultCount: 0, moduleCount: liveInputs.completed.length,
+      hubState: 'done', resultCount: applicationCardIds.length, moduleCount: liveInputs.completed.length,
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
       sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {},
       mergeStats: {
@@ -2464,6 +2479,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setCombining(false);
     setFinalizingCommittedCombine(false);
     setCompensationProgress(null);
+    setCombineResearchProgress(null);
     setRecoveryError(null);
     let cancellationIntent = null;
     try {
@@ -2605,6 +2621,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setCombining(false);
     setFinalizingCommittedCombine(false);
     setCompensationProgress(null);
+    setCombineResearchProgress(null);
     setRecoveryError(null);
     let cancellationIntent = null;
     try {
@@ -2748,6 +2765,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     setScanProgress(null);
     setCombining(false);
     setCompensationProgress(null);
+    setCombineResearchProgress(null);
     setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
     updateGlobal(id, node => isQuitPauseCurrent() ? savedWorkflowQuitPausePatch(node, acknowledgement) : null);
     await settlePreFenceCanvasBatches();
@@ -2758,13 +2776,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [canvasFilePath, data, epoch, getNode, id, moduleRunQueue, updateGlobal]);
 
   const pauseSearchesAndSave = useCallback(async () => {
-    if (pauseSaving) return;
+    if (pauseSaving) return { success: false, error: 'A save is already running.' };
     const boardRunId = getNode(id)?.data?.boardScanResume?.boardRunId || null;
     const isCurrentSearchRun = () => {
       const plan = getNode(id)?.data?.boardScanResume;
       return Boolean(boardRunId && plan?.boardRunId === boardRunId && plan.phase === 'searches');
     };
-    if (!isCurrentSearchRun()) return;
+    if (!isCurrentSearchRun()) return { success: true };
     setPauseSaving(true);
     try {
       const result = await pauseBoardForQuit({ boardRunId,
@@ -2774,9 +2792,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       if (result?.success) addToast({ title: 'Search paused and saved',
         description: 'The active Search can continue later. Existing Board results stay in place.', type: 'info' });
       else if (result?.status !== 'stale') throw new Error(result?.error || 'The active Search could not be paused safely.');
+      return { success: true };
     } catch (error) {
       setRecoveryError(error?.message || 'The active Search could not be paused safely.');
       addToast({ title: 'Pause & save did not finish', description: error?.message || 'The Board kept its recovery receipt.', type: 'error' });
+      return { success: false, error: error?.message || 'The active Search could not be paused safely.' };
     } finally { setPauseSaving(false); }
   }, [addToast, getNode, id, jobSearchCoordinator, pauseBoardForQuit, pauseSaving]);
 
@@ -2822,7 +2842,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     const afterSearch = options?.afterSearch === true;
     const queueManagedByScan = afterSearch && options?.queueManagedByScan === true;
     const recoveryAttempt = options?.recoveryAttempt === true;
-    if (!afterSearch && !recoveryAttempt && readyModules.length === 0 && allConnectedModulesDone) {
+    // This render's module list predates the preferences just applied; admission re-reads the live graph.
+    const preferencesJustApplied = options?.preferencesJustApplied === true;
+    if (!preferencesJustApplied && !afterSearch && !recoveryAttempt && readyModules.length === 0 && allConnectedModulesDone) {
       // A source may legitimately complete with no matching/new jobs. Replace
       // the hidden previous cascade only after an explicit confirmation. The
       // prompt makes the affected board-owned node count visible and defaults to
@@ -2838,7 +2860,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       }
       return { status: 'not-ready' };
     }
-    if (!afterSearch && !recoveryAttempt && readyModules.length === 0) {
+    if (!preferencesJustApplied && !afterSearch && !recoveryAttempt && readyModules.length === 0) {
       addToast({ title: 'Nothing to combine', description: 'Connect Job Search Modules that have finished scoring, then try again.', type: 'error' });
       return { status: 'not-ready' };
     }
@@ -2958,6 +2980,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     compensationRequestIdRef.current = compensationRequestId;
     setCombining(true);
     setCompensationProgress(null);
+    setCombineResearchProgress(null);
     const traceStartedAt = Date.now();
     const initialTrace = {
       attempt: ++combineAttemptRef.current,
@@ -3137,10 +3160,30 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // the right search module (a string per card, not a deep résumé copy —
       // the old per-job resumeProfile clone persisted N identical profile
       // objects into the canvas file and was read by nothing).
-      const jobArrays = readyAtCombine.map((m) =>
+      let jobArrays = readyAtCombine.map((m) =>
         m.scoredJobs
           .map((j) => ({ ...j, originHubId: j.originHubId || m.id }))
       );
+      const preferenceOverrideAtCombine = activeJobBoardPreferenceOverride(getNode(id)?.data);
+      if (preferenceOverrideAtCombine) {
+        recordCombineStage('board-preferences');
+        const applied = await runBoardPreferenceOverrideStage(readyAtCombine, {
+          override: preferenceOverrideAtCombine, nodeId: id, manualAiRunId,
+          cancelled: () => cancelled() || !getNode(id) || !!getNode(id)?.data?.locked,
+          onProgress: progress => { if (!cancelled()) setCombineResearchProgress(progress); },
+          persist: record => updateGlobal(id, { jobBoardPreferenceOverride: record }),
+          interpret: args => window.electronAPI.interpretJobPreferences(args),
+          reapply: args => window.electronAPI.reapplyJobPreferences(args),
+          evaluate: args => window.electronAPI.evaluateJobPreferences(args),
+          score: args => window.electronAPI.scoreBoardPreferenceJobs(args),
+        });
+        if (applied.cancelled) return { status: 'cancelled' };
+        jobArrays = applied.jobArrays;
+      }
+      // The Board's rows no longer come only from the Search's own result.
+      const markBoardPreferencesCombined = () => {
+        if (preferenceOverrideAtCombine) updateGlobal(id, node => ({ jobBoardPreferenceOverride: { ...activeJobBoardPreferenceOverride(node?.data), combinedAt: Date.now() } }));
+      };
       const mergeStats = {};
       let union = unionScoredJobs(jobArrays, mergeStats);
       // Location consolidation runs BEFORE taxonomy so a four-location
@@ -3161,7 +3204,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         candidateGroups: 0, postingsCollapsed: 0, protectedRetained: 0,
         representedPostings: 0, alreadyConsolidated: 0,
       };
-      if (union.length > 0) {
+      if (union.length > 0 || protectedBoardCards.length > 0) {
         recordCombineStage('location-consolidation');
         const attached = attachProtectedCards(union, protectedBoardCards);
         const confirmation = await window.electronAPI.confirmJobLocationConsolidations({
@@ -3197,14 +3240,18 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // and incomplete rows without changing the source-run artifacts.
       union = carryBoardOfficialPostingResults(union, existingBoardCards);
       recordCombineStage('official-postings');
-      const officialRefresh = await refreshBoardOfficialPostingJobs(union, {
-        nodeId: id, manualAiRunId, force: true,
+      const boardResearch = await runBoardResearchStage(union, {
+        nodeId: id, manualAiRunId, existingCards: existingBoardCards,
+        protectedIds: new Set(protectedBoardCards.map(card => card.id)),
         cancelled: () => cancelled() || !getNode(id) || !!getNode(id)?.data?.locked,
-        // Every row crosses the host proof check. Only the host can reuse an
-        // exact current cache receipt; renderer freshness is display-only.
+        // Every eligible row crosses the host proof check. Only the host can reuse
+        // an exact current cache receipt; renderer freshness is display-only.
         refresh: args => window.electronAPI.refreshOfficialPostings({ ...args, force: false }),
+        settle: args => window.electronAPI.settleBoardResearch(args),
+        onProgress: progress => { if (!cancelled()) setCombineResearchProgress(progress); },
       });
-      union = officialRefresh.jobs;
+      if (boardResearch.cancelled) return { status: 'cancelled' };
+      union = boardResearch.jobs;
       if (cancelled() || !getNode(id)) return { status: 'cancelled' };
       const perModule = completedAtCombine.map((m) => ({ label: m.label, count: m.count }));
       EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);
@@ -3220,13 +3267,21 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         `${mergeStats.collisionAssessmentUpgrades} assessment-upgrade(s))`
       );
       if (union.length === 0) {
-        if (candidateCountBeforeDismissal > 0) {
-          // Every saved candidate was already X'd. Commit an empty, current
-          // Board instead of treating the user's dismissal as missing data.
+        if (candidateCountBeforeDismissal > 0 || preferenceOverrideAtCombine) {
+          // Every saved candidate was already X'd, or the Board's own preferences
+          // removed them. Commit an empty, current Board instead of treating
+          // either as missing data.
+          if (getNode(id)?.data?.locked) {
+            autoResumedManualAiRunRef.current = null;
+            await completeManualAiRun(manualAiRunId, { retryCombineAfterRetirement: true });
+            return { status: 'not-ready', error: 'Unlock this Job Board first.' };
+          }
+          // The re-check can take minutes; a card that gained an application meanwhile stays.
+          const liveApplicationCardIds = getNodes().filter(node => node?.data?.hubId === id && isProtectedJobCard(node)).map(node => node.id);
           document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
-          clearBoardChildren();
+          clearBoardChildren({ preserveNodeIds: liveApplicationCardIds });
           updateGlobal(id, {
-            hubState: 'done', resultCount: 0, moduleCount: completedAtCombine.length,
+            hubState: 'done', resultCount: liveApplicationCardIds.length, moduleCount: completedAtCombine.length,
             scoreRangeMin: 0, scoreRangeMax: 100, scoreThreshold: 0,
             sourceFilter: null, finalSourceCounts: {}, jobTaxonomy: null,
             combineSignature: sigAtCombine,
@@ -3235,6 +3290,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             stale: false, staleReason: null,
             boardScanResume: null, manualAiResume: null,
           });
+          markBoardPreferencesCombined();
           autoResumedManualAiRunRef.current = null;
           await completeManualAiRun(manualAiRunId);
           return { status: 'completed' };
@@ -3608,6 +3664,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           EventLogger.error('[JobBoard] Displayed-results history append failed:', error);
         }
       }
+      markBoardPreferencesCombined();
       EventLogger.log(`[JobBoard] combine completed id=${id} signature=${sigAtCombine} results=${union.length} children=${newNodes.length} locationGroups=${locationStats.candidateGroups} locationCollapsed=${locationStats.postingsCollapsed}`);
       if (newNodes.length > 0 && canvasFilePath && !historyAuthorityAvailable) {
         addToast({
@@ -3659,6 +3716,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         }
         compensationRequestIdRef.current = null;
         setCompensationProgress(null);
+    setCombineResearchProgress(null);
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
@@ -6155,6 +6213,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           if (activeCombineManualAiRunRef.current === active) activeCombineManualAiRunRef.current = null;
           compensationRequestIdRef.current = null;
           setCompensationProgress(null);
+    setCombineResearchProgress(null);
           setCombining(false);
           setRecoveryError(SAVED_HANDOFF_READY_MESSAGE);
           EventLogger.log(`[JobBoard] Pause & save acknowledged id=${id} run=${detail.runId}`);
@@ -6895,6 +6954,33 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     addToast({ title: 'Career data for applications cleared', description: 'Job cards go back to the career data of their Job Search.', type: 'info' });
   }, [addToast, data.locked, id, retireCareerOverrideRuns, updateGlobal]);
 
+  const preferenceOverrideView = jobBoardPreferenceOverrideView(data);
+  const preferenceSeed = jobBoardPreferenceSeed(liveCombineInputs(id, getNodes(), getEdges()).completed);
+  const handlePreferenceOverrideApply = useCallback(async (brief) => {
+    updateGlobal(id, node => ({ jobBoardPreferenceOverride: applyJobBoardPreferenceBrief(node?.data, brief) }));
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    return handleCombine({ preferencesJustApplied: true });
+  }, [handleCombine, id, updateGlobal]);
+  const handlePreferenceOverrideClear = useCallback(async () => {
+    updateGlobal(id, { jobBoardPreferenceOverride: null });
+    addToast({ title: 'Board preferences cleared', description: 'This Board goes back to each search’s own rules.', type: 'info' });
+    await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    const live = liveCombineInputs(id, getNodes(), getEdges());
+    if (live.completed.length === 0) return { status: 'not-ready' };
+    if (live.ready.length > 0) return handleCombine({ preferencesJustApplied: true });
+    // The searches' own rules pass nothing, so the override's cards have no source left.
+    document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+    const applicationCardIds = getNodes().filter(node => node?.data?.hubId === id && isProtectedJobCard(node)).map(node => node.id);
+    clearBoardChildren({ preserveNodeIds: applicationCardIds });
+    updateGlobal(id, {
+      hubState: 'done', resultCount: applicationCardIds.length, moduleCount: live.completed.length,
+      scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100, sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {},
+      combineSignature: boardInputSignature(live.completed, live.all), combineSourceRuns: boundedCombinedSourceRuns(live.completed),
+      stale: false, staleReason: null, clearProvenance: null,
+    });
+    return { status: 'completed' };
+  }, [addToast, clearBoardChildren, getEdges, getNodes, handleCombine, id, updateGlobal]);
+
   const careerOverrideView = jobBoardCareerOverrideView(data, { localRunId: careerOverrideLocalRunId, locked: !!data.locked });
   const careerCanvasFiles = careerCanvasOpen ? canvasCareerImportCandidates(getNodes()) : [];
   const careerCanvasFileKey = careerCanvasFiles.map(file => `${file.nodeId}\u0000${file.filePath}`).join('\u0001');
@@ -6928,6 +7014,26 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         : !data.boardScanResume?.boardRunId ? 'Waiting for the Job Board to save a search run id before pausing safely.' : '';
   const waitingWorkersLabel = waitingForWorkers
     ? `Waiting for Claude to finish search resolution for ${awaitingSourceLabel}.` : null;
+  // Status and Pause & save live in the side panel, with every other module's.
+  const boardProgress = normalizeProgress(finalizingCommittedCombine
+    ? { label: 'Board updated — finalizing saved recovery cleanup…' }
+    : scanning
+    ? waitingForWorkers ? { label: waitingWorkersLabel } : scanProgress
+    : combining
+      ? { label: combineResearchProgress?.label || 'Combining all connected saved results…' }
+      : durableRecoveryActive
+        ? { label: awaitingSourceLabel
+          ? `Waiting for ${awaitingSourceLabel} to finish manual source resolution…`
+          : 'Recovering the interrupted Board run…' }
+        : null, selectedSearchModuleIds.length);
+  usePublishJobRunStatus(id, boardRunVisible ? {
+    label: 'Job Board',
+    headline: boardProgress?.label || 'Processing',
+    lines: boardProgress?.completed != null && boardProgress?.total != null ? [`${boardProgress.completed} of ${boardProgress.total} searches`] : [],
+    pauseKeys: [`node:${id}`, ...[...new Set([...awaitingSourceIds, ...selectedSearchModuleIds])].map(sourceId => `node:${sourceId}`)],
+    onPause: showPauseSave ? pauseSearchesAndSave : null,
+    pauseDisabledReason,
+  } : null);
 
   return (
     <>
@@ -6959,23 +7065,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           disabled={!!data.locked}
           running={boardRunVisible}
           upToDate={boardUpToDate}
-          progress={finalizingCommittedCombine
-            ? { label: 'Board updated — finalizing saved recovery cleanup…' }
-            : scanning
-            ? waitingForWorkers ? { label: waitingWorkersLabel } : scanProgress
-            : combining
-              ? { label: 'Combining all connected saved results…' }
-              : durableRecoveryActive
-                ? { label: awaitingSourceLabel
-                  ? `Waiting for ${awaitingSourceLabel} to finish manual source resolution…`
-                  : 'Recovering the interrupted Board run…' }
-                : null}
           onRun={handleSearchSelected}
           onCancel={handleCancelRun}
-          onPause={pauseSearchesAndSave}
-          showPauseSave={showPauseSave}
-          pauseDisabledReason={pauseDisabledReason}
-          waitingForWorkers={waitingForWorkers}
           recoveryError={scanning || combining ? null : recoveryError}
           onRetry={handleRetryRecovery}
           recoveryActionLabel={
@@ -7005,6 +7096,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           onResume={handleCareerOverrideResume}
           onDiscard={handleCareerOverrideDiscard}
           onClear={handleCareerOverrideClear}
+        />
+        <JobBoardPreferenceOverridePanel
+          view={preferenceOverrideView}
+          seed={preferenceSeed}
+          busy={!!data.locked || boardRunVisible}
+          hasSavedJobs={completedModules.length > 0}
+          onApply={handlePreferenceOverrideApply}
+          onClear={handlePreferenceOverrideClear}
         />
       </div>
 

@@ -101,7 +101,8 @@ export function marketplaceHubScanMaxPlatformsPerBatch() {
 // research on jobs the user was never going to pursue. Gating on fit score keeps the comparison to jobs
 // the user could realistically pursue: a competitive-pay verdict only changes
 // a decision on a job worth applying to.
-export const COMPENSATION_MIN_FIT_SCORE = 70;
+// The same bar now covers every automatic AI or web task after scoring (researchGate.js).
+export const RESEARCH_MIN_FIT_SCORE = 70;
 
 // ── LLM scoring budget (how many gathered jobs actually get LLM-scored) ───────
 // UNCAPPED (Infinity): score EVERY gathered job. selectTopAcrossSources(_, Infinity)

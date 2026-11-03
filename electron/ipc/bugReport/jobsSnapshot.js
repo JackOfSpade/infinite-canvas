@@ -953,12 +953,12 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
     const admissionFlow = windowFirst != null
       ? `${funnel.raw} raw → ${windowFirst} within automatic window${platformStage} → ${funnel.deduped} cross-platform deduped → ${funnel.kept} kept`
       : `${funnel.raw} raw → ${funnel.deduped} deduped → ${funnel.kept} kept`;
-    // Board-closed rows are counted in description evidence, then set aside for the
-    // official-posting check; this names the two stages so no drop is unattributed.
+    // Board-closed rows are counted in description evidence, then set aside and
+    // settled before scoring; this names the two stages so no drop is unattributed.
     const boardClosedRescued = nonnegativeCount(funnel.boardClosedSetAside) || 0;
     const boardClosedRemoved = nonnegativeCount(funnel.boardClosedDropped) || 0;
     const boardClosedDetail = boardClosedRescued > 0 || boardClosedRemoved > 0
-      ? ` · board-closed: ${boardClosedRescued} rescued from the evidence gate for the official-posting check, ${boardClosedRemoved} dropped after it`
+      ? ` · board-closed: ${boardClosedRescued} set aside by the evidence gate, ${boardClosedRemoved} dropped`
       : '';
     const incompleteOfficialLookups = nonnegativeCount(funnel.officialLookupsIncomplete) || 0;
     const officialRetryDetail = incompleteOfficialLookups > 0
@@ -999,7 +999,7 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       }
       const boardClosedDetailKept = nonnegativeCount(source.boardClosedDetailKept);
       if (boardClosedDetailKept != null && boardClosedDetailKept > 0) {
-        parts.push(`${boardClosedDetailKept} board-closed detail listing${boardClosedDetailKept === 1 ? '' : 's'} kept for the official-posting check`);
+        parts.push(`${boardClosedDetailKept} board-closed detail listing${boardClosedDetailKept === 1 ? '' : 's'} kept with their description`);
       }
       const pagesWalked = nonnegativeCount(source.pagesWalked);
       if (pagesWalked != null) {
@@ -5732,6 +5732,8 @@ function boardWorkTelemetryLines(records, ownership = {}) {
     if (taxonomy) lines.push(`  - Taxonomy${ago(taxonomy.ts)}: input ${count(taxonomy.input)} · placed ${count(taxonomy.placed)} · missing ${count(taxonomy.missing)} · duplicated ${count(taxonomy.duplicated)} · ${taxonomy.error || taxonomy.blocked ? 'failed or blocked' : 'stage recorded'}.`);
     const compensation = record.compensation;
     if (compensation) lines.push(`  - Compensation${ago(compensation.ts)}: input ${count(compensation.scoredInput)} · eligible ${count(compensation.eligible)} · assessed ${count(compensation.assessed)} · researched cohorts ${count(compensation.researched)} · failed cohorts ${count(compensation.failedCohorts)}.`);
+    const research = record.research;
+    if (research) lines.push(`  - Research gate${ago(research.ts)}: at or above ${count(research.minFitScore)}: ${count(research.eligible)} of ${count(research.total)} · skipped below fit ${count(research.skippedBelowFit)} · skipped unscored ${count(research.skippedUnscored)} · official lookups ${count(research.officialLookups)} · official duplicates removed ${count(research.officialDuplicatesDropped)} · closed removed ${count(research.closedDropped)} · below-fit closed removed ${count(research.belowFitClosedDropped)} · listings rechecked ${count(research.livenessRechecked)} of ${count(research.livenessVisited)} visited, ${count(research.livenessStillPending)} still pending · rescored ${count(research.rescoreAttempted)} (changed ${count(research.rescoreChanged)}, fell below ${count(research.rescoreFellBelow)}, failed ${count(research.rescoreFailed)}) · company research ${count(research.preferenceRequests)} request(s) for ${count(research.preferenceRows)} job(s), ${count(research.preferenceFiltered)} filtered, ${count(research.preferenceFailed)} failed${research.error ? ` · error ${research.errorCode || 'OTHER'}` : ''}`);
     const history = record.history?.boardDisplay;
     if (history) lines.push(`  - Seen-history${ago(history.ts)}: ${history.error ? 'failed' : history.skipped ? 'deferred' : 'recorded'} · input ${count(history.input)} · provisional rows ${count(history.staged)} · committed rows ${count(history.written)}. Provisional rows remain unseen until source deletion or its next scrape.`);
   }
@@ -6100,11 +6102,12 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     const finalDedupStage = finalDedupDropped > 0
       ? ` → final-enrichment-dedup-dropped: ${finalDedupDropped}`
       : '';
-    const officialStage = s.officialPosting
+    // Official lookups now follow scoring; only an older run has this stage.
+    const officialStage = Number(s.officialPosting?.total) > 0 || Number(s.officialDedupDropped) > 0
       ? ` → official-posting-resolved: ${Math.max(0, Number(s.officialPosting.total) || 0)} → official-posting-dedup-dropped: ${Math.max(0, Number(s.officialDedupDropped) || 0)}`
       : '';
     // Board-closed rows (an aggregator board reported the listing gone) are set
-    // aside from the evidence gate for the official-posting pass, then removed
+    // aside from the evidence gate and settled before scoring, then removed
     // only when no official source kept them. Counts only; absent when zero.
     const boardClosedSetAside = Math.max(0, Number(s.boardClosedSetAside) || 0);
     const boardClosedDropped = Math.max(0, Number(s.boardClosedDropped) || 0);
@@ -6180,7 +6183,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const counts = value => Object.entries(value || {}).filter(([, count]) => Number.isFinite(Number(count)))
         .map(([key, count]) => `${key}=${Math.max(0, Math.floor(Number(count)))}`).join(', ') || 'none';
       lines.push(`- Official postings: levels ${counts(resolution.levels)}; outcomes ${counts(resolution.outcomes)}; rejections ${counts(resolution.rejections)}; failures ${Math.max(0, Number(resolution.failed) || 0)}.`);
-      if (Number(resolution.officialLookupsIncomplete) > 0) lines.push(`- Official lookups incomplete after resolution: ${Math.max(0, Math.floor(Number(resolution.officialLookupsIncomplete) || 0))}; they remain retryable before scoring.`);
+      if (Number(resolution.officialLookupsIncomplete) > 0) lines.push(`- Older official lookups still incomplete: ${Math.max(0, Math.floor(Number(resolution.officialLookupsIncomplete) || 0))}; the Board retries them at or above the fit threshold.`);
       lines.push(`- Official-posting handoffs: ${Math.max(0, Number(resolution.handoffs) || 0)} handoff(s), ${Math.max(0, Number(resolution.handoffMs) || 0)} ms; material description changes ${Math.max(0, Number(resolution.materialJdChange) || 0)}; timeout ${Math.max(0, Number(resolution.workerTimeout) || 0)}; unavailable ${Math.max(0, Number(resolution.workerUnavailable) || 0)}.`);
       const comparisonCount = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
       const optionCounts = Array.from({ length: 8 }, (_, index) => `${index + 1}=${comparisonCount(resolution.comparisonOptions?.[index + 1])}`).join(', ');
@@ -6191,7 +6194,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .filter(([board, entry]) => /^[a-z0-9][a-z0-9-]{0,39}$/u.test(board) && entry && typeof entry === 'object')
         .slice(0, 24)
         .map(([board, entry]) => `\`${board}\` detected ${closedCount(entry.detected)} · kept (official) ${closedCount(entry.keptOfficial)} · kept (official posting not checked) ${closedCount(entry.keptUnchecked)} · dropped ${closedCount(entry.dropped)}`);
-      if (boardClosedRows.length) lines.push(`- Board-closed listings (an aggregator board reported them gone; the official source decides): ${boardClosedRows.join('; ')}.`);
+      if (boardClosedRows.length) lines.push(`- Board-closed listings (an aggregator board reported them gone): ${boardClosedRows.join('; ')}.`);
       const livenessRows = Object.entries(resolution.listingLiveness && typeof resolution.listingLiveness === 'object' ? resolution.listingLiveness : {})
         .filter(([board, entry]) => /^[a-z0-9][a-z0-9-]{0,39}$/u.test(board) && entry && typeof entry === 'object' && !Array.isArray(entry))
         .slice(0, 24)
@@ -8017,7 +8020,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (r.kind === 'description-retry') {
         const unavailable = Array.isArray(r.unavailableDescriptions) ? r.unavailableDescriptions : [];
         const boardClosedKept = Math.max(0, Math.floor(Number(r.boardClosedKept) || 0));
-        lines.push(`- \`${sourceId}\`${ago(r.ts)}: description retry → recovered ${r.recoveredDescriptions || 0}/${r.attemptedDescriptions || 0} · ${r.remainingDescriptions || 0} still below scoring threshold${unavailable.length ? ` · **${unavailable.length} unavailable listing(s) removed**` : ''}${boardClosedKept ? ` · ${boardClosedKept} board-closed listing(s) kept for the official-posting check` : ''}${languageDropStage}${r.challengeReason ? ` · stopped by ${r.challengeReason}` : ''}`);
+        lines.push(`- \`${sourceId}\`${ago(r.ts)}: description retry → recovered ${r.recoveredDescriptions || 0}/${r.attemptedDescriptions || 0} · ${r.remainingDescriptions || 0} still below scoring threshold${unavailable.length ? ` · **${unavailable.length} unavailable listing(s) removed**` : ''}${boardClosedKept ? ` · ${boardClosedKept} board-closed listing(s) kept with their description` : ''}${languageDropStage}${r.challengeReason ? ` · stopped by ${r.challengeReason}` : ''}`);
         for (const item of unavailable.slice(0, 5)) {
           lines.push(`  - Removed unavailable listing${item?.reason ? ' · reason recorded' : ''} (details withheld)`);
         }

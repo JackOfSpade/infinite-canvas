@@ -2,6 +2,7 @@ import { jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js
 import { waitForJobRendererCommit } from '../../src/utils/jobRendererCommit.js';
 import { dedupJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { hasLegacyPageScoring, JOB_SCORING_CONTRACT } from '../../src/utils/jobScoringContract.js';
+import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { jobBoardHasSavedAiContinuation } from '../../src/utils/jobBoardSavedAiContinuation.js';
 import assert from 'node:assert';
 
@@ -15,6 +16,7 @@ import {
   jobHubClearAvailability,
   pendingSavedJobsRescore,
   savedJobCount,
+  savedJobsReevaluationKeepsScores,
   savedJobsRescoreCompletionPatch,
 } from '../../src/utils/jobSearchSplitClear.js';
 import {
@@ -317,6 +319,7 @@ export default [
               stampJobsWithCareerSnapshot: (jobs, careerSnapshotId) => jobs.map(job => ({ ...job, careerSnapshotId })),
               normalizeCollectionScopeCaveats: value => value,
               terminalFinalizationError: () => null,
+              savedJobsReevaluationKeepsScores, hasStoredPreferenceVerdicts, splitKeptScores, mergeScoredJobs,
               completeJobRun: () => { throw new Error('A re-score must not complete a provider run'); },
               EventLogger: { log() {}, error() {} }, isNodeDeletedAbort: () => false,
               window: { electronAPI: {

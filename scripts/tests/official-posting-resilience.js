@@ -6,7 +6,7 @@ import path from 'node:path';
 import { ipcMain } from 'electron';
 import { normalizeOfficialPosting } from '../../electron/ipc/officialPostingFields.js';
 import { unresolvedOfficialPosting, officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
-import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { refreshOfficialPostingEntries } from '../../electron/ipc/officialPostingRefresh.js';
 import { createOfficialPostingStore, officialPostingView } from '../../electron/ipc/officialPostingStore.js';
 import { prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticSourceHash } from '../../electron/ipc/officialPostingSemantic.js';
@@ -30,8 +30,11 @@ async function withStore(run) {
   finally { await fs.rm(root, { recursive: true, force: true }); }
 }
 
-async function search(rows, resolve, { prepareStore } = {}) {
+// Search no longer researches. The resolver below is a tripwire: any call to it
+// from the search path is recorded, and the tests assert there are none.
+async function search(rows, { prepareStore } = {}) {
   return withStore(async (store, root) => {
+    const resolverCalls = []; const progress = [];
     await prepareStore?.(store, rows);
     const canvasFilePath = path.join(root, 'canvas.json');
     const nodeId = `resilience-${path.basename(root)}`;
@@ -51,17 +54,44 @@ async function search(rows, resolve, { prepareStore } = {}) {
         return [result];
       },
       officialPostingStore: store,
-      resolveOfficialPostings: (jobs, options) => resolve(jobs, { ...options, store }),
+      resolveOfficialPostings: async jobs => { resolverCalls.push(jobs.map(row => row.url)); throw new Error('Search must not research.'); },
     });
     try {
-      const sender = { id: 72991, isDestroyed: () => false, once() {}, on() {}, removeListener() {}, send() {} };
+      const sender = { id: 72991, isDestroyed: () => false, once() {}, on() {}, removeListener() {},
+        send(channel, payload) { if (channel === 'job-source-progress') progress.push(payload); } };
       const result = await ipcMain.__getInvokeHandler('search-jobs')({ sender }, {
         queries: ['software engineer'], nodeId, canvasFilePath, careerSnapshotId, operationAuthority: authority.receipt,
         enabledSourceIds: ['remoteok'], targetRole: '', preferredLocation: '',
       });
-      return { result, telemetry: structuredClone(getJobsTelemetry()) };
+      return { result, telemetry: structuredClone(getJobsTelemetry()), resolverCalls, progress };
     } finally { registerJobsHandlers(); }
   });
+}
+
+// A model that finds a posting on the row's own host for every healthy row it is
+// given and answers NOT FOUND for the rest, with snapshots unavailable.
+function healthyResolverFixture(healthyRows) {
+  const hostRows = new Map(healthyRows.map(row => [officialPostingRequestId(row), row]));
+  const offline = async () => { throw Object.assign(new Error('offline test'), { code: 'fetch-failed' }); };
+  const callRaw = (prompt, options) => {
+    const ids = prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ');
+    const answer = ids.map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\n${hostRows.has(id)
+      ? `CANDIDATE: ${JSON.stringify({ careersPageUrl: `https://${new URL(hostRows.get(id).url).host}/`, postingUrl: hostRows.get(id).url,
+        employer: hostRows.get(id).company, employerDomain: '', ats: '' })}` : 'NOT FOUND'}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
+    options.responseValidator(answer);
+    return answer;
+  };
+  const callMatch = (prompt, options) => {
+    const leads = JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
+    const lead = leads.find(item => item.kind === 'posting'); const row = [...hostRows.values()].find(item => item.url === lead.url);
+    const answer = { choice: lead.id, postingUrl: lead.url, status: 'open', statusQuote: 'Apply now', employerLinked: true,
+      employerPageUrl: `https://${new URL(lead.url).host}/`, employerLinkQuote: 'Careers', title: row.title, employer: row.company,
+      location: row.location, salary: '', description: DESCRIPTION, conflicts: [],
+      evidence: [{ scrapedQuote: DESCRIPTION, officialQuote: DESCRIPTION }] };
+    options.responseValidator(JSON.stringify(answer));
+    return JSON.stringify(answer);
+  };
+  return { callRaw, callMatch, offline };
 }
 
 export default [
@@ -147,66 +177,79 @@ export default [
     },
   },
   {
-    name: 'Official posting resilience: real search resolves both healthy rows around an invalid scraped employer',
+    name: 'Official posting resilience: real search no longer researches and leaves rows scraped around an invalid employer',
     async run() {
       const rows = [job({ url: 'https://careers.northwind.example/jobs/one' }), job({ company: 'Tech <3 Labs' }),
         job({ company: 'Cedar Works', url: 'https://careers.cedar.example/jobs/two' })];
-      const hostRows = new Map(rows.filter(row => row.company !== 'Tech <3 Labs').map(row => [officialPostingRequestId(row), row]));
-      const offline = async () => { throw Object.assign(new Error('offline test'), { code: 'fetch-failed' }); };
-      const callRaw = (prompt, options) => {
-        const ids = prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ');
-        const answer = ids.map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\n${hostRows.has(id)
-          ? `CANDIDATE: ${JSON.stringify({ careersPageUrl: `https://${new URL(hostRows.get(id).url).host}/`, postingUrl: hostRows.get(id).url,
-            employer: hostRows.get(id).company, employerDomain: '', ats: '' })}` : 'NOT FOUND'}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
-        options.responseValidator(answer);
-        return answer;
-      };
-      const callMatch = (prompt, options) => {
-        const leads = JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
-        const lead = leads.find(item => item.kind === 'posting'); const row = [...hostRows.values()].find(item => item.url === lead.url);
-        const answer = { choice: lead.id, postingUrl: lead.url, status: 'open', statusQuote: 'Apply now', employerLinked: true,
-          employerPageUrl: `https://${new URL(lead.url).host}/`, employerLinkQuote: 'Careers', title: row.title, employer: row.company,
-          location: row.location, salary: '', description: DESCRIPTION, conflicts: [],
-          evidence: [{ scrapedQuote: DESCRIPTION, officialQuote: DESCRIPTION }] };
-        options.responseValidator(JSON.stringify(answer));
-        return JSON.stringify(answer);
-      };
-      const { result } = await search(rows, (jobs, options) => resolveOfficialPostings(jobs, {
-        ...options, snapshotFetch: offline, callRaw, callMatch,
-      }));
+      const { result, telemetry, resolverCalls, progress } = await search(rows);
       assert.equal(result.success, true, result.error); assert.equal(result.jobs.length, 3);
+      assert.deepEqual(resolverCalls, [], 'search must make no official posting research call');
+      assert.equal(progress.some(item => /Finding official postings/u.test(item.detail || '')), false);
+      assert.equal(progress.some(item => item.sourceId === 'official-posting'), false);
       const byId = new Map(result.jobs.map(row => [officialPostingRequestId(row), row]));
       for (const row of rows) {
-        const actual = byId.get(officialPostingRequestId(row)); assert.ok(actual);
-        assert.equal(actual.company, row.company); assert.equal(actual.snippet, row.snippet);
-        if (row.company === 'Tech <3 Labs') assert.ok(['L5', 'L6'].includes(actual.officialPosting.level));
-        else assert.ok(['L1', 'L2', 'L3', 'L4'].includes(actual.officialPosting.level), `${row.company}: ${actual.officialPosting.level}`);
+        const actual = byId.get(officialPostingRequestId(row)); assert.ok(actual, row.company);
+        assert.equal(actual.company, row.company); assert.equal(actual.snippet, row.snippet); assert.equal(actual.url, row.url);
+        assert.equal(Object.hasOwn(actual, 'officialPosting'), false, `${row.company} must carry no officialPosting`);
       }
+      assert.ok(!telemetry.search.officialPosting?.total, 'search records no official posting lookups');
     },
   },
   {
-    name: 'Official posting resilience: unexpected batch failure leaves real search rows intact and records failed telemetry',
+    name: 'Official posting resilience: Board refresh resolves both healthy rows around an invalid scraped employer',
+    async run() {
+      const rows = [job({ url: 'https://careers.northwind.example/jobs/one' }), job({ company: 'Tech <3 Labs' }),
+        job({ company: 'Cedar Works', url: 'https://careers.cedar.example/jobs/two' })];
+      const { callRaw, callMatch, offline } = healthyResolverFixture(rows.filter(row => row.company !== 'Tech <3 Labs'));
+      const entries = rows.map((row, index) => ({ cardId: `resilience-card-${index}`, job: row }));
+      const before = JSON.stringify(entries);
+      const { entries: refreshed } = await withStore(store => refreshOfficialPostingEntries(
+        { nodeId: 'resilience-board', manualAiRunId: 'resilience-run', entries },
+        { store, snapshotFetch: offline, callRaw, callMatch }));
+      assert.equal(JSON.stringify(entries), before, 'refresh must not mutate its input');
+      assert.deepEqual(refreshed.map(entry => entry.cardId), entries.map(entry => entry.cardId));
+      refreshed.forEach((entry, index) => {
+        const row = rows[index]; assert.ok(normalizeOfficialPosting(entry.officialPosting), row.company);
+        if (row.company === 'Tech <3 Labs') assert.ok(['L5', 'L6'].includes(entry.officialPosting.level));
+        else assert.ok(['L1', 'L2', 'L3', 'L4'].includes(entry.officialPosting.level), `${row.company}: ${entry.officialPosting.level}`);
+      });
+    },
+  },
+  {
+    name: 'Official posting resilience: a resolver failure during Board refresh rejects without mutating rows, and search never reaches it',
     async run() {
       const rows = [job(), job({ company: 'Cedar Works', url: 'https://board.example/two' })];
-      const { result, telemetry } = await search(rows, async () => { throw new Error('Synthetic resolver failure.'); });
+      const { result, telemetry, resolverCalls } = await search(rows);
       assert.equal(result.success, true, result.error); assert.equal(result.jobs.length, rows.length);
       assert.deepEqual(result.jobs.map(row => row.company).sort(), rows.map(row => row.company).sort());
-      assert.equal(telemetry.search.officialPosting.failed, rows.length);
+      assert.deepEqual(resolverCalls, []);
+      assert.ok(!telemetry.search.officialPosting?.failed, 'search records no failed official lookups');
+      const entries = rows.map((row, index) => ({ cardId: `failure-card-${index}`, job: row }));
+      const before = JSON.stringify(entries);
+      await withStore(async store => {
+        await assert.rejects(refreshOfficialPostingEntries({ nodeId: 'resilience-board', manualAiRunId: 'resilience-run', entries },
+          { store, resolve: async () => { throw new Error('Synthetic resolver failure.'); } }), /Synthetic resolver failure/u);
+      });
+      assert.equal(JSON.stringify(entries), before);
+      // The real resolver contains a storage fault: the row is returned as a failed lookup and counted.
+      const { callRaw, callMatch, offline } = healthyResolverFixture([rows[0]]);
+      const faulty = { async find() { return null; }, async save() { throw new Error('Synthetic storage failure.'); },
+        async readText() { return null; } };
+      const { entries: refreshed, telemetry: lookupTelemetry } = await refreshOfficialPostingEntries(
+        { nodeId: 'resilience-board', manualAiRunId: 'resilience-run', entries: [entries[0]] },
+        { store: faulty, snapshotFetch: offline, callRaw, callMatch });
+      assert.equal(refreshed.length, 1); assert.ok(normalizeOfficialPosting(refreshed[0].officialPosting));
+      assert.equal(lookupTelemetry.failed, 1);
     },
   },
   {
-    name: 'R3 real search carries matching verified and fresh miss records and resolves only new or unbound rows',
+    name: 'R3 Board refresh reuses matching verified and fresh miss records and researches only new or unbound rows; search carries rows untouched',
     async run() {
       const rows = [job({ url: 'https://board.example/cache-one' }),
         job({ title: 'Systems Engineer', url: 'https://board.example/cache-two' }),
         job({ title: 'Release Engineer', url: 'https://board.example/new-three' }),
         job({ company: 'Cedar Works', url: 'https://board.example/unbound-four' })];
-      const calls = [];
-      const { result, telemetry } = await search(rows, async jobs => {
-        calls.push(jobs.map(row => row.url));
-        return { jobs: jobs.map(row => ({ ...row, ...unresolvedOfficialPosting(row) })),
-          telemetry: { total: jobs.length, levels: { L5: jobs.length }, outcomes: { 'not-found': jobs.length } } };
-      }, { prepareStore: async store => {
+      const prepareStore = async store => {
         const verifiedSource = { employer: rows[0].company, title: rows[0].title,
           sourceUrl: 'https://careers.northwind.example/jobs/cache-one', description: DESCRIPTION };
         const verified = await store.save(rows[0], { officialPosting: { level: 'L1', outcome: 'found',
@@ -220,17 +263,39 @@ export default [
           trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'comparative-none', 'semantic-match-v1'] } });
         rows[1].officialPosting = miss.officialPosting;
         rows[3].officialPosting = structuredClone(verified.officialPosting);
-      } });
+      };
+      // Search: zero research, every row (including older ones holding a record) comes through with its own view.
+      const { result, telemetry, resolverCalls, progress } = await search(rows, { prepareStore });
       assert.equal(result.success, true, result.error);
       assert.equal(result.jobs.length, 4);
-      assert.deepEqual(calls, [[rows[2].url, rows[3].url]]);
-      assert.equal(telemetry.search.officialPosting.total, 4);
-      assert.equal(telemetry.search.officialPosting.levels.L1, 1);
+      assert.deepEqual(resolverCalls, []);
+      assert.equal(progress.some(item => /Finding official postings/u.test(item.detail || '')), false);
+      assert.ok(!telemetry.search.officialPosting?.total, 'search records no official posting lookups');
       for (const original of rows) {
         const found = result.jobs.find(row => row.url === original.url);
         assert.ok(found);
         for (const field of ['title', 'company', 'snippet', 'url']) assert.equal(found[field], original[field]);
       }
+      assert.equal(result.jobs.find(row => row.url === rows[0].url).officialPosting?.level, 'L1', 'an older verified row keeps its view');
+      assert.equal(Object.hasOwn(result.jobs.find(row => row.url === rows[2].url), 'officialPosting'), false, 'a new row is not researched');
+      // Board refresh without force: the saved verified and fresh miss records settle without a chat; the rest are researched.
+      await withStore(async store => {
+        await prepareStore(store);
+        const { callRaw, callMatch, offline } = healthyResolverFixture([]);
+        const researched = [];
+        const spyRaw = (prompt, options) => {
+          researched.push(...prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', '));
+          return callRaw(prompt, options);
+        };
+        const { entries } = await refreshOfficialPostingEntries({ nodeId: 'resilience-board', manualAiRunId: 'resilience-run', force: false,
+          entries: rows.map((row, index) => ({ cardId: `cache-card-${index}`, job: row })) },
+        { store, snapshotFetch: offline, callRaw: spyRaw, callMatch });
+        assert.equal(entries.length, 4);
+        assert.deepEqual([...new Set(researched)].sort(), [officialPostingRequestId(rows[2]), officialPostingRequestId(rows[3])].sort());
+        assert.equal(entries[0].officialPosting.level, 'L1');
+        assert.ok(entries[0].officialPosting.trail.includes('cache-hit'));
+        assert.ok(entries[1].officialPosting.trail.includes('recent-miss'));
+      });
     },
   },
 ];

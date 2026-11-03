@@ -1,3 +1,4 @@
+import { isResearchEligible } from './researchGate.js';
 import { collector, templatesFor } from './validationLines.js';
 export const LOCATION_CONSOLIDATION_CORRECTION_TEMPLATES = templatesFor('locconf.');
 import { JOB_LOCATION_CONSOLIDATION_CONFIRMATION_SCHEMA } from './aiSchemas.js';
@@ -89,7 +90,9 @@ export async function confirmSimilarJobLocationPairs(jobs, {
 } = {}) {
   if (typeof callText !== 'function') throw new TypeError('confirmSimilarJobLocationPairs requires callText.');
   const input = Array.isArray(jobs) ? jobs : [];
-  const candidates = findSimilarLocationCandidates(input).map((pair) => ({
+  // A pair with no job at or above the fit threshold stays as two cards.
+  const candidates = findSimilarLocationCandidates(input).filter(pair =>
+    isResearchEligible(input[pair.leftIndex]) || isResearchEligible(input[pair.rightIndex])).map((pair) => ({
     ...pair,
     leftJob: postingJob(input[pair.leftIndex]),
     rightJob: postingJob(input[pair.rightIndex]),

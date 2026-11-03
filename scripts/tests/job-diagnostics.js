@@ -10252,7 +10252,7 @@ export default [
         && liveFingerprintAt > liveDataAt && processingAt > liveFingerprintAt
         && preferenceAt > processingAt && scoreAt > preferenceAt
         && /evaluatePreferencesForRun\(\{[\s\S]*?jobs:\s*jobsToReanalyze/.test(handler)
-        && /scoreJobs\(\{[\s\S]*?jobs:\s*preferenceResult\.jobs/.test(handler),
+        && /scoreJobs\(\{[\s\S]*?jobs:\s*jobsToScore/.test(handler),
       're-analysis freezes and unions the displayed/preserved candidate pool, then revalidates its live fingerprint after queue admission before submitting clean copies through preferences and scoreJobs');
       const scoreCallAt = handler.indexOf('window.electronAPI.scoreJobs({');
       assert(scoreCallAt >= 0, 're-analysis reaches scoreJobs from inside the handler');
@@ -10279,7 +10279,7 @@ export default [
         && /hubState:\s*'done'/.test(handler)
         && /catch\s*\(/.test(handler),
       'saved-job re-evaluation only clears jobs after preference evaluation and restores done state without losing old cards on failure/cancel');
-      assert(/scrapedCount:\s*0,/.test(handler)
+      assert(/scrapedCount:\s*keptScoredJobs\.length,/.test(handler)
         && /scrapedCount:\s*preferenceResult\.jobs\.length,/.test(handler)
         && doneState.includes('const scoreReadyCount = validCount(scrapedCount)'),
       're-analysis preserves the original found total but recomputes the score-ready funnel from the current preference-accepted rows, including zero when all are filtered');
@@ -10398,7 +10398,7 @@ export default [
         && reanalysis.includes('dedupJobsAcrossSources([...savedPool, ...existingScoredJobs])')
         && reanalysis.includes('const reanalysisRunId = runData.jobRunId || manualAiRunId;')
         && reanalysis.includes('runId: reanalysisRunId,')
-        && reanalysis.includes('if (preferenceResult.jobs.length === 0) {')
+        && reanalysis.includes('if (jobsToScore.length === 0) {')
         && reanalysis.includes('const snapshotResult = await window.electronAPI.saveJobAnalysisSnapshot({')
         && reanalysis.includes('// The pool is persisted separately by the snapshot builder.')
         && reanalysis.includes('jobs: [],')

@@ -22,9 +22,9 @@ function actualGenericGlue(resolveRows, row, checkpoints) {
   const publish = source.indexOf('const officialResolution = await resolveGenericPostings(', generic);
   const languageFilter = source.indexOf('const languageFilter = filterNonEnglishJobs(items);', publish);
   assert.ok(init > generic && persist > init && publish > persist, 'generic handler owns one pass receipt across checkpoint and publication');
-  assert.ok(languageFilter > publish, 'generic publication resolves official postings before filtering listing languages');
+  assert.ok(languageFilter > publish, 'generic publication settles scraped rows before filtering listing languages');
   const context = {
-    createOfficialPostingRecoveryPassResolver, resolveScoreSafePostings: resolveRows,
+    createOfficialPostingRecoveryPassResolver, settleScrapedRowsForScoring: resolveRows,
     sourceRecoverySnapshot: { jobs: [], descriptionRecoveryJobs: [row], profile: {}, careerData: '', careerSnapshotId: 'synthetic-career', nodeId: 'board' },
     sourceRecoveryJobs: [row], sourceRecoveryCheckpointOwned: true, recoveryCheckpointOutcome: 'unchanged', sourceId: 'google',
     snapshotDescriptionRecoveryJobs: snapshot => snapshot.descriptionRecoveryJobs,

@@ -1588,7 +1588,7 @@ const dockTests = [
       const routedEnd = dock.indexOf('{!isMcpRoutedRequest && (', routedStart);
       assert(routedEnd > routedStart, 'the worker-routed branch must sit before the paste fragment');
       const routedBlock = dock.slice(routedStart, routedEnd);
-      assert(routedBlock.includes('<ClaudeWorkingRow />'), 'a worker-routed handoff renders the Claude working row');
+      assert(routedBlock.includes('<ClaudeTaskProgress requestId={activeRequest.requestId} />'), 'a worker-routed handoff renders its live Claude progress');
       assert(
         !routedBlock.includes('Paste AI response') && !routedBlock.includes('id="non-api-ai-response"')
         && !routedBlock.includes('id="non-api-ai-prompt"') && !routedBlock.includes('Submit response') && !routedBlock.includes('Copy prompt'),

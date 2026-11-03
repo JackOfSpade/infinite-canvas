@@ -6,7 +6,10 @@ import { useModalStackCount } from './modalStack';
 import { EventLogger } from '../utils/EventLogger';
 import { CareerCompilationProgress } from './CareerCompilationProgress';
 import { careerCompilationProgressForRequest, recordCareerCompilationProgress } from '../utils/careerCompilationProgress';
-import { ClaudeProgress, ClaudeWorkingRow } from './ClaudeProgress';
+import { ClaudeProgress, ClaudeTaskProgress } from './ClaudeProgress';
+import { ClaudePauseControl, JobRunStatusDock, JobRunStatusSection } from './ClaudeRunStatus';
+import { claudeApplicationPauseKey, claudeNodePauseKey } from '../utils/claudePauseFlow';
+import { getJobRunStatus } from '../utils/jobRunStatusStore';
 import { ClaudePauseNotice } from './ClaudePauseNotice';
 import { isJobSearchPauseEligible } from '../utils/jobHubManualAiOwnership';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
@@ -466,7 +469,7 @@ export function NonApiAiDialog() {
   const isApplicationRequest = activeRequest?.kind === 'application';
   // Push routes come from the main process at issue time: a handoff with
   // workerOwned true is answered by the local Claude worker, so the dock shows
-  // a short "Claude is working" row for it and no paste controls. Only a
+  // its live Claude progress and no paste controls. Only a
   // handoff the worker returned to the person (workerOwned false) keeps the
   // paste UI. Application bundles use their own claudeRun state below.
   const isMcpRoutedRequest = !isApplicationRequest && activeRequest?.workerOwned !== false;
@@ -1672,7 +1675,7 @@ export function NonApiAiDialog() {
     return owners.size > 1;
   }, [mergedRequests]);
 
-  if (!activeRequest) return null;
+  if (!activeRequest) return <JobRunStatusDock yieldsToModal={modalCount > 0} />;
 
   // "Waiting" stopped being the whole truth once a bundle holds its slot
   // while the app saves it. Calling a bundle that wants nothing from you a
@@ -1921,10 +1924,8 @@ export function NonApiAiDialog() {
           {activeCareerProgress && <CareerCompilationProgress
             key={`${activeRequest.nodeId}:${activeRequest.runId}`}
             progress={activeCareerProgress}
-            onPauseAndSave={canPauseAndSaveJobSearch ? () => requestJobSearchPauseAndSave({
-              nodeId: activeRequest.nodeId, runId: activeRequest.runId, requestId: activeRequest.requestId,
-            }) : null}
           />}
+          <JobRunStatusSection pauseOwnedBy={activeRequest.nodeId} />
 
           {brokenApplicationMessage ? (
             // No prompt and no response box: this job takes no further paste,
@@ -1985,6 +1986,7 @@ export function NonApiAiDialog() {
             <>
             <ClaudeProgress run={activeClaudeRun} item={activeRequest} />
             <div className="flex flex-wrap items-center justify-end gap-2">
+              {activeRequest.jobId && <ClaudePauseControl key={activeRequest.jobId} pauseKeys={[claudeApplicationPauseKey(activeRequest.jobId)]} />}
               <button
                 type="button"
                 onClick={requestApplicationDiscardConfirm}
@@ -2039,8 +2041,19 @@ export function NonApiAiDialog() {
             <>
               {isMcpRoutedRequest && (
                 <>
-                  <ClaudeWorkingRow />
+                  <ClaudeTaskProgress requestId={activeRequest.requestId} />
                   <div className="flex flex-wrap items-center justify-end gap-2">
+                    {activeRequest.nodeId && (
+                      <ClaudePauseControl
+                        key={activeRequest.nodeId}
+                        pauseKeys={getJobRunStatus(activeRequest.nodeId)?.pauseKeys?.length ? getJobRunStatus(activeRequest.nodeId).pauseKeys : [claudeNodePauseKey(activeRequest.nodeId)]}
+                        onSave={getJobRunStatus(activeRequest.nodeId)?.onPause
+                          ? () => getJobRunStatus(activeRequest.nodeId).onPause()
+                          : canPauseAndSaveJobSearch
+                            ? () => requestJobSearchPauseAndSave({ nodeId: activeRequest.nodeId, runId: activeRequest.runId, requestId: activeRequest.requestId })
+                            : null}
+                      />
+                    )}
                     {isApplicationRequest ? (
                       <button
                         type="button"

@@ -1211,19 +1211,21 @@ export default [
             kind: 'resume', predecessor: initialAuthority,
           });
           let changedOnlyFinalWrites = 0;
-          if (testCase.pairOnly || testCase.linkOnly) {
-            __registerJobsHandlersForTests({
-              resolveOfficialPostings: async jobs => ({ jobs: jobs.map(job => ({ ...job,
-                ...(testCase.pairOnly ? {
-                  listingLiveness: { verdict: 'open', basis: 'open-marker', board: 'indeed', at: new Date().toISOString() },
-                } : {
-                  googleCardUrl: 'https://google.example/card/synthetic-link-only',
-                }),
-              })), telemetry: { total: jobs.length } }),
-              beforeSearchStageWrite: async ({ phase }) => { if (phase === 'before-final-stage') changedOnlyFinalWrites += 1; },
-            });
-            searchJobs = ipcMain.__getInvokeHandler('search-jobs');
-          }
+          // Search paths no longer research: a resolver that would change the
+          // row must never be called, and nothing may dirty the final checkpoint.
+          let officialResolverCalls = 0;
+          __registerJobsHandlersForTests({
+            resolveOfficialPostings: async jobs => {
+              officialResolverCalls += 1;
+              return { jobs: jobs.map(job => ({ ...job,
+                officialPosting: { level: 'L5', url: 'https://example.com/synthetic-official' },
+                listingLiveness: { verdict: 'open', basis: 'open-marker', board: 'indeed', at: new Date().toISOString() },
+                googleCardUrl: 'https://google.example/card/synthetic-link-only',
+              })), telemetry: { total: jobs.length } };
+            },
+            beforeSearchStageWrite: async ({ phase }) => { if (phase === 'before-final-stage') changedOnlyFinalWrites += 1; },
+          });
+          searchJobs = ipcMain.__getInvokeHandler('search-jobs');
           const result = await searchJobs({ sender }, {
             nodeId,
             canvasFilePath: canvasPath,
@@ -1247,21 +1249,21 @@ export default [
             && after.manifest.collectionDiagnostics?.completedAt === firstGatheredAt
             && after.manifest.collectionDiagnostics?.unfinishedSourceCount === 0,
           'the current settled search response must persist its observed collection evidence, including after a legacy gathered resume');
-          assert(result.jobs.length === 1 && result.jobs[0].officialPosting?.level === 'L5'
-            && after.stagedJobs.some(entry => entry.job?.officialPosting?.level === 'L5'),
-          'old gathered rows must cross the official resolver and checkpoint their metadata before being returned');
-          if (testCase.pairOnly) {
-            assert(changedOnlyFinalWrites === 1, 'a pair-only resolution change dirties the gathered-only final checkpoint');
-            assert(result.jobs[0].listingLiveness?.verdict === 'open', 'the result carries the refreshed verdict');
-            assert(after.stagedJobs.some(entry => entry.job?.listingLiveness?.verdict === 'open'),
-              'the refreshed verdict is durable in the final checkpoint');
+          const resolvedAnywhere = job => job?.officialPosting?.url === 'https://example.com/synthetic-official'
+            || job?.listingLiveness?.verdict === 'open'
+            || job?.googleCardUrl === 'https://google.example/card/synthetic-link-only';
+          assert(result.jobs.length === 1 && officialResolverCalls === 0
+            && !result.jobs.some(resolvedAnywhere)
+            && !after.stagedJobs.some(entry => resolvedAnywhere(entry.job)),
+          'old gathered rows must not cross an official pass in a search path: zero research calls and no resolved officialPosting, liveness verdict or link on the returned or checkpointed rows');
+          if (!testCase.pairOnly && !testCase.linkOnly) {
+            assert(!result.jobs[0].officialPosting, 'a row that held no officialPosting must stay without one after a gathered-only resume');
           }
-          if (testCase.linkOnly) {
-            assert(changedOnlyFinalWrites === 1, 'a link-only resolution change dirties the gathered-only final checkpoint');
-            assert(result.jobs[0].googleCardUrl === 'https://google.example/card/synthetic-link-only',
-              'the result carries the refreshed link');
-            assert(after.stagedJobs.some(entry => entry.job?.googleCardUrl === 'https://google.example/card/synthetic-link-only'),
-              'the refreshed link is durable in the final checkpoint');
+          assert(changedOnlyFinalWrites === 0,
+            'a gathered-only resume that performs no research must not dirty the final checkpoint');
+          if (testCase.pairOnly) {
+            assert(result.jobs[0].listingLiveness?.verdict === 'pending',
+              'the seeded pending verdict is carried unchanged, never rechecked by a search path');
           }
           outcomes.push(testCase.label);
         } finally {
@@ -1786,9 +1788,9 @@ export default [
         callRaw: () => { throw new Error('role evidence is listing-only'); },
         callText: async () => ({ assessments: [{ index: 0, matches: [{ preferenceId: 'no-web', outcome: 'not_applicable', evidence: 'model escape hatch' }] }] }),
       });
-      const strictMatch = strict.filteredJobs[0]?.preferenceAssessment.matches.find(match => match.preferenceId === 'no-web');
-      assert(strict.filteredJobs.length === 1 && strictMatch?.outcome === 'unverified',
-        'a strict non-confirmed outcome must normalize to unverified and fail closed');
+      const strictMatch = strict.acceptedJobs[0]?.preferenceAssessment.matches.find(match => match.preferenceId === 'no-web');
+      assert(strict.acceptedJobs.length === 1 && strict.filteredJobs.length === 0 && strictMatch?.outcome === 'unverified',
+        'a strict non-confirmed role outcome must normalize to unverified and go on to scoring, because only a conflict removes a job');
 
       const sameTitleDifferentCities = await evaluateJobPreferences({
         jobs: [
@@ -2135,11 +2137,11 @@ export default [
           throw new Error('web research unavailable');
         },
       });
-      const match = strict.filteredJobs[0]?.preferenceAssessment?.matches?.[0];
+      const match = strict.acceptedJobs[0]?.preferenceAssessment?.matches?.[0];
       assert(listingCalls === 1 && groundedCalls === 1
-        && strict.acceptedJobs.length === 0 && strict.filteredJobs.length === 1
+        && strict.acceptedJobs.length === 1 && strict.filteredJobs.length === 0
         && match?.outcome === 'unverified' && match?.source === 'none',
-      `strict unresolved company perks must attempt web research then filter fail-closed, got ${JSON.stringify({ listingCalls, groundedCalls, strict, match })}`);
+      `strict unresolved company perks must attempt web research, then stay visible as unverified, got ${JSON.stringify({ listingCalls, groundedCalls, strict, match })}`);
       // Fresh raw research packs up to JOB_PREFERENCE_RESEARCH_MAX_ITEMS companies; its compact
       // dependent assessment can safely combine the completed sections up to its own ceiling.
       // An opaque research id keeps each employer's proof isolated.
@@ -2250,7 +2252,7 @@ export default [
       });
       const unverifiedProvenanceFirst = await evaluateUnverifiedProvenance();
       const unverifiedProvenanceSecond = await evaluateUnverifiedProvenance();
-      const unverifiedProvenanceMatch = unverifiedProvenanceFirst.filteredJobs[0]?.preferenceAssessment?.matches?.[0];
+      const unverifiedProvenanceMatch = unverifiedProvenanceFirst.acceptedJobs[0]?.preferenceAssessment?.matches?.[0];
       const firstBatchIds = batchRawCalls[0]?.ids || [];
       const assessmentIds = batchAssessmentCalls[0]?.ids || [];
       const rawProgressHints = batchRawCalls.map(call => call.options.hints);
@@ -2412,7 +2414,7 @@ export default [
         && unverifiedProvenanceMatch.sourceDate === ''
         && unverifiedProvenanceMatch.source === 'web'
         && unverifiedProvenanceMatch.sourceUrls.length === 0
-        && unverifiedProvenanceSecond.filteredJobs.length === 1
+        && unverifiedProvenanceSecond.acceptedJobs.length === 1
         && unverifiedProvenanceRawCalls === 2,
       `fresh company research must issue deterministic ${batchSize}-item batches with isolated evidence, got ${JSON.stringify({ batchRawCalls, batchAssessmentCalls, counts: batched.counts })}`);
       return { blankBypassed: true, strictResearchAttempted: groundedCalls, unsupportedQuoteFailsClosed: true, batchedResearch: batchRawCalls.map(call => call.ids.length) };
@@ -3413,7 +3415,7 @@ export default [
         && done.includes('aria-describedby={preferencesHelpId}')
         && done.includes('maxLength={4000}')
         && done.includes('const [setupOpen, setSetupOpen] = useState(() => !settingsFrozen);')
-        && done.includes("Search setup{settingsFrozen ? ' · brief editable' : ''}")
+        && done.includes("Search setup{settingsFrozen && !managedByJobBoard ? ' · brief editable' : ''}")
         && done.includes('open={setupOpen}')
         && done.includes('Describe roles, priorities, and deal-breakers.'),
       'completed result labels must pluralize every job count and retain a labeled, 4,000-character editable Search Brief inside an initially closed setup disclosure');
@@ -3427,32 +3429,19 @@ export default [
         && !done.includes('Locked roles: {resolvedRoles.join'),
       'a zero-role plan must show its explicit fallback in draft and completed Search setup, never a dangling roles label');
 
-      const normalProcessingStart = processing.indexOf('<div className="group flex flex-col items-center justify-center');
-      const normalProcessing = processing.slice(normalProcessingStart);
+      const normalProcessing = processing.slice(processing.indexOf('<div className="flex flex-col items-center gap-2 px-4 py-4">'));
       const normalAtomicLiveRegions = normalProcessing.match(/role="status" aria-live="polite" aria-atomic="true"/g) || [];
-      const primaryLiveStart = normalProcessing.indexOf('<p className="text-white/60 text-xs font-medium" role="status" aria-live="polite" aria-atomic="true">');
-      const primaryLiveEnd = normalProcessing.indexOf('</p>', primaryLiveStart);
       assert(processing.includes('aria-label="Copy the Chrome launch command"')
-        // Chrome setup and ordinary processing are mutually exclusive render
-        // branches. In ordinary processing, only the compact phase/source
-        // label is live; high-frequency detail/count/scoring/resume copy is
-        // visibly present but deliberately outside that atomic announcement.
+        // The node says only that it is processing; every detail goes to the side panel.
         && normalAtomicLiveRegions.length === 1
-        && primaryLiveStart >= 0 && primaryLiveEnd > primaryLiveStart
-        && normalProcessing.slice(primaryLiveStart, primaryLiveEnd).includes('{primaryStatus}')
-        && normalProcessing.slice(primaryLiveEnd).includes('{hubState === \'searching\' && activeSourceDetail && (')
-        && normalProcessing.slice(primaryLiveEnd).includes('{collectedStatus && <p')
-        && normalProcessing.slice(primaryLiveEnd).includes('{scoringStatus && <p')
-        && normalProcessing.slice(primaryLiveEnd).includes('{resumeSummary && (')
-        && !normalProcessing.slice(primaryLiveEnd).includes('role="status"')
-        && processing.includes('aria-label="Pause and save job search progress for Resume"')
-        && processing.includes('data-action="pause-and-save"')
+        && normalProcessing.includes("'Processing'")
+        && !normalProcessing.includes('{scoringStatus')
+        && processing.includes('usePublishJobRunStatus(nodeId, {')
         && processing.includes("activity === 'description-enrichment'")
         && processing.includes('Enriching ${activeSourceName} descriptions…')
-        && processing.includes('Pause &amp; save')
         && !processing.includes('opacity-0 group-hover:opacity-100')
         && processing.includes('onPauseAndSave,')
-        && processing.includes('onClick={onPauseAndSave}')
+        && processing.includes('onPause: queuedRun ? null : onPauseAndSave')
         && !processing.includes('Cancel and reset job search')
         && !processing.includes('onClick={handleCopy}\n          title="Click to copy"'),
       'processing controls must be keyboard-operable and communicate the compact phase/source through one atomic live region without making detail, counts, scoring, or résumé text live');

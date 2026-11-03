@@ -1,27 +1,7 @@
 import React, { useId, useLayoutEffect, useMemo, useRef } from 'react';
-import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Loader2, Save, Search, X } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronUp, Loader2, Search, X } from 'lucide-react';
 import { jobBoardModuleReadiness, jobBoardSelectionPresentation } from '../../utils/jobBoardSearchSelection.js';
 
-function normalizeProgress(progress, selectedCount) {
-  if (!progress) return null;
-  if (typeof progress === 'string') return { label: progress, completed: null, total: null };
-
-  const completedValue = progress.completed ?? progress.done ?? progress.current;
-  const totalValue = progress.total ?? selectedCount;
-  const completed = Number.isFinite(Number(completedValue))
-    ? Math.max(0, Math.floor(Number(completedValue)))
-    : null;
-  const total = Number.isFinite(Number(totalValue)) && Number(totalValue) > 0
-    ? Math.max(1, Math.floor(Number(totalValue)))
-    : null;
-  const currentLabel = progress.currentLabel || progress.moduleLabel || '';
-  const label = progress.label
-    || (completed != null && total != null
-      ? `${completed} of ${total} searches complete${currentLabel ? ` · ${currentLabel}` : ''}`
-      : currentLabel || 'Starting or continuing selected sources…');
-
-  return { label, completed, total };
-}
 
 function displayModuleLabel(module) {
   if (typeof module?.label !== 'string') return 'Job Search';
@@ -76,13 +56,8 @@ export function JobBoardSearchSelection({
   onMove = null,
   disabled = false,
   running = false,
-  progress = null,
   onRun,
   onCancel = null,
-  onPause = null,
-  pauseDisabledReason = '',
-  showPauseSave = false,
-  waitingForWorkers = false,
   recoveryError = null,
   onRetry = null,
   recoveryActionLabel = 'Retry recovery',
@@ -146,7 +121,6 @@ export function JobBoardSearchSelection({
     && !hasUnreadySelection;
   const canCancel = running && recoveryCanCancel && typeof onCancel === 'function';
   const canRetry = !!recoveryError && !disabled && typeof onRetry === 'function';
-  const progressState = normalizeProgress(progress, selectedRows.length);
   const actionDisabledReasonId = `${fieldsetId}-run-reason`;
   // An idle primary action can be disabled by setup, a Board lock, or a
   // missing callback. Keep a real explanation beside the native disabled
@@ -312,28 +286,6 @@ export function JobBoardSearchSelection({
         </div>
       )}
 
-      {running && progressState && (
-        <div className="space-y-1" role="status" aria-live="polite">
-          <div className="text-center text-[9px] leading-snug text-indigo-200/65">
-            {progressState.label}
-          </div>
-          {progressState.completed != null && progressState.total != null && (
-            <progress
-              className="block h-1 w-full overflow-hidden rounded-full accent-indigo-400"
-              max={progressState.total}
-              value={Math.min(progressState.completed, progressState.total)}
-              aria-label="Job search progress"
-            />
-          )}
-        </div>
-      )}
-
-      {running && waitingForWorkers && !progressState && (
-        <p className="text-center text-[9px] leading-snug text-sky-200/75" role="status" aria-live="polite">
-          {progressState?.label || 'Waiting for Claude to finish official posting lookups.'}
-        </p>
-      )}
-
       {running && (
         <p className="text-center text-[8px] leading-snug text-white/30">
           Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.
@@ -349,12 +301,6 @@ export function JobBoardSearchSelection({
       {primaryActionDisabledReason && (
         <p id={actionDisabledReasonId} className="text-center text-[9px] leading-snug text-amber-300/65" role="status">
           {primaryActionDisabledReason}
-        </p>
-      )}
-
-      {running && showPauseSave && pauseDisabledReason && (
-        <p id={`${fieldsetId}-pause-reason`} className="text-center text-[9px] leading-snug text-amber-200/65" role="status">
-          {pauseDisabledReason}
         </p>
       )}
 
@@ -409,19 +355,6 @@ export function JobBoardSearchSelection({
           {running ? <X size={11} /> : <Search size={11} />}
           {running ? 'Cancel current run' : runLabel}
         </button>
-        {running && showPauseSave && (
-          <button
-            type="button"
-            onClick={onPause}
-            disabled={!!pauseDisabledReason || typeof onPause !== 'function'}
-            aria-describedby={pauseDisabledReason ? `${fieldsetId}-pause-reason` : undefined}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-amber-400/25 bg-amber-500/10 px-2 py-1.5 text-[10px] font-medium text-amber-100 transition-colors hover:bg-amber-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-            title={pauseDisabledReason || 'Pause active Search work and save its continuation for later.'}
-          >
-            <Save size={11} />
-            Pause &amp; save
-          </button>
-        )}
       </div>
       )}
     </fieldset>

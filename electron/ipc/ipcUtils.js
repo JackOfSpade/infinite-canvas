@@ -53,7 +53,7 @@ const QUIT_PAUSE_WORK_CHANNELS = new Set([
   'claim-job-analysis-operation', 'begin-job-continuation', 'claim-job-continuation', 'claim-job-board-run',
   'parse-career-data', 'resolve-job-search-location', 'interpret-job-preferences', 'resolve-search-roles',
   'evaluate-job-preferences', 'generate-job-queries', 'search-jobs', 'search-jobs-single-source', 'score-jobs',
-  'research-job-compensation', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
+  'research-job-compensation', 'score-board-preference-jobs', 'settle-board-research', 'confirm-job-location-consolidations', 'bucket-jobs', 'resolve-job-source', 'resume-job-source',
   'queue-local-application', 'prepare-official-posting-for-generation', 'refresh-official-postings', 'check-application-generation-gate', 'import-local-application', 'save-application', 'build-interview-brief',
   'analyze-photos', 'scrape-price-comps', 'synthesize-prices-batch', 'synthesize-bundle-price',
   'rescrape-source', 'resolve-captcha', 'assess-platform-fit',

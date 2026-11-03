@@ -130,7 +130,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
     keepCompletedSnapshotDuringActiveSearch: () => true, hideBoardChildren() {},
     autoResumedManualAiRunRef: { current: 'board-manual-run' }, committedCombineRef: { current: null },
     committedCombineManualAiRunIdsRef: { current: new Set() }, rememberBoundedRunId: (set, runId) => set.add(runId),
-    setFinalizingCommittedCombine() {}, recordCombineStage() {}, fitView() {},
+    setFinalizingCommittedCombine() {}, recordCombineStage() {}, markBoardPreferencesCombined() {}, fitView() {},
     completeManualAiRun: async (runId, options) => { calls.completed.push({ runId, options }); },
     addToast: toast => calls.toasts.push(toast), EventLogger: { log() {}, error() {} },
     document: { dispatchEvent() {} }, CustomEvent: class {}, requestAnimationFrame: callback => callback(),

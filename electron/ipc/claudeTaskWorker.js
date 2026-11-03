@@ -9,6 +9,8 @@ import path from 'node:path';
 import { logger } from '../logger.js';
 import { claudeChildEnv, resolveClaudeBinary } from './claudeApplicationRunner.js';
 import { CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
+import { claudeUsageLimit, claudeUsageWaitMs, clearClaudeUsageLimit, drainClaudeCalls, heldClaudeKeys, holdClaude, isClaudeHeld, isClaudePauseKey, releaseClaude, reportClaudeUsageLimit, subscribeClaudeHolds } from './claudePause.js';
+import { createClaudeTaskActivity, standaloneClaudeActivity, subscribeStandaloneClaudeActivity } from './claudeTaskActivity.js';
 import { CLAUDE_TASK_IDS, claudeTaskProfile } from './claudeTaskProfiles.js';
 import {
   listWorkerHandoffs,
@@ -30,6 +32,7 @@ const RETRY_MAX_MS = 10 * 60_000;
 const USAGE_LIMIT_WAIT_MS = 10 * 60_000;
 const RESEARCH_MAX_TURNS = 16;
 const IMAGE_MAX_EDGE = 1568;
+const ACTIVITY_NOTIFY_MS = 500;
 
 const SEAM = Object.freeze({
   list: listWorkerHandoffs,
@@ -45,6 +48,8 @@ const SEAM = Object.freeze({
 export const CLAUDE_TASK_STATUS_CHANNEL = 'get-claude-task-status';
 // Only these stops are shown to the person; anything else just retries quietly.
 export const CLAUDE_TASK_PAUSE_CODES = Object.freeze(['CLAUDE_USAGE_LIMIT', 'CLAUDE_NOT_SIGNED_IN', 'CLAUDE_CLI_MISSING']);
+export const CLAUDE_TASK_ACTIVITY_CHANNEL = 'get-claude-task-activity';
+export const CLAUDE_TASK_ACTIVITY_EVENT = 'claude-task:activity';
 
 let current = null;
 
@@ -62,6 +67,44 @@ export function claudeTaskWorkerStatus() {
 export function registerClaudeTaskStatusHandler({ ipcMain, status = claudeTaskWorkerStatus } = {}) {
   ipcMain.removeHandler?.(CLAUDE_TASK_STATUS_CHANNEL);
   ipcMain.handle(CLAUDE_TASK_STATUS_CHANNEL, () => status());
+}
+
+/** The dock's live steps for every handoff the worker knows about. */
+export function claudeTaskWorkerActivity() {
+  return withStandaloneActivity(current?.activity() || { at: Date.now(), running: 0, waiting: 0, paused: false, pauseCode: null, tasks: {} });
+}
+
+function withStandaloneActivity(snapshot) {
+  return { ...snapshot, held: heldClaudeKeys(), usageLimit: claudeUsageLimit(), tasks: { ...snapshot.tasks, ...standaloneClaudeActivity.snapshot().tasks } };
+}
+
+const nodeOfPauseKey = key => (typeof key === 'string' && key.startsWith('node:') ? key.slice('node:'.length) : null);
+
+/** Hold, release and drain every Claude call, from the panel's one control. */
+export function registerClaudePauseHandlers({ ipcMain } = {}) {
+  const handlers = {
+    'claude-pause:hold': ({ key }) => { holdClaude(key); return { held: isClaudeHeld(key) }; },
+    'claude-pause:release': ({ key }) => { releaseClaude(key); return { held: false }; },
+    // Resolves once no call for this key is still running, its answer saved.
+    'claude-pause:drain': async ({ key }) => {
+      const nodeId = nodeOfPauseKey(key);
+      await (nodeId ? current?.drain(nodeId) : drainClaudeCalls(key));
+      return { drained: true };
+    },
+    'claude-pause:stop-running': ({ key }) => { if (nodeOfPauseKey(key)) current?.stopRunning(nodeOfPauseKey(key)); return { stopped: true }; },
+  };
+  // Try now instead of waiting for the reset. A limit that still stands simply reports itself again.
+  ipcMain.removeHandler?.('claude-usage:resume-now');
+  ipcMain.handle('claude-usage:resume-now', () => { clearClaudeUsageLimit(); current?.resumeNow(); return { resumed: true }; });
+  for (const [channel, handler] of Object.entries(handlers)) {
+    ipcMain.removeHandler?.(channel);
+    ipcMain.handle(channel, (_event, args) => (isClaudePauseKey(args?.key) ? handler(args) : { error: 'Unknown pause key.' }));
+  }
+}
+
+export function registerClaudeTaskActivityHandler({ ipcMain, activity = claudeTaskWorkerActivity } = {}) {
+  ipcMain.removeHandler?.(CLAUDE_TASK_ACTIVITY_CHANNEL);
+  ipcMain.handle(CLAUDE_TASK_ACTIVITY_CHANNEL, () => activity());
 }
 
 /** Fit a photo inside Claude's image size, or return null when it cannot be read. */
@@ -105,6 +148,9 @@ export function createClaudeTaskWorker({
   now = () => Date.now(),
   setTimer = (fn, ms) => { const timer = setTimeout(fn, ms); timer.unref?.(); return timer; },
   clearTimer = clearTimeout,
+  onActivityChange = null,
+  isHeld = nodeId => isClaudeHeld(`node:${nodeId}`),
+  onUsageLimit = () => {},
 } = {}) {
   const allowTasks = new Set(taskIds);
   const running = new Map();
@@ -112,8 +158,22 @@ export function createClaudeTaskWorker({
   let pausedUntil = 0;
   let pauseCode = null;
   let timer = null;
+  let activityTimer = null;
   let stopped = false;
   let unsubscribe = null;
+  let unsubscribeHolds = null;
+  const drains = new Set();
+  // Streamed deltas arrive many times a second; the dock needs at most two a second.
+  const activity = createClaudeTaskActivity({
+    now,
+    onChange() {
+      if (!onActivityChange || stopped || activityTimer) return;
+      activityTimer = setTimer(() => {
+        activityTimer = null;
+        try { onActivityChange(activity.snapshot()); } catch { /* reporting cannot affect a task */ }
+      }, ACTIVITY_NOTIFY_MS);
+    },
+  });
 
   function wakeIn(ms) {
     if (stopped) return;
@@ -125,13 +185,18 @@ export function createClaudeTaskWorker({
     pausedUntil = Math.max(pausedUntil, now() + ms);
     if (pauseCode !== code) logger.warn(`[Claude tasks] Paused (${code}).`);
     pauseCode = code;
+    activity.setPause(true, code);
     wakeIn(ms);
   }
 
   function handleFailure(entry, error) {
-    if (error?.code === 'CLAUDE_CANCELLED') return;
-    if (error?.code === 'CLAUDE_USAGE_LIMIT') return pause(error.code, USAGE_LIMIT_WAIT_MS);
-    if (error?.code === 'CLAUDE_NOT_SIGNED_IN' || error?.code === 'CLAUDE_CLI_MISSING') return pause(error.code, RETRY_BASE_MS * 2);
+    if (error?.code === 'CLAUDE_CANCELLED') return activity.released(entry.requestId);
+    if (error?.code === 'CLAUDE_USAGE_LIMIT') {
+      activity.released(entry.requestId);
+      onUsageLimit({ resetsAt: error.detail?.resetsAt ?? null });
+      return pause(error.code, Number.isFinite(error.detail?.resetsAt) ? claudeUsageWaitMs(error.detail.resetsAt, now()) : USAGE_LIMIT_WAIT_MS);
+    }
+    if (error?.code === 'CLAUDE_NOT_SIGNED_IN' || error?.code === 'CLAUDE_CLI_MISSING') { activity.released(entry.requestId); return pause(error.code, RETRY_BASE_MS * 2); }
     if (error?.code === CLAUDE_PROMPT_TOO_LONG) {
       // No retry or manual paste can make this prompt fit, so its caller is told.
       failures.delete(entry.requestId);
@@ -151,6 +216,7 @@ export function createClaudeTaskWorker({
         return;
       }
       failures.set(entry.requestId, failure);
+      activity.failed(entry.requestId, { code: error.code, attempts: failure.attempts, retryAt: now() });
       return;
     }
     if (error?.code === 'CLAUDE_OUTPUT_TRUNCATED' && failure.attempts >= TRUNCATION_ATTEMPTS) {
@@ -161,6 +227,7 @@ export function createClaudeTaskWorker({
     const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (failure.attempts - 1));
     failure.notBefore = now() + delay;
     failures.set(entry.requestId, failure);
+    activity.failed(entry.requestId, { code: error?.code, attempts: failure.attempts, retryAt: failure.notBefore });
     wakeIn(delay);
   }
 
@@ -182,12 +249,14 @@ export function createClaudeTaskWorker({
     if (!handoff?.ok) return;
     seam.assigned({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks });
     const profile = profileFor(entry.task);
+    activity.begin(entry.requestId, { task: entry.task, model: profile.model, effort: profile.effort, maxTurns: profile.tools ? RESEARCH_MAX_TURNS : null, rejections: entry.rejections, nodeId: entry.nodeId });
     const pageImages = await imagesFor(entry);
     const stage = binding();
     const cached = cachedPromptParts(handoff.prompt, handoff.cachedPrefix);
     const reply = await runStage({
       ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
       pageImages, signal: controller.signal,
+      onActivity: event => activity.event(entry.requestId, event),
       model: profile.model, effort: profile.effort, persistSession: false,
       ...(profile.tools ? { tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS } : {}),
     });
@@ -195,8 +264,20 @@ export function createClaudeTaskWorker({
     failures.delete(entry.requestId);
     // An answer proves Claude is usable again, which is what ends a pause notice.
     pauseCode = null;
+    activity.setPause(false, null);
+    activity.checking(entry.requestId);
     const outcome = await seam.submit({ requestId: entry.requestId, handoffCode: entry.handoffCode, response: reply.text, allowTasks });
+    if (outcome?.outcome === 'rejected') activity.rejected(entry.requestId);
+    else activity.released(entry.requestId);
     if (outcome?.retryAfterMs > 0) wakeIn(outcome.retryAfterMs);
+  }
+
+  const runningFor = nodeId => [...running.values()].filter(run => run.nodeId === nodeId);
+
+  function settleDrains() {
+    for (const drain of [...drains]) {
+      if (!runningFor(drain.nodeId).length) { drains.delete(drain); drain.resolve(); }
+    }
   }
 
   function pump() {
@@ -205,17 +286,28 @@ export function createClaudeTaskWorker({
     const live = new Set([...snapshot.handoffs.map(entry => entry.requestId), ...snapshot.settlingRequestIds]);
     for (const [requestId, run] of running) if (!live.has(requestId)) run.controller.abort();
     for (const requestId of failures.keys()) if (!live.has(requestId)) failures.delete(requestId);
+    activity.prune(live);
     if (snapshot.retryAfterMs > 0) wakeIn(snapshot.retryAfterMs);
-    if (now() < pausedUntil) return;
+    // A handoff past its backoff, or past a slot limit, is waiting for a turn.
+    for (const entry of snapshot.handoffs) {
+      if (!running.has(entry.requestId) && profileFor(entry.task) && (failures.get(entry.requestId)?.notBefore || 0) <= now()) {
+        activity.queued(entry.requestId, { task: entry.task, issuedAt: entry.issuedAt, nodeId: entry.nodeId });
+      }
+    }
+    // Anything else may have replaced the wake timer, so a pause re-arms its own.
+    if (now() < pausedUntil) { wakeIn(pausedUntil - now()); return; }
+    activity.setPause(false, null);
     for (const entry of snapshot.handoffs) {
       if (running.size >= concurrency) return;
       if (running.has(entry.requestId) || (failures.get(entry.requestId)?.notBefore || 0) > now() || !profileFor(entry.task)) continue;
+      if (isHeld(entry.nodeId)) continue;
       const controller = new AbortController();
-      running.set(entry.requestId, { controller });
+      running.set(entry.requestId, { controller, nodeId: entry.nodeId });
       serve(entry, controller)
         .catch(error => handleFailure(entry, error))
         .finally(() => {
           running.delete(entry.requestId);
+          settleDrains();
           pump();
         });
     }
@@ -225,24 +317,62 @@ export function createClaudeTaskWorker({
     start() {
       stopped = false;
       unsubscribe = seam.onEvent(pump);
+      unsubscribeHolds = subscribeClaudeHolds(pump);
       pump();
     },
     stop() {
       stopped = true;
       unsubscribe?.();
+      unsubscribeHolds?.();
+      for (const drain of [...drains]) { drains.delete(drain); drain.resolve(); }
       if (timer) clearTimer(timer);
+      if (activityTimer) clearTimer(activityTimer);
+      activityTimer = null;
       for (const run of running.values()) run.controller.abort();
     },
     status: () => Object.freeze({ running: running.size, retrying: failures.size, paused: now() < pausedUntil, pauseCode }),
+    activity: () => activity.snapshot(),
+    // Resolves when this node's running calls have ended and their answers are in.
+    drain: nodeId => new Promise((resolve) => {
+      drains.add({ nodeId, resolve });
+      settleDrains();
+    }),
+    stopRunning(nodeId) { for (const run of runningFor(nodeId)) run.controller.abort(); },
+    resumeNow() {
+      pausedUntil = 0;
+      pauseCode = null;
+      activity.setPause(false, null);
+      pump();
+    },
     pump,
   });
 }
 
 /** Start answering AI tasks with Claude for this process. */
-export function startClaudeTaskWorker({ userData, nativeImage = null } = {}) {
+export function startClaudeTaskWorker({ userData, nativeImage = null, getAllWindows = () => [] } = {}) {
   const usageFile = userData ? path.join(userData, CLAUDE_TASK_USAGE_FILE) : null;
+  const broadcast = (snapshot) => {
+    for (const win of getAllWindows() || []) {
+      try {
+        if (!win || win.isDestroyed?.()) continue;
+        const contents = win.webContents;
+        if (!contents || contents.isDestroyed?.()) continue;
+        contents.send(CLAUDE_TASK_ACTIVITY_EVENT, snapshot);
+      } catch { /* a closing window cannot fail a task */ }
+    }
+  };
+  let standaloneTimer = null;
+  const scheduleBroadcast = () => {
+    if (standaloneTimer) return;
+    standaloneTimer = setTimeout(() => { standaloneTimer = null; broadcast(claudeTaskWorkerActivity()); }, ACTIVITY_NOTIFY_MS);
+    standaloneTimer.unref?.();
+  };
+  subscribeStandaloneClaudeActivity(scheduleBroadcast);
+  subscribeClaudeHolds(scheduleBroadcast);
   const worker = createClaudeTaskWorker({
     prepareImage: attachment => prepareTaskImage(attachment, nativeImage),
+    onActivityChange: snapshot => broadcast(withStandaloneActivity(snapshot)),
+    onUsageLimit: reportClaudeUsageLimit,
     recordUsage: (row) => {
       if (usageFile) void fs.promises.appendFile(usageFile, `${JSON.stringify(row)}\n`, { mode: 0o600 }).catch(() => {});
     },

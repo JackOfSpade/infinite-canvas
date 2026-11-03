@@ -33,6 +33,11 @@ export function savedJobCount(data) {
   return Array.isArray(data?.scoredJobs) ? data.scoredJobs.filter(Boolean).length : 0;
 }
 
+// A career swap owes every row a new score; a preference re-check does not.
+export function savedJobsReevaluationKeepsScores(data) {
+  return !hasLegacyPageScoring(data) && !data?.savedJobsRescore;
+}
+
 export function hubRetainsSavedJobs(data) {
   return savedJobCount(data) > 0;
 }

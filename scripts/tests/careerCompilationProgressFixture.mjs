@@ -93,7 +93,6 @@ export default [
       try {
         const { React, createRoot, act, ToastProvider, JobSearchProcessingState, JobSearchDoneState, JobBoardCareerOverridePanel } = bundle.module;
         const surfaces = [
-          [JobSearchProcessingState, runId => ({ hubState: 'parsing', nodeId: 'career-hub', careerRunId: runId })],
           [JobSearchDoneState, runId => ({ locked: true, careerCleared: true, careerCompiling: true, careerNodeId: 'career-hub', careerRunId: runId, savedJobCount: 4 })],
           [JobBoardCareerOverridePanel, runId => ({ nodeId: 'career-hub', view: { state: 'compiling', pending: { manualAiRunId: runId, fileNames: ['Synthetic career.txt'] } } })],
         ];

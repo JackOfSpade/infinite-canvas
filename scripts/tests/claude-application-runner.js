@@ -1861,4 +1861,69 @@ export default [
       assert.equal(persisted.updatedAt, 900);
     },
   },
+  {
+    name: 'claude runner: a usage limit in a parallel lane waits for the reset and then continues, instead of stranding the bundle',
+    async run() {
+      const done = new Set();
+      let limited = true;
+      let release;
+      const waits = [];
+      const reports = [];
+      const api = {
+        getHandoff: ({ matchTaskId } = {}) => {
+          if (matchTaskId) return done.has(matchTaskId) ? { completed: true } : { handoff: { handoffCode: matchTaskId, stage: 'match', prompt: 'p' } };
+          return done.size === 2 ? { completed: true } : { handoff: { handoffCode: 'main', stage: 'match-wave', prompt: 'unused', parallelTasks: [{ id: 't1' }, { id: 't2' }] } };
+        },
+        submitHandoff: ({ matchTaskId }) => { done.add(matchTaskId); return { accepted: true, completed: true }; },
+      };
+      const runner = createClaudeApplicationRunner({
+        api, stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        usage: { report: report => reports.push(report), wait: signal => { waits.push(signal); return new Promise((resolve) => { release = resolve; }); } },
+        runStage: async () => {
+          if (limited) throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', 'limit', { resetsAt: 12345 });
+          return { text: '{}', model: 'claude-sonnet-5-5' };
+        },
+      });
+      const jobId = 'job-usage-parallel';
+      runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => waits.length === 1, 'the driver waits for the reset');
+      assert.equal(waits[0].aborted, false, 'the wait is not ended by the sibling lane abort');
+      assert.equal(reports[0].resetsAt, 12345, 'the reported reset reaches the gate');
+      const waiting = runner.status([jobId])[jobId];
+      assert.equal(waiting.status, 'running', 'a usage limit is not a failed bundle');
+      assert.equal(waiting.activity, 'waiting');
+      limited = false;
+      release();
+      await waitFor(() => done.size === 2, 'the bundle continues after the reset');
+      await runner.shutdown();
+    },
+  },
+  {
+    name: 'claude runner: a discard during a usage-limit wait ends the wait and does not restart the bundle',
+    async run() {
+      let discard;
+      let starts = 0;
+      const waits = [];
+      const runner = createClaudeApplicationRunner({
+        api: {
+          getHandoff: () => { starts += 1; return { handoff: { handoffCode: 'c', stage: 'write', prompt: 'p' } }; },
+          submitHandoff: () => ({ accepted: true }),
+          subscribeDiscards: (listener) => { discard = listener; return () => {}; },
+        },
+        stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        usage: { report: () => {}, wait: signal => new Promise((resolve) => { waits.push(signal); signal.addEventListener('abort', resolve, { once: true }); }) },
+        runStage: async () => { throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', 'limit'); },
+      });
+      const jobId = 'job-usage-discard';
+      runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => waits.length === 1, 'waiting');
+      const startsBefore = starts;
+      discard({ jobId });
+      await waitFor(() => waits[0].aborted, 'the wait ended');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(starts, startsBefore, 'no restart after a discard');
+      assert.equal(runner.status([jobId])[jobId], undefined);
+      await runner.shutdown();
+    },
+  },
 ];

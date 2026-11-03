@@ -16,3 +16,16 @@ export function claudePauseNotice(status) {
   const reason = Object.hasOwn(CLAUDE_PAUSE_COPY.reasons, status.pauseCode) ? CLAUDE_PAUSE_COPY.reasons[status.pauseCode] : null;
   return reason ? { headline: CLAUDE_PAUSE_COPY.headline, reason } : null;
 }
+
+const clockTime = at => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+/** The notice while a usage limit holds every Claude call: what is safe, and when work continues. */
+export function claudeUsageLimitNotice(usageLimit) {
+  if (!usageLimit) return null;
+  return {
+    headline: 'Claude usage limit reached',
+    reason: `All finished work is saved and nothing was lost. ${usageLimit.knownReset
+      ? `Work continues by itself when usage resets, around ${clockTime(usageLimit.resumeAt)}.`
+      : `Claude did not say when usage resets, so the app tries again around ${clockTime(usageLimit.resumeAt)}.`}`,
+  };
+}

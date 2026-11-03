@@ -130,6 +130,7 @@ async function officialTextIsEvidence(row, { getView, minChars, requireSemantic 
  */
 export async function settleBoardClosedRows(rows, {
   scoreSafe, getView, minChars = 400, setAsideKeys = null, expiryCandidatesConfirmedClosed = null, requireSemantic = false,
+  researchDeferred = false,
 } = {}) {
   const kept = []; const dropped = []; const dispositions = new Map();
   const keep = (row, disposition) => { kept.push(row); dispositions.set(row, disposition); };
@@ -167,7 +168,9 @@ export async function settleBoardClosedRows(rows, {
       dropped.push({ row, disposition: scrapedOk ? BOARD_CLOSED_DISPOSITIONS.droppedSettled : BOARD_CLOSED_DISPOSITIONS.droppedNoDescription });
       continue;
     }
-    if (!scrapedOk) { dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked }); continue; }
+    // Research now follows scoring, and a job with no description cannot be
+    // scored, so a confirmed-closed one has no later check to wait for.
+    if (!scrapedOk) { dropped.push({ row, disposition: researchDeferred ? BOARD_CLOSED_DISPOSITIONS.droppedNoDescription : BOARD_CLOSED_DISPOSITIONS.deferredUnchecked }); continue; }
     keep(row, BOARD_CLOSED_DISPOSITIONS.keptUnchecked);
   }
   return { kept, dropped, dispositions };

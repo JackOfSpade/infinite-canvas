@@ -29,6 +29,7 @@ import {
 } from '../utils/applicationHandoffDock';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
+import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
 import { officialPostingDisplay } from '../utils/officialPostingDisplay';
 import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields';
@@ -475,6 +476,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const localApplicationNeedsAttention = Boolean(localApplication
     && ['failed', 'invalid', 'blocked', 'render-retry-required', 'revision-required', 'revision-exhausted', 'status-error'].includes(localApplication.status));
   const postingDisplay = useMemo(() => officialPostingDisplay(data), [data]);
+  const unverifiedCompanyRules = unverifiedCompanyPreferences(data);
   const salaryCurrencyLabel = useMemo(
     () => formatSalaryCurrencyLabel(postingDisplay.salary, postingDisplay.location),
     [postingDisplay.salary, postingDisplay.location]
@@ -1663,7 +1665,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{postingDisplay.title || 'Untitled'}</div>
           <div className="text-white/50 text-xs mt-0.5 truncate">{postingDisplay.employerLabel}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
           {postingDisplay.via && <div className="text-white/35 text-[10px] mt-0.5 truncate">{postingDisplay.via}</div>}
-          {postingDisplay.statusLabel && <div className="text-amber-300/70 text-[10px] mt-0.5" title={postingDisplay.statusDetail || undefined}>{postingDisplay.statusLabel}</div>}
+          {postingDisplay.statusLabel && <div className={`${postingDisplay.researchSkipped ? 'text-white/40' : 'text-amber-300/70'} text-[10px] mt-0.5`} title={postingDisplay.statusDetail || undefined}>{postingDisplay.statusLabel}</div>}
+          {data.officialRescore && <div className="text-white/40 text-[10px] mt-0.5">Rescored on the official posting, was {data.officialRescore.previousScore}</div>}
+          {unverifiedCompanyRules.length > 0 && <div className="text-white/40 text-[10px] mt-0.5" title={unverifiedCompanyRules.map(match => match.criterion).join('; ')}>Company preference not verified</div>}
           {postingDisplay.candidateLinks.length > 0 && (
             <div className="mt-1 min-w-0" onPointerDown={(e) => e.stopPropagation()}>
               <div className="text-white/50 text-[10px]">Not confirmed · candidate links (most official first)</div>

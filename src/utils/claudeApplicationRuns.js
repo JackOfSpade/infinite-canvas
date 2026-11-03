@@ -6,6 +6,7 @@
  * show "Claude is writing this" instead of a paste box.
  */
 import { normalizeApplicationProgress } from './applicationProgress.js';
+import { normalizeClaudeActivityEntry } from './claudeTaskActivityStore.js';
 
 export const CLAUDE_RUN_STATUSES = Object.freeze([
   'running', 'failed', 'done', 'needs-review', 'invalid',
@@ -25,6 +26,7 @@ export function normalizeClaudeRun(state) {
   const status = state.status;
   if (typeof status !== 'string' || !CLAUDE_RUN_STATUSES.includes(status)) return null;
   const progress = normalizeApplicationProgress(state.progress);
+  const live = normalizeClaudeActivityEntry(state.live);
   return {
     status,
     stage: optionalString(state.stage),
@@ -34,6 +36,7 @@ export function normalizeClaudeRun(state) {
     lastActivityAt: optionalTime(state.lastActivityAt),
     ...(optionalTime(state.startedAt) !== null ? { startedAt: state.startedAt } : {}),
     ...(progress ? { progress } : {}),
+    ...(live ? { live } : {}),
     ...(['waiting', 'running'].includes(state.activity) ? { activity: state.activity } : {}),
     ...(Number.isSafeInteger(state.activeCalls) && state.activeCalls >= 0 && state.activeCalls <= 100 ? { activeCalls: state.activeCalls } : {}),
     ...(Number.isSafeInteger(state.waitingCalls) && state.waitingCalls >= 0 && state.waitingCalls <= 100 ? { waitingCalls: state.waitingCalls } : {}),

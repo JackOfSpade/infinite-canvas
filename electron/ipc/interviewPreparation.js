@@ -34,6 +34,7 @@ import { INTERVIEW_ANSWER_ENTAILMENT_SCHEMA, interviewAnswerEntailmentPrompt,
 import { normalizeInterviewPublicUrl } from '../../src/utils/interviewUrlPrivacy.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { applicationFolderJobUrl, createApplicationFolderRegistry, listApplicationFolders } from './interviewApplicationFolders.js';
+import { standaloneClaudeActivity } from './claudeTaskActivity.js';
 import { createInterviewClaudeTransport } from './interviewClaudeTransport.js';
 import { INTERVIEW_DISCLOSURE_RESEARCH_INSTRUCTION, mapInterviewDisclosures } from './interviewQaDisclosures.js';
 import { factCheckInterviewCards } from './interviewQaFactCheck.js';
@@ -1374,6 +1375,7 @@ async function defaultPicker() {
   const selected = await dialog.showOpenDialog({ properties: ['openDirectory'] });
   return selected.canceled ? '' : selected.filePaths?.[0] || '';
 }
+const interviewActivityKey = runId => `interview:${runId}`;
 /** Register intake, sealed research and separately sealed prepared answers. */
 export function registerInterviewPreparationHandlers({ appInstance = app, registerHandler = handleSafe, picker = defaultPicker, captureBundle = captureInterviewPreparationBundle, loadBundle = loadInterviewPreparationBundle, buildBrief = buildInterviewBrief, publishBrief = publishInterviewPreparedBrief,
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
@@ -1485,7 +1487,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     validateInterviewBriefRequestArgs(args);
     try {
       // Claude CLI with the application stage profiles (careerWritingCore).
-      const { callText, callRaw } = aiTransport;
+      const { callText, callRaw } = aiTransport.withActivity?.(interviewActivityKey(args.manualAiRunId), args.nodeId) || aiTransport;
       const result = await buildBrief({ ...args, callText, callRaw, signal, userDataPath: appInstance.getPath('userData') });
       throwIfAborted(signal);
       const published = await publishBrief({ brief: result?.brief, signal, userDataPath: appInstance.getPath('userData') });
@@ -1546,6 +1548,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}) };
     }
     catch (error) { if (signal?.aborted) throw error; throw new Error('The interview brief could not be prepared safely.'); }
+    finally { standaloneClaudeActivity.remove(interviewActivityKey(args.manualAiRunId)); }
   }, { validateArgs: validateInterviewBriefRequestArgs });
 }
 

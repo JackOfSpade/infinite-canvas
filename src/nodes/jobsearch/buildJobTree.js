@@ -1087,6 +1087,7 @@ export function buildJobTreeNodes({
         applyOptions: job.applyOptions,
         salaryProvenance: job.salaryProvenance,
         officialPosting: job.officialPosting,
+        officialRescore: job.officialRescore,
         boardClosed: job.boardClosed,
         listingLiveness: job.listingLiveness,
         alternateListings: job.alternateListings,

@@ -101,6 +101,8 @@ import official_posting_read_only_search from './tests/official-posting-read-onl
 import official_posting_research_request from './tests/official-posting-research-request.js';
 import official_posting_service from './tests/official-posting-service.js';
 import official_posting_search from './tests/official-posting-search.js';
+import research_gate from './tests/research-gate.js';
+import job_preference_reevaluation from './tests/job-preference-reevaluation.js';
 import official_posting_consumers from './tests/official-posting-consumers.js';
 import official_posting_freeze from './tests/official-posting-freeze.js';
 import official_posting_bundle from './tests/official-posting-bundle.js';
@@ -118,6 +120,7 @@ import application_editorial_plan_archive from './tests/application-editorial-pl
 import claude_application_diagnostics from './tests/claude-application-diagnostics.js';
 import application_claude_dock from './tests/application-claude-dock.js';
 import claude_job_progress from './tests/claude-job-progress.js';
+import claude_task_activity from './tests/claude-task-activity.js';
 import application_v2_writer_shortlist from './tests/application-v2-writer-shortlist.js';
 import paste_application_assembly from './tests/paste-application-assembly.js';
 import paste_application_flow from './tests/paste-application-flow.js';
@@ -371,6 +374,8 @@ const testGroups = [
   ['official-posting-research-request.js', official_posting_research_request],
   ['official-posting-service.js', official_posting_service],
   ['official-posting-search.js', official_posting_search],
+  ['research-gate.js', research_gate],
+  ['job-preference-reevaluation.js', job_preference_reevaluation],
   ['official-posting-consumers.js', official_posting_consumers],
   ['official-posting-freeze.js', official_posting_freeze],
   ['official-posting-bundle.js', official_posting_bundle],
@@ -392,6 +397,7 @@ const testGroups = [
   ['claude-application-diagnostics.js', claude_application_diagnostics],
   ['application-claude-dock.js', application_claude_dock],
   ['claude-job-progress.js', claude_job_progress],
+  ['claude-task-activity.js', claude_task_activity],
   ['application-v2-writer-shortlist.js', application_v2_writer_shortlist],
   ['paste-application-assembly.js', paste_application_assembly],
   ['paste-application-flow.js', paste_application_flow],

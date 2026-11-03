@@ -298,3 +298,7 @@ The label change archives the previous pairs and resets the counter on the app's
 ### 2026-11-02 — all AI moved to Claude; caching and output limit; user-directed
 
 The career catalog now travels in the system prompt, because Claude Code reuses its cache only for system prompt text or a wholly identical prompt. List cost per bundle fell from about $15-22 to $7-10. A paired writer test on 14 prompts found no quality loss: +1.35 ±0.83. Batch sizes now derive from the official 128,000-token output limit without a new quality test, at the user's direction, so check batch size first if job scoring or company research quality drifts. Non-application tasks moved to Claude with settings tested on offline samples from real prompt code; see `claudeTaskProfiles.js`.
+
+### 2026-11-02 — research follows scoring, at or above the fit threshold; user-directed; counter not reset
+
+Search no longer looks up official postings: every eligible listing is scored on its scraped text, and automatic research runs at Board Combine only for jobs at or above `RESEARCH_MIN_FIT_SCORE`. This replaces "The existing search and board lookup stages remain in place" in the 2026-10-28 entry; the Board stage remains and is gated. Generate still runs its own fresh lookup at any score, so application generation is unchanged. Writer guidance, truth checks, the model label and the frozen regression set are unchanged. No writing-quality gain is claimed.

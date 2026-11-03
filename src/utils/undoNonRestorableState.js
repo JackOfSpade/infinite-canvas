@@ -22,6 +22,7 @@ const JOB_BOARD_RUN_FIELDS = [
   'manualAiCleanupReceipts',
   'queuedModuleRun',
   'jobBoardCareerOverride',
+  'jobBoardPreferenceOverride',
 ];
 
 const JOB_SEARCH_RUN_FIELDS = [
