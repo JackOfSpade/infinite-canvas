@@ -40,7 +40,7 @@ export const VALIDATION_TEMPLATES = Object.freeze({
   "research.batch-url": "no sourceUrls entry appears in the section that has the same researchId for {ids}; use outcome unverified with an empty sourceUrls array when that section has none",
   "listing.row-count": "assessments has {raw} rows; return exactly {total} listing rows, one per local listing index",
   "listing.index-invalid": "row positions {ids} carry an index that is not an integer from 0 to {max}, or that repeats an earlier row; return every local listing index exactly once",
-  "listing.listing-id": "listingId does not match the listingId shown for the same local index at listing indexes {ids}; copy each listingId exactly with its index; first returned {value}",
+  "listing.listing-id": "listingId does not match the listingId shown for the same local index at listing indexes {ids}; copy each listingId exactly with its index; correct index=listingId pairs: {list}; first returned {value}",
   "listing.matches-count": "listing indexes {ids} return {raw} matches where {expected} are required; return exactly one match per preferenceId",
   "listing.preference-missing": "listing indexes {ids} omit preferenceIds; for the first of them the omitted ids are {list}",
   "listing.preference-unknown-or-duplicate": "listing indexes {ids} include a preferenceId that is not in the plan or is repeated; first offending value {value}",

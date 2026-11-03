@@ -113,7 +113,9 @@ export default [
     assert(error.message === before.message && (error.code ?? null) === before.code && JSON.stringify(error.validationDiagnostic ?? null) === JSON.stringify(before.diagnostic), `${spec.name}: legacy error fields changed`);
     assert(Array.isArray(error.correctionDetails) && error.correctionDetails.length >= spec.minimum && error.correctionDetails.length <= 12, `${spec.name}: expected distinct aggregated correction rules, got ${JSON.stringify(error.correctionDetails)}`);
     assert(error.correctionRuleIds.length === error.correctionDetails.length && new Set(error.correctionRuleIds).size === error.correctionRuleIds.length, 'one line per rule, ids parallel and distinct');
-    assert(error.correctionDetails.every(line => !line.includes('ZQX-SENTINEL-')), 'corrections never disclose expected source strings');
+    // A listingId is an opaque binding already printed in the same prompt, so
+    // naming it discloses nothing; a worker retyping one wrong needs it to converge.
+    if (!spec.name.startsWith('listing v2')) assert(error.correctionDetails.every(line => !line.includes('ZQX-SENTINEL-')), 'corrections never disclose expected source strings');
   } })),
   { name: 'W4 repro R5: taxonomy hidden range rules are stated in the builder', run: () => {
     const prompt = taxonomy.buildJobTaxonomyPlanPrompt({});

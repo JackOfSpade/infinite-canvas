@@ -1500,6 +1500,19 @@ export default [
       assert(validateJobPreferenceListingSubmission({ assessments: [] }, [{ title: 'X' }], valid, { requireComplete: false }),
         'an omitted row is accepted by the relaxed validator so it can be re-requested on its own');
 
+      // A worker that retypes an opaque id wrong can only converge if the
+      // correction names the id it should have copied.
+      let wrongIdError = null;
+      try {
+        validateJobPreferenceListingSubmission(
+          { assessments: [{ index: 0, listingId: 'listing-invented-1', matches: [] }] },
+          [{ title: 'X' }], valid, { requireComplete: false, listingIds: ['listing-expected-1'] },
+        );
+      } catch (error) { wrongIdError = error; }
+      const wrongIdLine = (wrongIdError?.correctionDetails || []).find(line => line.includes('listingId does not match')) || '';
+      assert(wrongIdLine.includes('0=listing-expected-1') && wrongIdLine.includes('listing-invented-1'),
+        `a wrong listingId correction must name the expected id, got ${wrongIdLine}`);
+
       // Listing evaluation driven end to end through the injected seam.
       // One planned group issues up to HANDOFF_CONCURRENCY (10) batches, so the
       // pool spans more than ten full batches.
