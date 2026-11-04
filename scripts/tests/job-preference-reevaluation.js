@@ -2,6 +2,12 @@
 // saved jobs keeps every score still current. Synthetic fixtures only.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
+import { withTimeout } from './fixtures/practice-connector/harness.js';
+import { buildJobBoardDiagnostics } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJobPreferences } from '../../electron/ipc/jobPreferences.js';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { savedJobsReevaluationKeepsScores } from '../../src/utils/jobSearchSplitClear.js';
@@ -333,6 +339,64 @@ export default [
       const panel = fs.readFileSync(new URL('../../src/nodes/jobboard/JobBoardPreferenceOverridePanel.jsx', import.meta.url), 'utf8');
       assert.match(panel, /if \(trimmed\) onApply\?\.\(trimmed\); else onClear\?\.\(\)/);
       assert.doesNotMatch(panel, /TwoStepConfirmButton/);
+    },
+  },
+  {
+    name: 'Board preferences box: stays empty until the person fills it, even when a Search has a brief',
+    async run() {
+      const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-board-preferences-'));
+      const entry = path.join(directory, 'PanelProbe.jsx');
+      await fsPromises.writeFile(entry, `export { JobBoardPreferenceOverridePanel } from ${JSON.stringify(path.resolve('src/nodes/jobboard/JobBoardPreferenceOverridePanel.jsx'))};\n`);
+      const controller = new AbortController();
+      let bundle;
+      try {
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 8000);
+        const { React, act, createRoot, JobBoardPreferenceOverridePanel: Panel } = bundle.module;
+        await withDom(async window => {
+          const applied = [];
+          const props = { seed: { brief: 'Remote only', briefsDiffer: false }, hasSavedJobs: true, onApply: brief => applied.push(brief), onClear: () => {} };
+          const rootNode = createRoot(window.document.getElementById('root'));
+          const render = view => act(async () => { rootNode.render(React.createElement(Panel, { ...props, view })); await Promise.resolve(); });
+          const box = () => window.document.querySelector('textarea');
+          const button = label => [...window.document.querySelectorAll('button')].find(node => node.textContent.trim() === label);
+          const click = label => act(async () => { button(label).dispatchEvent(new window.MouseEvent('click', { bubbles: true })); });
+          try {
+            await render(jobBoardPreferenceOverrideView({}));
+            assert.equal(box().value, '', 'a Search brief must not fill the box by itself');
+            assert.match(box().placeholder, /own rules are in use/);
+            assert.equal(button('Apply to Board').disabled, true, 'an empty box has nothing to apply');
+            assert.doesNotMatch(window.document.body.textContent, /Not applied yet/);
+
+            await click('Use Job Search preferences');
+            assert.equal(box().value, 'Remote only', 'the button fills the box on request');
+            assert.equal(applied.length, 0, 'filling the box applies nothing');
+            assert.match(window.document.body.textContent, /Not applied yet.*own rules/);
+            assert.equal(button('Use Job Search preferences'), undefined, 'the box already holds it');
+            await click('Apply to Board');
+            assert.deepEqual(applied, ['Remote only']);
+
+            await render({ state: 'applied', brief: 'No agencies', counts: null });
+            assert.equal(box().value, 'No agencies', 'applied preferences show as applied');
+            assert.ok(button('Use Job Search preferences'), 'a person can still replace them with the Search brief');
+            assert.doesNotMatch(window.document.body.textContent, /Not applied yet/);
+          } finally { await act(async () => rootNode.unmount()); }
+        });
+      } finally {
+        controller.abort();
+        await bundle?.dispose();
+        await fsPromises.rm(directory, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'Board preferences in the bug report: states which rules are in use and withholds the brief',
+    run() {
+      const report = override => buildJobBoardDiagnostics([{ id: 'board', type: 'jobboard', data: { hubState: 'done', jobBoardPreferenceOverride: override } }], []);
+      assert.match(report(undefined), /Board preferences: none applied \(each search's own rules are in use\)\./);
+      const applied = report({ version: 1, brief: 'Secret brief', combinedAt: 5, counts: { checked: 10, passed: 7, removed: 3 } });
+      assert.match(applied, /Board preferences: applied · brief-chars=12 · checked=10 · passed=7 · removed=3\./);
+      assert.doesNotMatch(applied, /Secret brief/);
+      assert.match(report({ version: 1, brief: 'Secret brief', combinedAt: null, counts: null }), /Board preferences: pending · brief-chars=12 · checked=not retained/);
     },
   },
   {

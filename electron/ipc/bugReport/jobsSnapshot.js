@@ -30,6 +30,7 @@ import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.
 import { JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLimits.js';
 import { consolidateBoardCascadeNodes, summarizeConsolidation } from '../../../src/utils/jobLocationConsolidation.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
+import { jobBoardPreferenceOverrideView } from '../../../src/utils/jobBoardPreferenceOverride.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
 // builds. Keep the old decision helper only to explain those historical rejected
@@ -4220,6 +4221,14 @@ function boardDiagnosticValue(value, key) {
   catch { return undefined; }
 }
 
+// Whether the Board's rules are its own or each Search's. The brief itself is withheld.
+function boardPreferenceSummary(data) {
+  const view = jobBoardPreferenceOverrideView({ jobBoardPreferenceOverride: boardDiagnosticValue(data, 'jobBoardPreferenceOverride') });
+  if (view.state === 'empty') return 'none applied (each search\'s own rules are in use)';
+  const count = key => nonnegativeCount(boardDiagnosticValue(view.counts, key)) ?? 'not retained';
+  return `${view.state} · brief-chars=${view.brief.length} · checked=${count('checked')} · passed=${count('passed')} · removed=${count('removed')}`;
+}
+
 // Numeric report fields must be actual finite numbers. Coercing with Number()
 // turns a missing/null value into zero, which falsely reports a 0-item batch
 // or 0-character response instead of honestly omitting unavailable telemetry.
@@ -4694,6 +4703,7 @@ export function buildJobBoardDiagnostics(nodes, edges, nodeComponentStates = [])
     }
     lines.push(`  - Resume: ${boardResumeSummary(resumeFacts, labelContext)}.`);
     lines.push(`  - Recovery provenance: recoverable-failure=${recoverableFailure ? 'recorded' : 'none'} · cancellation=${cancellation ? 'recorded' : 'none'} · clear=${clear ? `recorded${clearCount != null ? ` (prior results ${clearCount})` : ''}` : 'none'}.`);
+    lines.push(`  - Board preferences: ${boardDiagnosticSafely(() => boardPreferenceSummary(data), 'not retained')}.`);
     lines.push(`  - Selector runtime: ${boardSelectorRuntimeSummary(componentRuntime?.selector)}.`);
     lines.push(`  - Combine runtime: ${boardCombineRuntimeSummary(componentRuntime?.combine)}.`);
     if (consolidation) {
