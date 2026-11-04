@@ -15,7 +15,7 @@ import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLong
 export { describeClaudeSdkMessage };
 
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
-const SAFEGUARD_MESSAGE = 'Claude blocked this request with its safeguards. The private run log contains the provider message. Review the request before retrying.';
+const SAFEGUARD_MESSAGE = 'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so Retry with Claude may pass. The provider message is in the private run log.';
 
 function clipped(value, max = 300) {
   return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, max);

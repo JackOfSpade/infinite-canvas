@@ -237,7 +237,7 @@ export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
     const requestId = providerText.match(/\bRequest ID:\s*(req_[A-Za-z0-9]{8,120})\b/u)?.[1];
     const messageId = providerText.match(/\bMessage ID:\s*(msg_[A-Za-z0-9]{8,120})\b/u)?.[1];
     return new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED',
-      'Claude blocked this request with its safeguards. The private run log contains the provider message. Review the request before retrying.',
+      'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so Retry with Claude may pass. The provider message is in the private run log.',
       { ...detail, ...(category ? { refusalCategory: category } : {}), ...(requestId ? { requestId } : {}), ...(messageId ? { messageId } : {}) },
       resultText.trim() ? resultText : providerText);
   }

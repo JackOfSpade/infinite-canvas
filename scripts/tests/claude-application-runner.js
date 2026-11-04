@@ -776,6 +776,8 @@ export default [
     name: 'claude runner: Opus plans (xhigh), writes (low), judges and fact-checks (high); Sonnet converts (medium) and repairs (high)',
     run() {
       assert.deepEqual(JSON.parse(JSON.stringify(CLAUDE_STAGE_PROFILES)), {
+        requirements: { model: 'opus', effort: 'medium' },
+        'requirements-audit': { model: 'opus', effort: 'medium' },
         'editorial-plan': { model: 'opus', effort: 'xhigh' },
         write: { model: 'opus', effort: 'low' },
         pick: { model: 'opus', effort: 'high' },
@@ -786,8 +788,11 @@ export default [
         'fact-correction': { model: 'opus', effort: 'high' },
         'fact-recheck': { model: 'opus', effort: 'high' },
       });
+      // Sonnet's safeguard refuses normal listings at these two stages.
+      assert.deepEqual(claudeStageProfile('requirements'), { model: 'opus', effort: 'medium' });
+      assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'opus', effort: 'medium' });
       // A stage the table does not name runs on the Sonnet high default.
-      assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'sonnet', effort: 'high' });
+      assert.deepEqual(claudeStageProfile('requirements-adjudication'), { model: 'sonnet', effort: 'high' });
       assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'low']);
     },
   },
@@ -1517,7 +1522,7 @@ export default [
         assert.equal(new Set(group.map(row => row.runId)).size, 1);
         assert.equal(new Set(group.map(row => row.handoffSha256)).size, 1);
         for (const row of group) {
-          assert.deepEqual([row.version, row.stage, row.requestedModel, row.requestedEffort], [2, 'requirements', 'sonnet', 'high']);
+          assert.deepEqual([row.version, row.stage, row.requestedModel, row.requestedEffort], [2, 'requirements', 'opus', 'medium']);
           assert.match(row.handoffSha256, /^[0-9a-f]{64}$/);
           assert.match(row.promptSha256, /^[0-9a-f]{64}$/);
           assert.equal(Number.isFinite(Date.parse(row.at)), true);
