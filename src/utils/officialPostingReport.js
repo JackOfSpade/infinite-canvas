@@ -59,10 +59,13 @@ export function collectOfficialPostingReport(nodes, { flat = false } = {}) {
       // one, and the same goes for a lookup left unfinished from before the gate.
       const notResearched = (raw == null || status.state === 'incomplete') && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible
         && (typeof node.data?.matchScore === 'number' || typeof node.data?.scoreStatus === 'string');
+      // Matches the Board's Retry count, which never includes a job below the threshold.
+      const belowGate = (typeof node.data?.matchScore === 'number' || typeof node.data?.scoreStatus === 'string')
+        && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible;
       rows.push(sanitizeOfficialPostingReportRow({ id: node.id,
         record: posting ? 'valid' : raw == null ? 'absent' : 'invalid',
         level: posting?.level, outcome: posting?.outcome, state: notResearched ? 'not-researched' : status.state,
-        retryable: notResearched || officialPostingExhausted(posting) ? false : status.retryable, settled: officialResearchSettled(posting),
+        retryable: notResearched || officialPostingExhausted(posting) || belowGate ? false : status.retryable, settled: officialResearchSettled(posting),
         trail: posting?.trail, fetchFailures: posting?.fetchFailures,
         semanticProof: posting?.semanticMatch?.sourceHash ? 'complete' : posting?.semanticMatch ? 'input-only' : 'absent',
       }));

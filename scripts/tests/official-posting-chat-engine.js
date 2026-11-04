@@ -979,6 +979,18 @@ export default [
       assert.equal(await markup('<script src="https://cdn.greenhouse.io/a.js"></script><a href="https://www.bamboohr.com/careers">Vendor</a>'), undefined, 'a vendor service is no company board');
       assert.equal(await markup('customers.greenhouse.io resources.workable.com boards-api.greenhouse.io mail.lever.co'), undefined, 'neither is a vendor host named in passing');
       assert.equal(await markup(`<script>"https://jobs.lever.co/northwind/${'x'.repeat(2000)}"</script>`), undefined, 'one address cannot swell the prompt');
+      // A landing page with no board leads to the same site's jobs page; another site's page is never fetched.
+      const fetched = [];
+      const followed = (await snapshotOfficialPostingLeads([{ id: 'C1', url: CAREERS, kind: 'careers' }], { fetch: async url => {
+        fetched.push(url);
+        const body = url === CAREERS ? '<a href="/careers/positions">Open positions</a><a href="https://other.example/jobs">Partner</a>'
+          : '<script src="https://boards.greenhouse.io/embed/job_board/js?for=northwind"></script>';
+        return { url, contentType: 'text/html', statusCode: 200, body };
+      } }))[0];
+      const jobsPage = new URL('/careers/positions', CAREERS).href;
+      assert.deepEqual(fetched, [CAREERS, jobsPage]);
+      assert.deepEqual(followed.jobBoardLinks, ['https://boards.greenhouse.io/embed/job_board/js?for=northwind']);
+      assert.equal(followed.jobBoardLinksFrom, jobsPage);
       const prompt = buildOfficialPostingJudgeRequest({ job: job(), leads, run: 'A', snapshots: snaps }).prompt;
       assert.ok(prompt.indexOf('BEGIN UNTRUSTED APP PAGE SNAPSHOTS JSON') > prompt.indexOf('END HOST LEADS JSON'));
       // A copy taken from a shortened snapshot keeps only the official link.

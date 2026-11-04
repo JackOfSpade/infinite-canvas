@@ -1,7 +1,7 @@
 import { extractOfficialPostingCandidates, officialDescriptionText, scanOfficialCareersPage } from './officialPostingExtractors.js';
 import { officialHttpsUrl } from './officialPostingFields.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
-import { extractAtsTenant, normalizedSourceHost } from './officialSourceHosts.js';
+import { extractAtsTenant, normalizedSourceHost, registrableDomain } from './officialSourceHosts.js';
 
 // Claude's WebFetch cannot run JavaScript and returns a summary of a page rather than
 // its text, so the app downloads each lead once and hands the judges what it
@@ -64,6 +64,29 @@ function jobBoardsInMarkup(body, known = []) {
   return [...boards.values()];
 }
 
+// A careers landing page often sends people to a separate page on the same site
+// that holds the board: /careers/positions, /about/open-positions.aspx.
+const JOBS_PAGE_PATH = /(?:^|[/_-])(?:positions?|openings?|open-roles|job-openings|jobs)(?:[/._-]|$)/iu;
+const MAX_FOLLOWED_JOBS_PAGES = 2;
+const htmlBoards = (body, finalUrl) => {
+  const plain = [...new Set(scanOfficialCareersPage(body, finalUrl).links
+    .filter(link => link.tag === 'a' || link.tag === 'iframe').map(link => link.url).filter(url => extractAtsTenant(url)))];
+  return [...new Set([...plain, ...jobBoardsInMarkup(body, plain)])].slice(0, MAX_BOARD_LINKS);
+};
+async function boardsOnJobsPage(body, finalUrl, { fetch, signal }) {
+  const domain = registrableDomain(normalizedSourceHost(finalUrl));
+  const pages = [...new Set(scanOfficialCareersPage(body, finalUrl).links.filter(link => link.tag === 'a').map(link => link.url))]
+    .filter(url => url !== finalUrl && registrableDomain(normalizedSourceHost(url)) === domain && JOBS_PAGE_PATH.test(new URL(url).pathname))
+    .slice(0, MAX_FOLLOWED_JOBS_PAGES);
+  for (const url of pages) {
+    const { page } = await read(fetch, url, signal);
+    if (!page || !/html/iu.test(page.contentType || '')) continue;
+    const links = htmlBoards(String(page.body || ''), officialHttpsUrl(page.url || page.sourceUrl) || url);
+    if (links.length) return { links, url };
+  }
+  return null;
+}
+
 async function read(fetch, url, signal) {
   try { return { page: await fetch(url, { signal }) }; }
   catch (error) { return { error: error?.code || 'fetch-failed', httpStatus: httpStatus(error) }; }
@@ -108,16 +131,18 @@ export async function snapshotOfficialPostingLead(lead, { fetch, signal } = {}) 
       pageTextTruncated = String(full || '').length > SNAPSHOT_DESCRIPTION_CHARS;
     } catch { pageText = ''; pageTextTruncated = false; }
   }
-  let boardLinks = [];
+  let boardLinks = []; let boardLinksFrom = '';
   if (lead.kind === 'careers' && /html/iu.test(result.page.contentType || '')) {
     try {
-      boardLinks = [...new Set(scanOfficialCareersPage(body, finalUrl).links
-        .filter(link => link.tag === 'a' || link.tag === 'iframe').map(link => link.url).filter(url => extractAtsTenant(url)))].slice(0, MAX_BOARD_LINKS);
-    } catch { boardLinks = []; }
-    try { boardLinks = [...new Set([...boardLinks, ...jobBoardsInMarkup(body, boardLinks)])].slice(0, MAX_BOARD_LINKS); } catch { /* The plain links still stand. */ }
+      boardLinks = htmlBoards(body, finalUrl);
+      if (!boardLinks.length) {
+        const followed = await boardsOnJobsPage(body, finalUrl, { fetch, signal });
+        if (followed) { boardLinks = followed.links; boardLinksFrom = followed.url; }
+      }
+    } catch { boardLinks = []; boardLinksFrom = ''; }
   }
   return { id: lead.id, at, source: 'page', read: true, ...(finalUrl !== lead.url ? { finalUrl } : {}),
-    ...(match ? postingFacts(match) : pageText ? { pageText, ...(pageTextTruncated ? { pageTextTruncated: true } : {}) } : {}), ...(boardLinks.length ? { jobBoardLinks: boardLinks } : {}) };
+    ...(match ? postingFacts(match) : pageText ? { pageText, ...(pageTextTruncated ? { pageTextTruncated: true } : {}) } : {}), ...(boardLinks.length ? { jobBoardLinks: boardLinks } : {}), ...(boardLinksFrom ? { jobBoardLinksFrom: boardLinksFrom } : {}) };
 }
 
 /** Snapshots for every lead, trimmed so the judgment prompt stays within its bound. */

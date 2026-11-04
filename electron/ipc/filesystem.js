@@ -3227,6 +3227,8 @@ function annotatePortableFilePaths(data, canvasPath) {
   });
 }
 
+const SLOW_WORKSPACE_LOAD_MS = 5_000;
+
 export async function resolvePortableFilePaths(data, canvasPath) {
   await traverseCanvasNodesAsync(data?.nodes, async (node) => {
     const d = node?.data;
@@ -3558,7 +3560,9 @@ export function registerFilesystemHandlers() {
     // Do this before looking for recovery journals: those journals can cause
     // recovery-owner migration and must never be consulted for a private
     // Interview authority record.
+    const loadStartedAt = Date.now();
     await assertRendererFilesystemPathAllowed(targetPath, { allowMissing: true });
+    const loadGuardedAt = Date.now();
 
     const journalRecovery = await reconcileRecoveryRebindJournalForCanvas(targetPath);
     if (journalRecovery.pending) {
@@ -3570,6 +3574,7 @@ export function registerFilesystemHandlers() {
     // check. This never follows an arbitrary directory JSON.
     if (journalRecovery.adoptedCanvasPath) targetPath = journalRecovery.adoptedCanvasPath;
     await assertRendererFilesystemPathAllowed(targetPath);
+    const loadJournalAt = Date.now();
 
     // Read from a no-follow descriptor bound to the checked regular-file inode
     // rather than resolving the renderer path and later reopening it by name.
@@ -3581,13 +3586,19 @@ export function registerFilesystemHandlers() {
       if (error?.code === 'ENOENT') throw new Error('File does not exist');
       throw error;
     }
+    const loadReadAt = Date.now();
     const { stat: stats, content } = workspace;
     if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
     if (workspace.tooLarge) throw new Error(`Workspace file is too large to open (${formatWorkspaceMegabytes(stats.size)}). Limit is ${WORKSPACE_LIMIT_LABEL}.`);
     try {
       const data = parseWorkspaceText(content);
+      const loadParsedAt = Date.now();
       await resolvePortableFilePaths(data, targetPath);
       logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
+      // A slow load has several possible causes, so a report must be able to say which step took the time.
+      if (Date.now() - loadStartedAt >= SLOW_WORKSPACE_LOAD_MS) {
+        logger.warn(`[FileSystem] Slow workspace load: guard=${loadGuardedAt - loadStartedAt}ms journal=${loadJournalAt - loadGuardedAt}ms read=${loadReadAt - loadJournalAt}ms parse=${loadParsedAt - loadReadAt}ms paths=${Date.now() - loadParsedAt}ms`);
+      }
 
       // Clean up legacy separate progress sidecar file if it exists
       try {

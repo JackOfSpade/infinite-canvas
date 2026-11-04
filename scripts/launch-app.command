@@ -27,7 +27,7 @@ stale_pid=""
 # A normal Electron quit asks every renderer to finish its beforeunload/save
 # work. Give that handshake enough time, but never turn a double-click launch
 # into an unbounded wait or fall back to killing a canvas editor.
-STALE_QUIT_TIMEOUT_SECONDS=30
+STALE_QUIT_TIMEOUT_SECONDS=120
 STALE_QUIT_POLL_SECONDS=0.5
 STALE_QUIT_REQUEST_TIMEOUT_SECONDS=5
 APP_BUNDLE_ID="com.antigravity.infinitecanvas"
