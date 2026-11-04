@@ -18,7 +18,7 @@ import { useToast } from '../components/ToastProvider';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { useBoardOfficialPostingRefresh } from '../hooks/useBoardOfficialPostingRefresh';
-import { carryBoardOfficialPostingResults } from '../utils/jobBoardOfficialPostingRefresh';
+import { carryBoardOfficialPostingResults, countBoardOfficialRetries } from '../utils/jobBoardOfficialPostingRefresh';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
@@ -852,7 +852,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   const refreshEdges = nav?.enumerateAllEdges || getEdges;
   const refreshNode = nodeId => refreshNodes().find(node => node.id === nodeId);
   const { runRef: officialPostingRefreshRunRef, refreshing: officialPostingRefreshing,
-    progress: officialPostingProgress, start: refreshOfficialPostings, cancel: cancelOfficialPostingRefresh } = useBoardOfficialPostingRefresh({
+    progress: officialPostingProgress, start: refreshOfficialPostings, retryIncomplete: retryIncompleteOfficialPostings,
+    cancel: cancelOfficialPostingRefresh } = useBoardOfficialPostingRefresh({
     nodeId: id, canvasFilePath, getNode: refreshNode, getNodes: refreshNodes,
     getCurrentFile: nav?.getCurrentFile, updateGlobal, moduleRunQueue, addToast,
     canStart: () => {
@@ -955,6 +956,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // edge direction — ConnectionMode.Loose). Returns a STRING signature so the
   // selector is stable (re-renders only when a connection or a module's job count
   // changes), then we derive the rich list via getNodes() keyed on that.
+  const incompleteOfficialLookups = useStore(useCallback(store => countBoardOfficialRetries(store.nodes, id), [id]));
   const connectedSig = useStore(
     useCallback((s) => {
       const ids = new Set();
@@ -2531,7 +2533,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       resultCount: 0, moduleCount: 0,
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
       sourceFilter: null, jobTaxonomy: null, finalSourceCounts: {}, mergeStats: null,
-      combineSignature: null, combineSourceRuns: null, stale: false, staleReason: null,
+      combineSignature: null, combineSourceRuns: null, researchRemovedLookups: null, stale: false, staleReason: null,
       dismissedJobKeys: [],
       clearProvenance,
       manualAiResume: null,
@@ -3240,8 +3242,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // and incomplete rows without changing the source-run artifacts.
       union = carryBoardOfficialPostingResults(union, existingBoardCards);
       recordCombineStage('official-postings');
+      const savedRemovals = getNode(id)?.data?.researchRemovedLookups;
       const boardResearch = await runBoardResearchStage(union, {
         nodeId: id, manualAiRunId, existingCards: existingBoardCards,
+        // A new Search run can change why a row left, so only the same runs reuse its lookup.
+        removedLookups: JSON.stringify(savedRemovals?.sourceRuns) === JSON.stringify(sourceRunsAtCombine) ? savedRemovals.entries : null,
         protectedIds: new Set(protectedBoardCards.map(card => card.id)),
         cancelled: () => cancelled() || !getNode(id) || !!getNode(id)?.data?.locked,
         // Every eligible row crosses the host proof check. Only the host can reuse
@@ -3252,6 +3257,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       });
       if (boardResearch.cancelled) return { status: 'cancelled' };
       union = boardResearch.jobs;
+      const researchRemovedLookups = boardResearch.removedLookups?.length
+        ? { sourceRuns: sourceRunsAtCombine, entries: boardResearch.removedLookups } : null;
+      if (boardResearch.reusedRemovals) EventLogger.log(`[JobBoard] combine reused ${boardResearch.reusedRemovals} official lookup(s) from rows the previous Combine removed id=${id}`);
+      if (boardResearch.pausedRetries) EventLogger.log(`[JobBoard] combine left ${boardResearch.pausedRetries} repeat-uncertain official lookup(s) for manual retry id=${id}`);
       if (cancelled() || !getNode(id)) return { status: 'cancelled' };
       const perModule = completedAtCombine.map((m) => ({ label: m.label, count: m.count }));
       EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);
@@ -3286,6 +3295,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             sourceFilter: null, finalSourceCounts: {}, jobTaxonomy: null,
             combineSignature: sigAtCombine,
             combineSourceRuns: sourceRunsAtCombine,
+            researchRemovedLookups,
             dismissedJobKeys: dismissedJobKeysAtCombine,
             stale: false, staleReason: null,
             boardScanResume: null, manualAiResume: null,
@@ -3620,6 +3630,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           // Baseline for staleness detection (connection/data drift vs. this combine).
           combineSignature: sigAtCombine,
           combineSourceRuns: sourceRunsAtCombine,
+          researchRemovedLookups,
           salaryCareerSnapshotId: salaryCareerAtCombine.careerSnapshotId,
           salaryMethodVersion: JOB_COMPENSATION_METHOD_VERSION,
           dismissedJobKeys: dismissedJobKeysAtCombine,
@@ -7144,6 +7155,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           officialPostingRefreshing={officialPostingRefreshing}
           officialPostingProgress={officialPostingProgress}
           onRefreshOfficialPostings={boardRunVisible ? null : refreshOfficialPostings}
+          onRetryIncompleteOfficialPostings={boardRunVisible ? null : retryIncompleteOfficialPostings}
+          incompleteOfficialLookups={incompleteOfficialLookups}
           onCancelOfficialPostingRefresh={cancelOfficialPostingRefresh}
         />
       )}

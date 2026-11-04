@@ -25,7 +25,7 @@ export default [
     name: 'Board official posting refresh is available without rebuilding and remains cancellable while checking',
     async run() {
       await inspectSummary({ resultCount: 2, onRefreshOfficialPostings() {} }, document => {
-        const button = [...document.querySelectorAll('button')].find(button => button.textContent === 'Refresh official postings');
+        const button = [...document.querySelectorAll('button')].find(button => button.textContent === 'Recheck all official postings');
         assert(button && !button.disabled);
       });
       await inspectSummary({ resultCount: 2, onRefreshOfficialPostings() {}, onCancelOfficialPostingRefresh() {},
@@ -35,8 +35,26 @@ export default [
         assert(check?.disabled && cancel && !cancel.disabled);
       });
       await inspectSummary({ resultCount: 2, onRefreshOfficialPostings() {}, locked: true }, document => {
-        assert(!document.body.textContent.includes('Refresh official postings'));
+        assert(!document.body.textContent.includes('Recheck all official postings'));
       });
+      const calls = [];
+      await inspectSummary({ resultCount: 2, onRefreshOfficialPostings() {}, incompleteOfficialLookups: 3,
+        onRetryIncompleteOfficialPostings: (...args) => calls.push(args) }, document => {
+        const retry = [...document.querySelectorAll('button')].find(button => button.textContent === 'Retry 3 incomplete lookups');
+        assert(retry && !retry.disabled);
+        retry.click();
+      });
+      assert.deepEqual(calls, [[]], 'the click event never reaches the lookup');
+      await inspectSummary({ resultCount: 2, onRefreshOfficialPostings() {}, incompleteOfficialLookups: 1,
+        onRetryIncompleteOfficialPostings() {} }, document => {
+        assert(document.body.textContent.includes('Retry 1 incomplete lookup') && !document.body.textContent.includes('1 incomplete lookups'));
+      });
+      for (const props of [{ incompleteOfficialLookups: 0 }, { incompleteOfficialLookups: 3, stale: true }, { incompleteOfficialLookups: 3, locked: true },
+        { incompleteOfficialLookups: 3, officialPostingRefreshing: true, officialPostingProgress: { completed: 0, total: 3 } }]) {
+        await inspectSummary({ resultCount: 2, onRefreshOfficialPostings() {}, onRetryIncompleteOfficialPostings() {}, ...props }, document => {
+          assert(!/Retry \d+ incomplete/u.test(document.body.textContent), 'no retry offered while there is nothing it can do');
+        });
+      }
     },
   },
   {

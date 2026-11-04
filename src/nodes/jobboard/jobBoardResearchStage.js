@@ -1,11 +1,24 @@
 import { isResearchEligible, RESEARCH_MIN_FIT_SCORE } from '../../../electron/ipc/researchGate.js';
-import { normalizeOfficialPosting } from '../../../electron/ipc/officialPostingFields.js';
+import { normalizeOfficialPosting, officialPostingRetryPaused } from '../../../electron/ipc/officialPostingFields.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../utils/officialPostingPreparation.js';
 import { refreshBoardOfficialPostingJobs } from '../../utils/jobBoardOfficialPostingRefresh.js';
+import { officialPostingNeedsRefresh } from '../../utils/officialPostingDisplay.js';
 
 const RESCORED_FIELDS = ['matchScore', 'rawScore', 'adjustedScore', 'reasoning', 'careerDirection', 'requirementAssessments',
   'materialGaps', 'confidence', 'strengths', 'experienceAssessment', 'fitAssessment', 'scoreStatus', 'officialRescore'];
 const sourceKey = job => officialPostingPreparationSourceKey(projectOfficialPostingGenerationJob(job));
+const MAX_REMOVED_LOOKUPS = 256;
+// A collision would hand one job another job's lookup, so this is a real digest.
+async function sourceDigest(job) {
+  const bytes = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(sourceKey(job)));
+  return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+// Only a finished lookup may stand in for research: an incomplete one could
+// have caused the removal, and a fresh attempt might keep the job.
+const finishedLookup = value => {
+  const posting = normalizeOfficialPosting(value);
+  return posting && !officialPostingNeedsRefresh({ officialPosting: posting }) ? posting : null;
+};
 const ruleKeys = assessment => (Array.isArray(assessment?.matches) ? assessment.matches : []).map(match => `${match?.preferenceId}\u0000${match?.criterion}`).sort().join('\u0001');
 
 /**
@@ -41,26 +54,43 @@ export function carryBoardRescores(jobs, cards) {
 /**
  * The one automatic research stage: official lookup for rows at or above the
  * fit threshold, then the host's listing, dedup, rescore and company checks.
- * Rows below the threshold reach neither call's research. Protected cards stay
- * through any removal, so an application-linked card is never lost.
+ * Rows below the threshold reach neither call's research, and neither does a
+ * lookup whose judges were uncertain twice on this source: a person retries that.
+ * Protected cards stay through any removal, so an application-linked card is never lost.
+ * A row the previous Combine of these same runs removed has no card to carry its
+ * lookup, so `removedLookups` carries it instead of researching it again.
  */
 export async function runBoardResearchStage(union, {
   nodeId, manualAiRunId, existingCards = [], protectedIds = new Set(), cancelled = () => false,
-  refresh, settle, onProgress = () => {},
+  refresh, settle, onProgress = () => {}, removedLookups = null,
 }) {
   const rows = carryBoardRescores(union, existingCards);
   const eligibleIndexes = rows.flatMap((job, index) => (isResearchEligible(job) ? [index] : []));
-  const lookupLabel = (completed, total) => `Researching jobs at ${RESEARCH_MIN_FIT_SCORE} or above: ${completed} of ${total}, ${rows.length - total} below skipped`;
-  onProgress({ label: lookupLabel(0, eligibleIndexes.length) });
-  const refreshed = await refreshBoardOfficialPostingJobs(eligibleIndexes.map(index => rows[index]), {
+  const savedRemovals = new Map((Array.isArray(removedLookups) ? removedLookups : []).map(entry => [entry?.key, entry]));
+  const reusedIndexes = new Set();
+  if (savedRemovals.size) {
+    const cardKeys = new Set(existingCards.filter(card => card?.type === 'jobcard' && card.data).map(card => sourceKey(card.data)));
+    for (const index of eligibleIndexes) {
+      if (cardKeys.has(sourceKey(rows[index]))) continue;
+      const saved = savedRemovals.get(await sourceDigest(rows[index]));
+      const posting = finishedLookup(saved?.officialPosting);
+      if (!posting) continue;
+      rows[index] = { ...rows[index], officialPosting: posting, postedBy: saved.postedBy };
+      reusedIndexes.add(index);
+    }
+  }
+  const lookupIndexes = eligibleIndexes.filter(index => !reusedIndexes.has(index) && !officialPostingRetryPaused(rows[index]?.officialPosting));
+  const lookupLabel = (completed, total) => `Researching jobs at ${RESEARCH_MIN_FIT_SCORE} or above: ${completed} of ${total}, ${rows.length - eligibleIndexes.length} below skipped`;
+  onProgress({ label: lookupLabel(0, lookupIndexes.length) });
+  const refreshed = await refreshBoardOfficialPostingJobs(lookupIndexes.map(index => rows[index]), {
     nodeId, manualAiRunId, force: true, cancelled, refresh,
     onProgress: ({ completed, total }) => onProgress({ label: lookupLabel(completed, total) }),
   });
   const merged = rows.slice();
-  eligibleIndexes.forEach((index, position) => { merged[index] = refreshed.jobs[position]; });
+  lookupIndexes.forEach((index, position) => { merged[index] = refreshed.jobs[position]; });
   if (cancelled()) return { cancelled: true };
   onProgress({ label: `Checking ${eligibleIndexes.length} researched job(s)` });
-  const settled = await settle({ jobs: merged, nodeId, manualAiRunId, officialLookups: eligibleIndexes.length });
+  const settled = await settle({ jobs: merged, nodeId, manualAiRunId, officialLookups: lookupIndexes.length });
   if (cancelled()) return { cancelled: true };
   if (!settled?.success || !Array.isArray(settled.jobs) || settled.jobs.length !== merged.length) {
     if (settled?.cancelled) return { cancelled: true };
@@ -68,5 +98,14 @@ export async function runBoardResearchStage(union, {
   }
   const isProtected = job => protectedIds.has(job?.cardId ?? job?.id) || !!job?.localApplication;
   const removed = new Set((settled.dropped || []).filter(({ index }) => !isProtected(settled.jobs[index])).map(({ index }) => index));
-  return { jobs: settled.jobs.filter((_job, index) => !removed.has(index)), counts: settled.counts, removed: removed.size };
+  const eligible = new Set(eligibleIndexes);
+  const nextRemovedLookups = [];
+  for (const index of removed) {
+    const posting = eligible.has(index) ? finishedLookup(settled.jobs[index]?.officialPosting) : null;
+    if (!posting || nextRemovedLookups.length >= MAX_REMOVED_LOOKUPS) continue;
+    nextRemovedLookups.push({ key: await sourceDigest(rows[index]), officialPosting: posting, postedBy: settled.jobs[index].postedBy });
+  }
+  return { jobs: settled.jobs.filter((_job, index) => !removed.has(index)), counts: settled.counts, removed: removed.size,
+    pausedRetries: eligibleIndexes.length - lookupIndexes.length - reusedIndexes.size,
+    reusedRemovals: reusedIndexes.size, removedLookups: nextRemovedLookups };
 }

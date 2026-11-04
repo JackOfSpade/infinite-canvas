@@ -621,6 +621,71 @@ export default [
     },
   },
   {
+    name: 'research gate [9 runBoardResearchStage]: a repeat-uncertain lookup waits for a person, every other eligible row still crosses',
+    async run() {
+      const paused = { ...rawRow('Stage Paused'), cardId: 'card-paused', matchScore: RESEARCH_MIN_FIT_SCORE + 5,
+        officialPosting: { level: 'L5', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'semantic-uncertain', 'retry-paused'] } };
+      const interrupted = { ...rawRow('Stage Interrupted'), cardId: 'card-interrupted', matchScore: RESEARCH_MIN_FIT_SCORE + 5,
+        officialPosting: { level: 'L5', outcome: 'failed', employer: '', trail: ['worker-timeout', 'retry-paused'] } };
+      const open = { ...rawRow('Stage Open'), cardId: 'card-open', matchScore: RESEARCH_MIN_FIT_SCORE + 5 };
+      const refreshed = []; const settled = []; const labels = [];
+      const outcome = await runBoardResearchStage([paused, interrupted, open], {
+        nodeId: 'board', manualAiRunId: 'run-paused', onProgress: value => labels.push(value.label),
+        refresh: async ({ entries }) => { refreshed.push(...entries); return { success: true, entries: entries.map(({ cardId }) => ({ cardId, officialPosting: retryablePosting(), postedBy: '' })) }; },
+        settle: async args => { settled.push(args); return { success: true, jobs: args.jobs, counts: {} }; },
+      });
+      assert.deepEqual(refreshed.map(entry => entry.job.title), ['Stage Interrupted', 'Stage Open']);
+      assert.equal(settled[0].officialLookups, 2);
+      assert.deepEqual(settled[0].jobs[0].officialPosting, paused.officialPosting, 'the paused row keeps its result and stays on the board');
+      assert.equal(outcome.pausedRetries, 1);
+      assert.equal(outcome.jobs.length, 3);
+      assert.ok(labels.some(label => /0 below skipped/u.test(label)), 'a paused row is not reported as below the threshold');
+    },
+  },
+  {
+    name: 'research gate [9 runBoardResearchStage]: a row the last Combine removed reuses its lookup until it has a card',
+    async run() {
+      const row = title => ({ ...rawRow(title), cardId: `card-${title}`, matchScore: RESEARCH_MIN_FIT_SCORE + 5 });
+      const uncertain = { level: 'L5', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'semantic-uncertain'] };
+      const finished = { level: 'L1', outcome: 'closed', employer: 'Synthetic Employer', sourceUrl: 'https://careers.example.test/gone',
+        trail: ['closed', 'semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) } };
+      const stage = async (union, options) => {
+        const refreshed = []; const settled = [];
+        const outcome = await runBoardResearchStage(union, { nodeId: 'board', manualAiRunId: 'run-removed', ...options,
+          refresh: async ({ entries }) => { refreshed.push(...entries.map(entry => entry.job.title)); return { success: true, entries: entries.map(({ cardId }) => ({ cardId, officialPosting: options.result || finished, postedBy: 'Poster' })) }; },
+          settle: async args => { settled.push(args); return { success: true, jobs: args.jobs, counts: {}, dropped: options.drop.map(index => ({ index, reason: 'closed' })) }; } });
+        return { outcome, refreshed, settled };
+      };
+      const first = await stage([row('Gone'), row('Kept')], { drop: [0] });
+      assert.deepEqual(first.refreshed, ['Gone', 'Kept']);
+      assert.equal(first.outcome.removedLookups.length, 1, 'only the removed row is saved');
+      assert.deepEqual(first.outcome.removedLookups[0].officialPosting, finished);
+      assert.match(first.outcome.removedLookups[0].key, /^[a-f0-9]{64}$/u);
+      const second = await stage([row('Gone'), row('Kept')], { drop: [0], removedLookups: first.outcome.removedLookups });
+      assert.deepEqual(second.refreshed, ['Kept'], 'the removed row is not researched again');
+      assert.deepEqual(second.settled[0].jobs[0].officialPosting, finished, 'settle sees the saved lookup and can remove it again');
+      assert.equal(second.settled[0].jobs[0].postedBy, 'Poster');
+      assert.equal(second.settled[0].officialLookups, 1);
+      assert.equal(second.outcome.reusedRemovals, 1);
+      assert.equal(second.outcome.pausedRetries, 0);
+      assert.deepEqual(second.outcome.removedLookups, first.outcome.removedLookups, 'a repeat removal stays saved for the next Combine');
+      const changed = await stage([{ ...row('Gone'), snippet: 'A changed source.' }], { drop: [], removedLookups: first.outcome.removedLookups });
+      assert.deepEqual(changed.refreshed, ['Gone'], 'a changed source owes a new lookup');
+      const carded = await stage([row('Gone')], { drop: [], removedLookups: first.outcome.removedLookups,
+        existingCards: [{ id: 'gone', type: 'jobcard', data: row('Gone') }] });
+      assert.deepEqual(carded.refreshed, ['Gone'], 'a live card outranks an old removal');
+      const corrupt = await stage([row('Gone')], { drop: [], removedLookups: [{ ...first.outcome.removedLookups[0], officialPosting: { trail: ['not-a-code'] } }] });
+      assert.deepEqual(corrupt.refreshed, ['Gone'], 'an unreadable saved lookup is researched');
+      const incomplete = await stage([row('Gone')], { drop: [0], result: uncertain });
+      assert.deepEqual(incomplete.outcome.removedLookups, [], 'an incomplete lookup is never saved');
+      const oldIncomplete = await stage([row('Gone')], { drop: [], removedLookups: [{ ...first.outcome.removedLookups[0], officialPosting: uncertain }] });
+      assert.deepEqual(oldIncomplete.refreshed, ['Gone'], 'an incomplete saved lookup is researched again');
+      assert.equal(oldIncomplete.outcome.reusedRemovals, 0);
+      const below = await stage([{ ...rawRow('Low'), ...FIT_KINDS.belowThreshold }], { drop: [0] });
+      assert.deepEqual(below.outcome.removedLookups, [], 'a row that never owed a lookup is not saved');
+    },
+  },
+  {
     name: 'research gate [9 runBoardResearchStage]: a rescore already carried on a card is reused and the host makes no new scoring call',
     async run() {
       const scoreCalls = [];

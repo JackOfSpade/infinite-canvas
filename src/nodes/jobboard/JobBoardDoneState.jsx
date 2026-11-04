@@ -43,6 +43,8 @@ export function JobBoardDoneState({
   combining = false,
   scanning = false,
   onRefreshOfficialPostings,
+  onRetryIncompleteOfficialPostings,
+  incompleteOfficialLookups = 0,
   onCancelOfficialPostingRefresh,
   officialPostingRefreshing = false,
   officialPostingProgress = null,
@@ -58,6 +60,7 @@ export function JobBoardDoneState({
   const duplicatePostings = Math.min(summaryCount(duplicatesRemoved), mergeInputPostings);
   const distinctPostings = mergeInputPostings - duplicatePostings;
   const removedByResearch = summaryCount(researchRemoved);
+  const retryableLookups = summaryCount(incompleteOfficialLookups);
   const groupedPostings = Math.min(summaryCount(locationPostingsCollapsed), distinctPostings);
   const locationGroups = Math.min(summaryCount(locationVariantGroups), distinctPostings);
 
@@ -116,21 +119,33 @@ export function JobBoardDoneState({
         </>
       )}
 
+      {!locked && !stale && !officialPostingRefreshing && onRetryIncompleteOfficialPostings && retryableLookups > 0 && (
+        <button
+          onClick={() => onRetryIncompleteOfficialPostings()}
+          onPointerDown={event => event.stopPropagation()}
+          disabled={actionsBusy}
+          className="nodrag mt-2 w-full rounded-full border border-amber-500/30 bg-amber-500/15 px-2 py-1 text-[10px] text-amber-200/90 hover:bg-amber-500/25 disabled:opacity-50"
+          title="Check only the cards whose official posting lookup is unfinished, in place. Keeps finished lookups, applications, notes and scores, and does not rebuild the board. Re-combine applies any score or duplicate changes afterwards. Re-combine stops retrying a job whose judges were uncertain twice, so this is how to try those again."
+        >
+          Retry {retryableLookups} incomplete lookup{retryableLookups === 1 ? '' : 's'}
+        </button>
+      )}
+
       {!locked && (onRefreshOfficialPostings || officialPostingRefreshing) && (
         <div className="mt-2 flex w-full items-center gap-1">
           <button
-            onClick={onRefreshOfficialPostings}
+            onClick={() => onRefreshOfficialPostings()}
             onPointerDown={event => event.stopPropagation()}
             disabled={actionsBusy}
             className="nodrag flex-1 rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-[10px] text-sky-200/90 hover:bg-sky-500/20 disabled:opacity-50"
-            title="Check the official postings for existing cards, including collapsed cards. Keeps applications, notes and scores."
+            title="Research every eligible card's official posting again, including finished lookups and collapsed cards. Keeps applications, notes and scores."
           >
             {officialPostingRefreshing
               ? officialPostingProgress?.recovering ? 'Lookup needs cancellation'
                 : officialPostingProgress?.stopping ? 'Stopping lookup…'
                 : officialPostingProgress?.queued ? 'Lookup queued…'
                   : `Checking postings ${officialPostingProgress?.completed || 0}/${officialPostingProgress?.total || 0}`
-              : 'Refresh official postings'}
+              : 'Recheck all official postings'}
           </button>
           {officialPostingRefreshing && (
             <button onClick={onCancelOfficialPostingRefresh} onPointerDown={event => event.stopPropagation()}

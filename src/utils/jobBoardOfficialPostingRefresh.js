@@ -1,4 +1,5 @@
 import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { isResearchEligible } from '../../electron/ipc/researchGate.js';
 import { officialPostingNeedsRefresh } from './officialPostingDisplay.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from './officialPostingPreparation.js';
 
@@ -15,6 +16,62 @@ const canonical = value => {
 const metadataKey = value => JSON.stringify(canonical(value));
 const postedByValid = value => value === undefined || typeof value === 'string' && value.length <= 500
   && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
+
+/** An unlocked Board card a Retry can finish. Paused cards count: only automatic retries stop. */
+export function boardCardNeedsOfficialRetry(card, boardId) {
+  return card?.type === 'jobcard' && card.data?.hubId === boardId && !card.data.locked
+    && isResearchEligible(card.data) && officialPostingNeedsRefresh(card.data);
+}
+
+export function countBoardOfficialRetries(nodes, boardId) {
+  let count = 0;
+  for (const node of Array.isArray(nodes) ? nodes : []) if (boardCardNeedsOfficialRetry(node, boardId)) count++;
+  return count;
+}
+
+export function searchRowsWithIncompleteLookups(jobs) {
+  return (Array.isArray(jobs) ? jobs : []).filter(job => isResearchEligible(job)
+    && officialPostingLookupStatus(job?.officialPosting).retryable);
+}
+
+// Keys are whole-source JSON and this runs on each canvas update. Saved rows and
+// card data are replaced, never mutated, so each object keeps one key.
+const sourceKeys = new WeakMap();
+const cachedSourceKey = data => {
+  let key = sourceKeys.get(data);
+  if (key === undefined) { key = sourceKey(data); sourceKeys.set(data, key); }
+  return key;
+};
+
+/** A run without an id predates run receipts, so no saved Combine can be matched to it. */
+export function boardCombinedSearchRun(board, searchId, runId) {
+  return typeof runId === 'string' && !!runId && Array.isArray(board?.data?.combineSourceRuns)
+    && board.data.combineSourceRuns.some(run => (run?.sourceHubId || run?.sourceId) === searchId && run?.runId === runId);
+}
+
+/**
+ * Source runs stay immutable, so a Search row keeps its first lookup result. The
+ * Board's card is the current answer. A row without a card waits for a Combine
+ * unless a Board already combined this run, which means that Combine merged or
+ * removed the row.
+ */
+export function summarizeSearchOfficialLookups(rows, { nodes, boardIds, runCombined = false } = {}) {
+  const counts = { onBoard: 0, awaitingCombine: 0 };
+  if (!Array.isArray(rows) || !rows.length) return counts;
+  const boards = new Set(boardIds || []);
+  const cards = new Map();
+  for (const node of boards.size && Array.isArray(nodes) ? nodes : []) {
+    if (node?.type !== 'jobcard' || !boards.has(node.data?.hubId)) continue;
+    const key = cachedSourceKey(node.data);
+    cards.set(key, cards.get(key) || boardCardNeedsOfficialRetry(node, node.data.hubId));
+  }
+  for (const row of rows) {
+    const key = cachedSourceKey(row);
+    if (cards.has(key)) { if (cards.get(key)) counts.onBoard++; }
+    else if (!runCombined) counts.awaitingCombine++;
+  }
+  return counts;
+}
 
 /** Counts lookup attempts, independently of whether a live card still accepts
  * its result. An interrupted recheck of a verified posting remains incomplete. */

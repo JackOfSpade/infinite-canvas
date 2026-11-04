@@ -3,7 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  boardOfficialPostingRefreshCardMatches, carryBoardOfficialPostingResults, refreshBoardOfficialPostingJobs, summarizeBoardOfficialPostingChecks,
+  boardCombinedSearchRun, boardOfficialPostingRefreshCardMatches, carryBoardOfficialPostingResults, countBoardOfficialRetries, refreshBoardOfficialPostingJobs,
+  searchRowsWithIncompleteLookups, summarizeBoardOfficialPostingChecks, summarizeSearchOfficialLookups,
 } from '../../src/utils/jobBoardOfficialPostingRefresh.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../src/utils/officialPostingPreparation.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
@@ -100,6 +101,10 @@ export function Probe({ options, capture }) {
               await Promise.resolve();
             });
           },
+          async finishOperation() { await act(async () => { await operation; }); },
+          async retryIncomplete() {
+            await act(async () => { operation = handle.retryIncomplete(); await Promise.resolve(); });
+          },
           async complete(value = response(requests.at(-1).entries)) {
             await act(async () => { reply(value); await operation; });
           },
@@ -130,7 +135,98 @@ export function Probe({ options, capture }) {
   } finally { await bundle?.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
 }
 
+const uncertain = (extra = {}) => ({ level: 'L5', outcome: 'ambiguous', employer: 'Synthetic Employer',
+  trail: ['worker-research', 'semantic-uncertain'], ...extra });
+
 export default [
+  {
+    name: 'Retry incomplete checks only unfinished cards in place and lets the host reuse saved results',
+    async run() {
+      await withRefreshHook(async probe => {
+        const [done, incomplete, paused, unchecked, locked, low] = probe.nodes.slice(1);
+        done.data = { ...done.data, officialPosting: posting(0) };
+        incomplete.data = { ...incomplete.data, officialPosting: uncertain() };
+        paused.data = { ...paused.data, officialPosting: uncertain({ trail: ['worker-research', 'semantic-uncertain', 'retry-paused'] }) };
+        locked.data = { ...locked.data, officialPosting: uncertain(), locked: true };
+        low.data = { ...low.data, officialPosting: uncertain(), matchScore: 20 };
+        assert.equal(countBoardOfficialRetries(probe.nodes, 'board'), 3);
+        await probe.retryIncomplete();
+        assert.equal(probe.requests.length, 1);
+        assert.deepEqual(probe.requests[0].entries.map(entry => entry.cardId), [incomplete.id, paused.id, unchecked.id]);
+        assert.equal(probe.requests[0].force, false, 'saved decisions stay available to the host');
+        const untouched = structuredClone(done.data);
+        await probe.complete();
+        assert.deepEqual(done.data, untouched);
+        assert.equal(incomplete.data.officialPosting.outcome, 'found');
+        assert.equal(incomplete.data.notes, 'Synthetic live note 1', 'a retry keeps the card');
+        assert.match(probe.toasts.at(-1).description, /Re-combine to apply any score or duplicate changes/u);
+      });
+    },
+  },
+  {
+    name: 'Recheck all stays a full bypass and Retry incomplete reports when nothing is unfinished',
+    async run() {
+      await withRefreshHook(async probe => {
+        for (const node of probe.nodes.slice(1)) node.data = { ...node.data, officialPosting: posting() };
+        await probe.retryIncomplete();
+        await probe.finishOperation();
+        assert.equal(probe.requests.length, 0);
+        assert.equal(probe.toasts.at(-1).title, 'No incomplete lookups');
+        await probe.start();
+        assert.equal(probe.requests.length, 1);
+        assert.equal(probe.requests[0].entries.length, probe.nodes.length - 1);
+        assert.equal(Object.hasOwn(probe.requests[0], 'force'), false, 'the host treats a missing force as a full bypass');
+        await probe.complete();
+      });
+    },
+  },
+  {
+    name: 'A lookup pauses only when judges stay uncertain on a second attempt',
+    async run() {
+      const { refreshOfficialPostingEntries } = await import('../../electron/ipc/officialPostingRefresh.js');
+      const { officialPostingRetryPaused } = await import('../../electron/ipc/officialPostingFields.js');
+      const run = async (previous, next) => (await refreshOfficialPostingEntries({ nodeId: 'board', manualAiRunId: 'official-posting:pause',
+        entries: [{ cardId: 'card', job: { ...job(7), ...(previous ? { officialPosting: previous } : {}) } }] }, {
+        store: { find: async () => null },
+        resolve: async rows => ({ jobs: rows.map(row => ({ ...row, officialPosting: next })) }),
+      })).entries[0].officialPosting;
+      assert.equal(officialPostingRetryPaused(await run(null, uncertain())), false, 'one uncertain result retries');
+      assert.equal(officialPostingRetryPaused(await run(uncertain(), uncertain())), true);
+      assert.equal(officialPostingRetryPaused(await run(uncertain({ trail: ['worker-research', 'source-unproven'] }), uncertain())), true,
+        'either kind of judged doubt counts');
+      const interrupted = { level: 'L5', outcome: 'failed', employer: '', trail: ['worker-timeout'] };
+      assert.equal(officialPostingRetryPaused(await run(uncertain(), interrupted)), false, 'an interrupted run can recover');
+      assert.equal(officialPostingRetryPaused(await run(interrupted, uncertain())), false, 'an interrupted first attempt was no judgment');
+      const failedFetch = uncertain({ fetchFailures: [{ url: 'https://careers.example.test/x', code: 'fetch-timeout', reason: 'fetch-timeout' }] });
+      assert.equal(officialPostingRetryPaused({ ...uncertain({ trail: ['semantic-uncertain', 'retry-paused'] }), ...failedFetch }), false,
+        'an unread page is not a judgment');
+      assert.equal(officialPostingRetryPaused(posting(1, { trail: ['semantic-match-v1', 'retry-paused'] })), false, 'a settled result is never paused');
+    },
+  },
+  {
+    name: 'The Job Search banner counts unfinished work from the Board cards, not the saved first attempt',
+    async run() {
+      const rows = [job(1, { officialPosting: uncertain() }), job(2, { officialPosting: uncertain() }), job(3), job(4, { officialPosting: posting(4) }), job(5, { matchScore: 10 })];
+      const pending = searchRowsWithIncompleteLookups(rows);
+      assert.deepEqual(pending.map(row => row.title), ['Synthetic Role 1', 'Synthetic Role 2', 'Synthetic Role 3'],
+        'never-checked rows count; settled and below-threshold rows do not');
+      const nodes = [card({ ...rows[0], hubId: 'board', officialPosting: posting(1) }, 'settled'),
+        card({ ...rows[1], hubId: 'board', officialPosting: uncertain() }, 'incomplete'),
+        card({ ...rows[2], hubId: 'other-board' }, 'unconnected')];
+      assert.deepEqual(summarizeSearchOfficialLookups(pending, { nodes, boardIds: ['board'] }), { onBoard: 1, awaitingCombine: 1 });
+      assert.deepEqual(summarizeSearchOfficialLookups(pending, { nodes, boardIds: ['board'], runCombined: true }), { onBoard: 1, awaitingCombine: 0 },
+        'a row the Board already combined away is not waiting');
+      assert.deepEqual(summarizeSearchOfficialLookups(pending, { nodes, boardIds: [] }), { onBoard: 0, awaitingCombine: 3 });
+      assert.deepEqual(summarizeSearchOfficialLookups([], { nodes, boardIds: ['board'] }), { onBoard: 0, awaitingCombine: 0 });
+      const board = { data: { combineSourceRuns: [{ sourceHubId: 'search', runId: 'run-1' }, { sourceId: 'live-shape', runId: 'run-2' }] } };
+      assert.equal(boardCombinedSearchRun(board, 'search', 'run-1'), true);
+      assert.equal(boardCombinedSearchRun(board, 'live-shape', 'run-2'), true);
+      assert.equal(boardCombinedSearchRun(board, 'search', 'run-newer'), false, 'a newer run still needs its Combine');
+      assert.equal(boardCombinedSearchRun(board, 'other', 'run-1'), false);
+      assert.equal(boardCombinedSearchRun(board, 'search', undefined), false);
+      assert.equal(boardCombinedSearchRun({ data: {} }, 'search', 'run-1'), false);
+    },
+  },
   {
     name: 'Retained verified rechecks carry new judge citations except their own source URL, never uncited search leads',
     async run() {
@@ -212,7 +308,7 @@ export default [
           const summary = probe.getLogs().findLast(line => line.includes('[JobBoard] official-posting refresh finished'));
           assert.ok(summary);
           assert.equal(summary.slice(summary.indexOf('[JobBoard]')),
-            `[JobBoard] official-posting refresh finished checked=6 verified=${incomplete ? 1 : 3} notFound=1 ambiguous=1 closed=1 retryable=${incomplete ? 2 : 0}`);
+            `[JobBoard] official-posting refresh finished mode=all checked=6 verified=${incomplete ? 1 : 3} notFound=1 ambiguous=1 closed=1 retryable=${incomplete ? 2 : 0}`);
           for (const source of ['Synthetic Employer', 'careers.example.test', 'Synthetic Role']) assert.equal(summary.includes(source), false);
         });
       }

@@ -155,6 +155,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
     }),
     isUnscoredPlaceholderCard, isLegacyUnscoredPlaceholder,
     boardResearch: { removed: 0 },
+    researchRemovedLookups: null,
     window: { electronAPI: {
       prepareBoardJobsHistory: async () => { enteredHistory(); return historyGate; },
       appendJobsHistory: async args => { calls.history.push(args); return { success: true }; },

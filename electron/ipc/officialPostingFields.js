@@ -15,8 +15,9 @@ export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown
 export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
   'comparative-match', 'comparative-equivalent', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
 ]);
+export const OFFICIAL_POSTING_RETRY_PAUSED_TRAIL = 'retry-paused';
 export const OFFICIAL_POSTING_TRAIL = Object.freeze([
-  'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
+  OFFICIAL_POSTING_RETRY_PAUSED_TRAIL, 'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
   'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
   'worker-research', 'worker-timeout', 'worker-unavailable', 'worker-aborted', 'research-miss',
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'source-unproven', 'poster-tenant',
@@ -39,7 +40,7 @@ export function officialPostingComparativeTrail({ validA = false, validB = false
     ...(validA === true && validB === true && a && a === b ? [`comparative-choice-${a}`] : [])];
 }
 
-const DURABILITY_TRAIL_CODES = new Set(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
+const DURABILITY_TRAIL_CODES = new Set([OFFICIAL_POSTING_RETRY_PAUSED_TRAIL, 'worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor', 'reverify-failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
@@ -335,4 +336,24 @@ export function officialPostingLookupStatus(value) {
   if (officialPostingNegativeNeedsRecheck(posting)) return result('incomplete', 'Outdated lookup · check again',
     `This result predates improved employer-source verification. ${retry}`, true);
   return result('incomplete', 'Official posting lookup incomplete', `The lookup did not finish, so no exact-match conclusion was reached. ${retry}`, true);
+}
+
+const JUDGED_UNCERTAIN_TRAIL = Object.freeze(['semantic-uncertain', 'source-unproven', 'official-liveness-unconfirmed']);
+const INTERRUPTED_RESEARCH_TRAIL = Object.freeze(RESEARCH_UNSETTLED_TRAIL.filter(code => !JUDGED_UNCERTAIN_TRAIL.includes(code)));
+
+/** Research ran to completion and its judges could not confirm the match. A
+ * failed download or interrupted worker can recover by itself, so it is excluded. */
+export function officialPostingJudgedUncertain(value) {
+  const posting = normalizeOfficialPosting(value);
+  if (!posting || !officialPostingLookupStatus(posting).retryable || posting.fetchFailures?.length) return false;
+  const trail = posting.trail || [];
+  return trail.some(code => JUDGED_UNCERTAIN_TRAIL.includes(code))
+    && !trail.some(code => INTERRUPTED_RESEARCH_TRAIL.includes(code));
+}
+
+/** The same judged-uncertain result came back twice. Combine stops retrying the
+ * row; a person can still retry it. */
+export function officialPostingRetryPaused(value) {
+  const posting = normalizeOfficialPosting(value);
+  return Boolean(posting?.trail?.includes(OFFICIAL_POSTING_RETRY_PAUSED_TRAIL)) && officialPostingJudgedUncertain(posting);
 }

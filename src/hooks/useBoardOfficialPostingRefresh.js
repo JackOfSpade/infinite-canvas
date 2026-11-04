@@ -1,7 +1,7 @@
 import { isResearchEligible, RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation, officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../utils/officialPostingPreparation.js';
-import { boardOfficialPostingRefreshCardMatches, refreshBoardOfficialPostingJobs, summarizeBoardOfficialPostingChecks } from '../utils/jobBoardOfficialPostingRefresh.js';
+import { boardCardNeedsOfficialRetry, boardOfficialPostingRefreshCardMatches, refreshBoardOfficialPostingJobs, summarizeBoardOfficialPostingChecks } from '../utils/jobBoardOfficialPostingRefresh.js';
 import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle.js';
 import { EventLogger } from '../utils/EventLogger.js';
@@ -66,7 +66,9 @@ export function useBoardOfficialPostingRefresh(options) {
     };
   }, [cancel]);
 
-  const start = useCallback(async () => {
+  // Checking everything bypasses saved results. A retry sends only unfinished
+  // cards and lets the host reuse any saved decision it can still prove.
+  const runLookups = useCallback(async ({ onlyIncomplete }) => {
     const { nodeId, canvasFilePath, getNode, getNodes, updateGlobal, moduleRunQueue, addToast, canStart, getScopeKey } = latest.current;
     if (runRef.current || !canStart() || isJobWorkflowDeletionPending(nodeId)) return;
     if (typeof window.electronAPI?.refreshOfficialPostings !== 'function') {
@@ -88,12 +90,13 @@ export function useBoardOfficialPostingRefresh(options) {
     try {
       setProgress({ completed: 0, total: 0, queued: true });
       lease = await moduleRunQueue.acquireModuleRun({ nodeId, kind: 'official-posting-refresh', lane: 'job-search',
-        label: 'Refresh official postings' });
+        label: onlyIncomplete ? 'Retry incomplete official postings' : 'Recheck all official postings' });
       if (!active() || !canStart()) return;
       const scopeKey = getScopeKey();
       const snapshots = [];
       for (const card of getNodes()) {
-        if (card?.type !== 'jobcard' || card.data?.hubId !== nodeId || card.data.locked || isJobWorkflowDeletionPending(card.id) || !isResearchEligible(card.data)) continue;
+        if (card?.type !== 'jobcard' || card.data?.hubId !== nodeId || card.data.locked || isJobWorkflowDeletionPending(card.id) || !isResearchEligible(card.data)
+          || (onlyIncomplete && !boardCardNeedsOfficialRetry(card, nodeId))) continue;
         const claim = beginOfficialPostingPreparation({ canvasFilePath, nodeId: card.id, purpose: 'lookup', cancel });
         if (!claim) continue;
         claims.push(claim);
@@ -102,7 +105,9 @@ export function useBoardOfficialPostingRefresh(options) {
           posting: JSON.stringify(card.data.officialPosting ?? null), postedBy: card.data.postedBy });
       }
       if (!snapshots.length) {
-        addToast({ title: 'No available job cards', description: `Only unlocked cards with a fit score of ${RESEARCH_MIN_FIT_SCORE} or above are refreshed. Use a card's own lookup for any other job.`, type: 'info' });
+        addToast(onlyIncomplete
+          ? { title: 'No incomplete lookups', description: 'Every available card already has a finished official posting check.', type: 'info' }
+          : { title: 'No available job cards', description: `Only unlocked cards with a fit score of ${RESEARCH_MIN_FIT_SCORE} or above are refreshed. Use a card's own lookup for any other job.`, type: 'info' });
         return;
       }
       if (mounted.current) setProgress({ completed: 0, total: snapshots.length });
@@ -114,9 +119,9 @@ export function useBoardOfficialPostingRefresh(options) {
         if (mounted.current) setProgress({ completed: Math.min(snapshots.length, batchBase + completed), total: snapshots.length });
       });
       const result = await refreshBoardOfficialPostingJobs(snapshots.map(item => item.job), {
-        nodeId, manualAiRunId, force: true, cardIds: snapshots.map(item => item.id), cancelled: () => !current(),
+        nodeId, manualAiRunId, force: !onlyIncomplete, cardIds: snapshots.map(item => item.id), cancelled: () => !current(),
         refresh: async args => {
-          const response = await window.electronAPI.refreshOfficialPostings(args);
+          const response = await window.electronAPI.refreshOfficialPostings(onlyIncomplete ? { ...args, force: false } : args);
           batchBase += args.entries.length;
           return response;
         },
@@ -140,9 +145,9 @@ export function useBoardOfficialPostingRefresh(options) {
       const outcomes = [[summary.verified, 'verified'], [summary.notFound, 'no exact match'],
         [summary.ambiguous, 'ambiguous'], [summary.closed, 'closed'], [summary.retryable, 'incomplete']]
         .filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(', ');
-      EventLogger.log(`[JobBoard] official-posting refresh finished checked=${summary.checked} verified=${summary.verified} notFound=${summary.notFound} ambiguous=${summary.ambiguous} closed=${summary.closed} retryable=${summary.retryable}`);
+      EventLogger.log(`[JobBoard] official-posting refresh finished mode=${onlyIncomplete ? 'incomplete' : 'all'} checked=${summary.checked} verified=${summary.verified} notFound=${summary.notFound} ambiguous=${summary.ambiguous} closed=${summary.closed} retryable=${summary.retryable}`);
       addToast({ title: summary.retryable ? 'Official posting checks incomplete' : 'Official postings checked',
-        description: `${summary.checked} check${summary.checked === 1 ? '' : 's'} finished: ${outcomes}. ${summary.retryable ? 'Retry incomplete lookups. ' : ''}Changed or unavailable cards kept their current results.`,
+        description: `${summary.checked} check${summary.checked === 1 ? '' : 's'} finished: ${outcomes}. ${summary.retryable ? 'Retry incomplete lookups. ' : ''}Changed or unavailable cards kept their current results.${onlyIncomplete && summary.verified ? ' Re-combine to apply any score or duplicate changes from newly verified postings.' : ''}`,
         type: summary.retryable ? 'info' : 'success' });
     } catch (error) {
       if (active() && error?.code !== 'JOB_OFFICIAL_REFRESH_CANCELLED') {
@@ -161,7 +166,9 @@ export function useBoardOfficialPostingRefresh(options) {
       }
     }
   }, [cancel]);
+  const start = useCallback(() => runLookups({ onlyIncomplete: false }), [runLookups]);
+  const retryIncomplete = useCallback(() => runLookups({ onlyIncomplete: true }), [runLookups]);
   const recovering = retained?.owner === 'board-refresh';
   return { runRef, refreshing: progress !== null || recovering,
-    progress: progress || (recovering ? { recovering: true } : null), start, cancel };
+    progress: progress || (recovering ? { recovering: true } : null), start, retryIncomplete, cancel };
 }

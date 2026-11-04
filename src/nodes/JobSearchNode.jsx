@@ -20,8 +20,7 @@ import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSou
 // gather, without over-collapsing distinct same-title/company reqs in
 // different cities. See the policy note in jobIdentity.js.
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../utils/jobIdentity';
-import { isResearchEligible } from '../../electron/ipc/researchGate.js';
-import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { boardCombinedSearchRun, searchRowsWithIncompleteLookups, summarizeSearchOfficialLookups } from '../utils/jobBoardOfficialPostingRefresh';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { mergeResolvedSourceItems } from '../utils/jobSourceResolveMerge';
 import { radialRadius, fitViewDuration } from '../utils/layoutGeometry';
@@ -71,7 +70,7 @@ import { buildPinnedTitleQueryBundle, flattenJobSearchQueries } from '../utils/j
 import { JobSearchLocationFields } from '../components/JobSearchLocationFields';
 import { CareerCanvasFileImportDialog } from '../components/CareerCanvasFileImportDialog';
 import { TRANSIENT_PROCESSING_HUB_STATES } from '../utils/persistenceTransientState';
-import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, isJobSearchBoardPausedContinuationBlocked, isJobSearchConnectedToBoard } from '../utils/jobBoardSearchSelection';
+import { findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, isJobSearchBoardPausedContinuationBlocked, getConnectedJobSearchIds, isJobSearchConnectedToBoard } from '../utils/jobBoardSearchSelection';
 import { safeClone } from '../utils/navigationUtils';
 import {
   getJobWorkflowDeletionLifecycleRevision,
@@ -1478,6 +1477,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       [id],
     ),
   );
+  const lookupRunId = data.jobRunId;
+  const lookupRows = useMemo(() => searchRowsWithIncompleteLookups(data.scoredJobs), [data.scoredJobs]);
+  const officialLookupCounts = useStore(
+    useCallback(store => {
+      if (!lookupRows.length) return '0:0';
+      const boards = store.nodes.filter(node => node?.type === 'jobboard'
+        && getConnectedJobSearchIds(node.id, store.nodes, store.edges).includes(id));
+      const { onBoard, awaitingCombine } = summarizeSearchOfficialLookups(lookupRows, { nodes: store.nodes,
+        boardIds: boards.map(board => board.id),
+        runCombined: boards.some(board => boardCombinedSearchRun(board, id, lookupRunId)) });
+      return `${onBoard}:${awaitingCombine}`;
+    }, [id, lookupRows, lookupRunId]),
+  );
+  const [officialLookupsOnBoard, officialLookupsAwaitingCombine] = officialLookupCounts.split(':').map(Number);
   const activeBoardRecoveryOwnerKey = useStore(
     useCallback((store) => {
       const owner = findJobSearchBoardActiveRecoveryOwner(
@@ -14451,8 +14464,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   }, [epoch, getNode, id, moduleRunQueue, updateGlobal]);
   const careerCompilationUnstarted = hasCareerIdentity && !data.careerImportCompilation
     && careerResumeInputPaths(data).length > 0;
-  const officialLookupsIncomplete = (Array.isArray(data.scoredJobs) ? data.scoredJobs : [])
-    .filter(job => job?.officialPosting && isResearchEligible(job) && officialPostingLookupStatus(job.officialPosting).retryable).length;
+  const officialLookupsIncomplete = officialLookupsOnBoard + officialLookupsAwaitingCombine;
 
 
   const banner = (
@@ -14473,7 +14485,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       {manualAiRecoveryBanner}
       {officialLookupsIncomplete > 0 && (
         <div className="m-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-100/80" role="status">
-          {officialLookupsIncomplete} official {officialLookupsIncomplete === 1 ? 'lookup is' : 'lookups are'} incomplete. Combine on a Job Board retries these.
+          {officialLookupsIncomplete} official {officialLookupsIncomplete === 1 ? 'lookup is' : 'lookups are'} incomplete.
+          {officialLookupsOnBoard > 0 && ` Retry incomplete on the Job Board handles ${officialLookupsAwaitingCombine > 0 ? `${officialLookupsOnBoard} of them` : officialLookupsOnBoard === 1 ? 'it' : 'them'}.`}
+          {officialLookupsAwaitingCombine > 0 && ` Combine on a Job Board checks ${officialLookupsOnBoard > 0 ? `the other ${officialLookupsAwaitingCombine}` : officialLookupsAwaitingCombine === 1 ? 'it' : 'them'}.`}
         </div>
       )}
       {data.terminalFinalizationRecovery && !data.errorMessage ? (
