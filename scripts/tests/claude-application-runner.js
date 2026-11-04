@@ -1292,6 +1292,7 @@ export default [
       await waitFor(() => runner.status([jobId])[jobId]?.status === 'failed', 'failed');
       const failed = runner.status([jobId])[jobId];
       assert.equal(failed.upgradeModel, 'Opus');
+      assert.deepEqual([failed.retryModel, failed.retryEffort], ['Sonnet', 'high']);
       assert.match(failed.message, /^Blocked\. Upgrade to Opus /u);
       await runner.retry({ jobId, canvasFilePath: '/c.canvas', upgradeModel: true });
       await waitFor(() => runner.status([jobId])[jobId]?.status === 'done', 'done');
@@ -1334,6 +1335,7 @@ export default [
       const onOpus = await failedAgain(3);
       assert.equal(onOpus.upgradeModel, undefined, 'a refusal on Opus has nothing left to upgrade to');
       assert.equal(onOpus.message, 'Stopped.');
+      assert.deepEqual([onOpus.retryModel, onOpus.retryEffort], ['Opus', 'high'], 'a retry now runs on Opus');
       await runner.retry({ jobId, canvasFilePath: '/c.canvas' });
       await waitFor(() => runner.status([jobId])[jobId]?.status === 'done', 'done');
       await runner.shutdown();
@@ -1358,6 +1360,7 @@ export default [
       const second = start(async () => { throw new ClaudeRunnerError('CLAUDE_ERROR', 'Later failure.'); });
       await second.load();
       assert.equal(second.status([jobId])[jobId].upgradeModel, 'Opus');
+      assert.deepEqual([second.status([jobId])[jobId].retryModel, second.status([jobId])[jobId].retryEffort], ['Sonnet', 'high']);
       await second.retry({ jobId, canvasFilePath: '/c.canvas', upgradeModel: true });
       await waitFor(() => second.status([jobId])[jobId]?.code === 'CLAUDE_ERROR', 'failed again');
       await second.shutdown();
@@ -1444,7 +1447,8 @@ export default [
       fs.writeFileSync(stateFile, JSON.stringify({ 'job-old': old }));
       const runner = createClaudeApplicationRunner({ api: sequenceApi([]).api, stateFile, logger: quietLogger(), homedir: tempHome(), runStage: async () => { throw new Error('must not run'); } });
       await runner.load();
-      assert.deepEqual(runner.status(['job-old']), { 'job-old': old });
+      // A failure saved before the buttons named a model gains it from its stage.
+      assert.deepEqual(runner.status(['job-old']), { 'job-old': { ...old, retryModel: 'Sonnet', retryEffort: 'high' } });
       assert.equal(runner.ensure({ jobId: 'job-old', canvasFilePath: '/c.canvas' }).status, 'failed');
 
       const badFile = tempStateFile();

@@ -13,6 +13,8 @@ export const CLAUDE_RUN_STATUSES = Object.freeze([
 ]);
 
 const MESSAGE_LIMIT = 400;
+const RETRY_MODELS = Object.freeze(['Sonnet', 'Opus', 'Haiku']);
+const RETRY_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh', 'max']);
 
 const optionalString = (value) => (typeof value === 'string' && value ? value : '');
 const optionalTime = (value) => (typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null);
@@ -33,6 +35,8 @@ export function normalizeClaudeRun(state) {
     code: optionalString(state.code),
     message: optionalString(state.message).slice(0, MESSAGE_LIMIT),
     ...(state.upgradeModel === 'Opus' ? { upgradeModel: state.upgradeModel } : {}),
+    ...(RETRY_MODELS.includes(state.retryModel) && RETRY_EFFORTS.includes(state.retryEffort)
+      ? { retryModel: state.retryModel, retryEffort: state.retryEffort } : {}),
     updatedAt: optionalTime(state.updatedAt),
     lastActivityAt: optionalTime(state.lastActivityAt),
     ...(optionalTime(state.startedAt) !== null ? { startedAt: state.startedAt } : {}),
@@ -44,6 +48,20 @@ export function normalizeClaudeRun(state) {
     ...(['same-rule-repeat', 'run-budget'].includes(state.reason) ? { reason: state.reason } : {}),
     ...(Number.isSafeInteger(state.runs) && state.runs > 0 ? { runs: state.runs } : {}),
   };
+}
+
+/** The model and effort that just failed; a plain retry uses the same pair. */
+export function claudeFailedOnLabel(run) {
+  return run?.retryModel ? `Failed on ${run.retryModel} (${run.retryEffort} effort)` : '';
+}
+
+/** Failed-run button text. An upgrade keeps the stage's effort. */
+export function claudeRetryLabel(run) {
+  return run?.retryModel ? `Retry with ${run.retryModel} (${run.retryEffort} effort)` : 'Retry with Claude';
+}
+
+export function claudeUpgradeLabel(run) {
+  return `Upgrade to ${run?.upgradeModel}${run?.retryEffort ? ` (${run.retryEffort} effort)` : ''}`;
 }
 
 let runs = new Map();

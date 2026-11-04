@@ -237,7 +237,7 @@ export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
     const requestId = providerText.match(/\bRequest ID:\s*(req_[A-Za-z0-9]{8,120})\b/u)?.[1];
     const messageId = providerText.match(/\bMessage ID:\s*(msg_[A-Za-z0-9]{8,120})\b/u)?.[1];
     return new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED',
-      'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so Retry with Claude may pass. The provider message is in the private run log.',
+      'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so retrying may pass. The provider message is in the private run log.',
       { ...detail, ...(category ? { refusalCategory: category } : {}), ...(requestId ? { requestId } : {}), ...(messageId ? { messageId } : {}) },
       resultText.trim() ? resultText : providerText);
   }
@@ -642,6 +642,13 @@ export function createClaudeApplicationRunner({
       && jobStageProfile(jobId, stage).model === CLAUDE_SONNET_MODEL ? 'Opus' : null;
   }
 
+  // What a retry of this stage will run on, for the failed state's buttons.
+  function retryProfile(jobId, stage) {
+    if (!nonEmptyString(stage)) return {};
+    const { model, effort } = jobStageProfile(jobId, stage);
+    return { retryModel: MODEL_FAMILIES[model]?.label || model, retryEffort: effort };
+  }
+
   function laneFor(jobId, laneKey) {
     let lanes = sessions.get(jobId);
     if (!lanes) { lanes = new Map(); sessions.set(jobId, lanes); }
@@ -758,6 +765,7 @@ export function createClaudeApplicationRunner({
       ...(patch.code ? { code: patch.code } : {}),
       ...(patch.message ? { message: patch.message } : {}),
       ...(patch.upgradeModel ? { upgradeModel: patch.upgradeModel } : {}),
+      ...(patch.status === 'failed' ? retryProfile(jobId, patch.retryStage || patch.stage) : {}),
       updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : now(),
       startedAt: previous?.startedAt ?? drivers.get(jobId)?.startedAt ?? now(),
       ...(patch.progress !== undefined ? { progress: patch.progress } : previous?.progress ? { progress: previous.progress } : {}),
@@ -899,6 +907,8 @@ export function createClaudeApplicationRunner({
         ...(entry.code ? { code: String(entry.code) } : {}),
         ...(entry.message ? { message: String(entry.message) } : {}),
         ...(upgradeModel ? { upgradeModel } : {}),
+        ...(typeof entry.retryModel === 'string' && typeof entry.retryEffort === 'string'
+          ? { retryModel: entry.retryModel, retryEffort: entry.retryEffort } : retryProfile(jobId, entry.stage)),
         updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : now(),
       });
     }
@@ -1272,7 +1282,7 @@ export function createClaudeApplicationRunner({
         const error = raw instanceof ClaudeRunnerError ? raw : applicationError(raw);
         const failedStage = error.code === 'CLAUDE_SAFEGUARD_BLOCKED' && error.failedStage ? error.failedStage : entry.stage;
         const upgradeModel = safeguardUpgrade(jobId, error.code, failedStage);
-        setState(jobId, canvasFilePath, { status: 'failed', stage: failedStage, code: error.code,
+        setState(jobId, canvasFilePath, { status: 'failed', stage: failedStage, retryStage: error.failedStage, code: error.code,
           message: upgradeModel ? `${error.message}${SAFEGUARD_UPGRADE_NOTE}` : error.message, ...(upgradeModel ? { upgradeModel } : {}) });
         logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}`);
         await persist();

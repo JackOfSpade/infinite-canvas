@@ -5,6 +5,9 @@ import {
 } from '../../src/utils/applicationHandoffDock.js';
 import {
   getClaudeApplicationRun,
+  claudeFailedOnLabel,
+  claudeRetryLabel,
+  claudeUpgradeLabel,
   normalizeClaudeRun,
   setClaudeApplicationRun,
   subscribeClaudeApplicationRuns,
@@ -40,6 +43,13 @@ export default [
       assert(run.reason === 'same-rule-repeat' && run.runs === 12, 'retain closed stop and count');
       assert(normalizeClaudeRun({ status: 'failed', upgradeModel: 'Opus' }).upgradeModel === 'Opus', 'retain the offered upgrade');
       assert(!('upgradeModel' in normalizeClaudeRun({ status: 'failed', upgradeModel: 'anything else' })), 'drop an unknown upgrade');
+      const offered = normalizeClaudeRun({ status: 'failed', retryModel: 'Sonnet', retryEffort: 'high', upgradeModel: 'Opus' });
+      assert(claudeFailedOnLabel(offered) === 'Failed on Sonnet (high effort)', 'names what failed');
+      assert(claudeRetryLabel(offered) === 'Retry with Sonnet (high effort)', 'retry names model and effort');
+      assert(claudeUpgradeLabel(offered) === 'Upgrade to Opus (high effort)', 'upgrade names model and effort');
+      const unknown = normalizeClaudeRun({ status: 'failed', retryModel: 'private prose', retryEffort: 'high' });
+      assert(claudeRetryLabel(unknown) === 'Retry with Claude', 'an unknown model is not shown');
+      assert(claudeFailedOnLabel(unknown) === '', 'an unknown model adds no line');
       const malformed = normalizeClaudeRun({ status: 'failed', reason: 'private prose', runs: -1 });
       assert(!('reason' in malformed) && !('runs' in malformed), 'drop untrusted diagnostic values');
     },

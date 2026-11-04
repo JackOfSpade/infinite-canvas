@@ -20,7 +20,7 @@ import { applicationRequestId, applicationStageLabel, assignApplicationOrdinals,
 // answer that. See applicationHandoffDock.js's doc comment for the shared
 // dock contract this file adapts application handoffs into.
 import { jobIntegrityFailureMessage } from '../utils/localAiFallback';
-import { setClaudeApplicationRun } from '../utils/claudeApplicationRuns';
+import { claudeFailedOnLabel, claudeRetryLabel, claudeUpgradeLabel, setClaudeApplicationRun } from '../utils/claudeApplicationRuns';
 
 const applicationDraftKey = payload => JSON.stringify([payload.canvasFilePath, payload.jobId, payload.handoffCode]);
 const writeApplicationDraft = payload => trackApplicationDraftWrite(
@@ -2010,6 +2010,9 @@ export function NonApiAiDialog() {
                 <div className="font-semibold text-red-50">
                   Claude could not finish {applicationStageLabel(activeClaudeRun.stage || activeRequest.stage).toLowerCase()}
                 </div>
+                {claudeFailedOnLabel(activeClaudeRun) && (
+                  <div className="mt-0.5 text-red-100/70">{claudeFailedOnLabel(activeClaudeRun)}</div>
+                )}
                 <div className="mt-1 whitespace-pre-wrap text-red-100/80">
                   {activeClaudeRun.message || 'The local Claude run stopped before finishing this application.'}
                 </div>
@@ -2024,7 +2027,7 @@ export function NonApiAiDialog() {
                     className="inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isRetryingClaude && <LoaderCircle size={12} className="animate-spin" aria-hidden="true" />}
-                    {isRetryingClaude ? 'Retrying…' : 'Retry with Claude'}
+                    {isRetryingClaude ? 'Retrying…' : claudeRetryLabel(activeClaudeRun)}
                   </button>
                   {activeClaudeRun.upgradeModel && (
                     <button
@@ -2033,7 +2036,7 @@ export function NonApiAiDialog() {
                       disabled={isRetryingClaude || isDiscarding || !!cancelConfirmTarget}
                       className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Upgrade to {activeClaudeRun.upgradeModel}
+                      {claudeUpgradeLabel(activeClaudeRun)}
                     </button>
                   )}
                   <button
