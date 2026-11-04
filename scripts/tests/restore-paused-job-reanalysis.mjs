@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { serializeWorkspaceForSave } from '../../electron/ipc/filesystem.js';
+import { WORKSPACE_POOLED_HEADER } from '../../electron/ipc/workspaceContentPool.js';
 import { buildPausedReanalysisRestore, restorePausedJobReanalysis, REANALYZE_SAVED_JOBS_RECOVERY_MODE } from '../restore-paused-job-reanalysis.mjs';
 
 const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-restore-paused-reanalysis-'));
@@ -48,6 +50,22 @@ try {
   assert.equal(dryRun.candidateSource, 'preferenceCandidatePool');
   assert.equal(dryRun.effectiveCandidateCount, 2);
   await assert.rejects(fs.promises.access(output), /ENOENT/);
+
+  // The app saves repeated content in its pooled form, and this tool must see
+  // the real job rows rather than references to them.
+  const pooledInput = path.join(root, 'pooled-canvas.json');
+  const repeated = 'Long listing text. '.repeat(40);
+  const pooledFixture = structuredClone(fixture);
+  const pooledHub = pooledFixture.nodes[0].data.nested.nodes[0];
+  for (const job of pooledHub.data.preferenceCandidatePool) job.snippet = repeated;
+  const pooledText = serializeWorkspaceForSave(pooledFixture);
+  assert.ok(pooledText.startsWith(WORKSPACE_POOLED_HEADER));
+  await fs.promises.writeFile(pooledInput, pooledText, 'utf8');
+  const pooledDryRun = await restorePausedJobReanalysis({
+    canvasPath: pooledInput, hubId, outputPath: output, recoveryRunId: 'job-search:hub-reanalysis-fixture:pooled', now: 1_790_000_000_000,
+  });
+  assert.equal(pooledDryRun.candidateSource, 'preferenceCandidatePool');
+  assert.equal(pooledDryRun.effectiveCandidateCount, 2);
 
   const written = await restorePausedJobReanalysis({
     canvasPath: input,

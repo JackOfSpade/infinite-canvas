@@ -6,8 +6,10 @@ const { shell, dialog, app } = electronPkg;
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { recordWorkspaceWriteOutcome } from './workspaceIoDiagnostics.js';
+import { formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
 import path from 'path';
 import fs from 'fs';
+import { constants as bufferConstants } from 'buffer';
 import { createHash, randomUUID } from 'crypto';
 import {
   rememberMissingPreviewSearchRoot,
@@ -1815,6 +1817,54 @@ async function recoverRendererWorkspaceMutation(target) {
 }
 
 /** Read through a bound handle and verify its public entry before exposing bytes. */
+// One bound for both directions, measured on the full canvas rather than the
+// smaller pooled file, so a canvas the app can save can always be reopened. It
+// is the runtime's real limit, not a chosen size: the renderer holds the canvas
+// as one JS string when it opens it. Measured in Electron 44, 510MiB loads and
+// crosses IPC; sending about 1.2GiB to the renderer crashes the main process.
+export const WORKSPACE_MAX_BYTES = bufferConstants.MAX_STRING_LENGTH;
+
+function formatWorkspaceMegabytes(bytes) {
+  return `${(bytes / 1024 / 1024).toFixed(2)}MB`;
+}
+
+const WORKSPACE_LIMIT_LABEL = `${Math.floor(WORKSPACE_MAX_BYTES / 1024 / 1024)}MB`;
+
+export function workspaceSaveTooLargeError(byteLength = null) {
+  const size = byteLength == null ? 'over the limit' : formatWorkspaceMegabytes(byteLength);
+  const error = new Error(`This canvas is too large to save (${size}). Limit is ${WORKSPACE_LIMIT_LABEL}. The last saved file was not changed.`);
+  error.code = 'WORKSPACE_TOO_LARGE';
+  return error;
+}
+
+function pooledFormOf(data, plain) {
+  try {
+    const pooled = poolWorkspaceContent(data);
+    if (!pooled) return null;
+    const serialized = formatPooledWorkspace(pooled);
+    // Prove the exact text about to reach disk restores this canvas. Anything
+    // short of that falls back to the plain form, which needs no restoring.
+    if (JSON.stringify(parseWorkspaceText(serialized)) === plain) return serialized;
+    logger.warn('[FileSystem] Canvas content pool did not restore identically; saving without it.');
+  } catch (error) {
+    logger.warn(`[FileSystem] Canvas content pool failed; saving without it: ${error?.message || error}`);
+  }
+  return null;
+}
+
+export function serializeWorkspaceForSave(data) {
+  let plain;
+  try {
+    plain = JSON.stringify(data);
+  } catch (error) {
+    if (error instanceof RangeError && /string length/i.test(error.message)) throw workspaceSaveTooLargeError();
+    throw error;
+  }
+  const byteLength = Buffer.byteLength(plain, 'utf8');
+  if (byteLength > WORKSPACE_MAX_BYTES) throw workspaceSaveTooLargeError(byteLength);
+  return pooledFormOf(data, plain) ?? plain;
+}
+
 export async function readRendererWorkspaceFile(filePath, {
   maxBytes = null,
   encoding = 'utf8',
@@ -3388,7 +3438,9 @@ export function registerFilesystemHandlers() {
     // but stop generating fresh embedded progress on save.
     delete data.transientProgress;
     annotatePortableFilePaths(data, targetPath);
-    const serializedCanvas = JSON.stringify(data);
+    // Refuse before any mutation below: an oversized write would replace the
+    // last good canvas with one the load path cannot open.
+    const serializedCanvas = serializeWorkspaceForSave(data);
 
     // Delete legacy separate sidecar progress file if present. Bind this
     // sibling deletion just like the canvas write: a path swap after the
@@ -3522,21 +3574,18 @@ export function registerFilesystemHandlers() {
     // Read from a no-follow descriptor bound to the checked regular-file inode
     // rather than resolving the renderer path and later reopening it by name.
     // This closes the guard→read path-swap window into app-private stores.
-    const MAX_WORKSPACE_BYTES = 100 * 1024 * 1024; // 100MB
     let workspace;
     try {
-      workspace = await readRendererWorkspaceFile(targetPath, { maxBytes: MAX_WORKSPACE_BYTES });
+      workspace = await readRendererWorkspaceFile(targetPath, { maxBytes: WORKSPACE_MAX_BYTES });
     } catch (error) {
       if (error?.code === 'ENOENT') throw new Error('File does not exist');
       throw error;
     }
     const { stat: stats, content } = workspace;
     if (stats.size === 0) throw new Error('Workspace file is empty (0 bytes)');
-    // Static safety bound (not adaptive): a workspace JSON larger than this would
-    // OOM the V8 string parser on read. Fixed by design.
-    if (workspace.tooLarge) throw new Error(`Workspace file is excessively large (${(stats.size/1024/1024).toFixed(2)}MB). Limit is 100MB.`);
+    if (workspace.tooLarge) throw new Error(`Workspace file is too large to open (${formatWorkspaceMegabytes(stats.size)}). Limit is ${WORKSPACE_LIMIT_LABEL}.`);
     try {
-      const data = JSON.parse(content);
+      const data = parseWorkspaceText(content);
       await resolvePortableFilePaths(data, targetPath);
       logger.info(`[FileSystem] Loaded workspace: ${targetPath} (${stats.size} bytes)`);
 
@@ -3575,7 +3624,7 @@ export function registerFilesystemHandlers() {
           extractSidecarData(cleanData.nodes || []);
           delete cleanData.transientProgress;
           
-          await atomicWriteRendererWorkspaceFile(targetPath, JSON.stringify(cleanData));
+          await atomicWriteRendererWorkspaceFile(targetPath, serializeWorkspaceForSave(cleanData));
           logger.info(`[FileSystem] Immediately deleted saved transient progress from disk file: ${targetPath}`);
         } catch (err) {
           logger.error(`[FileSystem] Failed to write clean canvas to disk after loading: ${targetPath}`, err);

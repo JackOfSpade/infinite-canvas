@@ -94,6 +94,25 @@ export function Probe({ onSnapshot, ...props }) { const state = useCanvasPersist
 }
 
 export default [
+  { name: 'A failed auto-load explains the blank canvas with the host reason and keeps the setting', async run() {
+    await withManualSave(async ({ props, render, act, state }) => {
+      const toasts = [];
+      const settings = [];
+      await render({ addToast: toast => toasts.push(toast), updateSetting: (key, value) => settings.push([key, value]) });
+      window.electronAPI.loadWorkspace = async () => ({ success: false, error: 'Workspace file is too large to open (600.00MB). Limit is 511MB.' });
+      await act(async () => { await state().loadCanvas('/workspace/canvas.json', true); });
+      assert.equal(toasts.length, 1, 'an auto-load failure is never silent');
+      assert.equal(toasts[0].title, 'Could Not Reopen Your Canvas');
+      assert.equal(toasts[0].duration, 0, 'the explanation stays until dismissed');
+      assert.match(toasts[0].description, /too large to open \(600\.00MB\).*not your saved file/);
+      assert.deepEqual(settings, [], 'a reported refusal keeps the file set for the next launch');
+
+      window.electronAPI.loadWorkspace = async () => ({ success: false, error: 'File does not exist' });
+      await act(async () => { await state().loadCanvas('/workspace/canvas.json', false); });
+      assert.equal(toasts.at(-1).title, 'Load Failed');
+      assert.equal(toasts.at(-1).description, 'File does not exist', 'a manual open reports the real reason too');
+    });
+  } },
   { name: 'Autosave retries a transient host path refusal without another edit and releases the writer lock', async run() {
     await withAutosave(async ({ props, writes, dirty, toasts, fire, setWrite, EventLogger }) => {
       setWrite(async () => writes.length === 1

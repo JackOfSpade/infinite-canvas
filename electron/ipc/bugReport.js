@@ -58,6 +58,7 @@ import { getHubDropLockReason, hubHasAcceptedInitialDrop } from '../../src/utils
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
+import { parseWorkspaceText } from './workspaceContentPool.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -816,7 +817,7 @@ function buildPersistedWorkspaceSnapshot(frontEndState) {
   }
 
   let parsed;
-  try { parsed = JSON.parse(raw); }
+  try { parsed = parseWorkspaceText(raw); }
   catch {
     return `
 ## Persisted Workspace Snapshot

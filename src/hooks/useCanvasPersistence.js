@@ -464,6 +464,15 @@ export function useCanvasPersistence({
     return true;
   }, [flushDocumentSessions, saveCanvas]);
 
+  const reportLoadFailure = useCallback((reason, isAutoLoad) => {
+    const detail = reason || 'The file could not be read.';
+    // A failed auto-load leaves a blank canvas that looks like lost work, so it
+    // must stay on screen and say the saved file was never opened.
+    addToast(isAutoLoad
+      ? { title: 'Could Not Reopen Your Canvas', description: `${detail} This blank canvas is not your saved file.`, type: 'error', duration: 0 }
+      : { title: 'Load Failed', description: detail, type: 'error' });
+  }, [addToast]);
+
   const loadCanvas = useCallback(async (targetFilePath = null, isSilent = false) => {
     if (!window.electronAPI || isAnimatingRef?.current || quitGateRef?.current?.frozen) return;
     const requestId = ++loadRequestRef.current;
@@ -597,7 +606,7 @@ export function useCanvasPersistence({
         if (!isSilent) addToast({ title: 'Workspace Loaded', description: 'Your canvas has been loaded successfully.', type: 'success' });
       } else if (!res?.canceled) {
         setLoadState({ active: false, progress: 0, label: '' });
-        if (!isSilent) addToast({ title: 'Load Failed', description: 'Failed to load canvas or invalid file format.', type: 'error' });
+        reportLoadFailure(res?.error, isSilent);
       } else {
         setLoadState({ active: false, progress: 0, label: '' });
       }
@@ -605,11 +614,11 @@ export function useCanvasPersistence({
       if (!isCurrentLoad()) return;
       EventLogger.error('Failed to load canvas:', err);
       setLoadState({ active: false, progress: 0, label: '' });
-      if (!isSilent) addToast({ title: 'Load Error', description: err?.message || String(err) || 'An error occurred while loading.', type: 'error' });
+      reportLoadFailure(err?.message || String(err), isSilent);
       // Clear auto-load config if it fails completely (deleted or broken) so we don't boot loop into it
       if (isSilent) updateSetting?.('lastOpenedWorkspace', null);
     }
-  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting, isMountedRef, quitGateRef]);
+  }, [handleUnsavedChanges, setNodes, setEdges, setDrawings, customFitView, addToast, resetStack, clearHistory, isAnimatingRef, updateSetting, isMountedRef, quitGateRef, reportLoadFailure]);
 
   const exportCanvasToPNG = useCallback(() => {
     if (isAnimatingRef?.current || isExportingRef.current) return;

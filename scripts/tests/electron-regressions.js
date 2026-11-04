@@ -6,6 +6,7 @@ import { getRecentLogs } from '../../electron/logger.js';
 import { createPendingGlobalQuitDeferral } from '../../electron/utils/quitDeferral.js';
 import { beginSenderQuitPause, drainSenderNodeTasksForQuit, getCurrentIpcRequestContext, isAppQuitPauseReason, releaseSenderQuitPause } from '../../electron/ipc/ipcUtils.js';
 import { registerNetworkHandlers } from '../../electron/ipc/network.js';
+import { WORKSPACE_MAX_BYTES, workspaceSaveTooLargeError } from '../../electron/ipc/filesystem.js';
 import {
   initialCanvasWindowSpec,
   openOrFocusCanvasWindow,
@@ -581,6 +582,51 @@ export default [
         // only a sender 'destroyed' event closes; without this the open
         // fs.watch keeps the runner process alive after its summary prints.
         loadEvent?.sender.emit('destroyed');
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'a saved canvas over the old 100MB load limit reopens, and save and load share one size bound',
+    run: async () => {
+      // The temp root stays under the cwd for the same reason as the rebind
+      // fixture above: the path guard refuses the /private/var system root.
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.ic-large-canvas-'));
+      const event = senderEvent();
+      try {
+        electronPkg.ipcMain.__clearInvokeHandlers();
+        registerFilesystemHandlers();
+        const load = electronPkg.ipcMain.__getInvokeHandler('load-workspace');
+        const save = electronPkg.ipcMain.__getInvokeHandler('save-workspace');
+
+        const large = path.join(root, 'large.json');
+        const pad = 'x'.repeat(105 * 1024 * 1024);
+        await fs.promises.writeFile(large, JSON.stringify({ nodes: [{ id: 'kept' }], edges: [], drawings: [], pad }));
+        const loaded = await load(event, { filePath: large });
+        assert(loaded?.success === true && loaded.data?.nodes?.[0]?.id === 'kept' && loaded.data.pad.length === pad.length,
+          `a 105MB canvas must load, got: ${loaded?.error}`);
+
+        const oversized = path.join(root, 'oversized.json');
+        await fs.promises.writeFile(oversized, '');
+        await fs.promises.truncate(oversized, WORKSPACE_MAX_BYTES + 1);
+        const refused = await load(event, { filePath: oversized });
+        assert(refused?.success === false && /too large to open/.test(refused.error),
+          'a file past the runtime string bound is refused with its reason, without being read');
+
+        const canvas = path.join(root, 'canvas.json');
+        const lastGood = '{"nodes":[],"edges":[],"drawings":[]}';
+        await fs.promises.writeFile(canvas, lastGood);
+        const unsaveable = { nodes: [], edges: [], drawings: [], toJSON() { throw new RangeError('Invalid string length'); } };
+        const saved = await save(event, { data: unsaveable, filePath: canvas });
+        assert(saved?.success === false && /too large to save/.test(saved.error)
+          && await fs.promises.readFile(canvas, 'utf8') === lastGood,
+          'a save past the bound is refused and the last good file keeps its bytes');
+        assert(/Limit is 511MB/.test(workspaceSaveTooLargeError(WORKSPACE_MAX_BYTES + 1).message)
+          && workspaceSaveTooLargeError().code === 'WORKSPACE_TOO_LARGE',
+          'the save refusal names the same bound the load path enforces');
+        return { loadedBytes: pad.length };
+      } finally {
+        event.sender.emit('destroyed');
         await fs.promises.rm(root, { recursive: true, force: true });
       }
     },

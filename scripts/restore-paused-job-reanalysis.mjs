@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { dedupJobsAcrossSources } from '../src/utils/jobIdentity.js';
+import { parseWorkspaceText } from '../electron/ipc/workspaceContentPool.js';
 
 export const REANALYZE_SAVED_JOBS_RECOVERY_MODE = 'reanalyze-saved-jobs';
 
@@ -283,7 +284,7 @@ export async function restorePausedJobReanalysis({
   const inputBytes = await readRegularFile(input, 'input canvas');
   let canvas;
   try {
-    canvas = JSON.parse(inputBytes.toString('utf8'));
+    canvas = parseWorkspaceText(inputBytes.toString('utf8'));
   } catch (error) {
     throw new Error(`Input canvas is not valid JSON: ${error.message}`);
   }

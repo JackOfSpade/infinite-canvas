@@ -193,6 +193,7 @@ import application_bundle_watch from './tests/application-bundle-watch.js';
 import application_sync_lifecycle from './tests/application-sync-lifecycle.js';
 import quit_autosave from './tests/quit-autosave.js';
 import autosave_recovery from './tests/autosave-recovery.js';
+import workspace_content_pool from './tests/workspace-content-pool.js';
 import job_tree_user_arranged_layout from './tests/job-tree-user-arranged-layout.js';
 import job_card_bundle_indicator from './tests/job-card-bundle-indicator.js';
 import application_authority_workflow from './tests/application-authority-workflow.js';
@@ -471,6 +472,7 @@ const testGroups = [
   ['application-sync-lifecycle.js', application_sync_lifecycle],
   ['quit-autosave.js', quit_autosave],
   ['autosave-recovery.js', autosave_recovery],
+  ['workspace-content-pool.js', workspace_content_pool],
   ['job-tree-user-arranged-layout.js', job_tree_user_arranged_layout],
   ['job-card-bundle-indicator.js', job_card_bundle_indicator],
   ['application-authority-workflow.js', application_authority_workflow],
