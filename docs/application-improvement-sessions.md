@@ -299,6 +299,16 @@ The label change archives the previous pairs and resets the counter on the app's
 
 The career catalog now travels in the system prompt, because Claude Code reuses its cache only for system prompt text or a wholly identical prompt. List cost per bundle fell from about $15-22 to $7-10. A paired writer test on 14 prompts found no quality loss: +1.35 ±0.83. Batch sizes now derive from the official 128,000-token output limit without a new quality test, at the user's direction, so check batch size first if job scoring or company research quality drifts. Non-application tasks moved to Claude with settings tested on offline samples from real prompt code; see `claudeTaskProfiles.js`.
 
+### 2026-11-04 — separate Résumé and Cover letter buttons; user-directed; counter not reset
+
+A job card now generates one document at a time, because many sites accept only a résumé. A job carries `documentScope` (`resume` or `cover`); a job without one predates this and produces both. Each scope gets a brief built from the exact sentences of `WRITE_VERIFY_BRIEF` that govern that document, with no sentence reworded. The full brief, rubric, truth gates, model label and frozen regression set are unchanged. Candidate count stays five, and the requirements stages run for each job.
+
+A résumé-only job skips the planning call, which is a letter outline, so its writer no longer receives an outline. A letter-only job's letter is checked against a host-built résumé made of exact approved achievement quotes, which is never rendered or delivered; the letter's own checks and fact-check are unchanged. A letter-only job's evidence covers all approved achievements rather than a writer's selection, so a letter may now argue from an achievement a separately written résumé leaves out.
+
+No blind writing-quality comparison was run, so no quality effect is claimed for either scope. Watch for a résumé quality change from the missing outline, and for a letter drifting from its résumé, since each document now has its own run.
+
+For sessions: a pair can hold one document. A résumé-only pair has `letter: null` and `letterRemoved: false`, which means the letter was never requested, not that it was generated and removed; only `not needed` rows record a removal. A letter-only pair has `resume: ''`. A second document joining the folder updates the same pair instead of superseding it, so it is neither a new count nor a rejection.
+
 ### 2026-11-02 — research follows scoring, at or above the fit threshold; user-directed; counter not reset
 
 Search no longer looks up official postings: every eligible listing is scored on its scraped text, and automatic research runs at Board Combine only for jobs at or above `RESEARCH_MIN_FIT_SCORE`. This replaces "The existing search and board lookup stages remain in place" in the 2026-10-28 entry; the Board stage remains and is gated. Generate still runs its own fresh lookup at any score, so application generation is unchanged. Writer guidance, truth checks, the model label and the frozen regression set are unchanged. No writing-quality gain is claimed.

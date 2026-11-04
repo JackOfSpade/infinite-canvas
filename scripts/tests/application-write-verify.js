@@ -488,7 +488,7 @@ export default [
       const hostSource = fs.readFileSync(new URL('../../electron/ipc/localAiApplication.js', import.meta.url), 'utf8');
       assert.match(hostSource, /kind: 'prompt'[\s\S]*?return record;/u);
       assert.match(hostSource, /assertApplicationV2ReplyLimit\(rawText\);\s*await archiveV2Content\(/u);
-      assert.match(hostSource, /kind: 'candidate-final'[\s\S]*?structured: gate\.structured/u);
+      assert.match(hostSource, /kind: 'candidate-final'[\s\S]*?structured: writeVerifyDocumentsForPrompt\(gate\.structured, input\.documentScope \|\| null\)/u);
       for (const [domain] of domains) {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), `v2-content-archive-${domain}-`));
         const jobDir = path.join(root, '.local-ai', 'jobs', JOB_ID);

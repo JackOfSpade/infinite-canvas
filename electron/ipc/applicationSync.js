@@ -11,6 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
+import { workspaceDocumentKinds, workspaceDocumentKindsFromBundleData } from './applicationDocumentScope.js';
 import { PDFDocument } from 'pdf-lib';
 import { renderPdf, applyDualPdf, pdfHasDualModeBackground } from './resumeRender.js';
 import {
@@ -573,11 +574,16 @@ function applicationSyncDataFromHtml(html) {
 }
 
 function letterWasRemoved(html) {
-  const dom = new JSDOM(String(html || ''));
-  try {
-    return JSON.parse(dom.window.document.getElementById('ic-application-bundle-data')?.textContent || '{}').letterRemoved === true;
-  } catch { return false; }
-  finally { dom.window.close(); }
+  return !workspaceDocumentKinds(html).includes('cover');
+}
+
+/** The panels a saved Application.html holds must be the ones its bundle data names. */
+export function workspacePanelsMatchBundle(bundle, resumePanels, coverPanels) {
+  const kinds = workspaceDocumentKindsFromBundleData(bundle);
+  const matches = (kind, panels) => (kinds.includes(kind)
+    ? panels.length === 1 && !!panels[0].querySelector('main.page')
+    : panels.length === 0);
+  return matches('resume', resumePanels) && matches('cover', coverPanels);
 }
 
 function withoutCoverLetter(html) {
@@ -720,8 +726,8 @@ export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, document
     const dom = new JSDOM(String(html || ''), { includeNodeLocations: true });
     const locations = {};
     try {
-      const removed = letterWasRemoved(html);
-      for (const kind of removed ? ['resume'] : ['resume', 'cover']) {
+      const kinds = workspaceDocumentKinds(html);
+      for (const kind of kinds) {
         const nodes = dom.window.document.querySelectorAll(`[data-ic-document-panel="${kind}"]`);
         if (nodes.length !== 1) {
           throw new Error(`${label} application workspace must contain exactly one ${kind} panel (found ${nodes.length}).`);
@@ -749,7 +755,7 @@ export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, document
         }
       }
       return {
-        removed,
+        kinds,
         mains: locations,
         decisions: collectUniqueReviewState(
           dom,
@@ -774,12 +780,12 @@ export function mergeSelectedApplicationPanel(incomingHtml, storedHtml, document
   const stored = String(storedHtml || '');
   const incomingState = inspect(incoming, 'Incoming');
   const storedState = inspect(stored, 'Saved', { validateCapability: Boolean(expectedToken) });
-  if (incomingState.removed !== storedState.removed || (storedState.removed && selected === 'cover')) {
-    throw new Error('The removed cover letter cannot be synced.');
+  if (incomingState.kinds.join() !== storedState.kinds.join() || !storedState.kinds.includes(selected)) {
+    throw new Error(selected === 'cover' ? 'The removed cover letter cannot be synced.' : 'This workspace does not hold a résumé to sync.');
   }
   const incomingLocations = incomingState.mains;
   const storedLocations = storedState.mains;
-  const replacements = (storedState.removed ? ['resume'] : ['resume', 'cover']).map((kind) => {
+  const replacements = storedState.kinds.map((kind) => {
     const storedMain = sanitizeDocumentMainHtml(
       stored.slice(storedLocations[kind].startOffset, storedLocations[kind].endOffset),
       { documentKind: kind, allowHostState: true, allowTrustedDerivations: true },
@@ -888,10 +894,7 @@ export async function inspectApplicationSyncRevision({ applicationPath, pdfPath,
             row.syncConfigValid = bundle?.sync?.endpoint === `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`
               && bundle?.sync?.token === token;
             row.htmlStructureValid = document.doctype?.name?.toLowerCase() === 'html'
-              && resumePanels.length === 1
-              && (bundle.letterRemoved === true ? coverPanels.length === 0 : coverPanels.length === 1)
-              && !!resumePanels[0].querySelector('main.page')
-              && (bundle.letterRemoved === true || !!coverPanels[0].querySelector('main.page'))
+              && workspacePanelsMatchBundle(bundle, resumePanels, coverPanels)
               && row.syncConfigValid;
           } finally {
             dom.window.close();
@@ -950,7 +953,7 @@ async function reconcileWorkspacePdfs(payload) {
     await captureOrVerifyWorkspaceIdentity(workspace);
     const storedHtml = await readRegisteredWorkspaceHtml(workspace);
     let reconciledHtml = storedHtml;
-    const activeKinds = letterWasRemoved(storedHtml) ? ['resume'] : ['resume', 'cover'];
+    const activeKinds = workspaceDocumentKinds(storedHtml);
     let syncData = applicationSyncDataFromHtml(reconciledHtml);
     const importedDocuments = [];
     const staleDocuments = [];
@@ -1147,6 +1150,7 @@ async function removeCoverLetter(payload) {
     if (workspaces.get(token) !== workspace) throw Object.assign(new Error('This workspace was replaced.'), { statusCode: 409 });
     await captureOrVerifyWorkspaceIdentity(workspace);
     const storedHtml = await readRegisteredWorkspaceHtml(workspace);
+    if (!workspaceDocumentKinds(storedHtml).includes('resume')) throw Object.assign(new Error('This workspace holds only its cover letter. Delete the saved folder from the job card instead.'), { statusCode: 409 });
     if (letterWasRemoved(storedHtml)) return { removed: true };
     const html = withoutCoverLetter(storedHtml);
     let audit = null;
@@ -1388,7 +1392,7 @@ async function syncWorkspace(payload) {
 export function applicationSyncConfig(token, { html = '', resumePdf = null, coverPdf = null } = {}) {
   const documentRevision = (documentKind, pdf) => ({
     pdfSha256: pdf == null ? '' : sha256(Buffer.from(pdf)),
-    htmlSha256: html ? applicationPanelSha256(html, documentKind) : '',
+    htmlSha256: html && workspaceDocumentKinds(html).includes(documentKind) ? applicationPanelSha256(html, documentKind) : '',
   });
   return {
     endpoint: `http://127.0.0.1:${APPLICATION_SYNC_PORT}${APPLICATION_SYNC_PATH}`,

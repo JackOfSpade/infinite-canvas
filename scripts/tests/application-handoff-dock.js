@@ -561,7 +561,7 @@ const dockTests = [
         'it must clear the pointer through the global node write, as the fallback manager does',
       );
       assert(
-        discovery.includes('live?.id === jobId'),
+        discovery.includes('localApplicationAfterDiscard(node?.data, jobId)'),
         'it must clear only the bundle the discard targeted, never a replacement queued since',
       );
     },

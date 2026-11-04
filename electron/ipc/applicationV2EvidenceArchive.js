@@ -28,7 +28,7 @@ export async function archiveV2Content({ jobDir, jobId, stage, revision, kind, c
   if (!content || typeof content !== 'object'
     || (kind === 'prompt' && typeof content.prompt !== 'string')
     || (kind === 'reply' && typeof content.response !== 'string')
-    || (kind === 'candidate-final' && (!content.structured?.resume || !content.structured?.coverLetter))) {
+    || (kind === 'candidate-final' && !content.structured?.resume && !content.structured?.coverLetter)) {
     throw new Error('Application v2 evidence archive accepts only stage content.');
   }
   const directory = v2EvidenceArchiveDirectory(jobDir, jobId);

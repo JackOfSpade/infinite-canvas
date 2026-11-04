@@ -55,7 +55,76 @@ function shortToken(line) {
   return { token: match[1], rest };
 }
 
-export function splitWriteVerifyWriterResponse(response, allowedIds) {
+function parseShortlistIds(workingLines, allowedIds) {
+  const allowedList = Array.isArray(allowedIds) ? allowedIds : [...(allowedIds || [])];
+  const allowed = new Set(allowedList);
+  const byEntity = shortIdIndex(allowedList);
+  const items = workingLines.filter(line => {
+    if (LIST_MARKER.test(line)) return true;
+    if ([...line.matchAll(CATALOG_ID)].length) return true;
+    const short = shortToken(line);
+    return Boolean(short && resolveShortId(short.token, byEntity));
+  });
+  if (items.length < 6 || items.length > 10) {
+    throw new Error(`Writer working shortlist must list 6–10 items, one per line as ${LINE_FORM} with the full ID (${FULL_ID_FORM}) copied from the FULL APPROVED CATALOG; ${items.length} item lines were found.`);
+  }
+  const ids = [];
+  for (const line of items) {
+    const matches = [...line.matchAll(CATALOG_ID)];
+    let id;
+    let rest;
+    if (matches.length > 1) throw new Error(ID_MESSAGE);
+    if (matches.length === 1) {
+      id = matches[0][0];
+      if (!allowed.has(id)) throw new Error(ID_MESSAGE);
+      rest = line.slice(matches[0].index + id.length);
+    } else {
+      const short = shortToken(line);
+      id = short ? resolveShortId(short.token, byEntity) : null;
+      if (!id) throw new Error(ID_MESSAGE);
+      rest = short.rest;
+    }
+    if (!rest.replace(REASON_PREFIX, '').trim()) throw new Error(ID_MESSAGE);
+    ids.push(id);
+  }
+  if (new Set(ids).size !== ids.length) {
+    throw new Error(`Writer working shortlist IDs must be distinct: use each catalog ID once, one per line as ${LINE_FORM} with the full ID ${FULL_ID_FORM}.`);
+  }
+  return ids;
+}
+
+// One delivered document, then the same two appendices. Kept apart from the
+// two-document parser below, whose legacy reply forms a scoped job never had.
+function splitScopedWriterResponse(response, allowedIds, documentScope) {
+  const name = documentScope === 'resume' ? 'résumé' : 'cover letter';
+  const heading = documentScope === 'resume' ? 'RÉSUMÉ' : 'COVER LETTER';
+  if (typeof response !== 'string' || !response.trim() || response.trim().startsWith('{')) {
+    throw new Error(`Writer must return a plain-text ${name} with no JSON.`);
+  }
+  const lines = response.split(/\r?\n/u);
+  const first = lines.findIndex(line => line.trim());
+  const own = documentScope === 'resume' ? RESUME_HEADING : LETTER_HEADING;
+  const other = documentScope === 'resume' ? LETTER_HEADING : RESUME_HEADING;
+  if (!own.test(lines[first] || '')) throw new Error(`Writer must start with a standalone ${heading} heading on the first line, with no preface or name line before it. Deliver ${heading}, then the EVIDENCE SHORTLIST and EDITORIAL SUMMARY appendices as separate sections.`);
+  const evidence = lines.findIndex(line => EVIDENCE_APPENDIX_HEADING.test(line));
+  const summary = lines.findIndex(line => EDITORIAL_SUMMARY_HEADING.test(line));
+  if (evidence <= first || (summary >= 0 && summary <= evidence)
+    || lines.filter(line => EVIDENCE_APPENDIX_HEADING.test(line)).length !== 1
+    || lines.filter(line => EDITORIAL_SUMMARY_HEADING.test(line)).length > 1) {
+    throw new Error(`Writer must return ${heading}, EVIDENCE SHORTLIST, then EDITORIAL SUMMARY as separate sections.`);
+  }
+  const body = lines.slice(first + 1, evidence);
+  if (!body.some(line => line.trim())) throw new Error(`Writer must return a nonempty ${name} section. ${FORM_SUFFIX}`);
+  if (body.some(line => other.test(line))) throw new Error(`This job produces only the ${name}. Return that document alone.`);
+  const workingLines = lines.slice(evidence + 1, summary >= 0 ? summary : lines.length).filter(line => line.trim());
+  const ids = parseShortlistIds(workingLines, allowedIds);
+  const plainText = [heading, ...body].join('\n').trim();
+  if (plainText.match(CATALOG_ID)) throw new Error(`The ${name} text must not contain catalog evidence IDs; keep ${FULL_ID_FORM} IDs only in shortlist lines of the form ${LINE_FORM}.`);
+  return { shortlist: workingLines.join('\n'), decisions: summary >= 0 ? lines.slice(summary + 1).join('\n').trim() : '', plainText, ids };
+}
+
+export function splitWriteVerifyWriterResponse(response, allowedIds, { documentScope = null } = {}) {
+  if (documentScope) return splitScopedWriterResponse(response, allowedIds, documentScope);
   if (typeof response !== 'string' || !response.trim() || response.trim().startsWith('{')) {
     throw new Error('Writer must return a plain-text résumé and cover letter with no JSON.');
   }
@@ -88,46 +157,13 @@ export function splitWriteVerifyWriterResponse(response, allowedIds) {
   if (heading < 0 || lines.slice(0, heading).some(line => line.trim()) || resume <= heading + 1) {
     throw new Error(`Writer must begin with EVIDENCE SHORTLIST (WORKING NOTES), then a RÉSUMÉ heading. ${FORM_SUFFIX}`);
   }
-  const allowedList = Array.isArray(allowedIds) ? allowedIds : [...(allowedIds || [])];
-  const allowed = new Set(allowedList);
-  const byEntity = shortIdIndex(allowedList);
   // The decision log is the writer's own record of why it chose what it chose. It is
   // archived for later diagnosis and never graded: a missing log is recorded, not rejected.
   const decisionHeading = lines.findIndex((line, index) => index > heading && index < resume && DECISION_LOG_HEADING.test(line));
   const shortlistEnd = decisionHeading > heading ? decisionHeading : resume;
   const decisions = decisionHeading > heading ? lines.slice(decisionHeading + 1, resume).join('\n').trim() : '';
   const workingLines = lines.slice(heading + 1, shortlistEnd).filter(line => line.trim());
-  const items = workingLines.filter(line => {
-    if (LIST_MARKER.test(line)) return true;
-    if ([...line.matchAll(CATALOG_ID)].length) return true;
-    const short = shortToken(line);
-    return Boolean(short && resolveShortId(short.token, byEntity));
-  });
-  if (items.length < 6 || items.length > 10) {
-    throw new Error(`Writer working shortlist must list 6–10 items, one per line as ${LINE_FORM} with the full ID (${FULL_ID_FORM}) copied from the FULL APPROVED CATALOG; ${items.length} item lines were found.`);
-  }
-  const ids = [];
-  for (const line of items) {
-    const matches = [...line.matchAll(CATALOG_ID)];
-    let id;
-    let rest;
-    if (matches.length > 1) throw new Error(ID_MESSAGE);
-    if (matches.length === 1) {
-      id = matches[0][0];
-      if (!allowed.has(id)) throw new Error(ID_MESSAGE);
-      rest = line.slice(matches[0].index + id.length);
-    } else {
-      const short = shortToken(line);
-      id = short ? resolveShortId(short.token, byEntity) : null;
-      if (!id) throw new Error(ID_MESSAGE);
-      rest = short.rest;
-    }
-    if (!rest.replace(REASON_PREFIX, '').trim()) throw new Error(ID_MESSAGE);
-    ids.push(id);
-  }
-  if (new Set(ids).size !== ids.length) {
-    throw new Error(`Writer working shortlist IDs must be distinct: use each catalog ID once, one per line as ${LINE_FORM} with the full ID ${FULL_ID_FORM}.`);
-  }
+  const ids = parseShortlistIds(workingLines, allowedIds);
   const letter = lines.findIndex((line, index) => index > resume && LETTER_HEADING.test(line));
   if (letter < 0 || !lines.slice(resume + 1, letter).some(line => line.trim())
     || !lines.slice(letter + 1).some(line => line.trim())) {

@@ -1335,12 +1335,12 @@ export default [
       const search = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
       const card = fs.readFileSync(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
       const applicationRunStart = card.indexOf('const queuedApplicationRun =');
-      const applicationRunEnd = card.indexOf('\n  const localJobPending =', applicationRunStart);
+      const applicationRunEnd = card.indexOf('\n  const localLookupPending =', applicationRunStart);
       const applicationRunState = card.slice(applicationRunStart, applicationRunEnd);
       const lockStart = card.indexOf('const owningBoardLocked = useStore(');
       const lockEnd = card.indexOf('\n  const previousMeasuredHeightRef =', lockStart);
       const effectiveLock = card.slice(lockStart, lockEnd);
-      const generateStart = card.indexOf('const generateApplication = useCallback(async (options = {}) => {');
+      const generateStart = card.indexOf('const generateApplication = useCallback(async (documentScope, options = {}) => {');
       const generateEnd = card.indexOf('\n\n  return (', generateStart);
       const generate = card.slice(generateStart, generateEnd);
       const dismissStart = card.indexOf('onClick={effectiveLock ? undefined : () => dismissCard()}');
@@ -1349,7 +1349,7 @@ export default [
       const notesStart = card.indexOf('id={`job-notes-${id}`}');
       const notesEnd = card.indexOf('\n        />', notesStart);
       const notes = card.slice(notesStart, notesEnd);
-      const buttonStart = card.indexOf('{/* Generate the application bundle.', generateEnd);
+      const buttonStart = card.indexOf('{/* Each button generates one document', generateEnd);
       const buttonEnd = card.indexOf('\n\n      </div>', buttonStart);
       const generateButton = card.slice(buttonStart, buttonEnd);
 
@@ -1364,8 +1364,8 @@ export default [
         && effectiveLock.includes('const effectiveLock = !!data.locked || owningBoardLocked;')
         && !effectiveLock.includes('moduleRunSnapshot') && !effectiveLock.includes("lane: 'job-search'"),
       'the effective lock must react to the owning Job Board only; an active Job Search is not a card lock');
-      assert(generate.includes('if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;')
-        && generate.includes('if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;')
+      assert(generate.includes('|| getRunningApplicationDocument(idRef.current) || startingCard?.type !== \'jobcard\'')
+        && generate.includes('queuedLocalApplicationStartDecision(startingCard, getLiveNode(startingCard.data?.hubId), documentScope).allowed')
         && !generate.includes("lane: 'job-search'")
         && !generate.includes('moduleRunSnapshot.active'),
       'Generate\'s guard must use the effective board lock plus a live race fence, never active Job Search work');
@@ -1382,12 +1382,12 @@ export default [
       assert(generate.includes('const queueJob = projectOfficialPostingGenerationJob(cardBeforeQueue.data)')
         && generate.includes('job: queueJob,'), 'Generate queues the current live card through the same source projection as research');
       assert(dismissButton.includes('disabled={effectiveLock}')
-        && notes.includes('disabled={effectiveLock || hasApplicationRun || localJobPending}')
-        && generateButton.includes('onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}')
-        && generateButton.includes('disabled={hasApplicationRun || !!officialPostingLookup || !!boardPostingPreparation || localJobPending || effectiveLock}')
+        && notes.includes('disabled={effectiveLock || hasApplicationRun || localLookupPending || everyDocumentExists}')
+        && generateButton.includes('onClick={disabled ? undefined : (e) => { e.stopPropagation(); requestApplicationDocument(kind, { listingOverride: listingOverrideAvailable }); }}')
+        && generateButton.includes('const disabled = state.disabled || lookupBusy || effectiveLock;')
         && card.includes('() => data.hubId ? getOfficialPostingPreparation(preparationCanvasFilePath, data.hubId) : null')
         && generate.includes('getOfficialPostingPreparation(canvas, card.data.hubId)')
-        && generate.includes('if (boardPostingCheckActive(getLiveNode(idRef.current))) return;')
+        && generate.includes('if (boardPostingCheckActive(startingCard)) return;')
         && !generateButton.includes('job-search') && !generateButton.includes('activeRuns'),
       'dismiss, notes, and Generate must share the effective owning-board lock while Generate stays enabled during an unrelated active Job Search module');
       return { jobSearchLane: true, applicationLane: true, effectiveBoardLock: true, generateScopedToApplication: true };

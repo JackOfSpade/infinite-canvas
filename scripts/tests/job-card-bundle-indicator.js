@@ -79,7 +79,7 @@ export default [
       const start = source.indexOf("{localApplication.status === 'saved' && localApplication.savedDir && window.electronAPI?.deleteLocalApplicationOutput");
       const handlerStart = source.indexOf('onClick={(e) => {', start) + 'onClick={'.length;
       const handlerEnd = source.indexOf('\n              }}', handlerStart) + '\n              }'.length;
-      const syncStart = source.indexOf('  useEffect(() => {\n    if (JSON.stringify(data.localApplication || null) !== localApplicationKey)');
+      const syncStart = source.indexOf('  useEffect(() => {\n    const canvasKey = JSON.stringify(data.localApplication || null);');
       const syncEnd = source.indexOf('\n  }, [', syncStart);
       const syncBody = source.slice(syncStart + '  useEffect(() => {'.length, syncEnd);
       assert.ok(start >= 0 && syncStart >= 0);
@@ -117,7 +117,7 @@ export default [
         // Run the real synchronization effect after the deletion response.
         runInNewContext(`(() => {${syncBody}})()`, {
           data: node.data, localApplication: state, localApplicationKey: JSON.stringify(state),
-          id: 'card', updateGlobal, setLocalApplication,
+          id: 'card', updateGlobal, setLocalApplication, seenCanvasApplicationRef: { current: JSON.stringify(node.data.localApplication || null) },
         });
         assert.strictEqual(state?.id ?? null, newer ? 'new-job' : null);
         assert.strictEqual(node.data.localApplication?.id ?? null, newer ? 'new-job' : null);
@@ -129,6 +129,7 @@ export default [
       const node = { data: { localApplication: { id: 'saved-job', status: 'saved', savedDir: '/canvas/bundle' } } };
       runInNewContext(`(() => {${syncBody}})()`, {
         data: node.data, localApplication: state, localApplicationKey: JSON.stringify(state), id: 'card',
+        seenCanvasApplicationRef: { current: JSON.stringify(node.data.localApplication) },
         setLocalApplication: next => { state = next; },
         updateGlobal: (_id, patch) => Object.assign(node.data, patch(node)),
       });
@@ -367,7 +368,7 @@ export default [
       const source = readNodeSource();
 
       assert.ok(source.includes("from '../utils/jobCardBundleIndicator'"), 'JobCardNode imports the bundle indicator helper');
-      assert.ok(source.includes('applicationBundleIndicator(localApplication)'), 'JobCardNode calls the helper with the card state');
+      assert.ok(source.includes('applicationBundleIndicator(savedPointer || localApplication)'), 'JobCardNode calls the helper with the card state');
       assert.ok(!source.includes('job-card-bundle-badge') && !source.includes('job-card-bundle-stripe'), 'old badge/stripe are gone');
 
       const crossAt = source.indexOf('data-testid="job-card-bundle-cross"');

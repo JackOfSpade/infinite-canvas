@@ -35,6 +35,17 @@ try {
     data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
       url: 'https://example.test/jobs/synthetic' },
   }, {
+    id: 'resume-saved-card', type: 'jobcard', position: { x: 0, y: 700 },
+    data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
+      localApplication: { id: '123e4567-e89b-42d3-a456-426614174778', status: 'saved', mode: 'paste', canvasFilePath, documentScope: 'resume',
+        savedDir: outputDir, savedDocuments: { resume: true, cover: false } } },
+  }, {
+    id: 'letter-running-card', type: 'jobcard', position: { x: 400, y: 700 },
+    data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
+      localApplication: { id: '123e4567-e89b-42d3-a456-426614174779', status: 'failed', mode: 'paste', canvasFilePath, documentScope: 'cover', message: 'Synthetic stop.' },
+      priorSavedApplication: { id: '123e4567-e89b-42d3-a456-426614174778', status: 'saved', mode: 'paste', canvasFilePath, documentScope: 'resume',
+        savedDir: outputDir, savedDocuments: { resume: true, cover: false } } },
+  }, {
     id: 'lookup-retry-card', type: 'jobcard', position: { x: 800, y: 0 },
     data: { title: 'Synthetic Engineer', company: 'Synthetic', matchScore: 80,
       url: 'https://example.test/jobs/retry',
@@ -67,27 +78,40 @@ try {
   await retry.getByRole('button', { name: 'Check again', exact: true }).waitFor();
   assert.match(await retry.innerText(), /Employer site verification timed out/u);
   assert.match(await retry.innerText(), /Complete the official posting lookup before generating/u);
-  assert.equal(await retry.getByRole('button', { name: 'Generate anyways', exact: true }).count(), 0,
+  assert.equal(await retry.getByRole('button', { name: /anyways/u }).count(), 0,
     'an incomplete source lookup offers retry, without a bypass');
   const closed = page.locator('.react-flow__node-jobcard[data-id="closed-posting-card"]');
   await closed.getByRole('button', { name: 'Check again', exact: true }).waitFor();
   assert.match(await closed.innerText(), /Generation paused · Official posting closed/u);
-  assert.equal(await closed.getByRole('button', { name: 'Generate anyways', exact: true }).count(), 0,
+  assert.equal(await closed.getByRole('button', { name: /anyways/u }).count(), 0,
     'a closed official identity offers a fresh lookup without a board-only override');
   await rebuilt.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
   assert.equal(await rebuilt.getByTestId('job-card-bundle-cross').count(), 1, 'the restored bundle displays its red X');
-  assert.equal(await rebuilt.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
-    'a rebuilt mounted card adopts its restored saved pointer');
+  const documentButton = (cardLocator, kind) => cardLocator.locator(`[data-application-document="${kind}"]`);
+  const assertDisabled = async (cardLocator, kind, disabled, message) => {
+    assert.equal(await documentButton(cardLocator, kind).isDisabled(), disabled, message);
+  };
+  await assertDisabled(rebuilt, 'resume', true, 'a rebuilt mounted card adopts its restored saved pointer');
+  await assertDisabled(rebuilt, 'cover', true, 'a restored saved bundle from before the split holds both documents');
   await card.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
-  assert.equal(await card.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
-    'a linked saved folder must hide Generate entirely');
+  await assertDisabled(card, 'resume', true, 'a linked saved folder greys out its résumé button');
+  await assertDisabled(card, 'cover', true, 'a linked saved folder greys out its letter button');
+  const resumeSaved = page.locator('.react-flow__node-jobcard[data-id="resume-saved-card"]');
+  await assertDisabled(resumeSaved, 'resume', true, 'a saved résumé greys out its own button');
+  await assertDisabled(resumeSaved, 'cover', false, 'a saved résumé leaves the letter available');
+  const letterFailed = page.locator('.react-flow__node-jobcard[data-id="letter-running-card"]');
+  await assertDisabled(letterFailed, 'resume', true, 'the saved résumé stays blocked beside a failed letter');
+  await assertDisabled(letterFailed, 'cover', false, 'a failed letter can be pressed again');
+  assert.match(await documentButton(letterFailed, 'cover').innerText(), /Retry cover letter/u);
+  await letterFailed.getByRole('button', { name: 'Open saved folder', exact: true }).waitFor();
   await page.evaluate(filePath => window.electronAPI.watchApplicationBundles({ canvasFilePath: filePath }), canvasFilePath);
   await fs.unlink(path.join(outputDir, 'Resume.pdf'));
-  assert.equal(await card.getByRole('button', { name: 'Generate', exact: true }).count(), 0,
-    'editing or deleting a file inside a linked folder must not unlock generation');
+  await assertDisabled(card, 'resume', true, 'editing or deleting a file inside a linked folder must not unlock generation');
   await fs.rm(outputDir, { recursive: true });
-  await card.getByRole('button', { name: 'Retry generation', exact: true }).waitFor({ timeout: 20_000 });
-  await rebuilt.getByRole('button', { name: 'Retry generation', exact: true }).waitFor({ timeout: 20_000 });
+  await page.waitForFunction(() => {
+    const free = id => document.querySelector(`.react-flow__node-jobcard[data-id="${id}"] [data-application-document="resume"]`)?.disabled === false;
+    return free('saved-card') && free('rebuilt-card');
+  }, null, { timeout: 20_000 });
   assert.equal(await rebuilt.getByTestId('job-card-bundle-cross').count(), 0, 'a deleted bundle clears the restored X');
   assert.equal(await card.getByRole('button', { name: 'Open saved folder', exact: true }).count(), 0,
     'external folder removal must clear the saved indicator');

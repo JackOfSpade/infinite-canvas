@@ -1,7 +1,7 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
-import { ExternalLink, X, Sparkles, ChevronDown } from 'lucide-react';
+import { ExternalLink, X, Sparkles, ChevronDown, Check } from 'lucide-react';
 import { useToast } from '../components/ToastProvider';
 import { EventLogger } from '../utils/EventLogger';
 import { generateId } from '../utils/idGenerator';
@@ -17,7 +17,8 @@ import { openExternalFailureMessage, openExternalUrl } from '../utils/openExtern
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
-import { canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup } from '../utils/localAiApplicationLifecycle';
+import { applicationDocumentButtonState, applicationDocumentMustWait, canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationAfterDiscard, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup, savedApplicationDocuments, savedApplicationPointer } from '../utils/localAiApplicationLifecycle';
+import { claimApplicationDocumentWaiter, claimRunningApplicationDocument, clearRunningApplicationDocument, getRunningApplicationDocument, releaseApplicationDocumentWaiter, subscribeApplicationDocumentRuns } from '../utils/applicationDocumentRuns';
 import {
   APPLICATION_HANDOFF_LIMIT,
   applicationAwaitsPaste,
@@ -101,6 +102,12 @@ function auditCountLabel(count, singular, plural = `${singular}s`) {
 // Every action that resumes or retries a paused generation shares this tone.
 // Labels still distinguish a safe recheck from an explicit listing override.
 const GENERATION_RECOVERY_BUTTON_CLASS = 'rounded-lg border border-amber-400/25 bg-amber-400/10 text-amber-200 hover:bg-amber-400/15 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 disabled:opacity-50 disabled:cursor-default';
+const APPLICATION_DOCUMENTS = Object.freeze([
+  { kind: 'resume', label: 'Résumé', noun: 'résumé' },
+  { kind: 'cover', label: 'Cover letter', noun: 'cover letter' },
+]);
+const applicationDocumentNoun = kind => (kind === 'cover' ? 'cover letter' : 'résumé');
+const QUEUED_DOCUMENT_POLL_MS = 1000;
 const GENERATION_RECOVERY_SMALL_BUTTON_CLASS = `${GENERATION_RECOVERY_BUTTON_CLASS} mt-2 px-2.5 py-1.5 text-[11px] font-semibold`;
 
 function compactAuditSummary(audit) {
@@ -288,8 +295,20 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   }, [id]);
 
   const localApplicationKey = JSON.stringify(localApplication);
+  const seenCanvasApplicationRef = useRef(JSON.stringify(data.localApplication || null));
   useEffect(() => {
-    if (JSON.stringify(data.localApplication || null) !== localApplicationKey) {
+    const canvasKey = JSON.stringify(data.localApplication || null);
+    const canvasChanged = canvasKey !== seenCanvasApplicationRef.current;
+    seenCanvasApplicationRef.current = canvasKey;
+    // A run begun before this card last remounted writes its new job to the
+    // canvas, not to this instance's state. Without this, the write-back below
+    // would replace that new job with what this instance mounted holding.
+    if (canvasChanged && data.localApplication?.id && data.localApplication.id !== localApplication?.id
+      && localApplication?.savedOutputMissing !== true && localApplication?.savedReceiptMissing !== true) {
+      setLocalApplication(data.localApplication);
+      return;
+    }
+    if (canvasKey !== localApplicationKey) {
       // Ownership handover: if the fallback manager finished a save while this
       // card was unmounted-or-racing, the terminal 'saved' state arrives via
       // data. Adopt it — clobbering it back would resurrect a job whose
@@ -328,17 +347,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const jobId = event?.detail?.jobId;
       const nodeId = event?.detail?.nodeId;
       if (!jobId || nodeId !== id) return;
-      updateGlobal(id, (node) => {
-        const live = node?.data?.localApplication;
-        // Only clear the pointer this discard actually targeted; a newer
-        // bundle this card queued in the meantime must survive.
-        return live?.id === jobId ? { localApplication: null } : null;
-      });
-      setLocalApplication((current) => current?.id === jobId ? null : current);
+      // Only the pointer this discard actually targeted moves; a newer bundle
+      // this card queued in the meantime must survive. A saved document that
+      // job was stacked on comes back.
+      const restored = localApplicationAfterDiscard(getLiveNode(id)?.data, jobId);
+      updateGlobal(id, (node) => localApplicationAfterDiscard(node?.data, jobId));
+      setLocalApplication((current) => current?.id === jobId ? (restored?.localApplication || null) : current);
     };
     document.addEventListener('application-handoff-discarded', handleDiscarded);
     return () => { document.removeEventListener('application-handoff-discarded', handleDiscarded); };
-  }, [id, updateGlobal]);
+  }, [id, updateGlobal, getLiveNode]);
 
   // Match and compensation disclosures change the card's DOM height
   // asynchronously through ResizeObserver. A first measurement only needs a
@@ -464,13 +482,37 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     ? { state: 'queued', position: queuedApplicationRun.position, blocked: queuedApplicationRun.blocked === true }
     : activeApplicationRun ? (applicationRun.state === 'resolving' ? applicationRun : { state: 'generating', position: null }) : (officialPostingLookup ? null : sharedPreparation) || applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
-  const localJobPending = !!localApplication && !canRegenerateLocalApplication(localApplication);
   const localLookupPending = localApplicationBlocksOfficialPostingLookup(localApplication);
-  const hasLinkedApplicationOutput = hasLinkedLocalApplicationOutput(localApplication)
-    || hasLinkedLocalApplicationOutput(data.localApplication);
-  const bundleIndicator = applicationBundleIndicator(localApplication);
+  const runningDocument = useSyncExternalStore(
+    subscribeApplicationDocumentRuns,
+    () => getRunningApplicationDocument(id),
+    () => null,
+  );
+  // This instance's state and the canvas can each hold the newer pointer for a
+  // moment. A document that either says exists or is running stays blocked.
+  const documentData = useMemo(() => ({
+    localApplication,
+    priorSavedApplication: data.priorSavedApplication,
+    queuedApplicationDocument: data.queuedApplicationDocument,
+  }), [localApplication, data.priorSavedApplication, data.queuedApplicationDocument]);
+  const canvasDocumentData = useMemo(() => ({
+    localApplication: data.localApplication,
+    priorSavedApplication: data.priorSavedApplication,
+    queuedApplicationDocument: data.queuedApplicationDocument,
+  }), [data.localApplication, data.priorSavedApplication, data.queuedApplicationDocument]);
+  const documentButtonState = kind => {
+    const own = applicationDocumentButtonState(kind, { data: documentData, runningDocument });
+    const canvas = applicationDocumentButtonState(kind, { data: canvasDocumentData, runningDocument });
+    return { exists: own.exists || canvas.exists, inProgress: own.inProgress || canvas.inProgress, queued: own.queued,
+      disabled: own.disabled || canvas.disabled };
+  };
+  const savedDocuments = savedApplicationDocuments(documentData);
+  const canvasSavedDocuments = savedApplicationDocuments(canvasDocumentData);
+  const everyDocumentExists = (savedDocuments.resume || canvasSavedDocuments.resume) && (savedDocuments.cover || canvasSavedDocuments.cover);
+  const savedPointer = savedApplicationPointer(documentData);
+  const bundleIndicator = applicationBundleIndicator(savedPointer || localApplication);
   const bundleTone = bundleIndicator ? APPLICATION_BUNDLE_TONES[bundleIndicator.tone] : null;
-  const listingGenerationPaused = !hasLinkedApplicationOutput && !hasApplicationRun && !localJobPending
+  const listingGenerationPaused = !everyDocumentExists && !hasApplicationRun && !localLookupPending
     && Boolean(data.listingGenerationNotice?.message || data.listingHold === true);
   const listingOverrideAvailable = listingGenerationPaused && !['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis);
   const localApplicationNeedsAttention = Boolean(localApplication
@@ -788,6 +830,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           ...current,
           status: 'saved',
           savedDir: saved.dir,
+          ...(saved.savedDocuments ? { savedDocuments: saved.savedDocuments } : {}),
           ...(savedReceipt ? { receipt: savedReceipt } : {}),
           message: missingArtifacts.length
             ? `Saved to ${saved.dir}, but ${missingArtifacts.join(' and ')} could not be rendered. Use Repair bundle to retry.`
@@ -803,7 +846,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             ? `Saved editable HTML and listing to ${saved.dir}; ${missingArtifacts.join(' and ')} were unavailable. Use Repair bundle to retry.`
             : resumeOverflow
               ? `Saved the bundle to ${saved.dir}, but the résumé remained ${resumeFit.pageCount} pages after the layout-fit safeguards (target: ${resumeFit.targetPageCount}).`
-            : `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir}.`,
+            : `Saved editable HTML, ${[saved.savedDocuments?.resume !== false && 'résumé', saved.savedDocuments?.cover !== false && 'cover letter'].filter(Boolean).join(', ')}, and listing to ${saved.dir}.`,
           type: missingArtifacts.length || resumeOverflow ? 'error' : 'success',
         });
       }
@@ -1047,7 +1090,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           if (needsSavedProbe && next.status === 'saved' && Array.isArray(next.receipt?.selectedModelEffort)) {
             setSavedSelection({ jobId, rows: next.receipt.selectedModelEffort });
           }
-          if (needsSavedProbe && next.status === 'saved') return;
+          // The folder is the record of what exists: a letter removed from the
+          // page frees its button here, the next time the card looks.
+          if (needsSavedProbe && next.status === 'saved') {
+            if (next.savedDocuments) {
+              setLocalApplication((current) => current?.id === jobId && JSON.stringify(next.savedDocuments) !== JSON.stringify(current.savedDocuments)
+                ? { ...current, savedDocuments: next.savedDocuments } : current);
+            }
+            return;
+          }
           // A restart can resume polling a job that reads 'saved' only from
           // its terminal receipt (the private folder is already gone). That
           // receipt carries the same durable output directory a live save
@@ -1078,6 +1129,35 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     interval = window.setInterval(check, 2500);
     return () => { cancelled = true; if (interval !== null) window.clearInterval(interval); };
   }, [localApplication?.id, localApplication?.status, localApplication?.canvasFilePath, nav, importCompletedLocalApplication, isMountedRef, savedFolderRecheck]);
+
+  // The saved document a running job is stacked on. Once a merged save names
+  // everything the folder holds, this pointer has nothing left to add. Until then
+  // it is read once per mount, so a folder deleted between sessions frees its button.
+  const priorSavedId = data.priorSavedApplication?.id;
+  const priorSavedCanvas = data.priorSavedApplication?.canvasFilePath;
+  const localHoldsSavedFolder = hasLinkedLocalApplicationOutput(data.localApplication) && !!data.localApplication?.savedDocuments;
+  useEffect(() => {
+    if (!priorSavedId) return undefined;
+    const clearPrior = (patch = { priorSavedApplication: null }) => updateGlobal(id, (node) => (node?.data?.priorSavedApplication?.id === priorSavedId ? patch : null));
+    if (localHoldsSavedFolder) { clearPrior(); return undefined; }
+    let cancelled = false;
+    const canvasFilePath = priorSavedCanvas || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null);
+    window.electronAPI?.getLocalApplicationStatus?.({ jobId: priorSavedId, canvasFilePath })
+      .then((result) => {
+        if (cancelled || !result?.success || !result.localJob) return;
+        const next = result.localJob;
+        if (next.status !== 'saved' && (next.savedOutputMissing || next.savedReceiptMissing)) clearPrior();
+        else if (next.status === 'saved' && next.savedDocuments) {
+          updateGlobal(id, (node) => {
+            const prior = node?.data?.priorSavedApplication;
+            return prior?.id === priorSavedId && JSON.stringify(prior.savedDocuments) !== JSON.stringify(next.savedDocuments)
+              ? { priorSavedApplication: { ...prior, savedDocuments: next.savedDocuments } } : null;
+          });
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [id, priorSavedId, priorSavedCanvas, localHoldsSavedFolder, nav, updateGlobal]);
 
   // A saved bundle folder deleted in Finder while the app runs: main watches
   // the canvas folder (event-driven, no polling) and reports changed paths.
@@ -1111,7 +1191,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // to the saved canvas. New jobs use paste-back; legacy coding-agent jobs produce files, then
   // the existing polling/import path validates and saves the final bundle.
   const refreshOfficialPosting = useCallback(async () => {
-    if (applicationSubmissionRef.current || hasApplicationRun || localLookupPending || effectiveLock) return;
+    if (applicationSubmissionRef.current || getRunningApplicationDocument(idRef.current) || hasApplicationRun || localLookupPending || effectiveLock) return;
     const sourceCard = getLiveNode(idRef.current);
     if (sourceCard?.type !== 'jobcard' || sourceCard.data?.locked || getLiveNode(sourceCard.data?.hubId)?.data?.locked
       || localApplicationBlocksOfficialPostingLookup(sourceCard.data?.localApplication)) return;
@@ -1192,17 +1272,18 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [getLiveNode, nav, hasApplicationRun, localLookupPending, effectiveLock, addToast, isMountedRef, updateGlobal]);
 
-  const generateApplication = useCallback(async (options = {}) => {
-    if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;
+  const generateApplication = useCallback(async (documentScope, options = {}) => {
+    // Every check reads live state, not this render's. A queued document can
+    // start long after the click, from a card that has since unmounted.
+    const startingCard = getLiveNode(idRef.current);
+    if (!window.electronAPI?.queueLocalApplication || applicationSubmissionRef.current
+      || getRunningApplicationDocument(idRef.current) || startingCard?.type !== 'jobcard') return;
+    if (!queuedLocalApplicationStartDecision(startingCard, getLiveNode(startingCard.data?.hubId), documentScope).allowed) return;
     const boardPostingCheckActive = card => {
       const canvas = nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null;
       return !!card?.data?.hubId && !!getOfficialPostingPreparation(canvas, card.data.hubId);
     };
-    if (boardPostingCheckActive(getLiveNode(idRef.current))) return;
-    if (hasLinkedLocalApplicationOutput(getLiveNode(idRef.current)?.data?.localApplication)) return;
-    // The reactive effective lock gives mounted cards immediate feedback; the
-    // live read remains the race-safe fence if a Board locks after that render.
-    if (effectiveLock || getLiveNode(data.hubId)?.data?.locked) return;
+    if (boardPostingCheckActive(startingCard)) return;
     const resolveLiveCareer = card => {
       const owningBoard = getLiveNode(card?.data?.hubId);
       const nodes = nav?.enumerateAllNodes?.() || getNodes();
@@ -1238,13 +1319,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       });
       return;
     }
+    // No await has run yet in this click, so a repeat click in the same tick
+    // finds this claim taken. The finally below releases it on every outcome.
+    if (!claimRunningApplicationDocument(idRef.current, documentScope)) return;
     applicationSubmissionRef.current = true;
     let lease = null;
     let preparation = null;
     let cancelledBeforeStart = false;
     let resolutionId = null;
-    let preparedPosting = data.officialPosting;
-    let preparedPoster = data.postedBy;
+    let preparedPosting = startingCard.data?.officialPosting;
+    let preparedPoster = startingCard.data?.postedBy;
     let preparedAt = null;
     let preparedSourceKey = null;
 
@@ -1268,7 +1352,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       const prepareLivePosting = async () => {
         const sourceCard = getLiveNode(idRef.current);
         if (cancelledBeforeStart || boardPostingCheckActive(sourceCard)
-          || !queuedLocalApplicationStartDecision(sourceCard, getLiveNode(sourceCard?.data?.hubId)).allowed) return false;
+          || !queuedLocalApplicationStartDecision(sourceCard, getLiveNode(sourceCard?.data?.hubId), documentScope).allowed) return false;
         const sourceJob = projectOfficialPostingGenerationJob(sourceCard.data);
         const sourceKey = officialPostingPreparationSourceKey(sourceJob);
         const prepareRunId = 'official-posting:' + idRef.current + ':' + generateId();
@@ -1292,7 +1376,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (cancelledBeforeStart || prepared?.cancelled || prepared?.pausedForQuit || prepared?.errorCode === 'APP_QUIT_PAUSED') return false;
         const preparedCard = getLiveNode(idRef.current);
         if (boardPostingCheckActive(preparedCard)
-          || !queuedLocalApplicationStartDecision(preparedCard, getLiveNode(preparedCard?.data?.hubId)).allowed) {
+          || !queuedLocalApplicationStartDecision(preparedCard, getLiveNode(preparedCard?.data?.hubId), documentScope).allowed) {
           cancelledBeforeStart = true;
           return false;
         }
@@ -1310,6 +1394,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             basis: prepared?.listingCheck?.basis || 'unavailable',
             message: prepared?.message || "Couldn't confirm the listing is still open",
             at: new Date().toISOString(),
+            documentScope,
           };
           updateGlobal(idRef.current, {
             listingGenerationNotice,
@@ -1358,13 +1443,14 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // sees the latest canvas state before it materializes its durable job folder.
       const unnamedOfficialEmployer = preparedPosting?.level === 'L4'
         && !(typeof preparedPosting.employer === 'string' && preparedPosting.employer.trim());
-      const posterLabel = [preparedPoster, data.company]
+      const labelCard = getLiveNode(idRef.current)?.data || startingCard.data;
+      const posterLabel = [preparedPoster, labelCard.company]
         .map(value => typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '').find(Boolean);
       const applicationLabel = unnamedOfficialEmployer
         ? ['Employer unknown', posterLabel ? `via ${posterLabel}` : ''].filter(Boolean).join(' · ')
         : (preparedPosting?.level === 'L6'
-        ? [preparedPoster, data.company, preparedPosting?.title, data.title]
-        : [preparedPosting?.employer, data.company, preparedPoster, preparedPosting?.title, data.title])
+        ? [preparedPoster, labelCard.company, preparedPosting?.title, labelCard.title]
+        : [preparedPosting?.employer, labelCard.company, preparedPoster, preparedPosting?.title, labelCard.title])
         .map(value => typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '').find(Boolean) || 'job';
       lease = await acquireModuleRun({
         nodeId: id,
@@ -1375,7 +1461,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // runs (see moduleRunQueue.js — lanes are independently FIFO with
         // capacity 1).
         lane: 'application',
-        label: `Application: ${applicationLabel}`,
+        label: `${documentScope === 'cover' ? 'Cover letter' : 'Résumé'}: ${applicationLabel}`,
         // The dock caps how many application bundles may hold a slot at once
         // (see applicationHandoffDock.js) — an eleventh prompt could never be
         // worked on. Rather than refusing the click, the queue holds this card
@@ -1391,7 +1477,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         canStart: () => {
           const card = getLiveNode(idRef.current);
           if (boardPostingCheckActive(card)) return true;
-          if (!queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId)).allowed) return true;
+          if (!queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId), documentScope).allowed) return true;
           const handoffCapNodes = (nav?.enumerateAllNodes?.() || []).filter((node) => node.id !== idRef.current);
           return countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles()) < APPLICATION_HANDOFF_LIMIT;
         },
@@ -1406,7 +1492,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           // live ownership/lock changes skip the work. Recheck after admission:
           // a card may change between canStart and this queue microtask.
           const card = getLiveNode(idRef.current);
-          const decision = queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId));
+          const decision = queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId), documentScope);
           if (boardPostingCheckActive(card) || !decision.allowed) {
             cancelledBeforeStart = true;
             const reason = boardPostingCheckActive(card) ? 'Official posting refresh in progress' : decision.reason;
@@ -1463,7 +1549,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // That permits regeneration without allowing a late response to clobber
       // a genuinely newer in-flight handoff.
       let cardBeforeQueue = getLiveNode(idRef.current);
-      const startDecision = queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId));
+      const startDecision = queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId), documentScope);
       // onStart and this async continuation run in separate microtasks. Keep
       // the same live ownership/lock fence immediately before the IPC too.
       if (boardPostingCheckActive(cardBeforeQueue) || !startDecision.allowed) {
@@ -1478,7 +1564,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         job: projectOfficialPostingGenerationJob(cardBeforeQueue.data) })) {
         if (!await prepareLivePosting()) return;
         cardBeforeQueue = getLiveNode(idRef.current);
-        if (cancelledBeforeStart || !queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId)).allowed) return;
+        if (cancelledBeforeStart || !queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId), documentScope).allowed) return;
       }
       const queueJob = projectOfficialPostingGenerationJob(cardBeforeQueue.data);
       if (officialPostingPreparationNeedsRefresh({ preparedAt, preparedSourceKey, job: queueJob })) {
@@ -1500,6 +1586,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         canvasFilePath,
         priorLocalApplicationId: expectedPriorLocalApplication?.id || null,
         transport: 'paste',
+        documentScope,
         job: queueJob,
         // The main process resolves and validates the immutable pin again;
         // mutable renderer careerData, profiles, roles, and ledgers are never
@@ -1514,6 +1601,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         if (queued?.errorCode) error.code = queued.errorCode;
         throw error;
       }
+      const acceptedJob = { ...queued.localJob, documentScope };
       // Hiding/collapsing unmounts this component but leaves its canvas node
       // intact. Persist the durable pointer directly into the live node before
       // consulting mounted state, so the canvas-level fallback manager can
@@ -1523,7 +1611,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       // behind until retention pruning.
       const settlement = queuedLocalApplicationSettlement(
         getLiveNode(idRef.current),
-        queued.localJob,
+        acceptedJob,
         expectedPriorLocalApplication,
       );
       if (settlement.action !== 'persist') {
@@ -1536,9 +1624,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       EventLogger.log(`[LocalAI] accepted queued handoff job=${queued.localJob.id} replacing=${expectedPriorLocalApplication?.id || 'none'} priorStatus=${expectedPriorLocalApplication?.status || 'none'}`);
       updateGlobal(idRef.current, (node) => {
-        const liveSettlement = queuedLocalApplicationSettlement(node, queued.localJob, expectedPriorLocalApplication);
+        const liveSettlement = queuedLocalApplicationSettlement(node, acceptedJob, expectedPriorLocalApplication);
         return liveSettlement.action === 'persist' ? {
-          localApplication: queued.localJob,
+          localApplication: acceptedJob,
+          priorSavedApplication: savedApplicationPointer(node.data),
           ...(Object.hasOwn(queued, 'officialPosting')
             ? { officialPosting: queued.officialPosting, postedBy: queued.postedBy } : {}),
         } : null;
@@ -1560,7 +1649,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       const replacedLocalApplication = replacedLocalApplicationForCleanup(
         expectedPriorLocalApplication,
-        queued.localJob,
+        acceptedJob,
         replacementPersisted,
       );
       if (!replacedLocalApplication && expectedPriorLocalApplication?.id) {
@@ -1579,7 +1668,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         }
       }
       if (isMountedRef.current) {
-        setLocalApplication(queued.localJob);
+        setLocalApplication(acceptedJob);
         // This card no longer owns a modal for the handoff — the global AI
         // handoff dock does. Ask it to select this job's prompt and to
         // re-read the job folder now, rather than waiting for the dock's own
@@ -1587,7 +1676,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         requestApplicationHandoffFocus(queued.localJob.id);
         requestApplicationHandoffRefresh(queued.localJob.id);
         addToast({
-          title: 'Application AI Handoff Ready',
+          title: documentScope === 'cover' ? 'Cover Letter Generation Started' : 'Résumé Generation Started',
           description: 'Open the AI handoff dock in the bottom-right corner, copy each prompt into your local AI chat, and paste back its JSON response. The app will validate every stage and request review-and-edit rounds until the quality checks pass.',
           type: 'success',
         });
@@ -1607,9 +1696,64 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       lease?.release();
       preparation?.finish();
       applicationSubmissionRef.current = false;
+      clearRunningApplicationDocument(idRef.current);
       if (isMountedRef.current) setApplicationRun({ state: 'idle', position: null });
     }
-  }, [data.hubId, data.title, data.company, data.postedBy, data.officialPosting, additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, hasApplicationRun, localJobPending, effectiveLock, updateGlobal]);
+  }, [additionalNotes, id, getLiveNode, getNodes, getEdges, nav, addToast, isMountedRef, acquireModuleRun, updateGlobal]);
+
+  // The second document waits for the first job to end, whichever way it ends,
+  // so one card never holds two jobs. The intent is on the canvas node: a restart
+  // loses this loop but not the request, and the effect below starts it again.
+  const generateApplicationRef = useRef(generateApplication);
+  useEffect(() => { generateApplicationRef.current = generateApplication; }, [generateApplication]);
+  const startQueuedDocumentWaiter = useCallback(() => {
+    const nodeId = idRef.current;
+    if (!claimApplicationDocumentWaiter(nodeId)) return;
+    void (async () => {
+      try {
+        for (;;) {
+          const card = getLiveNode(nodeId);
+          const kind = card?.type === 'jobcard' ? card.data?.queuedApplicationDocument : null;
+          if (!kind) return;
+          if (!applicationDocumentMustWait(card.data, getRunningApplicationDocument(nodeId))) {
+            const decision = queuedLocalApplicationStartDecision(card, getLiveNode(card.data?.hubId), kind);
+            // A locked card keeps its place. A document that came to exist, or a
+            // card that is gone, has nothing left to wait for.
+            if (decision.reason === 'card-locked') {
+              await new Promise(resolve => setTimeout(resolve, QUEUED_DOCUMENT_POLL_MS));
+              continue;
+            }
+            updateGlobal(nodeId, (node) => (node?.data?.queuedApplicationDocument === kind ? { queuedApplicationDocument: null } : null));
+            if (decision.allowed) await generateApplicationRef.current(kind);
+            // The other button can be pressed during that run, and this waiter
+            // holds the card's one slot, so it looks again rather than leaving.
+          }
+          await new Promise(resolve => setTimeout(resolve, QUEUED_DOCUMENT_POLL_MS));
+        }
+      } catch (error) {
+        EventLogger.error('Queued application document could not start:', error);
+      } finally {
+        releaseApplicationDocumentWaiter(nodeId);
+      }
+    })();
+  }, [getLiveNode, updateGlobal]);
+  useEffect(() => {
+    if (data.queuedApplicationDocument) startQueuedDocumentWaiter();
+  }, [data.queuedApplicationDocument, startQueuedDocumentWaiter]);
+
+  const requestApplicationDocument = useCallback((kind, options = {}) => {
+    const card = getLiveNode(idRef.current);
+    if (card?.type !== 'jobcard' || card.data?.locked || getLiveNode(card.data?.hubId)?.data?.locked) return;
+    const running = getRunningApplicationDocument(idRef.current);
+    const state = applicationDocumentButtonState(kind, { data: card.data, runningDocument: running });
+    if (state.disabled) return;
+    // The other document already holds its place in line; this one is next.
+    if (applicationSubmissionRef.current || applicationDocumentMustWait(card.data, running)) {
+      updateGlobal(idRef.current, { queuedApplicationDocument: kind });
+      return;
+    }
+    void generateApplication(kind, options);
+  }, [getLiveNode, updateGlobal, generateApplication]);
 
   return (
     <div
@@ -2044,7 +2188,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           onPointerDown={(e) => e.stopPropagation()}
           onChange={(e) => setAdditionalNotes(e.target.value)}
           onBlur={() => updateGlobal(id, { additionalNotes: additionalNotes.trim() })}
-          disabled={effectiveLock || hasApplicationRun || localJobPending}
+          disabled={effectiveLock || hasApplicationRun || localLookupPending || everyDocumentExists}
           className="nodrag nowheel mt-1.5 block w-full resize-y rounded-md border border-white/10 bg-black/20 px-2 py-1.5 text-xs leading-relaxed text-white/75 placeholder:text-white/25 outline-none transition-colors focus:border-blue-400/60 focus:ring-1 focus:ring-blue-400/30 disabled:cursor-default disabled:opacity-50"
         />
       </div>
@@ -2057,7 +2201,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             }`} />
             <div className="min-w-0 text-white/55">
               <div className="font-medium text-white/70">
-                {localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
+                {localApplication.documentScope && localApplication.status !== 'saved' ? `${localApplication.documentScope === 'cover' ? 'Cover letter' : 'Résumé'} · ` : ''}{localApplication.status === 'queued' ? (localApplication.mode === 'paste' || localApplication.transport === 'paste' ? 'Application AI handoff ready' : 'Local AI queued — run launch prompt') :
                   localApplication.status === 'importing' ? 'Importing Local AI result…' :
                     localApplication.status === 'saved' ? 'Local AI application saved' :
                       localApplication.status === 'status-error' ? 'Local AI reconnecting…' :
@@ -2070,7 +2214,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 : '')}</div>
               {localApplication.status === 'failed' && canRegenerateLocalApplication(localApplication) && (
                 <div className="mt-1 text-amber-200/80">
-                  This request stopped before saving. Generate starts a new application for this job; other queued jobs run independently.
+                  This request stopped before saving. Press its button below to try again; other queued jobs run independently.
                 </div>
               )}
               {localApplication.status === 'saved' && (Array.isArray(localApplication.receipt?.selectedModelEffort)
@@ -2150,7 +2294,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                     // Clear the authoritative canvas state first. Otherwise the
                     // saved-state adoption effect restores this deleted bundle.
                     updateGlobal(id, (node) => node?.data?.localApplication?.id === jobId
-                      ? { localApplication: null } : null);
+                      ? { localApplication: null, priorSavedApplication: null } : null);
                     setLocalApplication(current => (current?.id === jobId ? null : current));
                   })
                   .catch((error) => {
@@ -2204,6 +2348,36 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
       )}
 
+      {localApplication && localApplication.status !== 'saved' && hasLinkedLocalApplicationOutput(data.priorSavedApplication) && (
+        <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+          <div className="flex items-start gap-2 text-[10px] leading-snug">
+            <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+            <div className="min-w-0 font-medium text-white/70">
+              {[savedDocuments.resume && 'Résumé', savedDocuments.cover && 'Cover letter'].filter(Boolean).join(' and ')} saved
+            </div>
+          </div>
+          {data.priorSavedApplication.savedDir && window.electronAPI?.openLocalApplicationOutput && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const prior = data.priorSavedApplication;
+                window.electronAPI.openLocalApplicationOutput({ jobId: prior.id,
+                  canvasFilePath: prior.canvasFilePath || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null) })
+                  .then((result) => { if (!result?.opened && !result?.skipped) throw new Error(result?.error || 'not opened'); })
+                  .catch(() => {
+                    // A folder that no longer opens has nothing left to keep for.
+                    updateGlobal(id, (node) => node?.data?.priorSavedApplication?.id === prior.id ? { priorSavedApplication: null } : null);
+                  });
+              }}
+              className="mt-2 rounded-md border border-emerald-400/20 bg-emerald-400/10 px-2 py-1 text-[10px] font-medium text-emerald-200 transition-colors hover:bg-emerald-400/15"
+              title="Open the saved application bundle's folder."
+            >
+              Open saved folder
+            </button>
+          )}
+        </div>
+      )}
+
       {listingGenerationPaused && (
         <div role="status" className="mx-3 mb-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-2.5 py-2 text-[11px] text-amber-100">
           <div className="font-semibold">{data.listingGenerationNotice?.basis === 'official-closed' ? 'Generation paused · Official posting closed' : data.listingGenerationNotice?.basis === 'official-lookup' ? 'Generation paused · Official posting lookup' : 'Generation paused · Listing check'}</div>
@@ -2216,7 +2390,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           <button
             onClick={effectiveLock ? undefined : (e) => { e.stopPropagation();
               if (['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis)) refreshOfficialPosting();
-              else generateApplication();
+              else requestApplicationDocument(data.listingGenerationNotice?.documentScope === 'cover' ? 'cover' : 'resume');
             }}
             disabled={effectiveLock || !!officialPostingLookup || !!boardPostingPreparation}
             className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
@@ -2227,61 +2401,86 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
       )}
 
-      {/* Generate the application bundle. Submission remains a manual action on
-          the employer's site; this disposable hierarchy tracks no application state. */}
-      {!hasLinkedApplicationOutput && <div className="px-3 py-2 border-t border-white/5 flex items-center gap-1.5" onPointerDown={(e) => e.stopPropagation()}>
-        <button
-          onClick={effectiveLock ? undefined : (e) => { e.stopPropagation(); generateApplication({ listingOverride: listingOverrideAvailable }); }}
-          disabled={hasApplicationRun || !!officialPostingLookup || !!boardPostingPreparation || localJobPending || effectiveLock}
-          className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
-            effectiveLock
-              ? 'bg-white/5 text-white/20 cursor-default'
-              : listingGenerationPaused || (!hasApplicationRun && localApplicationNeedsAttention)
-              ? GENERATION_RECOVERY_BUTTON_CLASS
-              : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200 disabled:opacity-50'
-          }`}
-          title={localJobPending
-            ? 'A Local AI job is waiting for the local-agent routine or is being imported.'
-            : officialPostingLookup || boardPostingPreparation ? 'An official posting lookup is running for this card or its Job Board.'
-            : displayedApplicationRun.state === 'resolving'
-            ? 'Finding the official posting. Cancel to stop this preparation.'
-            : displayedApplicationRun.state === 'queued'
-            ? displayedApplicationRun.blocked
-              ? applicationLimitMessage()
-              : `Queued at position ${displayedApplicationRun.position} — application generation runs one at a time to protect model quota and document rendering, and starts automatically when an application slot is free.`
-            : listingOverrideAvailable
-            ? 'Generate an application even if this listing is closed or could not be confirmed open.'
-            : 'Copy app-provided prompts into your local AI chat and paste back structured JSON. Infinite Canvas validates, renders, reviews, and saves the tailored application bundle next to your canvas'}
-        >
-          <Sparkles size={13} className={hasApplicationRun ? 'animate-pulse' : ''} />
-          {localJobPending
-            ? localApplication.status === 'importing' ? 'Importing…' : 'Local AI queued'
-            : displayedApplicationRun.state === 'queued'
-            ? `Queued · #${displayedApplicationRun.position}`
-            : displayedApplicationRun.state === 'resolving' ? 'Finding official posting…'
-            : displayedApplicationRun.state === 'generating' ? 'Generating…'
-            : listingOverrideAvailable ? 'Generate anyways' : localApplicationNeedsAttention ? 'Retry generation' : 'Generate'}
-        </button>
-        {displayedApplicationRun.state === 'queued' && (
+      {/* Each button generates one document, so a site that takes only a résumé
+          spends nothing on a letter. Submission remains a manual action on the
+          employer's site; this disposable hierarchy tracks no application state. */}
+      <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+        <div className="flex items-center gap-1.5">
+          {APPLICATION_DOCUMENTS.map(({ kind, label, noun }) => {
+            const state = documentButtonState(kind);
+            const lookupBusy = !!officialPostingLookup || !!boardPostingPreparation;
+            // A run being set up shows its live stage on its own button.
+            const settingUp = state.inProgress && runningDocument === kind;
+            const needsAttention = !state.disabled && !hasApplicationRun && localApplicationNeedsAttention && localApplication?.documentScope === kind;
+            const disabled = state.disabled || lookupBusy || effectiveLock;
+            return (
+              <button
+                key={kind}
+                data-application-document={kind}
+                onClick={disabled ? undefined : (e) => { e.stopPropagation(); requestApplicationDocument(kind, { listingOverride: listingOverrideAvailable }); }}
+                disabled={disabled}
+                aria-disabled={disabled}
+                className={`flex-1 min-w-0 flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                  disabled
+                    ? 'bg-white/5 text-white/30 cursor-not-allowed'
+                    : listingGenerationPaused || needsAttention
+                    ? GENERATION_RECOVERY_BUTTON_CLASS
+                    : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200'
+                }`}
+                title={state.exists ? `This job's ${noun} already exists. Delete its saved folder to generate it again.`
+                  : state.queued ? `Waiting for the other document to finish. The ${noun} starts automatically.`
+                  : state.inProgress && !settingUp ? `The ${noun} is being generated.`
+                  : lookupBusy ? 'An official posting lookup is running for this card or its Job Board.'
+                  : settingUp && displayedApplicationRun.state === 'resolving' ? 'Finding the official posting. Cancel to stop this preparation.'
+                  : settingUp && displayedApplicationRun.state === 'queued'
+                  ? (displayedApplicationRun.blocked
+                    ? applicationLimitMessage()
+                    : `Queued at position ${displayedApplicationRun.position} — applications start one at a time to protect model quota and document rendering, and this one starts automatically when a slot is free.`)
+                  : listingOverrideAvailable ? `Generate the ${noun} even if this listing is closed or could not be confirmed open.`
+                  : `Generate only the ${noun}. Infinite Canvas writes, checks and saves it next to your canvas, in this job's application folder.`}
+              >
+                {state.exists ? <Check size={13} /> : <Sparkles size={13} className={state.inProgress ? 'animate-pulse' : ''} />}
+                <span className="truncate">
+                  {state.queued ? `${label} next`
+                    : settingUp && displayedApplicationRun.state === 'queued' ? `Queued · #${displayedApplicationRun.position}`
+                    : settingUp && displayedApplicationRun.state === 'resolving' ? 'Finding posting…'
+                    : state.inProgress ? (localApplication?.status === 'importing' ? 'Importing…' : 'Generating…')
+                    : listingOverrideAvailable ? `${label} anyways`
+                    : needsAttention ? `Retry ${noun}`
+                    : label}
+                </span>
+              </button>
+            );
+          })}
+          {displayedApplicationRun.state === 'queued' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); cancelQueuedRunsForNode(id, 'Application generation cancelled before it started'); }}
+              className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
+              title="Remove this card from the application queue."
+            >
+              Cancel
+            </button>
+          )}
+          {displayedApplicationRun.state === 'resolving' && (
+            <button
+              onClick={(e) => { e.stopPropagation(); displayedApplicationRun.cancel?.(); }}
+              className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
+              title="Cancel finding the official posting for this card."
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+        {data.queuedApplicationDocument && (
           <button
-            onClick={(e) => { e.stopPropagation(); cancelQueuedRunsForNode(id, 'Application generation cancelled before it started'); }}
-            className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
-            title="Remove this card from the application queue."
+            onClick={(e) => { e.stopPropagation(); updateGlobal(id, { queuedApplicationDocument: null }); }}
+            className="mt-1.5 w-full py-1 rounded-md text-[10px] font-medium text-white/50 bg-white/5 hover:bg-white/10 hover:text-white/80 transition-colors"
+            title={`Do not generate the ${applicationDocumentNoun(data.queuedApplicationDocument)} after the current document finishes.`}
           >
-            Cancel
+            Cancel waiting {applicationDocumentNoun(data.queuedApplicationDocument)}
           </button>
         )}
-        {displayedApplicationRun.state === 'resolving' && (
-          <button
-            onClick={(e) => { e.stopPropagation(); displayedApplicationRun.cancel?.(); }}
-            className="shrink-0 py-2 px-2.5 rounded-lg text-xs font-medium text-white/60 bg-white/5 hover:bg-white/10 hover:text-white/85 transition-colors"
-            title="Cancel finding the official posting for this card."
-          >
-            Cancel
-          </button>
-        )}
-
-      </div>}
+      </div>
     </div>
   );
 });

@@ -7,7 +7,7 @@
  * only structured copy and its editorial notes; it never provides markup,
  * output locations, source-grounding quotes, or invented checklist evidence.
  */
-import { assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
+import { renderEvidenceResumeMainHtml, assertTrustedSourceRoles, isUnsafeControlCharacter, projectContactChannels, projectTrustedIdentity, renderStructuredResume } from './structuredResume.js';
 import { authorityProjectRoleOf, resolveAuthorityEvidence, resolveAuthorityRole } from './applicationCareerAuthority.js';
 import { verifyCareerCleanText } from './careerCleanLayer.js';
 export { MAX_FROZEN_SOURCE_CHARS } from './applicationSourceLimits.js';
@@ -664,6 +664,7 @@ export function assemblePasteApplicationResult({
     ? '[current-authority listing validated in immutable paged receipt]'
     : gradeFrozenSource(jobListing, 'jobListing', FROZEN_JOB_LISTING);
   // The accepted résumé, which a review answers by returning a replacement.
+  const documentScope = jobInput.documentScope === 'resume' || jobInput.documentScope === 'cover' ? jobInput.documentScope : null;
   const resume = withRepairs(['resume:authored'], () => record(state.resume, 'paste.resume'));
   const sourceRoles = frozenState(FROZEN_JOB_RECORD, () => {
     if (!Array.isArray(jobInput.sourceRoles)) fail('input.sourceRoles must be a trusted role list.');
@@ -715,7 +716,10 @@ export function assemblePasteApplicationResult({
     ? new Map([...evidenceById].filter(([id]) => renderedEvidenceIds.has(id)))
     : evidenceById;
   const renderCareerData = authority ? authorityRenderCareerData(authority, sourceRoles, renderEvidenceById) : frozenCareerData;
-  const rendered = withRepairs(['resume:authored'], () => renderStructuredResume(resume, {
+  // A letter-only job holds approved evidence, not a résumé anyone wrote: the
+  // letter checks read it and nothing delivers it, so the rules for a delivered
+  // résumé do not run on it.
+  const rendered = documentScope === 'cover' ? { draft: { roles: [] }, resumeMainHtml: renderEvidenceResumeMainHtml(resume) } : withRepairs(['resume:authored'], () => renderStructuredResume(resume, {
     sourceRoles,
     evidenceCatalog: [...evidenceById.values()],
     careerData: renderCareerData,
@@ -734,7 +738,7 @@ export function assemblePasteApplicationResult({
   // The letter's envelope and its paragraph evidence citations: a defect in
   // either is repaired by replacing the letter, whether the repair moves its
   // rendered text or only which evidence a paragraph cites.
-  const letter = withRepairs(['coverLetter:authored'], () => normalizedCoverLetter(state.coverLetter, trustedIdentity));
+  const letter = documentScope === 'resume' ? null : withRepairs(['coverLetter:authored'], () => normalizedCoverLetter(state.coverLetter, trustedIdentity));
   // The only check in this module that still takes the host's unattributed
   // default, and honestly: paste.finalReview IS the response this round
   // returned, whole, so "return a different response" is exactly the repair.
@@ -755,7 +759,7 @@ export function assemblePasteApplicationResult({
     bullet: bullet.text,
     careerDataQuotes: careerQuotesForIds(bullet.evidenceIds, evidenceById, occursInCareerData, `résumé bullet ${bullet.id}`),
   }))));
-  const coverLetterParagraphs = withRepairs(['coverLetter:authored'], () => letter.paragraphs.map(paragraph => ({
+  const coverLetterParagraphs = documentScope === 'resume' ? [] : withRepairs(['coverLetter:authored'], () => letter.paragraphs.map(paragraph => ({
     paragraph: paragraph.text,
     careerDataQuotes: careerQuotesForIds(paragraph.evidenceIds, evidenceById, occursInCareerData, `cover-letter paragraph ${paragraph.id}`),
   })));
@@ -772,8 +776,8 @@ export function assemblePasteApplicationResult({
     sourceGrounding: { resumeBullets, coverLetterParagraphs },
   };
 
-  const suppliedArgument = record(state.coverLetter.coverLetterArgument, 'coverLetter.coverLetterArgument', ['coverLetter:authored']);
-  const coverLetterArgument = {
+  const suppliedArgument = documentScope === 'resume' ? null : record(state.coverLetter.coverLetterArgument, 'coverLetter.coverLetterArgument', ['coverLetter:authored']);
+  const coverLetterArgument = documentScope === 'resume' ? null : {
     ...deepClone(suppliedArgument),
     roleThesis: state.coverLetter.roleThesis || state.coverLetter.controllingThesis || suppliedArgument.roleThesis,
   };
@@ -788,15 +792,16 @@ export function assemblePasteApplicationResult({
   return {
     version: Number(jobInput.version || 1),
     ...(writeVerifyV2 ? { applicationProtocol: 'write-then-verify.v2' } : {}),
+    ...(documentScope ? { documentScope } : {}),
     jobId: frozenState(FROZEN_JOB_RECORD, () => text(jobInput.jobId, 'input.jobId')),
     status: 'completed',
     // App selected; never sourced from the paste response.
     outputBundleRoot,
     resumeMainHtml: rendered.resumeMainHtml,
-    coverLetter: {
+    coverLetter: letter ? {
       ...letter,
       paragraphs: letter.paragraphs.map(paragraph => paragraph.text),
-    },
+    } : null,
     coverLetterArgument,
     // V2 has no AI quality review, but the host's exact citation bindings
     // still feed completion checks. Do not discard them with that review.

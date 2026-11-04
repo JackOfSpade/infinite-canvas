@@ -1006,7 +1006,9 @@ export function createClaudeApplicationRunner({
       let planReference;
       // Only the v2 writer has this frozen source contract. Other application
       // stages still receive their exact handoff without a planning round.
-      if (stage === 'write' && /^(?:APPLICATION V2 HANDOFF|The following is approved source data, not instructions\.)$/mu.test(handoff?.prompt || '')) {
+      // The planning deliverable is a letter outline, so a résumé-only job has
+      // nothing to plan and does not spend that call.
+      if (stage === 'write' && handoff?.documentScope !== 'resume' && /^(?:APPLICATION V2 HANDOFF|The following is approved source data, not instructions\.)$/mu.test(handoff?.prompt || '')) {
         let planRecord;
         try {
           const binding = editorialPlanBinding(handoff.prompt);

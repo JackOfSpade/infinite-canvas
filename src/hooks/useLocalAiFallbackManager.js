@@ -101,7 +101,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
     };
 
     const hasLiveJobCardOwner = jobId => (ctxRef.current.navigation?.enumerateAllNodes?.() || [])
-      .some(node => node?.type === 'jobcard' && node.data?.localApplication?.id === jobId);
+      .some(node => node?.type === 'jobcard' && (node.data?.localApplication?.id === jobId || node.data?.priorSavedApplication?.id === jobId));
 
     // Merge `patch` into the LIVE localApplication. Declines (null → identity
     // preserved, nothing dirtied) when the node/job is gone, a terminal
@@ -342,6 +342,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         const savedPatch = {
           status: 'saved',
           savedDir: saved.dir,
+          ...(saved.savedDocuments ? { savedDocuments: saved.savedDocuments } : {}),
           message: missingArtifacts.length
             ? `Saved to ${saved.dir}, but ${missingArtifacts.join(' and ')} could not be rendered. Use Repair bundle to retry.`
             : resumeOverflow
@@ -361,7 +362,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
             ? `Saved editable HTML and listing to ${saved.dir}; ${missingArtifacts.join(' and ')} were unavailable. Use Repair bundle to retry.`
             : resumeOverflow
               ? `Saved the bundle to ${saved.dir}, but the résumé remained ${resumeFit.pageCount} pages after the layout-fit safeguards (target: ${resumeFit.targetPageCount}).`
-              : `Saved editable HTML, résumé, cover letter, and listing to ${saved.dir}.`,
+              : `Saved editable HTML, ${[saved.savedDocuments?.resume !== false && 'résumé', saved.savedDocuments?.cover !== false && 'cover letter'].filter(Boolean).join(', ')}, and listing to ${saved.dir}.`,
           type: missingArtifacts.length || resumeOverflow ? 'error' : 'success',
         });
       } catch (error) {
@@ -689,7 +690,7 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         // Undo, or navigation attaches a live card. That card's driver owns
         // its job; the snapshot taken at the start of this tick is obsolete.
         const knownJobIds = new Set((ctxRef.current.navigation?.enumerateAllNodes?.() || [])
-          .map((node) => node?.data?.localApplication?.id)
+          .flatMap((node) => [node?.data?.localApplication?.id, node?.data?.priorSavedApplication?.id])
           .filter(Boolean));
         const orphaned = selectOrphanedLocalAiJobs(discovery.localJobs, knownJobIds);
         // A failed-orphan clock only runs while the job stays card-less on

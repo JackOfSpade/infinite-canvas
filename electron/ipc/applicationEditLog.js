@@ -304,14 +304,25 @@ function prune(state) {
   return state;
 }
 
-export async function logGeneratedBundle({ root, workspaceDir, html, posting, appVersion, careerSnapshotId = null, careerSourceFrozenAt = null }) {
+export async function logGeneratedBundle({ root, workspaceDir, html, posting, appVersion, careerSnapshotId = null, careerSourceFrozenAt = null, addedDocument = null }) {
   return serialize(async () => {
     const state = await alignModel(root, await read(root));
     const workspaceId = idFor(workspaceDir);
     const id = crypto.randomUUID();
     const at = new Date().toISOString();
     const snapshot = documentSnapshot(html);
-    if (!snapshot.resume) throw new Error('Cannot log a bundle without its résumé panel.');
+    if (!snapshot.resume && !snapshot.letter) throw new Error('Cannot log a bundle without a document panel.');
+    // A second document joining the folder completes the same application. It
+    // is not a regeneration, so the kept document's history stays where it is.
+    const joined = addedDocument ? state.pairs.findLast(item => item.workspaceId === workspaceId && !item.supersededAt) : null;
+    if (joined) {
+      joined.generated = { ...joined.generated, [addedDocument === 'cover' ? 'letter' : 'resume']: addedDocument === 'cover' ? snapshot.letter : snapshot.resume, letterRemoved: false };
+      joined.saved = snapshot;
+      joined.savedAt = at;
+      joined.letterRemoved = false;
+      await write(root, prune(state));
+      return joined;
+    }
     const build = appBuild();
     // A regeneration overwrites the folder's bundle, so the earlier pair was never
     // sent. Whether it was REJECTED is a different question: a regeneration under

@@ -279,7 +279,7 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
       ? handoff.correctionsRecovered
       : null,
     label: company || title || 'Application',
-    subject: [title, company].filter(Boolean).join(' · '),
+    subject: [local.documentScope === 'cover' ? 'Cover letter' : local.documentScope === 'resume' ? 'Résumé' : '', title, company].filter(Boolean).join(' · '),
     claudeRun: normalizeClaudeRun(getClaudeApplicationRun(local.id)),
   };
 }

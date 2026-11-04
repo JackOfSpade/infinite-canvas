@@ -2127,6 +2127,20 @@ export function renderStructuredResume(raw, context = {}) {
   return { draft, resumeMainHtml, advisories: draft.advisories };
 }
 
+/**
+ * The approved-evidence résumé a letter-only job checks its letter against. It
+ * is host-built from exact catalog quotes and never delivered, so the rules a
+ * delivered résumé answers to (bullet budgets, selection, prose) do not apply.
+ */
+export function renderEvidenceResumeMainHtml(resume) {
+  const identity = resume?.identity || {};
+  const subtitle = identity.subtitleRole
+    ? `<span class="subtitle-role" itemprop="jobTitle">${escapeHtml(identity.subtitleRole)}</span>${identity.credential ? `${separator()}<span class="credential">${escapeHtml(identity.credential)}</span>` : ''}`
+    : (identity.credential ? `<span class="credential">${escapeHtml(identity.credential)}</span>` : '');
+  const header = `<header class="resume-header"><h1 class="name" itemprop="name">${escapeHtml(identity.name || '')}</h1>${subtitle ? `<p class="tagline">${subtitle}</p>` : ''}<p class="contact" role="group" aria-label="Contact">${(identity.contact || []).map(escapeHtml).join(separator())}</p></header>`;
+  return `<main class="page" role="document" itemscope itemtype="https://schema.org/Person">${header}<section class="section" aria-labelledby="sec-experience">${sectionHead('Experience', 'sec-experience')}${(resume?.roles || []).map(renderRole).join('')}</section></main>`;
+}
+
 /** Paste-workflow adapter: only returns markup accepted by the legacy validator. */
 export function validateStructuredApplicationResume(resume, context = {}) {
   return validateStructuredResumeDraft(resume, context);

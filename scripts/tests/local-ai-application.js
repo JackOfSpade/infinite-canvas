@@ -1550,8 +1550,8 @@ export default [
           && !canSaveImportedLocalApplication({ type: 'jobcard', data: { localApplication: { id: 'other' } } }, localJob.id),
         'only the live card that still owns this exact job may promote an imported workspace');
         const cardSource = await fs.promises.readFile(path.resolve('src/nodes/JobCardNode.jsx'), 'utf8');
-        assert(/updateGlobal\(idRef\.current, \(node\) => \{[\s\S]{0,420}localApplication: queued\.localJob/.test(cardSource)
-          && /if \(isMountedRef\.current\) \{\s*setLocalApplication\(queued\.localJob\)/.test(cardSource),
+        assert(/updateGlobal\(idRef\.current, \(node\) => \{[\s\S]{0,420}localApplication: acceptedJob/.test(cardSource)
+          && /if \(isMountedRef\.current\) \{\s*setLocalApplication\(acceptedJob\)/.test(cardSource),
         'the queued pointer is committed to global node data before the mounted-only UI state update, so hidden cards remain discoverable');
 
         const queued = await queueLocalApplicationJob({
@@ -8899,8 +8899,8 @@ Personal Projects`;
       // byte-for-byte-unchanged response cannot rely on an effect rerun).
       assert(/if \(needsSavedProbe\) \{\s*localSavedProbeRef\.current\.add\(jobId\);/.test(cardSource),
         'a completed mounted saved probe must record the job id exactly once');
-      assert(cardSource.includes("if (needsSavedProbe && next.status === 'saved') return;"),
-        'a healthy mounted saved probe must NOT merge/persist the localJob or receipt into card state');
+      assert(cardSource.includes("if (needsSavedProbe && next.status === 'saved') {\n            if (next.savedDocuments) {") && /savedDocuments: next\.savedDocuments \} : current\);\s*\}\s*return;/.test(cardSource),
+        'a healthy mounted saved probe adopts only which documents the folder holds, never the localJob or receipt');
 
       // Canvas fallback manager: its own one-time set and the narrow write.
       assert(fallbackSource.includes('const savedProbedRef = useRef(new Set());'),

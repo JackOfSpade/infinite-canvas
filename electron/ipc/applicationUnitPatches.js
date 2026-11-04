@@ -49,8 +49,11 @@ export function applicationUnitRegistry(documents) {
       rows.push({ id, kind: meta.kind, doc: meta.doc, ...(role ? { roleId: role.id } : {}), fields });
     }
   }
-  if (!nonblank(documents?.coverLetter?.roleThesis)) errors.push('The letter roleThesis is missing.');
-  if (!object(documents?.coverLetter?.coverLetterArgument?.primaryEvidence)) errors.push('The letter primary argument slot is missing.');
+  // A résumé-only job's documents have no letter to require these of.
+  if (documents?.coverLetter !== undefined) {
+    if (!nonblank(documents.coverLetter?.roleThesis)) errors.push('The letter roleThesis is missing.');
+    if (!object(documents.coverLetter?.coverLetterArgument?.primaryEvidence)) errors.push('The letter primary argument slot is missing.');
+  }
   return { rows, errors };
 }
 export const unitDigest = row => digest(row.fields);

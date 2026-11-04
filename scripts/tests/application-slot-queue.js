@@ -4,7 +4,7 @@ import { assert } from './testHelpers.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, projectOfficialPostingGenerationJob,
   officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh } from '../../src/utils/officialPostingPreparation.js';
-import { hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision } from '../../src/utils/localAiApplicationLifecycle.js';
+import { hasLinkedLocalApplicationOutput, queuedLocalApplicationStartDecision, savedApplicationPointer } from '../../src/utils/localAiApplicationLifecycle.js';
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
 import { collectNodesDeep } from '../../src/utils/navigationUtils.js';
@@ -101,7 +101,7 @@ export default [
     async run() {
       const source = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       const start = source.indexOf('const generateApplication = useCallback(');
-      const end = source.indexOf('\n\n  return (', start);
+      const end = source.indexOf('\n\n  // The second document waits', start);
       assert(start >= 0 && end > start, 'the actual Generate callback is available');
       for (const change of ['unchanged', 'newer-career', 'board-career', 'career-cleared', 'board-pending', 'deleted', 'card-locked', 'board-locked', 'saved', 'pending']) {
         const queue = createModuleRunQueue();
@@ -122,7 +122,7 @@ export default [
           } },
           generateId: () => 'gate-run',
           applicationSubmissionRef: { current: false },
-          hasApplicationRun: false, localJobPending: false, effectiveLock: false,
+          getRunningApplicationDocument: () => null, claimRunningApplicationDocument: () => true, clearRunningApplicationDocument() {}, savedApplicationPointer,
           id: 'card', idRef: { current: 'card' }, data, additionalNotes: '',
           nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board, search].filter(Boolean),
             enumerateAllEdges: () => [{ id: 'connection', source: 'board', target: 'search' }] },
@@ -164,7 +164,7 @@ export default [
             },
           }),
         });
-        await callback();
+        await callback('resume');
         assert(mutationAfterStart && ipcCalls === (['unchanged', 'newer-career', 'board-career'].includes(change) ? 1 : 0),
           `${change}: only an unchanged live card may create a private handoff`);
         if (change === 'newer-career') assert(selectedPin === 'b'.repeat(64), 'queued generation must re-resolve career data at start');
@@ -178,7 +178,7 @@ export default [
     async run() {
       const source = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       const start = source.indexOf('const generateApplication = useCallback(');
-      const end = source.indexOf('\n\n  return (', start);
+      const end = source.indexOf('\n\n  // The second document waits', start);
       assert(start >= 0 && end > start, 'the actual Generate callback is available');
       for (const gateResult of [
         { success: true, blocked: true, patterns: [{ summary: 'Shortens the opening summary', count: 3 }] },
@@ -204,7 +204,7 @@ export default [
           } },
           generateId: () => 'gate-run',
           applicationSubmissionRef: { current: false },
-          hasApplicationRun: false, localJobPending: false, effectiveLock: false,
+          getRunningApplicationDocument: () => null, claimRunningApplicationDocument: () => true, clearRunningApplicationDocument() {}, savedApplicationPointer,
           id: 'card', idRef: { current: 'card' }, data: card.data, additionalNotes: '',
           nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board, search],
             enumerateAllEdges: () => [{ id: 'connection', source: 'board', target: 'search' }] },
@@ -221,7 +221,7 @@ export default [
           beginOfficialPostingPreparation, getOfficialPostingPreparation, projectOfficialPostingGenerationJob, officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh,
           acquireModuleRun: options => queue.acquireModuleRun(options),
         });
-        await callback();
+        await callback('resume');
         const label = gateResult.success ? `blocked=${gateResult.blocked}` : 'failed check';
         assert(gateCalls.length === 1 && gateCalls[0].nodeId === 'card' && gateCalls[0].manualAiRunId === 'application-gate:card:gate-run',
           `${label}: the gate runs once with the card's durable run id`);
@@ -735,7 +735,7 @@ export default [
       const card = readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
 
       assert(card.includes('canStart:'), 'JobCardNode passes a canStart predicate to the queue');
-      assert((card.match(/queuedLocalApplicationStartDecision\(card, getLiveNode\(card\?\.data\?\.hubId\)\)/g) || []).length === 2,
+      assert((card.match(/queuedLocalApplicationStartDecision\(card, getLiveNode\(card\?\.data\?\.hubId\), documentScope\)/g) || []).length === 2,
         'admission and onStart both check the live card and owning board');
       assert(
         card.includes('countActiveApplicationHandoffs(handoffCapNodes, getDismissedApplicationBundles())'),

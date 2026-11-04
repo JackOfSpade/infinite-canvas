@@ -36,7 +36,7 @@ import { logger } from '../logger.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { pruneEmptyApplicationParents } from '../utils/emptyApplicationFolders.js';
 import { FROZEN_CAREER_DATA, FROZEN_COMPLETED_PACKAGE, FROZEN_EVIDENCE_PLAN, FROZEN_JOB_LISTING, FROZEN_JOB_MANIFEST, FROZEN_JOB_RECORD, LOCAL_AI_JOB_INTEGRITY_CODE, LocalAiJobIntegrityError, MAX_FROZEN_SOURCE_CHARS, MAX_UNIT_CAREER_DATA_QUOTES, assemblePasteApplicationResult, assertAuthorityDraftSelection, assertFrozenEvidencePlan, assertFrozenTrustedIdentity, frozenSourceQuoteTest, frozenState, gradeFrozenSource, isJobIntegrityFault, normalizeBoundDocumentText } from './pasteApplicationAssembly.js';
-import { assertTrustedSourceRoles, occursInQuotedCareerEvidence, careerQuoteHasDeterministicRoleScope, formatRoleDateForPresentation, projectContactChannels, projectTrustedIdentity, CAREER_DATA_ROLE_SECTION_RULE, CAREER_SECTION_OPENING_BLOCK_RULE, CAREER_TERM_OVERLAP_RULE, isUnsafeControlCharacter, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_RULE, PROJECT_JOB_RELEVANCE_RULE_TEXT, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, SKILL_ITEM_FILTERABLE_RULE, SKILL_ITEM_GROUNDING_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS, structuredResumeRoleEvidenceGaps, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, POSTING_NAMED_SKILLS_RULE, postingNamedAttestedSkillTerms, careerAttestedSkillTerms, requiredCareerAttestedSkillTerms, MAX_REQUIRED_CAREER_SKILL_TERMS, SKILLS_BLOCK_PRESENCE_RULE, CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, validateStructuredApplicationResume } from './structuredResume.js';
+import { renderEvidenceResumeMainHtml, assertTrustedSourceRoles, occursInQuotedCareerEvidence, careerQuoteHasDeterministicRoleScope, formatRoleDateForPresentation, projectContactChannels, projectTrustedIdentity, CAREER_DATA_ROLE_SECTION_RULE, CAREER_SECTION_OPENING_BLOCK_RULE, CAREER_TERM_OVERLAP_RULE, isUnsafeControlCharacter, MIN_SHARED_CAREER_TERMS, NEUTRAL_SKILL_GROUP_RULE, PROJECT_JOB_RELEVANCE_RULE_TEXT, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, SKILL_ITEM_FILTERABLE_RULE, SKILL_ITEM_GROUNDING_RULE, SKILLS_BLOCK_BUDGET_RULE, STRUCTURED_RESUME_ID_PATTERN, STRUCTURED_RESUME_LIMITS, structuredResumeRoleEvidenceGaps, missingPostingNamedSkillTerms, missingRequiredCareerSkillTerms, POSTING_NAMED_SKILLS_RULE, postingNamedAttestedSkillTerms, careerAttestedSkillTerms, requiredCareerAttestedSkillTerms, MAX_REQUIRED_CAREER_SKILL_TERMS, SKILLS_BLOCK_PRESENCE_RULE, CAREER_SNAPSHOT_HISTORICAL_SKILL_EVIDENCE_VERSION, CAREER_SNAPSHOT_SKILL_EVIDENCE_VERSION, validateStructuredApplicationResume } from './structuredResume.js';
 import { applyPasteDocumentPatches, mergePasteReviewDelta, requiredPasteReviewDeltaEntries, TARGET_FORMS_RULE as PASTE_REVIEW_DELTA_TARGET_FORMS_RULE, VALID_OPS as PASTE_REVIEW_DELTA_VALID_OPS } from './pasteReviewDelta.js';
 import { recordPasteHandoffDiagnostic } from './pasteHandoffDiagnostics.js';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSnapshotStorageRoot, isCareerSkillIndexEligible, projectApprovedCareerSnapshotForApplication, projectLegacyCareerProfile, readCareerSnapshot, readPinnedCareerSnapshot, vettedCareerSkillInventory } from './careerSnapshot.js';
@@ -55,7 +55,8 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifySkillIndex, writeVerifyDroppedSkillErrors, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors } from './applicationWriteVerify.js';
+import { ABSENT_DOCUMENT_FIT, applicationDocumentLabel, evidenceResumeForLetter, normalizeApplicationDocumentScope, savedDocumentsFromHtml } from './applicationDocumentScope.js';
+import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifySkillIndex, writeVerifyDroppedSkillErrors, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors, writeVerifyDocumentsForPrompt } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
 import { targetEmploymentFrames } from './applicationEmploymentGuard.js';
@@ -265,6 +266,8 @@ const LOCAL_AI_HANDOFF_RECEIPTS_DIR = 'handoff-receipts';
 const LOCAL_AI_JOB_PHASES = Object.freeze(['awaiting-paste', 'generating', 'saved', 'discarded', 'pruned']);
 const LOCAL_AI_PHASE_STAMPS_DIR = 'phase-stamps';
 const PASTE_APPLICATION_PROTOCOL_VERSION = 1;
+const REPLACEABLE_APPLICATION_JOB_STATUSES = new Set(['failed', 'invalid', 'revision-exhausted', 'saved']);
+const MAX_SAVED_APPLICATION_HTML_BYTES = 8 * 1024 * 1024;
 const PASTE_APPLICATION_LOG_FILE = 'Generation Log.jsonl';
 // A durable, METADATA-ONLY trace of rejected paste rounds — see the rejection
 // branch of submitLocalApplicationHandoff for what one row carries and why.
@@ -5040,6 +5043,7 @@ async function writeVerifyFrozenContext(input, state) {
   const hand = fullApprovedHand(hydrated.snapshot.profile, catalog);
   const lengthBudget = writeVerifyLengthBudgets(hydrated.snapshot.profile, hydrated.sourceRoles);
   const sourcePrompt = writeVerifySourcePrompt({
+    documentScope: input.documentScope || null,
     posting, requirements, listingEvidence, identity: hydrated.snapshot.profile.identity,
     sourceRoles: hydrated.sourceRoles, profile: hydrated.snapshot.profile, catalog, lengthBudget,
     careerSkillEvidence: hydrated.skillEvidence,
@@ -5047,7 +5051,10 @@ async function writeVerifyFrozenContext(input, state) {
   });
   const skillNames = writeVerifySkillIndex({ profile: hydrated.snapshot.profile, catalog, listingEvidence,
     careerSkillEvidence: hydrated.skillEvidence }).map(skill => skill.name);
-  return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt, skillNames,
+  const evidenceResume = input.documentScope === 'cover' ? evidenceResumeForLetter({ identity: authorityTrustedIdentity(applicationCareerAuthority(input)),
+    sourceRoles: hydrated.sourceRoles, profile: hydrated.snapshot.profile, catalog }) : null;
+  return { posting, requirements, listingEvidence, catalog, hand, sourcePrompt, skillNames, evidenceResume,
+    documentScope: input.documentScope || null,
     evidencePlan: { evidence: [...hydrated.catalog, ...listingEvidence], requirements } };
 }
 
@@ -5069,7 +5076,8 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
   // droppedCandidateFindings). Corrections stay the current candidate's own.
   const prompt = writeVerifyPrompt({ stage: state.stage, state: state.writeVerify, ...context,
     targetCompany: input.job?.company || '',
-    envelope, corrections, droppedFindings: state.stage === 'write' ? droppedCandidateFindings(state.writeVerify) : [] });
+    envelope, corrections, droppedFindings: state.stage === 'write' ? droppedCandidateFindings(state.writeVerify) : [],
+    documentScope: context.documentScope });
   assertApplicationV2PromptLimit(prompt);
   const record = { ...envelope, revision: state.revision, prompt, draft: '', progress: applicationWorkflowProgress(input, state) };
   if (state.stage === 'pick') {
@@ -5081,22 +5089,23 @@ async function writeVerifyHandoffRecord({ jobId, input, state, corrections = [] 
       const { resume, coverLetter } = candidate.structured;
       const renderState = { ...state, evidencePlan: context.evidencePlan, selectedRoleIds: resume.roles.map(role => role.id) };
       const html = pasteRenderedResumeMainHtml(resume, renderState, input);
-      const letter = authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
+      const letter = input.documentScope === 'resume' ? null : authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
         paragraphs: coverLetter.paragraphs.map(paragraph => paragraph.text) }), html, input.job);
       const phase = await writeVerifyRenderPhase({ html, letter, input, renderState });
       if (phase.kind === 'render-fault') throw new ApplicationV2RenderUnavailableError(phase.renderFault);
       if (phase.kind === 'host-fault') throw new Error(phase.hostFault.message);
       const { resumeFit, letterFit } = phase;
-      if (phase.kind !== 'ok' || resumeFit.pageCount !== 1 || letterFit.pageCount !== 1 || !resumeFit.bytes || !letterFit.bytes)
+      if (phase.kind !== 'ok' || resumeFit.pageCount !== 1 || letterFit.pageCount !== 1 || (!resumeFit.absent && !resumeFit.bytes) || (!letterFit.absent && !letterFit.bytes))
         throw new Error('Application v2 judge requires both verified one-page renders for every accepted candidate.');
-      record.pageImages.push({ candidateId: id, document: 'resume', mimeType: 'image/png', data: await applicationV2PagePngImpl(resumeFit.bytes) });
-      record.pageImages.push({ candidateId: id, document: 'cover-letter', mimeType: 'image/png', data: await applicationV2PagePngImpl(letterFit.bytes) });
+      if (!resumeFit.absent) record.pageImages.push({ candidateId: id, document: 'resume', mimeType: 'image/png', data: await applicationV2PagePngImpl(resumeFit.bytes) });
+      if (!letterFit.absent) record.pageImages.push({ candidateId: id, document: 'cover-letter', mimeType: 'image/png', data: await applicationV2PagePngImpl(letterFit.bytes) });
     }
   }
   if (corrections.length) {
     record.corrections = corrections;
     record.correctionPrompt = prompt;
   }
+  if (input.documentScope) record.documentScope = input.documentScope;
   Object.defineProperty(record, 'freshContextKey', { value: writeVerifyStageKey(state.writeVerify, state.stage, jobId), enumerable: false });
   Object.defineProperty(record, 'freshContextRequired', { value: true, enumerable: false });
   await archiveV2Content({ jobDir: path.join(input.canvasRoot, '.local-ai', 'jobs', jobId), jobId,
@@ -5113,13 +5122,16 @@ async function writeVerifyRenderPhase({ html, letter, input, renderState, render
   const injected = typeof render === 'function' || renderPdf !== productionRenderPdf;
   const trustedRenderedRoleDates = input && renderState
     ? trustedRoleDatesForDashGate(selectedSourceRoles(renderState, input)) : null;
+  const documentScope = input?.documentScope || null;
   if (typeof render !== 'function') render = async () => {
-    const resumeFit = await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [], docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
-      trustedRenderedRoleDates });
-    const letterFit = await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
+    const resumeFit = documentScope === 'cover' ? { ...ABSENT_DOCUMENT_FIT, variantAttrs: applicationVariantAttrsForJob(input.job) }
+      : await renderLocalResumeWithFit({ resumeMainHtml: html, ledger: [], docId: crypto.randomUUID(), targetPageCount: 1, job: input.job,
+        trustedRenderedRoleDates });
+    const letterFit = documentScope === 'resume' ? ABSENT_DOCUMENT_FIT
+      : await renderLocalCoverLetter({ letter, variantAttrs: resumeFit.variantAttrs, docId: crypto.randomUUID() });
     return { resumeFit, letterFit };
   };
-  const key = !injected ? applicationV2RenderKey({ html, letter, variantAttrs: applicationVariantAttrsForJob(input.job),
+  const key = !injected ? applicationV2RenderKey({ html: documentScope === 'cover' ? `letter-only:${documentScope}` : html, letter, variantAttrs: applicationVariantAttrsForJob(input.job),
     trustedRenderedRoleDates, targetPageCount: 1,
     rendererVersion: currentApplicationV2RendererVersion() }) : null;
   return applicationV2RenderCache.getOrRender(key, () => measureWriteVerifyRenderPhase(render));
@@ -5171,27 +5183,32 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, r
     value: input.__careerCleanSkillNames || null, enumerable: false,
   });
   const base = { ...state, selectedRoleIds, evidencePlan };
-  const canonical = canonicalizeParsedResumeForHost({ resume }, { ...base, stage: 'resume' }, input).parsed;
-  const normalizedResume = canonical.resume;
+  const documentScope = input.documentScope || null;
+  const resumeDelivered = documentScope !== 'cover';
+  const letterDelivered = documentScope !== 'resume';
+  // A letter-only job holds approved evidence where the résumé sits; no host
+  // rule about a delivered résumé applies to it.
+  const normalizedResume = resumeDelivered ? canonicalizeParsedResumeForHost({ resume }, { ...base, stage: 'resume' }, input).parsed.resume : resume;
   const authority = applicationCareerAuthority(input);
   const hostFaults = hostOwnedPunctuationFaults({ sourceRoles: selectedSourceRoles(base, input), identity: authorityTrustedIdentity(authority),
-    recordFields: hostOwnedResumeRecordFields(normalizedResume, { authority, acceptedEvidence: evidencePlan?.evidence || [] }) });
+    recordFields: resumeDelivered ? hostOwnedResumeRecordFields(normalizedResume, { authority, acceptedEvidence: evidencePlan?.evidence || [] }) : [] });
   if (hostFaults.length) return finish({ errors: [], contentErrors: [], fitErrors: [], hostFault: { message: hostOwnedPunctuationMessage(hostFaults) },
-    structured: { resume: normalizedResume, coverLetter }, checkIds: [] });
+    structured: letterDelivered ? { resume: normalizedResume, coverLetter } : { resume: normalizedResume }, checkIds: [] });
 
+  const structuredDocuments = letterDelivered ? { resume: normalizedResume, coverLetter } : { resume: normalizedResume };
   const envelope = stage => ({ protocol: PASTE_APPLICATION_PROTOCOL_VERSION, jobId: input.jobId,
     stage, handoffCode: state.handoffCode, baseHashes: state.baseHashes });
-  const resumeErrors = validatePasteResponse({ ...envelope('resume'), resume: normalizedResume }, { ...base, stage: 'resume' }, input);
-  const letterErrors = validatePasteResponse({ ...envelope('cover-letter'), coverLetter },
-    { ...base, stage: 'cover-letter', resume: normalizedResume }, input);
+  const resumeErrors = resumeDelivered ? validatePasteResponse({ ...envelope('resume'), resume: normalizedResume }, { ...base, stage: 'resume' }, input) : [];
+  const letterErrors = letterDelivered ? validatePasteResponse({ ...envelope('cover-letter'), coverLetter },
+    { ...base, stage: 'cover-letter', resume: normalizedResume }, input) : [];
   const errors = [...resumeErrors, ...letterErrors];
   // Selection coverage is inapplicable to v2, but the shared final-artifact
   // duplicate rule still validates the résumé's actual content.
-  errors.push(...currentAuthorityRoleProjectDuplicateErrors(normalizedResume, frozen.authority));
+  if (resumeDelivered) errors.push(...currentAuthorityRoleProjectDuplicateErrors(normalizedResume, frozen.authority));
   if (!errors.length) {
     const renderState = { ...base, resume: normalizedResume };
     try {
-      const packageState = { ...renderState, coverLetter, skillSelection: frozenSkillSelection(normalizedResume, input) };
+      const packageState = { ...renderState, ...(letterDelivered ? { coverLetter } : {}), skillSelection: frozenSkillSelection(normalizedResume, input) };
       const sourceRoles = selectedSourceRoles(packageState, input);
       const packageRaw = assemblePasteApplicationResult({ input: { ...input, sourceRoles,
         __careerCleanSkillNames: input.__careerCleanSkillNames,
@@ -5204,18 +5221,18 @@ async function writeVerifyCandidateGate({ raw, state, input, frozen, manifest, r
     } catch (error) {
       for (const record of validationFailureRecords(error)) { errors.push(record.message); findingMeta[record.message] = { repairs: record.repairs }; }
     }
-    if (errors.length) return finish({ errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter },
+    if (errors.length) return finish({ errors, contentErrors: errors, fitErrors: [], structured: structuredDocuments,
       checkIds: pasteRejectionCheckIds(errors).checkIds });
     const html = pasteRenderedResumeMainHtml(normalizedResume, renderState, input);
-    const letter = authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
-      paragraphs: coverLetter.paragraphs.map(paragraph => paragraph.text) }), html, input.job);
+    const letter = letterDelivered ? authorLocalCoverLetterEnvelope(sanitizeCoverLetter({ ...coverLetter,
+      paragraphs: coverLetter.paragraphs.map(paragraph => paragraph.text) }), html, input.job) : null;
     const phase = await writeVerifyRenderPhase({ html, letter, input, renderState, render });
-    const structured = { resume: normalizedResume, coverLetter };
+    const structured = structuredDocuments;
     if (phase.kind === 'host-fault' || phase.kind === 'render-fault') return finish({ errors: [], contentErrors: [], fitErrors: [], structured, checkIds: [],
       ...(phase.hostFault ? { hostFault: phase.hostFault } : { renderFault: phase.renderFault }) });
     if (phase.kind === 'fit') return finish({ errors: phase.fitErrors, contentErrors: [], fitErrors: phase.fitErrors, measured: phase.measured, structured, checkIds: ['measured-one-page-fit'] });
   }
-  return finish({ errors, contentErrors: errors, fitErrors: [], structured: { resume: normalizedResume, coverLetter }, checkIds: pasteRejectionCheckIds(errors).checkIds });
+  return finish({ errors, contentErrors: errors, fitErrors: [], structured: structuredDocuments, checkIds: pasteRejectionCheckIds(errors).checkIds });
 }
 
 export async function __writeVerifyCandidateGateForTests(args) {
@@ -5630,6 +5647,7 @@ function frozenSkillSelection(resume, input) {
 // does not actually have.
 
 function pasteRenderedResumeMainHtml(resume, state, input) {
+  if (input?.documentScope === 'cover') return sanitizeResumeMainHtml(renderEvidenceResumeMainHtml(resume));
   const authority = applicationCareerAuthority(input);
   return sanitizeResumeMainHtml(renderStructuredApplicationResume(resume, {
     sourceRoles: selectedSourceRoles(state, input),
@@ -7946,7 +7964,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   if (!errors.length && outgoingStage === 'write') {
     const allowedIds = (await writeVerifyFrozenContext(input, state)).catalog.map(row => row.id);
     let split;
-    try { split = splitWriteVerifyWriterResponse(rawText, allowedIds); }
+    try { split = splitWriteVerifyWriterResponse(rawText, allowedIds, { documentScope: input.documentScope || null }); }
     catch (error) { errors.push(error.message); }
     if (split) {
       await archiveV2WriterNotes({ jobDir: dir, jobId, revision: state.revision, candidateId: candidate.id,
@@ -7955,7 +7973,15 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     }
   }
   if (!errors.length && ['convert', 'verify-correction', 'fit-correction', 'fact-correction'].includes(outgoingStage)) {
-    let documents = parsed?.resume && parsed?.coverLetter ? { resume: parsed.resume, coverLetter: parsed.coverLetter } : null;
+    // A one-document job takes only that document back. In a letter-only job the
+    // résumé slot always holds the host's evidence, whatever the reply carried,
+    // so no reply and no patch can replace what the letter is checked against.
+    const evidenceResume = input.documentScope === 'cover' ? (await writeVerifyFrozenContext(input, state)).evidenceResume : null;
+    const documentsFrom = source => input.documentScope === 'resume' ? (source?.resume ? { resume: source.resume } : null)
+      : input.documentScope === 'cover' ? (source?.coverLetter ? { resume: evidenceResume, coverLetter: source.coverLetter } : null)
+        : (source?.resume && source?.coverLetter ? { resume: source.resume, coverLetter: source.coverLetter } : null);
+    const conversionMessage = input.documentScope ? `Conversion must return the production structured ${applicationDocumentLabel(input.documentScope)}.` : 'Conversion must return both production structured documents.';
+    let documents = documentsFrom(parsed);
     if (outgoingStage !== 'convert') {
       unitState ||= bootstrapApplicationUnitState({ documents: owner.structured, corrections: work.lastCorrections || [], status: owner.status,
         ...(outgoingStage === 'fact-correction' ? { tier: 'fact', factFindings: work.factFindings || [] } : {}) });
@@ -7965,14 +7991,14 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       const base = owner.structured, openText = unitState.open.join(', ');
       const refuse = text => { errors.push(`unit-patch: ${text}`); patchRefused = true; };
       if (unitState.mode === 'patch') {
-        if (parsed.resume || parsed.coverLetter) refuse(`this round takes unit patches ({"patches":[...]}), not whole documents; units open this round: ${openText}.`);
+        if (input.documentScope ? documentsFrom(parsed) : parsed.resume || parsed.coverLetter) refuse(`this round takes unit patches ({"patches":[...]}), not whole documents; units open this round: ${openText}.`);
         else {
           const merge = mergeUnitPatches(base, parsed.patches, { open: unitState.open,
             shortenOnly: outgoingStage === 'fit-correction' || unitState.tier === 'fit', knownBad: unitState.flagged });
           errors.push(...merge.errors.map(error => error.text)); patchRefused = merge.errors.length > 0;
-          if (!patchRefused) documents = merge.documents;
+          if (!patchRefused) documents = input.documentScope === 'cover' ? { ...merge.documents, resume: evidenceResume } : merge.documents;
         }
-      } else if (!documents) errors.push('Conversion must return both production structured documents.');
+      } else if (!documents) errors.push(conversionMessage);
       else if (unitState.mode !== 'environment') {
         const delta = diffUnits(base, documents);
         for (const id of [...delta.changed, ...delta.removed].filter(id => !unitState.open.includes(id)))
@@ -7989,8 +8015,8 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
       }
       if (documents) { const delta = diffUnits(base, documents); patchEvidence = { mode: unitState.mode, changed: delta.changed, removed: delta.removed, mergedSha256: structuredDocumentDigest(documents) }; }
     }
-    if (!errors.length && !documents) errors.push('Conversion must return both production structured documents.');
-    if (!errors.length && outgoingStage === 'convert') {
+    if (!errors.length && !documents) errors.push(conversionMessage);
+    if (!errors.length && outgoingStage === 'convert' && input.documentScope !== 'cover') {
       errors.push(...writeVerifyDroppedSkillErrors(candidate.plainText, documents, (await writeVerifyFrozenContext(input, state)).skillNames));
     }
     if (!errors.length) {
@@ -8022,7 +8048,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
             ? work.ranking[work.factIndex] : candidate.id,
           content: { plainText: outgoingStage === 'fact-correction'
             ? work.candidates.find(row => row.id === work.ranking[work.factIndex])?.plainText : candidate.plainText,
-          structured: gate.structured } });
+          structured: writeVerifyDocumentsForPrompt(gate.structured, input.documentScope || null) } });
       }
     }
   }
@@ -8060,7 +8086,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   }
   if (!errors.length && ['fact-check', 'fact-recheck'].includes(outgoingStage)) {
     const winner = work.candidates.find(row => row.id === work.ranking[work.factIndex]);
-    errors.push(...writeVerifyFactFindingErrors(parsed?.findings, winner?.structured));
+    errors.push(...writeVerifyFactFindingErrors(parsed?.findings, writeVerifyDocumentsForPrompt(winner?.structured, input.documentScope || null)));
     if (!errors.length) {
       if (!parsed.findings.length) work.factPassed = true;
       else if (outgoingStage === 'fact-recheck') {
@@ -8211,7 +8237,7 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   if (nextStage === 'completed' || nextStage === 'write-verify-human-stop') next.handoffCode = null;
   if (nextStage === 'completed') {
     const winner = work.candidates.find(row => row.id === work.ranking[work.factIndex]);
-    next.resume = winner.structured.resume; next.coverLetter = winner.structured.coverLetter;
+    next.resume = winner.structured.resume; next.coverLetter = winner.structured.coverLetter ?? null;
     next.selectedRoleIds = next.resume.roles.map(role => role.id);
     next.skillSelection = frozenSkillSelection(next.resume, input);
     next.baseHashes = pasteBaseHashesFor(next);
@@ -10385,9 +10411,25 @@ async function ensureLocalAiHandoffReceiptsRoot(canvasRoot) {
   });
 }
 
+function measuredTargetsMessage({ documentScope, resumeFit, coverLetterFit, targetPageCount }) {
+  if (documentScope === 'resume') return `The résumé met its measured target (${resumeFit?.pageCount}/${targetPageCount} pages).`;
+  if (documentScope === 'cover') return `The cover letter met its measured target (${coverLetterFit?.pageCount}/1 pages).`;
+  return `Both documents met their measured targets (résumé ${resumeFit?.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit?.pageCount}/1 pages).`;
+}
+
+// What a saved folder holds now. Reading the file rather than remembering what
+// was generated is what lets a letter removed from the page free its button.
+// null means the folder could not answer; callers then keep their current view.
+async function readSavedApplicationDocuments(canvas, receipt) {
+  try {
+    const dir = await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt);
+    return savedDocumentsFromHtml(await readOwnedFile(dir, path.join(dir, 'Application.html'), { maxBytes: MAX_SAVED_APPLICATION_HTML_BYTES }));
+  } catch { return null; }
+}
+
 async function writeLocalAiTerminalReceipt({
   canvasRoot, canvasFilePath, jobId, resultRaw, resumeFit, coverLetterFit, targetPageCount, outputDir,
-  pasteRejectionTrace = [], selectedModelEffort = null, job = null,
+  pasteRejectionTrace = [], selectedModelEffort = null, job = null, documentScope = null,
 }) {
   const receiptsRoot = await ensureLocalAiHandoffReceiptsRoot(canvasRoot);
   // The private job folder is deleted right after this receipt is written, so
@@ -10426,13 +10468,14 @@ async function writeLocalAiTerminalReceipt({
       targetPageCount: 1,
     },
     ...(selectedModelEffort ? { selectedModelEffort } : {}),
+    ...(documentScope ? { documentScope } : {}),
     // This is a durable diagnostic projection, deliberately separate from
     // generated output and limited to the metadata-only row whitelist.
     pasteRejectionTrace: {
       version: 1,
       rows: projectLocalAiPasteRejectionTrace(pasteRejectionTrace, jobId),
     },
-    message: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
+    message: measuredTargetsMessage({ documentScope, resumeFit, coverLetterFit, targetPageCount }),
   };
   await atomicJson(path.join(receiptsRoot, `${jobId}.json`), receipt);
   return receipt;
@@ -11161,7 +11204,8 @@ function authorLocalCoverLetterEnvelope(coverLetter, resumeMainHtml, job = {}) {
   };
 }
 
-function localAiCoverLetterTelemetry(coverLetter = {}) {
+function localAiCoverLetterTelemetry(rawCoverLetter = {}) {
+  const coverLetter = rawCoverLetter || {};
   return {
     // This compact lifecycle receipt already retains the contact row and
     // visible prose. Keep the displayed name/date with it so diagnostics do
@@ -11212,8 +11256,9 @@ function applicationOutputDigest(value) {
   return crypto.createHash('sha256').update(JSON.stringify(value), 'utf8').digest('hex');
 }
 
-function localAiApplicationOutputTelemetry({ resumeMainHtml, coverLetter } = {}) {
-  const evidence = extractResumeEvidence(resumeMainHtml);
+function localAiApplicationOutputTelemetry({ resumeMainHtml, coverLetter: rawCoverLetter } = {}) {
+  const coverLetter = rawCoverLetter || {};
+  const evidence = resumeMainHtml ? extractResumeEvidence(resumeMainHtml) : null;
   const resume = {
     identity: {
       name: applicationOutputVisibleText(evidence?.identity?.name),
@@ -14135,15 +14180,23 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
     if (!projectRoot) throw new Error(`This job records a canvas folder of ${JSON.stringify(projectRoot ?? null)}, and a bundle location is resolved inside one.`);
   });
   const output = frozenEnvelope(() => resolveLocalOutputBundleRoot(raw.outputBundleRoot, projectRoot));
-  const resumeMainHtml = withFailureRepairs(['resume:rendered'],
+  // Only the app's own v2 assembly writes this field. A legacy responder-written
+  // package must still produce both documents.
+  const documentScope = options.applicationProtocol === WRITE_VERIFY_PROTOCOL ? frozenEnvelope(() => normalizeApplicationDocumentScope(raw.documentScope)) : null;
+  const resumeDelivered = documentScope !== 'cover';
+  const letterDelivered = documentScope !== 'resume';
+  // A letter-only package carries the host's approved-evidence résumé for the
+  // letter checks to read. Nothing delivers it, so nothing about a delivered
+  // résumé is asked of it.
+  const resumeMainHtml = resumeDelivered ? withFailureRepairs(['resume:rendered'],
     () => assertRetainedResumeRoleBullets(sanitizeResumeMainHtml(raw.resumeMainHtml), {
       expectedRoleCount: options.currentAuthoritySelectedRoleCount ?? null,
-    }));
+    })) : sanitizeResumeMainHtml(raw.resumeMainHtml);
   // Deferred, not thrown: résumé prose is graded from resumeMainHtml alone, so
   // a failure here blocks nothing below it. Throwing immediately meant a
   // result with one résumé defect and one cover-letter defect could never
   // report both, and the writer paid a round to discover the second.
-  const resumeProseChecks = evaluateResumeProseChecks(resumeMainHtml, { activeOnly: true });
+  const resumeProseChecks = resumeDelivered ? evaluateResumeProseChecks(resumeMainHtml, { activeOnly: true }) : [];
   const resumeProseFailures = partitionResumeCheckResults(resumeProseChecks).blocking;
   const resumeProseFailure = resumeProseFailures.length
     ? {
@@ -14155,9 +14208,9 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
   // These three are STRUCTURAL: nothing below can be graded without them, so
   // they still fail fast. They must not swallow the prose defect the app has
   // already measured, though — that would spend a round re-discovering it.
-  let coverLetter;
-  let coverLetterArgument;
-  try {
+  let coverLetter = null;
+  let coverLetterArgument = null;
+  if (letterDelivered) try {
     // Two checks, two different repairs. The envelope grades the letter the
     // host will render, so only a rendered edit repairs it; the argument
     // envelope is the letter's authored contract, which repairs without the
@@ -14174,7 +14227,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
     if (isJobIntegrityFault(error)) throw error;
     throwValidationFailures([resumeProseFailure, ...asFailureRecords(validationFailureRecords(error), ['coverLetter:authored'])].filter(Boolean));
   }
-  const coverPlan = localCoverLetterPlan(coverLetterArgument);
+  const coverPlan = letterDelivered ? localCoverLetterPlan(coverLetterArgument) : null;
   // Asserted above: present, and either usable text or an explicit null.
   const hasTrustedCareerData = options.careerData !== null;
   const authorityCareerDataValidated = !hasTrustedCareerData
@@ -14194,7 +14247,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
   const writeVerifyV2 = options.applicationProtocol === WRITE_VERIFY_PROTOCOL;
   const expectedAuditVersion = writeVerifyV2 ? null : frozenState(FROZEN_JOB_RECORD,
     () => expectedGenerationAuditVersion(options?.generationAuditVersion));
-  let coverChecks = pasteCoverLetterChecks({
+  let coverChecks = !letterDelivered ? [] : pasteCoverLetterChecks({
     plan: coverPlan,
     paragraphs: coverLetter.paragraphs,
     evidence: resumeEvidence,
@@ -14224,10 +14277,10 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
   // throwing here would hide those. Gated on hasTrustedCareerData for the same
   // reason sourceGrounding is — without the corpus there is no stated location
   // to require, and a caller that supplies none must not be told one is missing.
-  const roleLocationFailures = hasTrustedCareerData
+  const roleLocationFailures = hasTrustedCareerData && resumeDelivered
     ? resumeRoleLocationFailures(resumeEvidence?.roles, careerData)
     : [];
-  const projectProvenanceFailures = hasTrustedCareerData
+  const projectProvenanceFailures = hasTrustedCareerData && resumeDelivered
     ? resumeProjectProvenanceFailures(resumeMainHtml, careerData)
     : [];
   // Both are résumé-content defects, and both say so on the failure rather
@@ -14240,7 +14293,7 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
   };
   try {
     assertCandidateDashPunctuation({
-      resumeMainHtml,
+      resumeMainHtml: resumeDelivered ? resumeMainHtml : '',
       coverLetter,
       trustedRenderedRoleDates: options.trustedRenderedRoleDates,
     });
@@ -14364,7 +14417,10 @@ export function validateLocalApplicationResult(raw, jobId, projectRoot, job, opt
   }
   if (failures.length) throwValidationFailures(failures);
   return {
-    resumeMainHtml,
+    ...(documentScope ? { documentScope } : {}),
+    // Never the evidence résumé: anything downstream of this result that reads
+    // a résumé is reading one that will be delivered.
+    resumeMainHtml: resumeDelivered ? resumeMainHtml : '',
     coverLetter,
     coverLetterArgument,
     qualityReview,
@@ -14796,7 +14852,8 @@ export function buildLocalGenerationAuditArtifact({
       ...(scrapedListingMarkdown == null ? {} : { scrapedListingSha256: contentHash(scrapedListingMarkdown) }),
     },
     writerAudit: projectWriterGenerationAudit(result?.generationAudit, currentAuthorityDisposition),
-    coverLetterArgument: projectGenerationAuditArgument(result?.coverLetterArgument),
+    // The audit's shape requires this section; a résumé-only job has no letter to fill it.
+    coverLetterArgument: projectGenerationAuditArgument(result?.coverLetterArgument) || { notRequested: true },
     writerQualityReview: generationAuditRequired === false && isWriteVerifyJob(input)
       ? { status: 'not-applicable', reason: 'Application v2 has no review-stage response.' }
       : projectGenerationAuditQualityReview(result?.qualityReview),
@@ -16035,8 +16092,51 @@ async function authoritativeCareerInputForSnapshot(snapshotId) {
   };
 }
 
+// The renderer claims a document before its first await, but it cannot speak for
+// a second window, a stale card instance or a retry that outran its own state.
+// This is the last refusal before a job spends any usage.
+const applicationDocumentStartsInFlight = new Set();
+
+function applicationDocumentAlreadyStarted(documentScope) {
+  return Object.assign(new Error(`This job's ${applicationDocumentLabel(documentScope)} is already being generated.`), { code: 'LOCAL_AI_DOCUMENT_ALREADY_STARTED' });
+}
+
+// A job ending in a failed state, or already saved, no longer holds its document.
+async function activeApplicationJobForDocument({ canvasFilePath, nodeId, documentScope, priorLocalApplicationId = null }) {
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  for (const { id } of await discoverLocalApplicationJobs(canvasFilePath)) {
+    if (id === priorLocalApplicationId) continue;
+    const dir = path.join(path.resolve(localJobsRoot(canvas.canvasRoot)), id);
+    const [manifest, input] = await Promise.all([loadManifest(dir), readOwnedFile(path.dirname(dir), path.join(dir, 'input.json'), { maxBytes: MAX_LOCAL_AI_INPUT_BYTES }).then(JSON.parse)]);
+    if (input?.nodeId !== nodeId || (input?.documentScope && input.documentScope !== documentScope)) continue;
+    if (REPLACEABLE_APPLICATION_JOB_STATUSES.has(manifest?.status)) continue;
+    if (await readLocalAiTerminalReceipt(canvas.canvasRoot, canvas.canonicalCanvasFilePath, id)) continue;
+    return id;
+  }
+  return null;
+}
+
+/** Runs `start` only if nothing else holds this card's document, now or on disk. */
+export async function withApplicationDocumentStart({ canvasFilePath, nodeId, documentScope, priorLocalApplicationId = null }, start) {
+  if (!documentScope || typeof nodeId !== 'string' || !nodeId) return start();
+  // Claimed before the first await, so two invokes in one turn cannot both pass.
+  const key = JSON.stringify([canvasFilePath, nodeId, documentScope]);
+  if (applicationDocumentStartsInFlight.has(key)) throw applicationDocumentAlreadyStarted(documentScope);
+  applicationDocumentStartsInFlight.add(key);
+  try {
+    if (await activeApplicationJobForDocument({ canvasFilePath, nodeId, documentScope, priorLocalApplicationId })) throw applicationDocumentAlreadyStarted(documentScope);
+    return await start();
+  } finally { applicationDocumentStartsInFlight.delete(key); }
+}
+
 export async function queueLocalApplicationJob(args = {}, signal = null) {
   throwIfAborted(signal);
+  return withApplicationDocumentStart({ canvasFilePath: args.canvasFilePath, nodeId: args.nodeId,
+    documentScope: normalizeApplicationDocumentScope(args.documentScope), priorLocalApplicationId: args.priorLocalApplicationId ?? null },
+  () => queueLocalApplicationJobForPin(args, signal));
+}
+
+async function queueLocalApplicationJobForPin(args, signal) {
   const rawCareerSnapshotId = args.careerSnapshotId;
   if (typeof rawCareerSnapshotId !== 'string' || !rawCareerSnapshotId) {
     throw new Error('A current approved career snapshot is required to generate an application. Re-import your career files, re-run Job Search, and re-combine this board before trying again.');
@@ -16096,6 +16196,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
     }
   }
   const canvas = await resolveCanvasProject(args.canvasFilePath);
+  const documentScope = normalizeApplicationDocumentScope(args.documentScope);
   if (args.priorLocalApplicationId != null) {
     if (typeof args.priorLocalApplicationId !== 'string' || !JOB_ID_RE.test(args.priorLocalApplicationId)) {
       throw new Error('Invalid prior Local AI job id.');
@@ -16105,7 +16206,9 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       let outputExists = true;
       try { await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt); }
       catch (error) { if (error?.code !== 'ENOENT') throw error; outputExists = false; }
-      if (outputExists) {
+      // A saved folder blocks only the documents it already holds.
+      const savedDocuments = outputExists ? await readSavedApplicationDocuments(canvas, receipt) : null;
+      if (outputExists && (!documentScope || savedDocuments?.[documentScope] !== false)) {
         const error = new Error('This job already has a linked application bundle. Delete its saved folder externally before generating another application.');
         error.code = 'LOCAL_AI_OUTPUT_ALREADY_LINKED';
         throw error;
@@ -16179,7 +16282,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       ...(snapshotInput && pasteTransport ? { authorityProtocol: queuedCurrentAuthorityProtocolForTests || AUTHORITY_PROTOCOL_CURRENT, listingCoverageVersion: AUTHORITY_LISTING_COVERAGE_VERSION } : {}),
       ...(snapshotInput && pasteTransport && !args[LEGACY_APPLICATION_TEST_CAPABILITY]
         && applicationProtocolSetting(args.applicationProtocol ?? tryGetStore()?.get('application.protocol')) === WRITE_VERIFY_PROTOCOL
-        ? { applicationProtocol: WRITE_VERIFY_PROTOCOL, candidateCount: writeVerifyCandidateCount(args.candidateCount) } : {}),
+        ? { applicationProtocol: WRITE_VERIFY_PROTOCOL, candidateCount: writeVerifyCandidateCount(args.candidateCount), ...(documentScope ? { documentScope } : {}) } : {}),
       additionalNotes: normalizeApplicationAdditionalNotes(args.additionalNotes),
       reasoning: cleanText(args.reasoning, 8_000), matchScore: Number.isFinite(args.matchScore) ? args.matchScore : null,
       // A pinned snapshot is the complete career authority. Never carry the
@@ -16615,9 +16718,12 @@ async function localApplicationStatusUnlocked(jobId, canvasFilePath) {
             throw validationError;
           }
         }
+        const savedDocuments = receipt.version === 2 && receipt.outputDir ? await readSavedApplicationDocuments(requestedCanvas, receipt) : null;
         return {
           id: jobId,
           status: 'saved',
+          ...(savedDocuments ? { savedDocuments } : {}),
+          ...(receipt.documentScope ? { documentScope: receipt.documentScope } : {}),
           folder: null,
           canvasFilePath: requestedCanvas.canonicalCanvasFilePath,
           createdAt: receipt.importedAt || null,
@@ -17258,6 +17364,11 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   // rewritten to rejectable bytes that still satisfy expectedResultSha256.
   const result = await gradeOrRecordRejection(() =>
     validateLocalApplicationResult(raw, jobId, canvas.canvasRoot, input.job, validationOptions));
+  const documentScope = result.documentScope || null;
+  if (documentScope !== (input.documentScope || null)) {
+    await gradingFrozenJobRecord(() => frozenState(FROZEN_COMPLETED_PACKAGE, () => { throw new Error('The completed application package names a different document than this job was queued for.'); }));
+  }
+  const candidateName = result.coverLetter?.name || extractResumeEvidence(result.resumeMainHtml || raw.resumeMainHtml)?.identity?.name || '';
   const priorFeedback = await readLocalFitFeedback(root, dir);
   const matchingPriorFeedback = priorFeedback?.jobId === jobId && priorFeedback?.resultSha256 === contentHash(resultRaw);
   // Only a MEASURED verdict may stand in for the quality-review check below.
@@ -17307,7 +17418,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       : String(priorFeedback.message || 'The résumé or cover letter exceeded its measured page target. Re-run the Local AI routine to revise result.json using fit-feedback.json.');
     return {
       id: jobId, status: 'revision-required',
-      company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name,
+      company: input.job?.company || input.job?.postedBy || '', candidateName,
       resumeFit: { targetPageCount, pageCount: resumePageCount, targetMet, compactApplied: Boolean(priorFeedback?.resume?.attempts?.some(attempt => attempt?.density === 'compact')), layout: resumeLayout, layoutIssues: resumeLayoutIssues, contentUtilization: resumeTypeAreaUtilization(resumeLayout) },
       coverLetterFit: { targetPageCount: 1, pageCount: coverLetterPageCount, targetMet: coverLetterTargetMet, layout: coverLetterLayout, layoutIssues: coverLayoutIssues, contentUtilization: resumeTypeAreaUtilization(coverLetterLayout) },
       fitIssues, fitMessage, revisionRound: Number.isFinite(priorFeedback.revisionRound) ? priorFeedback.revisionRound : null,
@@ -17329,11 +17440,13 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const targetPageCount = Number.isFinite(input?.targetPageCount) && input.targetPageCount > 0
     ? input.targetPageCount
     : targetPageCountForJob(input.job?.title);
-  const resumeFit = await renderLocalResumeWithFit({
-    resumeMainHtml: result.resumeMainHtml, ledger, docId, targetPageCount, job: input.job, signal,
-    trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates,
-  });
-  const coverLetterFit = await renderLocalCoverLetter({
+  const resumeFit = documentScope === 'cover'
+    ? { ...ABSENT_DOCUMENT_FIT, mainHtml: '', variantAttrs: applicationVariantAttrsForJob(input.job) }
+    : await renderLocalResumeWithFit({
+      resumeMainHtml: result.resumeMainHtml, ledger, docId, targetPageCount, job: input.job, signal,
+      trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates,
+    });
+  const coverLetterFit = documentScope === 'resume' ? ABSENT_DOCUMENT_FIT : await renderLocalCoverLetter({
     letter: result.coverLetter, variantAttrs: resumeFit.variantAttrs, docId: `${docId}-cover`, signal,
   });
   const resumeHandoffFit = { ...resumeFit, targetPageCount };
@@ -17363,9 +17476,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     return '';
   };
   const verificationIssues = [
-    ...(!resumeFit.bytes || resumeFit.fontsLoaded !== true || resumeFit.pageCount == null
+    ...(!resumeFit.absent && (!resumeFit.bytes || resumeFit.fontsLoaded !== true || resumeFit.pageCount == null)
       ? [`résumé layout could not be verified${unverifiedReason(resumeFit)}`] : []),
-    ...(!coverLetterFit.bytes || coverLetterFit.fontsLoaded !== true || coverLetterFit.pageCount == null
+    ...(!coverLetterFit.absent && (!coverLetterFit.bytes || coverLetterFit.fontsLoaded !== true || coverLetterFit.pageCount == null)
       ? [`cover-letter layout could not be verified${unverifiedReason(coverLetterFit)}`] : []),
   ];
   if (verificationIssues.length) {
@@ -17421,7 +17534,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       localAi: { jobId, verificationIssues: boundedVerificationIssues, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
-      id: jobId, status: 'render-retry-required', company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name,
+      id: jobId, status: 'render-retry-required', company: input.job?.company || input.job?.postedBy || '', candidateName,
       renderMessage, verificationIssues: boundedVerificationIssues, resultSha256: contentHash(resultRaw),
       localJob: {
         id: jobId, status: 'render-retry-required', folder: dir,
@@ -17550,7 +17663,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       localAi: { jobId, targetMet: false, coverLetterTargetMet, revisionRequested: true, revisionRound, fitIssues, chronology: localAiChronologyTelemetry(result), qualityReview: compactLocalAiQualityReview(result.qualityReview), handoffHistory: handoffManifest.handoffHistory },
     });
     return {
-      id: jobId, status: 'revision-required', company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name,
+      id: jobId, status: 'revision-required', company: input.job?.company || input.job?.postedBy || '', candidateName,
       resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: validatedResumeLayoutIssues, contentUtilization: resumeFit.contentUtilization },
       coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: validatedCoverLayoutIssues, contentUtilization: coverLetterFit.contentUtilization },
       fitIssues, fitMessage,
@@ -17575,10 +17688,10 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const scrapedListingMarkdown = await readScrapedListingAudit(root, dir, input);
   const trustedBundlePosting = normalizeOfficialPosting(input.job?.officialPosting);
   const downloadOfficialPosting = trustedBundlePosting || undefined;
-  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, jobUrl: input.job?.url || '', listingLinkUrl: input.job?.listingLinkUrl || '', officialPosting: downloadOfficialPosting, jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
+  const applicationHtml = buildResumeDocument({ resumeMainHtml: resumeFit.mainHtml, documentScope, variantAttrs: resumeFit.variantAttrs, ledger, docId, coverLetter: result.coverLetter, trustedRenderedRoleDates: validationOptions.trustedRenderedRoleDates, jobContext: { title: input.job?.title || '', company: input.job?.company || '', location: input.job?.location || '' }, downloadBundle: { company: input.job?.company || input.job?.postedBy || '', candidateName, jobUrl: input.job?.url || '', listingLinkUrl: input.job?.listingLinkUrl || '', officialPosting: downloadOfficialPosting, jobMarkdown: jobListingMarkdown, postingVariants: input.job?.postingVariants || [] } });
   let resumePdf = resumeFit.bytes; let coverPdf = coverLetterFit.bytes;
   const missingArtifacts = [];
-  if (!resumePdf) {
+  if (!resumePdf && !resumeFit.absent) {
     missingArtifacts.push('résumé PDF');
     if (resumeFit.renderError) logger.warn(`[LocalAI] Resume PDF unavailable: ${resumeFit.renderError}`);
     else if (resumeFit.fontsLoaded === false) {
@@ -17588,7 +17701,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       );
     }
   }
-  if (!coverPdf) {
+  if (!coverPdf && !coverLetterFit.absent) {
     missingArtifacts.push('cover-letter PDF');
     if (coverLetterFit.renderError) logger.warn(`[LocalAI] Cover letter PDF unavailable: ${coverLetterFit.renderError}`);
   }
@@ -17601,7 +17714,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   const importedManifest = await appendLocalAiHandoffEvent(dir, manifest, localAiHandoffEvent({
     type: 'result-imported', resultRaw, resumeFit: resumeHandoffFit,
     coverLetterFit: coverLetterHandoffFit, qualityReview: result.qualityReview,
-    detail: `Both documents met their measured targets (résumé ${resumeFit.pageCount}/${targetPageCount} pages; cover letter ${coverLetterFit.pageCount}/1 pages).`,
+    detail: measuredTargetsMessage({ documentScope, resumeFit, coverLetterFit, targetPageCount }),
   }));
   // Read the metadata-only trace before staging the audit. The same projector
   // is used later by the terminal receipt, so successful cleanup cannot make
@@ -17695,7 +17808,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   postRenderFailure.phase = 'registering application save capability';
   await assertLocalAiResultHashCurrent(root, dir, resultSha256);
   const workDir = registerPendingApplicationWorkspace({
-    workDir: dir, senderId, company: input.job?.company || input.job?.postedBy, candidateName: result.coverLetter.name,
+    workDir: dir, senderId, company: input.job?.company || input.job?.postedBy, candidateName, documentScope,
     identityCompany: typeof manifest.scrapedCompany === 'string' ? manifest.scrapedCompany : null,
     resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
     resumePdfPageCount: resumePdf ? resumeFit.pageCount : null,
@@ -17737,6 +17850,7 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
         coverLetterFit, targetPageCount,
         outputDir: savedOutputDir,
         job: input.job,
+        documentScope,
         pasteRejectionTrace,
         selectedModelEffort: generationSelectionSummary(canvas.canonicalCanvasFilePath, jobId),
       });
@@ -17781,8 +17895,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   // The only success-path log for an import: handleSafe logs failures only, so
   // without this a clean run leaves no import entry in the main-process log a
   // HANDOFF bug report could show.
-  logger.info(`[LocalAI] Imported job ${jobId}: résumé ${resumeFit.pageCount}/${targetPageCount} page(s), cover letter ${coverLetterFit.pageCount}/1 — awaiting bundle save`);
-  return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath, company: input.job?.company || input.job?.postedBy || '', candidateName: result.coverLetter.name, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues), contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues), contentUtilization: coverLetterFit.contentUtilization }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
+  logger.info(`[LocalAI] Imported job ${jobId}: ${documentScope === 'cover' ? '' : `résumé ${resumeFit.pageCount}/${targetPageCount} page(s)`}${documentScope ? '' : ', '}${documentScope === 'resume' ? '' : `cover letter ${coverLetterFit.pageCount}/1`} — awaiting bundle save`);
+  return { id: jobId, status: 'imported', workDir, resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath, company: input.job?.company || input.job?.postedBy || '', candidateName, missingArtifacts, resumeFit: { targetPageCount, pageCount: resumeFit.pageCount, targetMet, compactApplied: resumeFit.compactApplied, layout: resumeFit.layout, layoutIssues: safeMeasuredLayoutIssues(resumeFit.layoutIssues), contentUtilization: resumeFit.contentUtilization }, coverLetterFit: { targetPageCount: 1, pageCount: coverLetterFit.pageCount, targetMet: coverLetterTargetMet, layout: coverLetterFit.layout, layoutIssues: safeMeasuredLayoutIssues(coverLetterFit.layoutIssues), contentUtilization: coverLetterFit.contentUtilization }, localJob: { id: jobId, status: 'imported', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath } };
 }
 
 /**
@@ -17911,6 +18025,7 @@ export async function findSavedApplicationLinks({ canvasFilePath, jobs = [] } = 
       bundles.push({ listingKeys, importedAt: receipt.importedAt, localApplication: {
         id: jobId, status: 'saved', canvasFilePath: canvas.canonicalCanvasFilePath,
         savedDir: dir, receipt, message: 'Application bundle restored from its saved receipt.',
+        ...(await readSavedApplicationDocuments(canvas, receipt).then(savedDocuments => savedDocuments ? { savedDocuments } : {})),
       } });
     } catch { unavailable++; }
   }

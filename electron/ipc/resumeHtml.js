@@ -1359,6 +1359,7 @@ export function normaliseResumeDownloadBundle(raw = {}) {
     coverLetterPdfBase64,
     sync,
     coverLetterAudit,
+    ...(raw.documentScope === 'resume' || raw.documentScope === 'cover' ? { documentScope: raw.documentScope } : {}),
   };
 }
 
@@ -1835,9 +1836,11 @@ ${editableRuntimeSanitizerSource()}
     } catch (e) {}
   }
   var main = document.querySelector('main.page') || document.querySelector('main');
-  var resumeMain = main;
+  // A letter-only workspace's one main.page is the letter, routed through its
+  // own panel below. Only a standalone letter binds its page to the résumé slot.
+  var resumeMain = BUNDLE_DATA.documentScope === 'cover' ? null : main;
   var coverMain = document.querySelector('[data-ic-document-panel="cover"] main');
-  var activeDocument = 'resume';
+  var activeDocument = resumeMain ? 'resume' : 'cover';
   var documentTabs = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-tab]'));
   var editBtn = document.getElementById('ic-edit-toggle');
   var syncBtn = document.getElementById('ic-sync-btn');
@@ -2165,7 +2168,7 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
   }
   if (resumeMain && resumeMain.innerHTML !== initialResumeMarkup) markPdfStale('resume');
   updateSkillReviewStatus();
-  selectDocument('resume');
+  selectDocument(resumeMain ? 'resume' : 'cover');
 
   // A file:// page has no authority to read its sibling PDFs. Ask the same
   // capability-scoped loopback bridge used by Sync to compare the fixed
@@ -2253,7 +2256,7 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
   // ---- Edit mode + localStorage autosave (§5.5). contenteditable edits
   // vanish on reload without this; keyed by docId so different documents
   // (and different applications generated from the same hub) never collide. ----
-  if (main) {
+  if (resumeMain) {
     try {
       var saved = icReadAutosave(STORAGE_KEY, RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
       if (saved) {
@@ -2276,7 +2279,7 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
         icWriteAutosave(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations), RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
       }, 500);
     }
-    main.addEventListener('input', function () {
+    resumeMain.addEventListener('input', function () {
       scheduleSave();
       markPdfStale('resume');
       if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
@@ -2368,7 +2371,9 @@ ${APPLICATION_EDIT_NOTES_RESTORE}
     }).catch(function () {});
   }
   if (removeCoverBtn) {
-    if (BUNDLE_DATA.letterRemoved || !coverMain) removeCoverBtn.remove();
+    // A letter-only workspace would be left holding nothing; Delete saved folder
+    // on the card is the action that removes it.
+    if (BUNDLE_DATA.letterRemoved || !coverMain || !resumeMain) removeCoverBtn.remove();
     else removeCoverBtn.addEventListener('click', function () {
       if (!window.confirm('Permanently remove the cover letter and its PDF? This cannot be undone.')) return;
       var sync = BUNDLE_DATA.sync || {};
@@ -2531,7 +2536,14 @@ ${APPLICATION_EDIT_NOTES_RESTORE}
  *   Final interactive documents leave this false and require explicit review.
  * @returns {string}
  */
-export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, showAllVerifySkills = false, downloadBundle, coverLetter, trustedRenderedRoleDates = null } = {}) {
+export const APPLICATION_COVER_TAB_MARKUP = '<button type="button" id="ic-cover-tab" class="ic-btn" role="tab" data-ic-document-tab="cover" aria-controls="ic-cover-panel" aria-selected="false" tabindex="-1">Cover letter</button>';
+export function applicationCoverPanelMarkup(coverMain, { hidden = true } = {}) {
+  return `<section id="ic-cover-panel" role="tabpanel" aria-labelledby="ic-cover-tab" data-ic-document-panel="cover"${hidden ? ' hidden' : ''}><div class="ic-page-stage">${coverMain}<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>`;
+}
+
+export function buildResumeDocument({ documentScope = null, resumeMainHtml, variantAttrs, ledger, docId, skillInsights, skillHistogram, jobContext, skillOpportunityError, coverLetterCheckSummary, showAllVerifySkills = false, downloadBundle, coverLetter, trustedRenderedRoleDates = null } = {}) {
+  const resumeHeld = documentScope !== 'cover';
+  const coverHeld = documentScope !== 'resume';
   let main = String(resumeMainHtml || '').trim();
   // Defensive: accept a fenced response, but let the DOM-based sanitizer find
   // the one real <main> element. Regex extraction is unsafe here: a script or
@@ -2541,19 +2553,21 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   // Decode any literal "\n"/"\t" the model left in the markup so they collapse as
   // HTML whitespace instead of printing verbatim (real newlines are untouched).
   main = decodeTextEscapes(main);
-  main = sanitizeDocumentMainHtml(main, { documentKind: 'resume', allowHostState: false });
-  main = stripMainVariantAttrs(main);
-  main = neutralizeHighlightTextEmphasis(main);
+  if (resumeHeld) {
+    main = sanitizeDocumentMainHtml(main, { documentKind: 'resume', allowHostState: false });
+    main = stripMainVariantAttrs(main);
+    main = neutralizeHighlightTextEmphasis(main);
+  } else main = '';
   assertCandidateDashPunctuation({ resumeMainHtml: main, coverLetter, trustedRenderedRoleDates });
   // Resolve/strip receipts BEFORE anything else touches the markup (§4.3 step 3).
-  main = injectReceipts(main, ledger);
+  if (resumeHeld) main = injectReceipts(main, ledger);
   const bundle = normaliseResumeDownloadBundle(downloadBundle);
   const workspace = buildSkillWorkspace({
     skillInsights, skillHistogram, jobContext, jobUrl: bundle.jobUrl, listingLinkUrl: bundle.listingLinkUrl, officialPosting: bundle.officialPosting,
     postingVariants: bundle.postingVariants,
     skillOpportunityError, coverLetterCheckSummary,
   });
-  main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
+  if (resumeHeld) main = injectInferredSkills(main, workspace.insights, showAllVerifySkills);
 
   const attrs = variantAttrs != null ? variantAttrs : extractVariantAttrs(resumeMainHtml);
   const suppliedCover = coverLetter ? buildCoverLetterDocument({ letter: coverLetter, variantAttrs: attrs, docId: String(docId || 'application') + '-cover' }) : '';
@@ -2572,9 +2586,9 @@ export function buildResumeDocument({ resumeMainHtml, variantAttrs, ledger, docI
   const css = inlineStylesheets(CSS_FILES);
   const scriptNonce = createDocumentScriptNonce();
   const chrome = buildInjectedChrome({
-    docId, kind: 'resume', workspace: true, downloadBundle, scriptNonce,
-    resumeFingerprint: documentMarkupFingerprint(main),
-    coverFingerprint: documentMarkupFingerprint(coverMain),
+    docId, kind: 'resume', workspace: true, downloadBundle: documentScope ? { ...downloadBundle, documentScope } : downloadBundle, scriptNonce,
+    resumeFingerprint: resumeHeld ? documentMarkupFingerprint(main) : '',
+    coverFingerprint: coverHeld ? documentMarkupFingerprint(coverMain) : '',
   });
 
   return `<!doctype html>
@@ -2595,11 +2609,11 @@ ${INJECTED_CHROME_CSS}
 ${workspace.markup}
   <div class="ic-preview-area">
     <div class="ic-document-tabs" role="tablist" aria-label="Application documents">
-      <button type="button" id="ic-resume-tab" class="ic-btn" role="tab" data-ic-document-tab="resume" aria-controls="ic-resume-panel" aria-selected="true" tabindex="0">Résumé</button>
-      <button type="button" id="ic-cover-tab" class="ic-btn" role="tab" data-ic-document-tab="cover" aria-controls="ic-cover-panel" aria-selected="false" tabindex="-1">Cover letter</button>
+      ${resumeHeld ? '<button type="button" id="ic-resume-tab" class="ic-btn" role="tab" data-ic-document-tab="resume" aria-controls="ic-resume-panel" aria-selected="true" tabindex="0">Résumé</button>' : ''}
+      ${coverHeld ? APPLICATION_COVER_TAB_MARKUP : ''}
     </div>
-    <section id="ic-resume-panel" role="tabpanel" aria-labelledby="ic-resume-tab" data-ic-document-panel="resume"><div class="ic-page-stage">${main}<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>
-    <section id="ic-cover-panel" role="tabpanel" aria-labelledby="ic-cover-tab" data-ic-document-panel="cover" hidden><div class="ic-page-stage">${coverMain}<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>
+    ${resumeHeld ? `<section id="ic-resume-panel" role="tabpanel" aria-labelledby="ic-resume-tab" data-ic-document-panel="resume"><div class="ic-page-stage">${main}<div class="ic-page-guides" aria-hidden="true" data-ic-page-guides></div></div></section>` : ''}
+    ${coverHeld ? applicationCoverPanelMarkup(coverMain, { hidden: resumeHeld }) : ''}
 ${chrome}
   </div>
 </div>

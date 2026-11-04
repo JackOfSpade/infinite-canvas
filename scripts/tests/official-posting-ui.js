@@ -13,6 +13,7 @@ import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import {
   hasLinkedLocalApplicationOutput, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision,
   replacedLocalApplicationForCleanup,
+  savedApplicationPointer,
 } from '../../src/utils/localAiApplicationLifecycle.js';
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
@@ -41,7 +42,7 @@ const row = extra => ({ hubId: 'board', careerSnapshotId: 'approved-snapshot',
 function generateBody() {
   const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
   const start = source.indexOf('const generateApplication = useCallback(');
-  const end = source.indexOf('\n\n  return (', start);
+  const end = source.indexOf('\n\n  // The second document waits', start);
   assert.ok(start >= 0 && end > start);
   return source.slice(start, end);
 }
@@ -66,7 +67,7 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
   };
   const context = {
     useCallback: fn => fn, window: { electronAPI }, generateId: () => `fresh-${++sequence}`,
-    applicationSubmissionRef: { current: false }, hasApplicationRun: false, localJobPending: false, effectiveLock: false,
+    applicationSubmissionRef: { current: false }, getRunningApplicationDocument: () => null, claimRunningApplicationDocument: () => true, clearRunningApplicationDocument() {}, savedApplicationPointer,
     id: 'card', idRef: { current: 'card' }, data, additionalNotes: '',
     nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board, search].filter(Boolean),
       enumerateAllEdges: () => [{ id: 'connection', source: 'board', target: 'search' }] },
@@ -85,7 +86,8 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     officialPostingPreparationSourceKey, officialPostingPreparationNeedsRefresh, setTimeout: fn => { fn(); return 0; },
     acquireModuleRun: options => { leases++; laneLabel = options.label; return queue.acquireModuleRun(options); },
   };
-  return { callback: runInNewContext(`${generateBody()}\ngenerateApplication;`, context), context, states, calls, completed, cancelled, updates, toasts,
+  const generate = runInNewContext(`${generateBody()}\ngenerateApplication;`, context);
+  return { callback: (options = {}) => generate('resume', options), context, states, calls, completed, cancelled, updates, toasts,
     queue, get leases() { return leases; }, get label() { return laneLabel; }, get card() { return card; }, board,
     deleteCard: () => { card = null; } };
 }
@@ -99,7 +101,7 @@ function lookupHarness({ refresh, data = row({ careerSnapshotId: undefined }) } 
   let canvas = '/synthetic/lookup-canvas.json';
   const board = { id: 'board', type: 'jobboard', data: {} };
   const calls = []; const completed = []; const cancelled = []; const updates = []; const toasts = [];
-  const context = { useCallback: fn => fn, applicationSubmissionRef: { current: false },
+  const context = { useCallback: fn => fn, applicationSubmissionRef: { current: false }, getRunningApplicationDocument: () => null,
     hasApplicationRun: false, localLookupPending: false, effectiveLock: false,
     idRef: { current: 'lookup-card' }, generateId: () => 'synthetic-lookup-run',
     getLiveNode: id => id === 'lookup-card' ? card : id === 'board' ? board : null,
@@ -820,8 +822,8 @@ export default [
       const projection = fs.readFileSync(new URL('../../src/utils/officialPostingPreparation.js', import.meta.url), 'utf8');
       assert.equal(projection.split("liveness: variant.liveness === 'closed' ? 'closed' : undefined,").length - 1, 1);
       assert.ok(source.includes('job: sourceJob,') && source.includes('job: queueJob,'));
-      assert.ok(source.includes('generateApplication({ listingOverride: listingOverrideAvailable })')
-        && source.includes("listingOverrideAvailable ? 'Generate anyways' : localApplicationNeedsAttention"));
+      assert.ok(source.includes('requestApplicationDocument(kind, { listingOverride: listingOverrideAvailable })')
+        && source.includes('listingOverrideAvailable ? `${label} anyways`'));
       assert.ok(source.includes('Check again'));
     },
   },
@@ -835,7 +837,7 @@ export default [
         const data = row({ listingHold: action === 'hold',
           listingGenerationNotice: { action, message: 'Synthetic listing pause' } });
         const available = runInNewContext(`${source.slice(start, end)}\nlistingOverrideAvailable;`, {
-          data, hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
+          data, everyDocumentExists: false, hasApplicationRun: false, localLookupPending: false,
         });
         assert.equal(available, true, action);
         const test = harness({ data, prepare: input => ({ success: true, resolutionId: 'resolution',
@@ -847,16 +849,16 @@ export default [
       }
       const sourceFailure = row({ listingGenerationNotice: { action: 'refuse-retry', basis: 'official-lookup', message: 'Research unavailable' } });
       assert.equal(runInNewContext(`${source.slice(start, end)}\nlistingOverrideAvailable;`, {
-        data: sourceFailure, hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
+        data: sourceFailure, everyDocumentExists: false, hasApplicationRun: false, localLookupPending: false,
       }), false, 'Generate anyway cannot bypass an unfinished official lookup');
       assert.equal(runInNewContext(`${source.slice(start, end)}\nlistingOverrideAvailable;`, {
         data: row({ listingGenerationNotice: { action: 'refuse-final', basis: 'official-closed', message: 'Official posting closed' } }),
-        hasLinkedApplicationOutput: false, hasApplicationRun: false, localJobPending: false,
+        everyDocumentExists: false, hasApplicationRun: false, localLookupPending: false,
       }), false, 'Generate anyway cannot bypass an official closure');
       const notice = source.slice(source.indexOf('      {listingGenerationPaused && ('),
-        source.indexOf('      {/* Generate the application bundle.'));
+        source.indexOf('      {/* Each button generates one document'));
       assert.ok(notice.includes('Check again'));
-      assert.ok(notice.includes('generateApplication();'));
+      assert.ok(notice.includes("requestApplicationDocument(data.listingGenerationNotice?.documentScope === 'cover' ? 'cover' : 'resume');"));
       assert.equal(notice.includes('data.listingHold === true &&'), false);
     },
   },
@@ -904,7 +906,7 @@ export default [
         const metadata = posting({ level, employer: level === 'L6' ? '' : 'Northwind Labs' });
         const data = row({ officialPosting: metadata });
         const test = harness({ data, prepare: { success: true, resolutionId: 'resolution', officialPosting: metadata, postedBy: data.postedBy } });
-        await test.callback(); assert.equal(test.label, `Application: ${officialPostingDisplay(data).label}`);
+        await test.callback(); assert.equal(test.label, `Résumé: ${officialPostingDisplay(data).label}`);
       }
       const downgraded = posting({ level: 'L4', outcome: 'link-only', trail: ['oversize'] });
       const test = harness({ prepare: { success: true, resolutionId: 'resolution', officialPosting: posting(), postedBy: 'Acme Talent Partners' },
@@ -923,7 +925,7 @@ export default [
       assert.ok(source.includes('normalizeJobListingExternalUrl({ ...data, url: postingDisplay.viewUrl || data.url })'));
       assert.ok(source.includes('(postingDisplay.viewUrl || data.url || data.googleCardUrl)'));
       assert.ok(source.includes('title={postingDisplay.viewLabel}') && source.includes('aria-label={postingDisplay.viewLabel}'));
-      assert.ok(source.includes('Finding official posting…') && source.includes("{displayedApplicationRun.state === 'resolving' && ("));
+      assert.ok(source.includes('Finding posting…') && source.includes("{displayedApplicationRun.state === 'resolving' && ("));
       assert.ok(source.includes('displayedApplicationRun.cancel?.()'));
       const body = generateBody(); const prepareAt = body.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.(');
       assert.ok(prepareAt > body.indexOf('applicationSubmissionRef.current = true;') && prepareAt < body.indexOf('lease = await acquireModuleRun('));

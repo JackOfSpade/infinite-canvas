@@ -59,6 +59,7 @@ export function hostOwnedPunctuationMessage(faults) {
 }
 export function fitMeasurement({ resumeFit, letterFit }) {
   return Object.fromEntries([['resume', resumeFit], ['coverLetter', letterFit]].map(([key, fit]) => [key, {
+    ...(fit.absent ? { absent: true } : {}),
     pageCount: fit.pageCount, typeAreaHeightPx: Number.isFinite(fit.layout?.typeAreaHeightPx) ? fit.layout.typeAreaHeightPx : null,
     layoutIssues: (fit.layoutIssues || []).map(({ id, count, maxOverflowPx }) => ({ id, count, maxOverflowPx })), environment: null,
     contentHeightPx: Number.isFinite(fit.layout?.contentHeightPx) ? fit.layout.contentHeightPx : null,
@@ -66,7 +67,7 @@ export function fitMeasurement({ resumeFit, letterFit }) {
   }]));
 }
 export function sameFitMeasurement(previous, current) {
-  return !!previous && !!current && ['resume', 'coverLetter'].every(key => previous[key]?.pageCount === current[key]?.pageCount
+  return !!previous && !!current && ['resume', 'coverLetter'].every(key => (previous[key]?.absent && current[key]?.absent) || previous[key]?.pageCount === current[key]?.pageCount
     && previous[key]?.horizontalOverflowCount === current[key]?.horizontalOverflowCount
     && Number.isFinite(previous[key]?.contentHeightPx) && Number.isFinite(current[key]?.contentHeightPx) && Math.abs(previous[key].contentHeightPx - current[key].contentHeightPx) <= 1);
 }

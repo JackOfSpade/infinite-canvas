@@ -42,6 +42,7 @@ import application_authority_ledger_store from './tests/application-authority-le
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
+import application_single_document from './tests/application-single-document.js';
 import official_posting_gates from './tests/official-posting-gates.js';
 import official_posting_r2_subject from './tests/official-posting-r2-subject.js';
 import official_posting_r3_identities from './tests/official-posting-r3-identities.js';
@@ -316,6 +317,7 @@ const testGroups = [
   ['current-authority-parallel-match.js', current_authority_parallel_match],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
+  ['application-single-document.js', application_single_document],
   ['official-posting-gates.js', official_posting_gates],
   ['official-posting-r2-subject.js', official_posting_r2_subject],
   ['official-posting-r3-identities.js', official_posting_r3_identities],

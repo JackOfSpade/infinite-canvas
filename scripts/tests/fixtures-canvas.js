@@ -1752,7 +1752,7 @@ export default [
       const generationEnd = indexOf('\n  return (', generationStart);
       const generationScope = source.slice(generationStart, generationEnd);
       const generationIndexOf = (needle) => generationStart + generationScope.indexOf(needle);
-      const latchGuard = generationIndexOf('applicationSubmissionRef.current || hasApplicationRun || localJobPending) return;');
+      const latchGuard = generationIndexOf('|| getRunningApplicationDocument(idRef.current) || startingCard?.type');
       const latchSet = generationIndexOf('applicationSubmissionRef.current = true;');
       const prepareIpc = generationIndexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.({');
       const acquire = generationIndexOf('lease = await acquireModuleRun({');
@@ -1811,10 +1811,10 @@ export default [
       'queued applications must have an application identity and an isolated visible queue position');
       assert(source.includes('snapshot: moduleRunSnapshot') && source.includes('const displayedApplicationRun = queuedApplicationRun')
         && source.includes('const hasApplicationRun = displayedApplicationRun.state !== \'idle\';')
-        && source.includes('applicationSubmissionRef.current || hasApplicationRun || localJobPending')
-        && source.includes('disabled={hasApplicationRun || !!officialPostingLookup || !!boardPostingPreparation || localJobPending || effectiveLock}')
+        && source.includes('|| getRunningApplicationDocument(idRef.current) || startingCard?.type !== \'jobcard\'')
+        && source.includes('const disabled = state.disabled || lookupBusy || effectiveLock;')
         && source.includes('const boardPostingPreparation = useSyncExternalStore(')
-        && generationScope.includes('if (boardPostingCheckActive(getLiveNode(idRef.current))) return;')
+        && generationScope.includes('if (boardPostingCheckActive(startingCard)) return;')
         && generationScope.includes('if (boardPostingCheckActive(cardBeforeQueue) || !startDecision.allowed)'),
       'the application-lane snapshot must keep a remounted card visibly disabled and synchronously reject a duplicate enqueue');
       assert(canvasSource.includes('const getCurrentFile = useCallback(() => currentFileRef.current, []);')
@@ -1826,14 +1826,14 @@ export default [
       // navigation graph, never isMountedRef or a level-scoped getNode.
       assert(!generationScope.includes('if (!isMountedRef.current) return;')
         && generationScope.includes('let cardBeforeQueue = getLiveNode(idRef.current);')
-        && generationScope.includes('queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId))')
+        && generationScope.includes('queuedLocalApplicationStartDecision(cardBeforeQueue, getLiveNode(cardBeforeQueue?.data?.hubId), documentScope)')
         && generationScope.includes('const expectedPriorLocalApplication = cardBeforeQueue.data?.localApplication || null;')
         && generationScope.includes('const settlement = queuedLocalApplicationSettlement(')
         && generationScope.includes('expectedPriorLocalApplication,')
         && generationScope.includes('discardLocalApplication'),
       'a hidden-but-extant card must persist or deliberately replace its durable handoff globally, while an actually deleted or superseded card discards that exact handoff');
       assert(source.includes("cancelQueuedRunsForNode(id, 'Job card dismissed before generation started')")
-        && generationScope.includes('queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId))')
+        && generationScope.includes('queuedLocalApplicationStartDecision(card, getLiveNode(card?.data?.hubId), documentScope)')
         && generationScope.includes('if (boardPostingCheckActive(card) || !decision.allowed) {') && generationScope.includes('cancelledBeforeStart = true;'),
       'a removed queued card must be cancelled or rejected at turn start before it can invoke generation IPC');
       assert(source.includes('Additional notes for AI')
@@ -5661,7 +5661,7 @@ export default [
       const preloadSource = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
       const mainSource = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
       assert(cardSource.includes('const generateApplication = useCallback')
-        && cardSource.includes('Generate the application bundle'),
+        && cardSource.includes('Each button generates one document'),
       'application-bundle generation remains available on disposable job cards');
       for (const removed of ['markJobApplied', 'unmarkJobApplied', 'isJobApplied', 'Mark applied', 'hiddenApplied', 'filterOutApplied']) {
         assert(!cardSource.includes(removed), `job card no longer references ${removed}`);

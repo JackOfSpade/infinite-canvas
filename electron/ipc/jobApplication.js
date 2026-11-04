@@ -20,7 +20,9 @@ import { applyDualPdf, pdfHasDualModeBackground, renderPdf } from './resumeRende
 import { LEDGER_VERSION, MINING_TARGET } from '../../src/utils/achievementLedger.js';
 import { logger } from '../logger.js';
 import { sanitizeApplicationBundlePart, truncateApplicationBundlePart } from './applicationBundle.js';
-import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock } from './applicationSync.js';
+import { mergeApplicationDocument } from './applicationBundleMerge.js';
+import { savedDocumentsFromHtml, workspaceDocumentKinds } from './applicationDocumentScope.js';
+import { applicationSyncConfig, applicationSyncStatusSnapshot, registerApplicationSyncWorkspace, withApplicationSyncWorkspaceLock, workspacePanelsMatchBundle } from './applicationSync.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logGeneratedBundle, logSavedBundle } from './applicationEditLog.js';
 import { ensureDirectoryWithinRoot, isRendererPrivateAppPath, isWithinDirectory, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
@@ -352,7 +354,7 @@ export function __pruneEmptyExportDirectoriesForTests(outputRoot, exportDir) {
  * and retryable because no discard occurs on the failed save path.
  */
 export function registerPendingApplicationWorkspace({
-  workDir, senderId, company = '', candidateName = '', resumeHtmlPath,
+  workDir, senderId, company = '', candidateName = '', documentScope = null, resumeHtmlPath,
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   resumePdfPageCount = null, coverLetterPdfPageCount = null,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
@@ -449,6 +451,7 @@ export function registerPendingApplicationWorkspace({
   }
   pendingApplicationArtifacts.set(resolvedWorkDir, {
     attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
+    documentScope: documentScope === 'resume' || documentScope === 'cover' ? documentScope : null,
     identityCompany: identityCompany == null ? null : String(identityCompany),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
     resumePdfPageCount: optional[0] ? resumePdfPageCount : null,
@@ -2260,10 +2263,7 @@ export async function inspectApplicationExport(files) {
               && /^[a-f0-9]{64}$/i.test(String(bundle?.sync?.token || ''));
             row.htmlStructureValid = document.doctype?.name?.toLowerCase() === 'html'
               && document.documentElement?.tagName === 'HTML'
-              && resumePanels.length === 1
-              && coverPanels.length === 1
-              && !!resumePanels[0].querySelector('main.page')
-              && !!coverPanels[0].querySelector('main.page')
+              && workspacePanelsMatchBundle(bundle, resumePanels, coverPanels)
               && row.syncConfigValid;
           } finally {
             dom.window.close();
@@ -2683,6 +2683,7 @@ export function registerJobApplicationHandlers() {
     // only one this flow uses; since the namespace is a strict ancestor and
     // is always taken first, no holder of the exact-dir key can be waiting on
     // a namespace this callback holds.
+    let savedDocumentHtml = '';
     let dir, applicationFile, resumeFile, coverLetterFile, jobListingFile,
       generationAuditFile, generationLogFile, scrapedListingFile, hasPdf, hasCoverLetterPdf,
       hasListing, hasGenerationAudit, hasScrapedListing;
@@ -2769,7 +2770,7 @@ export function registerJobApplicationHandlers() {
         },
       });
     }
-    const [resumePdfData, coverLetterPdfData] = await Promise.all([
+    let [resumePdfData, coverLetterPdfData] = await Promise.all([
       ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceResumePdfData, documentKind: 'resume', expectedPageCount: pending.resumePdfPageCount }),
       ensureGeneratedApplicationPdf({ html: sourceHtml, pdf: sourceCoverLetterPdfData, documentKind: 'cover', expectedPageCount: pending.coverLetterPdfPageCount }),
     ]);
@@ -2778,50 +2779,78 @@ export function registerJobApplicationHandlers() {
     hasListing = jobListingData != null;
     hasGenerationAudit = generationAuditData != null;
     hasScrapedListing = scrapedListingData != null;
-    // Embed a fresh capability before the transaction, but do not revoke the
-    // previous saved workspace until every file has been promoted and passed
-    // readback. Registration runs inside the transaction verifier, so a
-    // persistence failure rolls the visible bundle back too.
-    const syncToken = crypto.randomBytes(32).toString('hex');
-    const sync = applicationSyncConfig(syncToken, {
-      html: sourceHtml,
-      resumePdf: resumePdfData,
-      coverPdf: coverLetterPdfData,
-    });
-    const generatedHtml = embedApplicationSyncConfig(sourceHtml, sync);
-    const savedArtifactData = {
-      applicationHtml: generatedHtml,
-      resumePdf: resumePdfData,
-      coverLetterPdf: coverLetterPdfData,
-      jobListing: jobListingData,
-      scrapedListing: scrapedListingData,
-    };
-    const finalizedGenerationAuditData = generationAuditData == null
-      ? null
-      : finalizeGenerationAuditData(generationAuditData, {
-        expectedJobId: pending.generationAuditJobId,
-        generationAuditRequired: pending.generationAuditRequired,
-        stagedArtifacts: {
-          applicationHtml: sourceHtml,
-          resumePdf: sourceResumePdfData,
-          coverLetterPdf: sourceCoverLetterPdfData,
-          jobListing: jobListingData,
-          scrapedListing: scrapedListingData,
-        },
-        savedArtifacts: savedArtifactData,
-      });
-
     // The workspace is deliberately unzipped and predictable. Treat all
     // siblings as one transaction: unavailable optional artifacts remove stale
     // predecessors, while any promotion/readback failure restores the complete
     // prior generation instead of leaving a mixed bundle.
     exportPhase = 'writing and verifying destination bundle';
     const writeBundle = async () => {
+      // A one-document save joins the folder's other document instead of replacing
+      // it. Everything from here to the transaction reads that folder, so it runs
+      // under the folder's own lock, where a Sync edit cannot land in between.
+      let merged = null;
+      let sourceDocumentSnapshot = sourceHtml;
+      if (pending.documentScope) {
+        const existingHtml = await fs.promises.readFile(applicationFile, 'utf8').catch(error => {
+          if (error?.code === 'ENOENT') return null;
+          throw error;
+        });
+        merged = existingHtml == null ? null : mergeApplicationDocument({ existingHtml, stagedHtml: sourceHtml, documentScope: pending.documentScope });
+        if (merged) {
+          sourceDocumentSnapshot = merged.html;
+          const otherFile = pending.documentScope === 'resume' ? coverLetterFile : resumeFile;
+          const otherPdf = await fs.promises.readFile(otherFile).catch(error => {
+            if (error?.code === 'ENOENT') return null;
+            throw error;
+          });
+          if (pending.documentScope === 'resume') { coverLetterPdfData = otherPdf; hasCoverLetterPdf = otherPdf != null; }
+          else { resumePdfData = otherPdf; hasPdf = otherPdf != null; }
+        }
+      }
+      // Embed a fresh capability before the transaction, but do not revoke the
+      // previous saved workspace until every file has been promoted and passed
+      // readback. Registration runs inside the transaction verifier, so a
+      // persistence failure rolls the visible bundle back too.
+      const syncToken = crypto.randomBytes(32).toString('hex');
+      const sync = applicationSyncConfig(syncToken, {
+        html: sourceDocumentSnapshot,
+        resumePdf: resumePdfData,
+        coverPdf: coverLetterPdfData,
+      });
+      // The kept document's revision pair is a statement about what was last
+      // synced; recomputing it here would call an unsynced edit current.
+      if (merged?.keptSyncDocument) sync.documents[merged.keptKind] = merged.keptSyncDocument;
+      const generatedHtml = embedApplicationSyncConfig(sourceDocumentSnapshot, sync);
+      savedDocumentHtml = generatedHtml;
+      const savedArtifactData = {
+        applicationHtml: generatedHtml,
+        resumePdf: resumePdfData,
+        coverLetterPdf: coverLetterPdfData,
+        jobListing: jobListingData,
+        scrapedListing: scrapedListingData,
+      };
+      const finalizedGenerationAuditData = generationAuditData == null
+        ? null
+        : finalizeGenerationAuditData(generationAuditData, {
+          expectedJobId: pending.generationAuditJobId,
+          generationAuditRequired: pending.generationAuditRequired,
+          stagedArtifacts: {
+            applicationHtml: sourceHtml,
+            resumePdf: sourceResumePdfData,
+            coverLetterPdf: sourceCoverLetterPdfData,
+            jobListing: jobListingData,
+            scrapedListing: scrapedListingData,
+          },
+          savedArtifacts: savedArtifactData,
+        });
+
       const finalizedGenerationLogData = await mergeApplicationGenerationLogs(generationLogFile, generationLogData);
+      // A merge leaves the kept document's PDF file exactly as it is.
+      const keptPdf = merged ? merged.keptKind : null;
       const saved = await replaceApplicationBundleAtomically([
         { destination: applicationFile, data: generatedHtml },
-        { destination: resumeFile, data: resumePdfData },
-        { destination: coverLetterFile, data: coverLetterPdfData },
+        ...(keptPdf === 'resume' ? [] : [{ destination: resumeFile, data: resumePdfData }]),
+        ...(keptPdf === 'cover' ? [] : [{ destination: coverLetterFile, data: coverLetterPdfData }]),
         { destination: jobListingFile, data: jobListingData },
         { destination: generationAuditFile, data: finalizedGenerationAuditData },
         { destination: generationLogFile, data: finalizedGenerationLogData },
@@ -2830,8 +2859,8 @@ export function registerJobApplicationHandlers() {
         verify: async () => {
           const readback = await inspectApplicationExport([
             { path: applicationFile, expected: true, expectedData: generatedHtml, kind: 'html' },
-            { path: resumeFile, expected: hasPdf, expectedData: resumePdfData, kind: 'pdf', expectedPageCount: pending.resumePdfPageCount, expectedPaper: expectedPdfPaperBox(sourceHtml) },
-            { path: coverLetterFile, expected: hasCoverLetterPdf, expectedData: coverLetterPdfData, kind: 'pdf', expectedPageCount: pending.coverLetterPdfPageCount, expectedPaper: expectedPdfPaperBox(sourceHtml) },
+            { path: resumeFile, expected: hasPdf, expectedData: resumePdfData, kind: 'pdf', expectedPageCount: keptPdf === 'resume' ? null : pending.resumePdfPageCount, expectedPaper: keptPdf === 'resume' ? null : expectedPdfPaperBox(sourceHtml) },
+            { path: coverLetterFile, expected: hasCoverLetterPdf, expectedData: coverLetterPdfData, kind: 'pdf', expectedPageCount: keptPdf === 'cover' ? null : pending.coverLetterPdfPageCount, expectedPaper: keptPdf === 'cover' ? null : expectedPdfPaperBox(sourceHtml) },
             { path: jobListingFile, expected: hasListing, expectedData: jobListingData, kind: 'markdown' },
             { path: scrapedListingFile, expected: hasScrapedListing, expectedData: scrapedListingData, kind: 'markdown' },
             {
@@ -2879,6 +2908,7 @@ export function registerJobApplicationHandlers() {
           posting: jobListingData?.toString('utf8') || '', appVersion: app.getVersion(),
           careerSnapshotId: pending.careerSnapshotId,
           careerSourceFrozenAt: pending.careerSourceFrozenAt,
+          ...(merged ? { addedDocument: pending.documentScope } : {}),
         });
       } catch (error) {
         logger.warn(`[JobApplication] Could not record generated application edit evidence: ${error?.message || error}`);
@@ -2895,7 +2925,9 @@ export function registerJobApplicationHandlers() {
     // namespace tail cannot self-deadlock.
     return await withApplicationSyncWorkspaceLock(dir, writeBundle);
     });
-    const missingFiles = [!hasPdf && 'résumé PDF', !hasCoverLetterPdf && 'cover-letter PDF', !hasListing && 'original job listing'].filter(Boolean);
+    // A document this job did not produce, and the folder does not hold, is not missing.
+    const savedKinds = workspaceDocumentKinds(savedDocumentHtml);
+    const missingFiles = [!hasPdf && savedKinds.includes('resume') && 'résumé PDF', !hasCoverLetterPdf && savedKinds.includes('cover') && 'cover-letter PDF', !hasListing && 'original job listing'].filter(Boolean);
     const syncStatus = applicationSyncStatusSnapshot();
     const bundleWarnings = [
       missingFiles.length ? `Saved the editable workspace, but the ${missingFiles.join(', ')} was unavailable.` : '',
@@ -2969,6 +3001,8 @@ export function registerJobApplicationHandlers() {
     return {
       saved: true,
       dir,
+      savedDocuments: savedDocumentsFromHtml(savedDocumentHtml),
+      documents: savedKinds,
       applicationFile,
       resumeFile: hasPdf ? resumeFile : null,
       coverLetterFile: hasCoverLetterPdf ? coverLetterFile : null,

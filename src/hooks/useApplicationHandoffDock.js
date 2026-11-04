@@ -13,6 +13,7 @@ import {
   subscribeApplicationHandoffRefresh,
 } from '../utils/applicationHandoffDock';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs } from '../utils/handoffScheduler';
+import { localApplicationAfterDiscard } from '../utils/localAiApplicationLifecycle';
 import {
   getClaudeApplicationRun,
   normalizeClaudeRun,
@@ -377,14 +378,11 @@ export function useApplicationHandoffDock({ navigation, getCurrentFile, addToast
       discardedJobIds.add(jobId);
       const nav = ctxRef.current.navigation;
       if (!nav?.updateNodeDataGlobally) return;
-      nav.updateNodeDataGlobally(nodeId, (node) => {
-        const live = node?.data?.localApplication;
-        // Only the bundle this discard targeted: a card that has already
-        // queued a replacement must keep it. A mounted card may win this
-        // race and clear it first, which makes this a no-op rather than a
-        // second write.
-        return live?.id === jobId ? { localApplication: null } : null;
-      });
+      // Only the bundle this discard targeted: a card that has already queued a
+      // replacement must keep it. A mounted card may win this race and clear it
+      // first, which makes this a no-op rather than a second write. A saved
+      // document the discarded job was stacked on comes back to the card.
+      nav.updateNodeDataGlobally(nodeId, (node) => localApplicationAfterDiscard(node?.data, jobId));
       void discover();
     };
     document.addEventListener('application-handoff-discarded', handleDiscarded);
