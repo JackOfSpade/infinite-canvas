@@ -2454,8 +2454,10 @@ function multiSourceBoardCompletionAssessment(canvasFilePath, hubIds, jobBoardSt
   else if (cards > results) problems.push('rendered cards exceed the Board result count');
   const merged = boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique'));
   const collapsed = boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed'));
-  if (merged != null && collapsed != null && (collapsed > merged || (results != null && merged - collapsed !== results))) {
-    problems.push('Board result count does not reconcile with merged unique minus collapsed location postings');
+  // Absent on a Board combined before research could remove cards.
+  const researchRemoved = boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved') ?? 0) ?? 0;
+  if (merged != null && collapsed != null && (collapsed > merged || (results != null && merged - collapsed - researchRemoved !== results))) {
+    problems.push('Board result count does not reconcile with merged unique minus collapsed location postings and research removals');
   }
   // Launch selection only controls which searches start/continue. Combine
   // consumes every connected completed source; a new connection without an
@@ -2518,7 +2520,7 @@ function multiSourceBoardCompletionAssessment(canvasFilePath, hubIds, jobBoardSt
 ${sourceLines.join('\n')}
 - Latest in-process Board taxonomy: ${taxonomy ? `input ${taxonomyInput ?? '?'} · placed ${nonnegativeCount(taxonomy.placed) ?? '?'} · missing ${nonnegativeCount(taxonomy.missing) ?? '?'} · duplicated ${nonnegativeCount(taxonomy.duplicated) ?? '?'}` : 'not retained for this Board in this process'}.
 - Latest in-process Board compensation: ${compensation ? `eligible ${nonnegativeCount(compensation.eligible) ?? '?'} · assessed ${nonnegativeCount(compensation.assessed) ?? '?'} · researched ${nonnegativeCount(compensation.researched) ?? '?'} · failed cohorts ${nonnegativeCount(compensation.failedCohorts) ?? '?'}` : 'not retained for this Board in this process'}.
-- Latest in-process seen-history write: ${history ? history.error ? '⚠️ failed' : `input ${nonnegativeCount(history.input) ?? '?'} · written ${nonnegativeCount(history.written) ?? '?'}` : 'not retained for this Board in this process'}.
+- Latest in-process seen-history write: ${history ? history.error ? '⚠️ failed' : `input ${nonnegativeCount(history.input) ?? '?'} · eligible ${nonnegativeCount(history.eligible) ?? 'not recorded'} · provisional ${nonnegativeCount(history.staged) ?? '?'} · written ${nonnegativeCount(history.written) ?? '?'}${history.input > 0 && history.eligible === 0 ? ' · ⚠️ no displayed row could be recorded as seen' : ''}` : 'not retained for this Board in this process'}.
 - Attempt correlation: latest in-process phase records are Board/window-scoped; no exact display-generation token was retained for them.
 - Scope: prior source collection coverage was not reverified. These display facts do not prove that the current Board was saved to disk.
 `;
@@ -3149,6 +3151,7 @@ export function buildJobCompletionAssessment(
       resultCount: boardNonnegativeCount(boardDiagnosticValue(board, 'resultCount')),
       mergeUnique: boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique')),
       locationPostingsCollapsed: boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed') ?? 0),
+      researchRemoved: boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved') ?? 0) ?? 0,
       renderedCardCount: boardNonnegativeCount(boardDiagnosticValue(board, 'renderedCardCount')),
       stale: boardDiagnosticValue(board, 'stale') === true,
       staleReason: boardStaleReasonFact(boardDiagnosticValue(board, 'staleReason')),
@@ -3430,7 +3433,7 @@ export function buildJobCompletionAssessment(
     !board.stale && board.resultCount === taxonomyInput
     && (board.combinedSourceHubIds.length > 1
       || (board.combinedSourceHubIds.length === 1 && board.locationPostingsCollapsed > 0
-        && board.mergeUnique - board.locationPostingsCollapsed === board.resultCount))
+        && board.mergeUnique - board.locationPostingsCollapsed - board.researchRemoved === board.resultCount))
   )) || null;
 
   const gaps = [];
@@ -3554,8 +3557,8 @@ export function buildJobCompletionAssessment(
     }
     if (board.mergeUnique == null) {
       gaps.push(`Job Board \`${boardLabel(board)}\` did not retain merge-count provenance`);
-    } else if (board.resultCount !== board.mergeUnique - (collapsed ?? 0)) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}${collapsed ? ` − ${collapsed} location postings collapsed` : ''}`);
+    } else if (board.resultCount !== board.mergeUnique - (collapsed ?? 0) - board.researchRemoved) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount} ≠ merged unique ${board.mergeUnique}${collapsed ? ` − ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` − ${board.researchRemoved} removed by research` : ''}`);
     }
     // A one-source board has no legitimate cross-module dedup adjustment, so
     // its pre-consolidation count must equal this run's score-ready result.
@@ -5735,7 +5738,7 @@ function boardWorkTelemetryLines(records, ownership = {}) {
     const research = record.research;
     if (research) lines.push(`  - Research gate${ago(research.ts)}: at or above ${count(research.minFitScore)}: ${count(research.eligible)} of ${count(research.total)} · skipped below fit ${count(research.skippedBelowFit)} · skipped unscored ${count(research.skippedUnscored)} · official lookups ${count(research.officialLookups)} · official duplicates removed ${count(research.officialDuplicatesDropped)} · closed removed ${count(research.closedDropped)} · below-fit closed removed ${count(research.belowFitClosedDropped)} · listings rechecked ${count(research.livenessRechecked)} of ${count(research.livenessVisited)} visited, ${count(research.livenessStillPending)} still pending · rescored ${count(research.rescoreAttempted)} (changed ${count(research.rescoreChanged)}, fell below ${count(research.rescoreFellBelow)}, failed ${count(research.rescoreFailed)}) · company research ${count(research.preferenceRequests)} request(s) for ${count(research.preferenceRows)} job(s), ${count(research.preferenceFiltered)} filtered, ${count(research.preferenceFailed)} failed${research.error ? ` · error ${research.errorCode || 'OTHER'}` : ''}`);
     const history = record.history?.boardDisplay;
-    if (history) lines.push(`  - Seen-history${ago(history.ts)}: ${history.error ? 'failed' : history.skipped ? 'deferred' : 'recorded'} · input ${count(history.input)} · provisional rows ${count(history.staged)} · committed rows ${count(history.written)}. Provisional rows remain unseen until source deletion or its next scrape.`);
+    if (history) lines.push(`  - Seen-history${ago(history.ts)}: ${history.error ? 'failed' : history.skipped ? 'deferred' : 'recorded'} · input ${count(history.input)} · eligible rows ${count(history.eligible)} · provisional rows ${count(history.staged)} · committed rows ${count(history.written)}${history.input > 0 && history.eligible === 0 ? ' · ⚠️ no displayed row could be recorded as seen' : ''}. Provisional rows remain unseen until source deletion or its next scrape.`);
   }
   return lines;
 }

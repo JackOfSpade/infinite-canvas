@@ -261,12 +261,13 @@ async function readDisplayedHistory(filePath) {
 
 export async function stageDisplayedJobsHistory(canvasFilePath, sources) {
   const filePath = historyPathForCanvas(canvasFilePath);
-  if (!filePath) return { written: 0, staged: 0 };
+  if (!filePath) return { written: 0, staged: 0, eligible: 0 };
   return withHistoryLock(filePath, async () => {
     const pendingPath = `${filePath}.pending.json`;
     const data = await readDisplayedHistory(pendingPath);
-    let staged = 0; let written = 0;
+    let staged = 0; let written = 0; let eligible = 0;
     for (const { hubId, runId, rows } of sources) {
+      eligible += rows.length;
       // A confirmed display can arrive after deletion's IPC. That source has
       // already crossed the boundary, so finish directly instead of leaving
       // an orphan pending receipt that will never receive another boundary.
@@ -286,7 +287,7 @@ export async function stageDisplayedJobsHistory(canvasFilePath, sources) {
       }
     }
     if (staged) await atomicWriteHistory(pendingPath, JSON.stringify(data));
-    return { written, staged };
+    return { written, staged, eligible };
   });
 }
 

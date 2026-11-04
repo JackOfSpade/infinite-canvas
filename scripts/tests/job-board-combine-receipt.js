@@ -1,3 +1,4 @@
+import { isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard } from '../../src/utils/jobCardFilters.js';
 import { deleteChildrenByHubId } from '../../src/nodes/_shared/hubChildCleanup.js';
 import { beginJobCardDisplayRemoval, isJobCardDisplayRemoval } from '../../src/utils/jobCardRemovalIntent.js';
 import fs from 'node:fs';
@@ -152,6 +153,8 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
         return { deletedNodes: [...removedNodeIds].map(id => ({ id })), deletedEdges: [] };
       },
     }),
+    isUnscoredPlaceholderCard, isLegacyUnscoredPlaceholder,
+    boardResearch: { removed: 0 },
     window: { electronAPI: {
       prepareBoardJobsHistory: async () => { enteredHistory(); return historyGate; },
       appendJobsHistory: async args => { calls.history.push(args); return { success: true }; },

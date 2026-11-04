@@ -249,7 +249,14 @@ const LINKEDIN_MAX_UNPRODUCTIVE_PAGES = 2;
  * LinkedIn walk depth has no fixed total-results ceiling. Source-local pacing
  * plus the explicit empty/repeated/no-output stop reasons above are the safety
  * controls; collection itself must not silently discard a later valid page.
+ * The walk only learns the guest endpoint's limit from its 400 at this offset.
  */
+const LINKEDIN_GUEST_OFFSET_LIMIT = 1000;
+
+/** The 400 that ends a deep walk. An earlier 400, or one with a detected wall, stays a real fault. */
+export function isLinkedInGuestPageLimit(response, start) {
+  return response?.status === 400 && !response.warning && start >= LINKEDIN_GUEST_OFFSET_LIMIT;
+}
 
 /**
  * Pacing for LinkedIn's guest *search* API, independent of detail-page
@@ -390,6 +397,11 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       // a heavy anti-bot source so if page 0 is blocked, page 1 will be too.
       if (r.warning && !warning) warning = r.warning;
       if (abortedDuringFetch(signal, r)) { stopReason = 'aborted'; break; }
+      if (isLinkedInGuestPageLimit(r, start)) {
+        logger.info(`[LinkedIn API] Query ${qi + 1}/${queryList.length} reached the guest page limit at page ${start / 25}`);
+        stopReason = 'provider-page-limit';
+        break;
+      }
       if (!r.ok) {
         logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length} page ${start / 25} returned ${r.status}${r.warning ? ` (${r.warning.code})` : ''}`);
         stopReason = 'blocked';

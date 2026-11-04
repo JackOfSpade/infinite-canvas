@@ -449,10 +449,10 @@ async function runMatrixCell({ kind, row, via }) {
     assert((await route(requests[0], answer(requests[0], long))).accepted === true, `${kind.id}/R7: first fingerprint commits`);
     await finishSuccessor();
     await settleRun();
-    // Current records carry unique mandatory codes, so their raw responses
-    // cannot be byte-identical.  The shared accept body nonetheless retains
-    // the legacy cross-record guard: exercise it with a second logical step
-    // and the exact raw response the first accept body already claimed.
+    // Worker answers are not fingerprinted, because a worker answers by request
+    // id. The guard still protects pasted answers: exercise it directly with a
+    // first paste and a second logical step.
+    __claimAcceptedResponseFingerprintForTests({ stepKey: `${runId}-first-logical-step` }, answer(requests[0], long));
     let duplicate = null;
     try { __claimAcceptedResponseFingerprintForTests({ stepKey: `${runId}-second-logical-step` }, answer(requests[0], long)); }
     catch (error) { duplicate = error; }
@@ -1369,6 +1369,22 @@ export default [
       'the immutable route keeps never and unreviewed tasks out even when a caller passes an overly broad allowlist');
       await cancelAll(sender, requests);
       await run.catch(() => {});
+    },
+  },
+  {
+    name: 'non-API AI worker: isolated workers may honestly return byte-identical long answers to different requests',
+    run: async () => {
+      const { sender, waitFor } = freshHarness();
+      const nodeId = 'worker-identical-answers';
+      const run = startWorkflow({ sender, nodeId, runId: null, handoffs: [1, 2].map(batch => ({ prompt: `IDENTICAL ${batch}`, task: TASK, responseSchema: SCHEMA, batch, batchTotal: 2, itemCount: 1 })) });
+      const requests = await waitFor(2);
+      const allow = { ...ALLOW, allowNodeIds: new Set([nodeId]), allowWindowNodePairs: new Set([`${sender.id}\u0000${nodeId}`]) };
+      const response = JSON.stringify({ answer: 'same copied posting '.repeat(40) });
+      for (const request of requests) {
+        const result = await submitWorkerResponse({ requestId: request.requestId, handoffCode: request.handoffCode, response, ...allow });
+        assert(result.accepted === true, `each worker request accepts its own answer; got ${JSON.stringify(result)}`);
+      }
+      await run;
     },
   },
   {

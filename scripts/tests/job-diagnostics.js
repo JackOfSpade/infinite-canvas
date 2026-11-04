@@ -1461,6 +1461,9 @@ export default [
           assert(!output.includes(secret), 'Board/source/run identifiers and payload evidence must remain private');
         }
         assert(output.includes('do not prove that the current Board was saved to disk'), 'display proof must not imply a durable workspace save');
+        const researched = { ...board, mergeUnique: board.mergeUnique + 18, researchRemoved: 18 };
+        assert(!assess(researched).includes('**BOARD COMPLETION INDETERMINATE**'), 'cards removed by Board research reconcile the result count');
+        assert(assess({ ...researched, researchRemoved: 17 }).includes('**BOARD COMPLETION INDETERMINATE**'), 'an unexplained single-card gap still flags');
         for (const state of [
           { ...board, stale: true },
           { ...board, combineSourceRuns: [runs[0]] },

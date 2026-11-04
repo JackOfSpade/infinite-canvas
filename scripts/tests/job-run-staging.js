@@ -3403,6 +3403,7 @@ export default [
         fs.promises.readFile(path.resolve('src/components/JobSearchLocationFields.jsx'), 'utf8'),
         fs.promises.readFile(path.resolve('src/components/HubErrorBanner.jsx'), 'utf8'),
       ]);
+      assert(!processing.includes('resumeSummary'), 'the running status panel must not show skills or years of experience');
       assert(search.includes('Search Brief <span className="text-white/25">(optional)</span>')
         && search.includes('AI turns this brief into roles and fit criteria.')
         && search.includes('aria-describedby={jobPreferencesHelpId}')

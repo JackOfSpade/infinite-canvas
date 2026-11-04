@@ -280,6 +280,7 @@ export function useIssueReporter({
             combineSourceRuns: boundedCombinedSourceRuns(safeReportField(data, 'combineSourceRuns')),
             mergeUnique: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'unique')),
             locationPostingsCollapsed: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'locationVariantPostingsCollapsed')),
+            researchRemoved: reportBoardCount(safeReportField(safeReportField(data, 'mergeStats'), 'researchRemoved')),
             connectedSourceHubIds: [...new Set(connectedSourceHubIds)].slice(0, 25),
             clearProvenance,
           };

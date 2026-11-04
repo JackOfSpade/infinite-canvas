@@ -22,7 +22,7 @@ import { carryBoardOfficialPostingResults } from '../utils/jobBoardOfficialPosti
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
-import { hubCardFilter } from '../utils/jobCardFilters';
+import { hubCardFilter, isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
@@ -3231,7 +3231,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           EventLogger.log(
             `[JobBoard] location consolidation id=${id} groups=${locationStats.candidateGroups} `
             + `postingsCollapsed=${locationStats.postingsCollapsed} protected=${locationStats.protectedRetained} `
-            + `aiConfirmed=${confirmation.confirmedPairIds?.length || 0}/${confirmation.candidateCount || 0}`,
+            + `similarPairsConfirmed=${confirmation.confirmedPairIds?.length || 0}/${confirmation.candidateCount || 0}`,
           );
         }
       }
@@ -3405,7 +3405,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // the exact source receipts/current artifacts; a later source change or
       // cancellation makes the pending token unusable rather than recording
       // listings that were never displayed.
-      const historyRows = union.flatMap((j) => {
+      const historyRows = union.filter(j => !isUnscoredPlaceholderCard(j) && !isLegacyUnscoredPlaceholder(j)).flatMap((j) => {
         if (Array.isArray(j.postingVariants) && j.postingVariants.length > 0) {
           return j.postingVariants.map((variant) => ({
             source: variant.source || j.source,
@@ -3615,6 +3615,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             locationVariantGroups: locationStats.candidateGroups,
             locationVariantPostingsCollapsed: locationStats.postingsCollapsed,
             locationVariantProtectedRetained: locationStats.protectedRetained,
+            researchRemoved: boardResearch.removed || 0,
           },
           // Baseline for staleness detection (connection/data drift vs. this combine).
           combineSignature: sigAtCombine,
@@ -7019,7 +7020,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       : pauseSaving ? 'Saving the active Search continuation…'
         : !data.boardScanResume?.boardRunId ? 'Waiting for the Job Board to save a search run id before pausing safely.' : '';
   const waitingWorkersLabel = waitingForWorkers
-    ? `Waiting for Claude to finish search resolution for ${awaitingSourceLabel}.` : null;
+    ? `Waiting for ${awaitingSourceLabel} to finish.` : null;
   // Status and Pause & save live in the side panel, with every other module's.
   const boardProgress = normalizeProgress(finalizingCommittedCombine
     ? { label: 'Board updated — finalizing saved recovery cleanup…' }
@@ -7029,7 +7030,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       ? { label: combineResearchProgress?.label || 'Combining all connected saved results…' }
       : durableRecoveryActive
         ? { label: awaitingSourceLabel
-          ? `Waiting for ${awaitingSourceLabel} to finish manual source resolution…`
+          ? `Waiting for ${awaitingSourceLabel} to finish…`
           : 'Recovering the interrupted Board run…' }
         : null, selectedSearchModuleIds.length);
   usePublishJobRunStatus(id, boardWorkRunning ? {
@@ -7120,6 +7121,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           totalIncoming={data.mergeStats?.totalIncoming || 0}
           duplicatesRemoved={data.mergeStats?.duplicatesRemoved || 0}
           preferenceFilteredSkipped={data.mergeStats?.preferenceFilteredSkipped}
+          researchRemoved={data.mergeStats?.researchRemoved}
           locationPostingsCollapsed={data.mergeStats?.locationVariantPostingsCollapsed}
           locationVariantGroups={data.mergeStats?.locationVariantGroups}
           stale={stale}

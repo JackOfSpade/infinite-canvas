@@ -46,6 +46,7 @@ export function JobBoardDoneState({
   onCancelOfficialPostingRefresh,
   officialPostingRefreshing = false,
   officialPostingProgress = null,
+  researchRemoved,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const actionsBusy = combining || scanning || officialPostingRefreshing;
@@ -56,6 +57,7 @@ export function JobBoardDoneState({
   const collectedPostings = mergeInputPostings + preferenceExcluded;
   const duplicatePostings = Math.min(summaryCount(duplicatesRemoved), mergeInputPostings);
   const distinctPostings = mergeInputPostings - duplicatePostings;
+  const removedByResearch = summaryCount(researchRemoved);
   const groupedPostings = Math.min(summaryCount(locationPostingsCollapsed), distinctPostings);
   const locationGroups = Math.min(summaryCount(locationVariantGroups), distinctPostings);
 
@@ -102,6 +104,7 @@ export function JobBoardDoneState({
                 ? `${duplicatePostings} duplicate${duplicatePostings === 1 ? '' : 's'} removed`
                 : 'no duplicates'}
               {preferenceExcluded > 0 ? ` · ${preferenceExcluded} excluded by preferences` : ''}
+              {removedByResearch > 0 ? ` · ${removedByResearch} removed after research` : ''}
             </p>
           )}
           {groupedPostings > 0 && (

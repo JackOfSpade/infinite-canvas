@@ -694,7 +694,7 @@ export default [{
 }, {
   name: 'classifyCompensationFitEligibility: the configured boundary is inclusive and an unscored job is not a low-scoring job',
   run: () => {
-    const opts = { minScore: RESEARCH_MIN_FIT_SCORE, unscoredSentinel: 50 };
+    const opts = { minScore: RESEARCH_MIN_FIT_SCORE };
     const justBelowThreshold = RESEARCH_MIN_FIT_SCORE - 1;
     // The configured boundary must be INCLUSIVE — an off-by-one here silently
     // denies the check to exactly the jobs sitting on the bar. The user asked
@@ -710,8 +710,10 @@ export default [{
     // sentinel marks "no assessment happened", so reading it as a real 50
     // would tell the user their job was judged and found wanting when it was
     // never judged at all.
-    assert(classifyCompensationFitEligibility(50, opts) === 'score-unavailable',
-      'the unscored sentinel must read as score-unavailable, never as a genuine mid score');
+    assert(classifyCompensationFitEligibility(50, { ...opts, unscored: true }) === 'score-unavailable',
+      'an unscored job must read as score-unavailable, never as a genuine mid score');
+    assert(classifyCompensationFitEligibility(50, opts) === 'below-threshold',
+      'a real score of 50 is an ordinary low score, not an unavailable one');
     for (const missing of [null, undefined, NaN, Infinity, '82', {}]) {
       assert(classifyCompensationFitEligibility(missing, opts) === 'score-unavailable',
         `a non-numeric score must read as score-unavailable → ${String(missing)}`);

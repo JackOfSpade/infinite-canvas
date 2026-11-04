@@ -10,7 +10,6 @@ export function JobSearchProcessingState({
   hubState,
   totalSourceJobs,
   scoringProgress,
-  resumeSummary,
   activeSourceId,
   activeSourceDetail,
   activeSourceProgress,
@@ -88,7 +87,7 @@ export function JobSearchProcessingState({
     headline: careerView?.label || primaryStatus,
     lines: careerView ? [careerView.detail, careerView.countLabel] : [
       ...checkpointLines, queuedStatus, descriptionProgress,
-      hubState === 'searching' ? activeSourceDetail : null, collectedStatus, scoringStatus, resumeSummary,
+      hubState === 'searching' ? activeSourceDetail : null, collectedStatus, scoringStatus,
     ],
     pauseKeys: nodeId ? [`node:${nodeId}`] : [],
     onPause: queuedRun ? null : onPauseAndSave,

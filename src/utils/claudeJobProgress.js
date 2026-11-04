@@ -123,8 +123,6 @@ function taskLiveCounts(task) {
   return [
     Number.isSafeInteger(task.rejections) && task.rejections > 0 ? `${task.rejections} rejected` : '',
     Number.isSafeInteger(task.maxTurns) ? `Web research turn ${task.toolTurns || 0} of ${task.maxTurns}` : countOf(task.toolTurns, 'tool turns'),
-    countOf(task.outputChars, 'characters written'),
-    countOf(task.thinkingChars, 'characters of thinking'),
   ].filter(Boolean);
 }
 

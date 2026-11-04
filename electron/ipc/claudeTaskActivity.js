@@ -26,13 +26,13 @@ function describeStreamEvent(event) {
   if (event?.type === 'message_start') return { kind: 'request' };
   if (event?.type === 'content_block_start') {
     const type = event.content_block?.type;
-    if (type === 'thinking') return { kind: 'thinking', chars: 0 };
-    if (type === 'text') return { kind: 'writing', chars: 0 };
+    if (type === 'thinking') return { kind: 'thinking' };
+    if (type === 'text') return { kind: 'writing' };
     return null;
   }
   if (event?.type !== 'content_block_delta') return null;
-  if (event.delta?.type === 'thinking_delta') return { kind: 'thinking', chars: String(event.delta.thinking ?? '').length };
-  if (event.delta?.type === 'text_delta') return { kind: 'writing', chars: String(event.delta.text ?? '').length };
+  if (event.delta?.type === 'thinking_delta') return { kind: 'thinking' };
+  if (event.delta?.type === 'text_delta') return { kind: 'writing' };
   return null;
 }
 
@@ -108,7 +108,7 @@ export function createClaudeTaskActivity({ now = () => Date.now(), onChange = ()
     const task = {
       state: 'queued', phase: 'starting', task: null, model: null, effort: null,
       firstStartedAt: at, phaseStartedAt: at, lastActivityAt: null, round: 0, rejections: 0,
-      toolTurns: 0, maxTurns: null, outputChars: 0, thinkingChars: 0, target: null, tool: null,
+      toolTurns: 0, maxTurns: null, target: null, tool: null,
       apiRetry: null, failure: null, steps: [], stepSeq: 0, nodeId: null, turnIds: new Set(), ...fields,
     };
     tasks.set(requestId, task);
@@ -141,7 +141,7 @@ export function createClaudeTaskActivity({ now = () => Date.now(), onChange = ()
       Object.assign(task, {
         state: 'running', phase: 'starting', phaseStartedAt: now(), task: taskId ?? task.task, nodeId: nodeId ?? task.nodeId, model: model ?? null, effort: effort ?? null,
         maxTurns, rejections: Math.max(task.rejections, Number.isSafeInteger(rejections) ? rejections : 0), round: countRound ? task.round + 1 : 1,
-        toolTurns: 0, outputChars: 0, thinkingChars: 0, target: null, tool: null, apiRetry: null, failure: null, turnIds: new Set(),
+        toolTurns: 0, target: null, tool: null, apiRetry: null, failure: null, turnIds: new Set(),
       });
       onChange();
     },
@@ -156,12 +156,10 @@ export function createClaudeTaskActivity({ now = () => Date.now(), onChange = ()
         case 'thinking':
           task.target = null;
           enterPhase(task, 'thinking', 'Thinking');
-          task.thinkingChars += event.chars || 0;
           break;
         case 'writing':
           task.target = null;
           enterPhase(task, 'writing', 'Writing the answer');
-          task.outputChars += event.chars || 0;
           break;
         case 'tool': {
           if (!event.messageId || !task.turnIds.has(event.messageId)) task.toolTurns += 1;

@@ -1177,7 +1177,7 @@ export async function writeWorkspaceAwaitingSyncLink(targetPath, payload, {
   const deadline = now() + waitMs;
   for (;;) {
     try {
-      return await atomicWriteRendererWorkspaceFile(targetPath, payload, { returnMetadata: true });
+      return await atomicWriteRendererWorkspaceFile(targetPath, payload, { returnMetadata: true, syncLinkWaitable: true });
     } catch (error) {
       if (!isWorkspaceSyncLinkRefusal(error)) throw error;
       // Only metadata is polled here; every retry re-runs the full write path.
@@ -1187,7 +1187,11 @@ export async function writeWorkspaceAwaitingSyncLink(targetPath, payload, {
         const stat = await fs.promises.lstat(targetPath).catch(() => null);
         linked = Boolean(stat && typeof stat.nlink === 'number' && stat.nlink > 1);
       }
-      if (linked) throw workspaceSyncLinkBusyError(error);
+      if (linked) {
+        const busy = workspaceSyncLinkBusyError(error);
+        recordWorkspaceWriteOutcome(busy);
+        throw busy;
+      }
     }
   }
 }
@@ -1580,11 +1584,18 @@ async function assertWorkspaceHandlePayload(handle, payload) {
   if (!hasSameIdentity(after, before)
       || after.size !== before.size
       || after.mtimeMs !== before.mtimeMs
-      || after.ctimeMs !== before.ctimeMs
       || digest.digest('hex') !== createHash('sha256').update(payload).digest('hex')) {
     throw rendererWorkspacePathChangedError();
   }
+  // The bytes are proven intact; only metadata moved during a read of a large
+  // file. A cloud-sync client linking the file does that, so wait and rewrite
+  // as for any sync link. Otherwise the caller's binding check still decides.
+  if (after.ctimeMs !== before.ctimeMs && after.nlink > 1) {
+    throw rendererWorkspacePathChangedError('target-hardlink');
+  }
 }
+
+export const __assertWorkspaceHandlePayloadForTests = assertWorkspaceHandlePayload;
 
 function workspaceMutationJournalName(target) {
   // Windows names are case-insensitive, so two case spellings must resolve to
@@ -1892,7 +1903,7 @@ export async function atomicWriteRendererWorkspaceFile(filePath, data, options =
     recordWorkspaceWriteOutcome();
     return result;
   } catch (error) {
-    recordWorkspaceWriteOutcome(error);
+    recordWorkspaceWriteOutcome(error, { waiting: options.syncLinkWaitable === true && isWorkspaceSyncLinkRefusal(error) });
     throw error;
   }
 }

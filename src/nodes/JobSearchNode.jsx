@@ -14791,7 +14791,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             hubState={hubState}
             totalSourceJobs={totalSourceJobs}
             scoringProgress={scoringProgress}
-            resumeSummary={data.resumeSummary}
             activeSourceId={lastActiveSource}
             activeSourceDetail={sourceProgress[lastActiveSource]?.detail || null}
             activeSourceProgress={sourceProgress[lastActiveSource] || null}

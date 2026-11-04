@@ -2702,6 +2702,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
             combineSourceRuns: node.data?.combineSourceRuns,
             mergeUnique: node.data?.mergeStats?.unique,
             locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
+            researchRemoved: node.data?.mergeStats?.researchRemoved,
             clearProvenance,
           };
         });
@@ -2751,6 +2752,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
         combineSourceRuns: node.data?.combineSourceRuns,
         mergeUnique: node.data?.mergeStats?.unique,
         locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
+        researchRemoved: node.data?.mergeStats?.researchRemoved,
         clearProvenance: node.data?.clearProvenance,
       }));
     const jobBoardStates = [...rawJobBoardStates, ...liveOnlyBoards].map((board) => {

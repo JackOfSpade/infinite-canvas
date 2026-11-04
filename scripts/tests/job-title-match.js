@@ -1,5 +1,5 @@
 import { assert, fetchLinkedInJobs, fetchRemoteOKJobs, formatRemoteOkSalary, linkedInApiRequestPacing, linkedInDescriptionPacing, linkedInPacingWaitMs, linkedInPageStopReason, remoteOkTagsFromQueries, runApiTransportRetry, shouldRetryApiTransportFailure, wwrCategoriesFromQueries } from '../test-dependencies.js';
-import { fetchUSAJobs } from '../../electron/extractors/apiExtractors.js';
+import { fetchUSAJobs, isLinkedInGuestPageLimit } from '../../electron/extractors/apiExtractors.js';
 import { detectQueryOperators } from '../../src/utils/jobTitleMatch.js';
 
 export default [
@@ -18,6 +18,15 @@ export default [
         assert(detectQueryOperators(clean).length === 0, `"${clean}" is not operator syntax`);
       }
       return { detected: true };
+    },
+  },
+  {
+    name: 'LinkedIn walk: only a clean 400 at the guest offset limit ends a walk as results exhausted',
+    run: () => {
+      assert(isLinkedInGuestPageLimit({ status: 400 }, 1000), 'a 400 at offset 1000 is the page limit');
+      assert(!isLinkedInGuestPageLimit({ status: 400 }, 975), 'an earlier 400 stays a real fault');
+      assert(!isLinkedInGuestPageLimit({ status: 429 }, 1000), 'a throttle at that depth stays a block');
+      assert(!isLinkedInGuestPageLimit({ status: 400, warning: { code: 'http-400' } }, 1000), 'a detected wall stays a block');
     },
   },
   {

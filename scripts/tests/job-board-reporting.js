@@ -22,7 +22,7 @@ function recordBoard(nodeId = boardId) {
       researched: 14, failedCohorts: 0, failures: [{ reason: 'private source URL' }] };
   });
   run(nodeId, 'append-jobs-history', () => {
-    getJobsTelemetry().history = { boardDisplay: { ts: Date.now(), input: 118, staged: 118, written: 0 } };
+    getJobsTelemetry().history = { boardDisplay: { ts: Date.now(), input: 118, eligible: 118, staged: 118, written: 0 } };
   });
 }
 function pipeline(boardIds = new Set([boardId])) {
@@ -40,7 +40,7 @@ export default [
         assert.match(output, /### Job Board work \(current process\)/);
         assert.match(output, /Taxonomy.*input 73 · placed 73 · missing 0 · duplicated 0/);
         assert.match(output, /Compensation.*input 73 · eligible 15 · assessed 14 · researched cohorts 14 · failed cohorts 0/);
-        assert.match(output, /Seen-history.*recorded · input 118 · provisional rows 118 · committed rows 0/);
+        assert.match(output, /Seen-history.*recorded · input 118 · eligible rows 118 · provisional rows 118 · committed rows 0/);
         assert(!output.includes('no taxonomy recorded this session'));
         assert(!output.includes('private posting prose') && !output.includes('private source URL'));
         assert(!output.includes(boardId), 'report correlations must not reveal reusable owner ids');

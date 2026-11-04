@@ -49,9 +49,9 @@ export default [
     run() {
       assert.deepEqual(describeClaudeSdkMessage({ type: 'system', subtype: 'init' }), { kind: 'started' });
       assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'message_start' })), { kind: 'request' });
-      assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'content_block_start', content_block: { type: 'thinking' } })), { kind: 'thinking', chars: 0 });
-      assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'abc' } })), { kind: 'thinking', chars: 3 });
-      assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello' } })), { kind: 'writing', chars: 5 });
+      assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'content_block_start', content_block: { type: 'thinking' } })), { kind: 'thinking' });
+      assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'content_block_delta', delta: { type: 'thinking_delta', thinking: 'abc' } })), { kind: 'thinking' });
+      assert.deepEqual(describeClaudeSdkMessage(stream({ type: 'content_block_delta', delta: { type: 'text_delta', text: 'hello' } })), { kind: 'writing' });
       assert.deepEqual(describeClaudeSdkMessage({ type: 'user', message: { content: [{ type: 'tool_result', is_error: true }] } }), { kind: 'tool-result', isError: true });
       assert.deepEqual(describeClaudeSdkMessage({ type: 'tool_progress', tool_name: 'WebFetch', elapsed_time_seconds: 9 }), { kind: 'tool-progress', tool: 'WebFetch', seconds: 9 });
       assert.deepEqual(describeClaudeSdkMessage({ type: 'system', subtype: 'api_retry', attempt: 2, max_retries: 10, retry_delay_ms: 8000, error_status: 529 }),
@@ -86,12 +86,11 @@ export default [
       let clock = 100;
       const tracker = createClaudeTaskActivity({ now: () => clock });
       tracker.begin('a', { task: 't', model: 'opus', effort: 'low', maxTurns: 16 });
-      for (let i = 0; i < 5; i += 1) { clock += 1; tracker.event('a', { kind: 'thinking', chars: 10 }); }
-      for (let i = 0; i < 5; i += 1) tracker.event('a', { kind: 'writing', chars: 2 });
+      for (let i = 0; i < 5; i += 1) { clock += 1; tracker.event('a', { kind: 'thinking' }); }
+      for (let i = 0; i < 5; i += 1) tracker.event('a', { kind: 'writing' });
       let task = tracker.snapshot().tasks.a;
       assert.deepEqual(task.steps.map(step => step.label), ['Thinking', 'Writing the answer']);
-      assert.equal(task.thinkingChars, 50);
-      assert.equal(task.outputChars, 10);
+      assert.equal(task.phase, 'writing');
       for (let i = 0; i < 20; i += 1) tracker.event('a', { kind: 'tool', messageId: `m${i % 3}`, calls: [{ tool: 'WebSearch', target: `q${i}` }] });
       task = tracker.snapshot().tasks.a;
       assert.equal(task.steps.length, 12, 'the step log is bounded');
@@ -120,7 +119,7 @@ export default [
       let rounds = 0;
       const { worker } = workerHarness({
         entries: [entry('a', { issuedAt: 400 })],
-        runStage: async ({ onActivity }) => { rounds += 1; onActivity({ kind: 'writing', chars: 7 }); return answer; },
+        runStage: async ({ onActivity }) => { rounds += 1; onActivity({ kind: 'writing' }); return answer; },
         submit: () => (rounds === 1 ? { outcome: 'rejected' } : { outcome: 'accepted' }),
       });
       worker.pump();
@@ -140,7 +139,7 @@ export default [
         entries: [entry('a', { issuedAt: 400 })],
         runStage: async ({ onActivity }) => {
           calls += 1;
-          onActivity({ kind: 'writing', chars: 7 });
+          onActivity({ kind: 'writing' });
           if (calls === 2) await gate;
           return answer;
         },
@@ -152,7 +151,6 @@ export default [
       assert.equal(task.round, 2);
       assert.equal(task.rejections, 1);
       assert.equal(task.firstStartedAt, 400);
-      assert.equal(task.outputChars, 7, 'the character count restarts each round');
       const labels = task.steps.map(step => step.label);
       assert(labels.includes('App rejected the answer') && labels.includes('Checking the answer'), labels.join());
       release();
@@ -229,7 +227,7 @@ export default [
       const { worker, state } = workerHarness({
         entries: [entry('a')],
         runStage: ({ onActivity, signal }) => new Promise((_, reject) => {
-          for (let i = 0; i < 50; i += 1) onActivity({ kind: 'writing', chars: 1 });
+          for (let i = 0; i < 50; i += 1) onActivity({ kind: 'writing' });
           signal.addEventListener('abort', () => reject(Object.assign(new Error('x'), { code: 'CLAUDE_CANCELLED' })));
         }),
       });
@@ -240,7 +238,7 @@ export default [
       assert.equal(state.notified.length, 0);
       pending[0].fn();
       assert.equal(state.notified.length, 1);
-      assert.equal(state.notified[0].tasks.a.outputChars, 50);
+      assert.equal(state.notified[0].tasks.a.phase, 'writing');
       worker.stop();
       assert.equal(state.timers.filter(timer => timer.ms === 500 && timer !== pending[0]).length, 0, 'stop leaves no push pending');
       await settle();
@@ -266,7 +264,7 @@ export default [
     run() {
       const hostile = normalizeClaudeTaskActivity({
         running: -1, waiting: 'many', paused: 'yes', tasks: {
-          a: { state: 'running', phase: 'nonsense', prompt: 'secret', firstStartedAt: -5, outputChars: Infinity, target: 'x'.repeat(500), failure: 'no',
+          a: { state: 'running', phase: 'nonsense', prompt: 'secret', firstStartedAt: -5, target: 'x'.repeat(500), failure: 'no',
             steps: [{ at: 1, label: 'ok' }, { at: 'late', label: 'bad time' }, { at: 2, label: 42 }, null] },
           b: { state: 'unknown' },
           c: 'text',
@@ -280,7 +278,6 @@ export default [
       assert.equal(task.phase, 'starting');
       assert.equal('prompt' in task, false);
       assert.equal(task.firstStartedAt, null);
-      assert.equal(task.outputChars, 0);
       assert.equal(task.target.length, 160);
       assert.equal(task.failure, null);
       assert.deepEqual(task.steps, [{ at: 1, label: 'ok' }]);
@@ -324,9 +321,9 @@ export default [
       assert.equal(claudeProgressTimeLines(retrying, 1000).next, 'Next attempt in 30s');
       assert.equal(claudeProgressTimeLines(retrying, 31000).next, 'Next attempt now');
       assert.equal(claudeProgressTimeLines(retrying, 1000).heard, null);
-      const full = view({ ...base, phase: 'writing', round: 2, rejections: 1, toolTurns: 3, maxTurns: 16, outputChars: 1234, thinkingChars: 890 }, { running: 4, waiting: 12 });
+      const full = view({ ...base, phase: 'writing', round: 2, rejections: 1, toolTurns: 3, maxTurns: 16 }, { running: 4, waiting: 12 });
       assert.equal(full.contextLabel, 'Opus · low effort · round 2');
-      assert.equal(full.summary, '1 rejected · Web research turn 3 of 16 · 1,234 characters written · 890 characters of thinking · 4 tasks running · 12 waiting for a slot');
+      assert.equal(full.summary, '1 rejected · Web research turn 3 of 16 · 4 tasks running · 12 waiting for a slot');
       const many = view({ ...base, phase: 'writing', steps: Array.from({ length: 12 }, (_, at) => ({ at, label: `s${at}` })) });
       assert.deepEqual(many.steps.map(step => step.label), ['s4', 's5', 's6', 's7', 's8', 's9', 's10', 's11']);
     },
@@ -493,10 +490,10 @@ export default [
       const bundle = extra => deriveClaudeJobProgress({ run: { status: 'running', stage: 'write', activity: 'waiting' }, ...extra });
       assert.equal(bundle({ held: true }).headline, 'Paused');
       assert.equal(bundle({ usageLimited: true }).headline, 'Paused until Claude usage resets');
-      const live = deriveClaudeJobProgress({ run: { status: 'running', stage: 'write', live: { state: 'running', phase: 'tool', tool: 'WebSearch', target: 'Acme', toolTurns: 2, outputChars: 12, steps: [{ at: 1, label: 'Write application' }] } } });
+      const live = deriveClaudeJobProgress({ run: { status: 'running', stage: 'write', live: { state: 'running', phase: 'tool', tool: 'WebSearch', target: 'Acme', toolTurns: 2, steps: [{ at: 1, label: 'Write application' }] } } });
       assert.equal(live.headline, 'Write application');
       assert.equal(live.detail, 'Searching the web: Acme');
-      assert.match(live.summary, /2 tool turns · 12 characters written/u);
+      assert.match(live.summary, /2 tool turns/u);
       assert.deepEqual(live.steps.map(step => step.label), ['Write application']);
     },
   },

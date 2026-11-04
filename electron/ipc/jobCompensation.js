@@ -666,14 +666,13 @@ export function classifyCompensationLocationGap(job = {}, context = {}, remoteRe
  * and must reach the user as different reasons. Collapsing them would tell
  * someone their job was judged a weak match when it was never judged at all.
  *
- * `unscoredSentinel` is the scorer's fixed placeholder value for a job the AI
- * could not score. It is a marker, not an assessment, so it counts as unknown.
+ * `unscored` says the scorer could not score this job. Its placeholder score is
+ * a marker, not an assessment, so it counts as unknown. A real score of the same
+ * value is an ordinary score, so the value itself is never the test.
  * PURE, so the boundary is directly unit-testable.
  */
-export function classifyCompensationFitEligibility(rawScore, { minScore, unscoredSentinel = null } = {}) {
-  const known = typeof rawScore === 'number'
-    && Number.isFinite(rawScore)
-    && !(unscoredSentinel !== null && rawScore === unscoredSentinel);
+export function classifyCompensationFitEligibility(rawScore, { minScore, unscored = false } = {}) {
+  const known = typeof rawScore === 'number' && Number.isFinite(rawScore) && !unscored;
   if (!known) return 'score-unavailable';
   return rawScore >= minScore ? 'eligible' : 'below-threshold';
 }

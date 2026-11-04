@@ -62,7 +62,7 @@ export default [
       'the searches-phase action is keyed to the current Board run and pauses its Search owners through the quit-pause path');
       assert(board.includes('usePublishJobRunStatus(id, boardWorkRunning ? {') && board.includes('onPause: showPauseSave ? pauseSearchesAndSave : null')
         && !selector.includes('onPause'), 'the Board publishes its pause to the side panel and the selector has none');
-      assert(board.includes('Waiting for Claude to finish search resolution for')
+      assert(board.includes('`Waiting for ${awaitingSourceLabel} to finish.`')
         && selector.includes('Cancel rolls back partial work in the active Search; completed Search results and existing Board results stay.'),
       'the waiting state and cancellation effect are explicit');
     },

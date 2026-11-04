@@ -24,6 +24,7 @@ import {
   scanPath,
   syncTextParentDirectory,
   writeWorkspaceAwaitingSyncLink,
+  __assertWorkspaceHandlePayloadForTests,
 } from '../../electron/ipc/filesystem.js';
 import {
   assertPrivateLocalFileReservation,
@@ -173,6 +174,30 @@ export default [
     },
   },
   {
+    name: 'workspace read-back: a sync link landing during verification waits, while changed content stays refused',
+    run: async () => {
+      const payload = Buffer.from('{"v":1}');
+      const stat = overrides => ({ isFile: () => true, size: payload.length, dev: 1, ino: 2, mtimeMs: 10, ctimeMs: 20, nlink: 1, ...overrides });
+      const handle = (after, bytes = payload) => {
+        const stats = [stat(), stat(after)];
+        return {
+          stat: async () => stats.shift(),
+          read: async (buffer, offset, length, position) => {
+            bytes.copy(buffer, offset, position, position + length);
+            return { bytesRead: length };
+          },
+        };
+      };
+      const check = async (...args) => __assertWorkspaceHandlePayloadForTests(handle(...args), payload).then(() => null, error => error);
+      assert(await check({}) === null, 'an untouched file passes');
+      assert(await check({ ctimeMs: 21 }) === null, 'a metadata touch alone defers to the caller binding check');
+      assert((await check({ ctimeMs: 21, nlink: 2 }))?.workspacePathCheck === 'target-hardlink', 'a link added mid-read joins the sync wait');
+      assert((await check({ mtimeMs: 11, nlink: 2 }))?.workspacePathCheck === 'binding-changed', 'a content time change stays a hard refusal');
+      assert((await check({ ino: 3 }))?.workspacePathCheck === 'binding-changed', 'another file stays a hard refusal');
+      assert((await check({ ctimeMs: 21, nlink: 2 }, Buffer.from('{"v":2}')))?.workspacePathCheck === 'binding-changed', 'different bytes stay a hard refusal');
+    },
+  },
+  {
     name: 'workspace save waits out a cloud-sync upload link, then fails as retryable without weakening the boundary',
     run: async () => {
       const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(process.cwd(), '.workspace-sync-link-')));
@@ -190,6 +215,9 @@ export default [
         });
         assert(result?.filePath && await fs.promises.readFile(canvas, 'utf8') === '{"v":2}',
           'the save lands once the sync client drops its link');
+        assert(workspaceIoDiagnosticsMarkdown().split('\n').find(line => line.includes(' · check '))?.includes('saved · OK'), 'the recovered save reads as saved');
+        assert(workspaceIoDiagnosticsMarkdown().includes('waiting · RENDERER_WORKSPACE_PATH_CHANGED · check target-hardlink'),
+          'an attempt the save retries reads as waiting, not failed');
 
         // A link that outlives the wait is reported as retryable, never written.
         await fs.promises.link(canvas, uploadLink);
@@ -202,6 +230,7 @@ export default [
         } catch (error) { busy = error; }
         assert(busy?.code === 'WORKSPACE_SYNC_LINK_BUSY' && busy.workspacePathCheck === 'target-hardlink'
           && /cloud sync/.test(busy.message), 'a persistent link becomes the retryable sync-busy code');
+        assert(workspaceIoDiagnosticsMarkdown().includes('failed · WORKSPACE_SYNC_LINK_BUSY'), 'only a save that gave up reads as failed');
         assert(await fs.promises.readFile(uploadLink, 'utf8') === '{"v":2}', 'the shared inode is never written');
 
         // Other refusals are not retried or relabelled.

@@ -550,6 +550,34 @@ export default [
     },
   },
   {
+    name: 'seen history: a real source artifact saved before scoring still records its displayed rows',
+    async run() {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-prescoring-display-history-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const sender = { id: 814 };
+      const row = name => ({ source: 'remoteok', company: 'Example', title: name, location: 'Toronto', url: `https://example.test/${name}` });
+      const shown = row('shown'), filtered = row('filtered'), hidden = row('hidden');
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const authority = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'a', operationId: 'display-a', semanticBase: base() });
+        const saved = snapshot({ canvasFilePath: canvas, hubId: 'a', authority: authority.receipt });
+        // The production snapshot holds every candidate, unscored, and is not rewritten after scoring.
+        saved.jobs = [{ ...shown }, { ...hidden }, { ...filtered, preferenceAssessment: { status: 'filtered' } },
+          null, { ...row('oversize'), url: `https://example.test/${'x'.repeat(2500)}` }];
+        await __saveJobAnalysisSnapshotForTests(saved);
+        const sources = [{ hubId: 'a', runId: 'run-1', careerSnapshotId: pin, operationAuthority: authority.receipt }];
+        const jobs = [shown, filtered];
+        const prepared = await __boardHistoryAuthorityForTests.prepare({ sender }, { canvasFilePath: canvas, jobs, sources });
+        assert(prepared.success, 'the unscored source artifact still proves ownership');
+        const consumed = await __boardHistoryAuthorityForTests.consume({ sender }, { canvasFilePath: canvas, jobs, historyToken: prepared.historyToken });
+        assert(consumed.staged === 1 && consumed.eligible === 1, `only the displayed, unfiltered row is staged; got ${JSON.stringify(consumed)}`);
+        await finalizeDisplayedJobsHistory(canvas, 'a', { deleted: true });
+        const remaining = dedupAgainstHistory([shown, hidden, filtered], await loadJobsHistory(canvas)).kept;
+        assert(!remaining.includes(shown) && remaining.includes(hidden) && remaining.includes(filtered), 'only the displayed row becomes seen');
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'seen history: failed finalization retains durable pending rows for retry',
     async run() {
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-history-retry-'));

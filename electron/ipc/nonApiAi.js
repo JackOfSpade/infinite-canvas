@@ -3017,8 +3017,10 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
     // into two different steps (see acceptedResponseFingerprints near the
     // top of this file). Must run before any durable write or resolution
     // below — a rejection here must leave this request exactly as pending
-    // as a code-mismatch rejection does.
-    claimAcceptedResponseFingerprint(record, args.response);
+    // as a code-mismatch rejection does. A worker answers one request by id
+    // from its own session, so it cannot paste into the wrong step, and two
+    // sessions copying the same posting can honestly return identical text.
+    if (transport !== 'worker') claimAcceptedResponseFingerprint(record, args.response);
     record.validationError = null;
     record.validationCode = null;
     record.validationCorrectionDetails = [];
@@ -3080,7 +3082,8 @@ async function acceptNonApiAiResponse(record, args, { transport = 'local' } = {}
       ...responseReceipt,
       ...(cause ? { causeTag: rejectionCauseTag(cause.key), causeRepeats: cause.count, ruleId: cause.ruleId } : {}),
     });
-    logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}).`);
+    const failedRules = correction.ruleIds.slice(0, 3).join(',');
+    logger.warn(`[Non-API AI] Rejected response for task '${record.task || 'unknown'}' (code=${nonApiAiLogErrorCode(error)}${failedRules ? ` rules=${failedRules}` : ''}).`);
     if (record.comparisonGroup && phase === 'validate') {
       record.comparisonInvalidCount = Math.min(2, record.comparisonInvalidCount + 1);
       await updateDurableStep(record, { status: record.comparisonInvalidCount >= 2 ? 'failed' : 'pending', response: null, draft: '',

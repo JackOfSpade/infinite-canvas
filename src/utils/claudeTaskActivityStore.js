@@ -33,8 +33,6 @@ export function normalizeClaudeActivityEntry(raw) {
     rejections: count(raw.rejections),
     toolTurns: count(raw.toolTurns),
     maxTurns: optionalCount(raw.maxTurns),
-    outputChars: count(raw.outputChars),
-    thinkingChars: count(raw.thinkingChars),
     tool: text(raw.tool, 60),
     target: text(raw.target),
     apiRetry,

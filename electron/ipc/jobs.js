@@ -219,16 +219,19 @@ async function verifySealedHistorySources(canvasFilePath, sources, records, disp
       || snapshot?.careerSnapshotId !== source.careerSnapshotId
       || !authorityReceiptMatches(snapshotOperationAuthority(snapshot), source.authority)
       || !scopedPublicationMatches(records[index], 'current', read.serialized, source.authority)) return null;
-    const scoredRows = canonicalHistoryRows((snapshot.jobs || []).filter(job =>
-      Number.isFinite(job?.matchScore) && job.matchScore >= 0 && job.matchScore <= 100
+    // The source artifact is saved before scoring, so its rows normally carry
+    // no score. It proves a displayed row belongs to this source; the Board
+    // sends only rows it has a real score for.
+    // One malformed candidate the Board never showed must not block the display.
+    const scoredRows = (snapshot.jobs || []).filter(job => job && typeof job === 'object'
+      && (job.matchScore == null || (Number.isFinite(job.matchScore) && job.matchScore >= 0 && job.matchScore <= 100))
       && !isUnscoredPlaceholderCard(job) && !isLegacyUnscoredPlaceholder(job)
       && job?.preferenceAssessment?.status !== 'filtered').flatMap(job => (
       Array.isArray(job.postingVariants) && job.postingVariants.length
         ? job.postingVariants.map(variant => ({ source: variant.source || job.source, company: job.company,
           title: job.title, location: variant.location || job.location, url: variant.url || job.url }))
         : [job]
-    )));
-    if (!scoredRows) return null;
+    )).flatMap(row => canonicalHistoryRows([row]) || []);
     const notDisplayed = new Set(dedupAgainstHistory(scoredRows, displayedRows).kept);
     sealed.push({ ...source, artifactFingerprint: jobAnalysisArtifactDigest(read.serialized),
       displayedRows: scoredRows.filter(row => !notDisplayed.has(row)) });
@@ -5463,6 +5466,10 @@ function historyWriteTelemetry(input, result = {}) {
     input: Array.isArray(input) ? input.length : Number(input) || 0,
     written: Number(result.written) || 0,
     staged: Number(result.staged) || 0,
+    // Displayed rows the source artifacts could prove. Zero from a real input
+    // means nothing can become seen, which `staged` alone cannot tell apart
+    // from rows that were already staged.
+    eligible: Number.isFinite(result.eligible) ? result.eligible : null,
     pruned: Number(result.pruned) || 0,
     skipped: result.skipped || null,
     // Why the input jobs that produced no row produced no row (per key kind and
@@ -5697,7 +5704,7 @@ export function getJobsBoardTelemetryForReport(boardIds, reportWindowId = null, 
       }
       const displayed = telemetry.history?.boardDisplay;
       const boardDisplay = displayed && typeof displayed === 'object' && !Array.isArray(displayed)
-        ? { ...boardTelemetryCounts(displayed, ['ts', 'input', 'staged', 'written', 'pruned', 'unreadable']),
+        ? { ...boardTelemetryCounts(displayed, ['ts', 'input', 'staged', 'eligible', 'written', 'pruned', 'unreadable']),
           skipped: displayed.skipped === 'no-canvas-path' ? 'no-canvas-path' : null,
           skips: boardTelemetryCounts(displayed.skips, ['noKey', 'url', 'titleCompany', 'inBatch']), error: Boolean(displayed.error) }
         : null;
@@ -10113,7 +10120,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       if (postingJob(job)?.officialPosting || normalizeOfficialPosting(job?.officialPosting)) continue;
       if (classifyCompensationFitEligibility(job.matchScore, {
         minScore: RESEARCH_MIN_FIT_SCORE,
-        unscoredSentinel: UNSCORED_FALLBACK_SCORE,
+        unscored: isUnscoredPlaceholderCard(job) || isLegacyUnscoredPlaceholder(job),
       }) !== 'eligible') continue;
       const lookupContext = compensationContextForSalary(job, job.compensationContext || {});
       const gap = classifyCompensationLocationGap(job, lookupContext, compensationResidencesForJob(job, remoteResidences));
@@ -10164,14 +10171,13 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     // budget this gate exists to bound. Same field the renderer's card filter
     // reads (src/utils/jobCardFilters.js: matchScore).
     const rawScore = job.matchScore;
-    // UNSCORED_FALLBACK_SCORE (above) marks a job the AI never actually
-    // scored — a fixed sentinel, not a real assessment. Reading it as a
-    // genuine 50 would gate the job out while implying an assessment was made
+    // scoreStatus marks a job the AI never actually scored. Its fallback score
+    // is a fixed sentinel, not a real assessment. Reading it as a genuine 50 would gate the job out while implying an assessment was made
     // and came up short. Treat it the same as a missing score: not eligible,
     // but say the score was unavailable rather than claiming it was low.
     const fitEligibility = classifyCompensationFitEligibility(rawScore, {
       minScore: RESEARCH_MIN_FIT_SCORE,
-      unscoredSentinel: UNSCORED_FALLBACK_SCORE,
+      unscored: isUnscoredPlaceholderCard(job) || isLegacyUnscoredPlaceholder(job),
     });
     if (fitEligibility !== 'eligible') {
       skippedBelowFit++;
