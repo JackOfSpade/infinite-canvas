@@ -529,7 +529,7 @@ export function NonApiAiDialog() {
     : null;
   const isRetryingClaude = !!activeRequestId && claudeRetryingRequestIds.has(activeRequestId);
   const claudeRetryError = activeRequestId ? (claudeRetryErrors[activeRequestId] || '') : '';
-  const retryWithClaude = async () => {
+  const retryWithClaude = async ({ upgradeModel = false } = {}) => {
     const request = activeRequest;
     const retry = window.electronAPI?.claudeApplicationRetry;
     if (!request?.jobId || typeof retry !== 'function') return;
@@ -538,7 +538,7 @@ export function NonApiAiDialog() {
     setClaudeRetryErrors(previous => ({ ...previous, [requestId]: '' }));
     let failure = '';
     try {
-      const result = await retry({ jobId: request.jobId, canvasFilePath: request.canvasFilePath });
+      const result = await retry({ jobId: request.jobId, canvasFilePath: request.canvasFilePath, ...(upgradeModel ? { upgradeModel: true } : {}) });
       if (result?.success === false) {
         failure = result?.error || 'Claude could not be restarted for this application.';
       } else {
@@ -2026,6 +2026,16 @@ export function NonApiAiDialog() {
                     {isRetryingClaude && <LoaderCircle size={12} className="animate-spin" aria-hidden="true" />}
                     {isRetryingClaude ? 'Retrying…' : 'Retry with Claude'}
                   </button>
+                  {activeClaudeRun.upgradeModel && (
+                    <button
+                      type="button"
+                      onClick={() => { void retryWithClaude({ upgradeModel: true }); }}
+                      disabled={isRetryingClaude || isDiscarding || !!cancelConfirmTarget}
+                      className="rounded-md border border-white/15 bg-white/5 px-3 py-1.5 text-[11px] font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Upgrade to {activeClaudeRun.upgradeModel}
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={requestApplicationDiscardConfirm}

@@ -519,7 +519,7 @@ export function splitCareerCatalog(text) {
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {
   let bound = null;
-  return async ({ text, pageImages, signal, stage, sessionId, resume, onThinkingSummary, onActivity }) => {
+  return async ({ text, pageImages, signal, sessionId, resume, model, effort, onThinkingSummary, onActivity }) => {
     if (!bound) {
       if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
       const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
@@ -527,9 +527,11 @@ function createProductionRunStage({ workspaceDir, fsImpl }) {
     }
     const { runClaudeSdkStage } = await import('./claudeApplicationSdkStage.js');
     const split = splitCareerCatalog(text);
-    return runClaudeSdkStage({ text: split.text, systemAppend: split.catalog ? `APPROVED CAREER CATALOG:\n${split.catalog}` : '', pageImages, signal, sessionId, resume, onThinkingSummary, onActivity, ...bound, ...claudeStageProfile(stage) });
+    return runClaudeSdkStage({ text: split.text, systemAppend: split.catalog ? `APPROVED CAREER CATALOG:\n${split.catalog}` : '', pageImages, signal, sessionId, resume, model, effort, onThinkingSummary, onActivity, ...bound });
   };
 }
+
+const SAFEGUARD_UPGRADE_NOTE = ' Upgrade to Opus runs this step on Opus at the same effort, which costs more.';
 
 const FRESH_CONTEXT_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -625,6 +627,20 @@ export function createClaudeApplicationRunner({
   const drivers = new Map();
   // jobId -> Map(laneKey -> { sessionId, started, contextKey, stage }); laneKey is 'main' or a matchTaskId.
   const sessions = new Map();
+  // jobId -> stages the user moved to Opus after a safeguard stop. Every call of
+  // such a stage in this job uses Opus, until the job finishes or is discarded.
+  const modelUpgrades = new Map();
+
+  function jobStageProfile(jobId, stage) {
+    const profile = claudeStageProfile(stage);
+    return modelUpgrades.get(jobId)?.has(stage) ? { ...profile, model: CLAUDE_OPUS_MODEL } : profile;
+  }
+
+  // Only a safeguard stop on a stage still running on Sonnet can be upgraded.
+  function safeguardUpgrade(jobId, code, stage) {
+    return code === 'CLAUDE_SAFEGUARD_BLOCKED' && nonEmptyString(stage)
+      && jobStageProfile(jobId, stage).model === CLAUDE_SONNET_MODEL ? 'Opus' : null;
+  }
 
   function laneFor(jobId, laneKey) {
     let lanes = sessions.get(jobId);
@@ -711,7 +727,8 @@ export function createClaudeApplicationRunner({
   async function dropSessions(jobId) {
     const lanes = sessions.get(jobId);
     const hadRuns = runCounts.delete(jobId);
-    if (!lanes && !hadRuns) return;
+    const hadUpgrades = modelUpgrades.delete(jobId);
+    if (!lanes && !hadRuns && !hadUpgrades) return;
     sessions.delete(jobId);
     const ids = [...(lanes?.values() || [])].map(lane => lane.sessionId).filter(Boolean);
     persist();
@@ -740,6 +757,7 @@ export function createClaudeApplicationRunner({
       stage: patch.stage !== undefined ? patch.stage : (previous?.stage ?? null),
       ...(patch.code ? { code: patch.code } : {}),
       ...(patch.message ? { message: patch.message } : {}),
+      ...(patch.upgradeModel ? { upgradeModel: patch.upgradeModel } : {}),
       updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : now(),
       startedAt: previous?.startedAt ?? drivers.get(jobId)?.startedAt ?? now(),
       ...(patch.progress !== undefined ? { progress: patch.progress } : previous?.progress ? { progress: previous.progress } : {}),
@@ -807,7 +825,8 @@ export function createClaudeApplicationRunner({
       if (Object.keys(out).length) sessionSnapshot[jobId] = out;
     }
     const runs = Object.fromEntries([...runCounts].filter(([, n]) => n > 0));
-    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot, ...(Object.keys(runs).length ? { runs } : {}) }, null, 2)}\n`;
+    const upgrades = Object.fromEntries([...modelUpgrades].map(([jobId, stages]) => [jobId, [...stages]]));
+    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot, ...(Object.keys(runs).length ? { runs } : {}), ...(Object.keys(upgrades).length ? { upgrades } : {}) }, null, 2)}\n`;
     const write = async () => {
       if (!stateFile) return;
       await fsImpl.mkdir(path.dirname(stateFile), { recursive: true });
@@ -854,6 +873,11 @@ export function createClaudeApplicationRunner({
       if (isPlainObject(data.runs)) for (const [jobId, n] of Object.entries(data.runs)) {
         if (nonEmptyString(jobId) && !drivers.has(jobId) && Number.isSafeInteger(n) && n > 0) runCounts.set(jobId, n);
       }
+      if (isPlainObject(data.upgrades)) for (const [jobId, stages] of Object.entries(data.upgrades)) {
+        if (!nonEmptyString(jobId) || !Array.isArray(stages) || drivers.has(jobId)) continue;
+        const restored = stages.filter(stage => nonEmptyString(stage) && claudeStageProfile(stage).model === CLAUDE_SONNET_MODEL);
+        if (restored.length) modelUpgrades.set(jobId, new Set(restored));
+      }
       for (const [jobId, lanes] of Object.entries(data.sessions || {})) {
         if (!nonEmptyString(jobId) || !isPlainObject(lanes) || drivers.has(jobId)) continue;
         const restored = new Map();
@@ -866,6 +890,7 @@ export function createClaudeApplicationRunner({
     }
     for (const [jobId, entry] of Object.entries(failedMap)) {
       if (!nonEmptyString(jobId) || entry?.status !== 'failed' || drivers.has(jobId)) continue;
+      const upgradeModel = safeguardUpgrade(jobId, entry.code, entry.stage);
       states.set(jobId, {
         jobId,
         canvasFilePath: typeof entry.canvasFilePath === 'string' ? entry.canvasFilePath : '',
@@ -873,6 +898,7 @@ export function createClaudeApplicationRunner({
         stage: entry.stage ?? null,
         ...(entry.code ? { code: String(entry.code) } : {}),
         ...(entry.message ? { message: String(entry.message) } : {}),
+        ...(upgradeModel ? { upgradeModel } : {}),
         updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : now(),
       });
     }
@@ -914,7 +940,7 @@ export function createClaudeApplicationRunner({
       }
       const acquiredAt = now();
       entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: acquiredAt });
-      const profile = claudeStageProfile(stage);
+      const profile = jobStageProfile(jobId, stage);
       const actionShown = () => [...entry.actions.entries()].find(([, row]) => row.activity === 'running')?.[0] === actionId;
       if (actionShown()) {
         liveActivity.begin(jobId, { model: profile.model, effort: profile.effort, countRound: false });
@@ -984,6 +1010,8 @@ export function createClaudeApplicationRunner({
           const failure = cause instanceof ClaudeRunnerError
             ? cause
             : new ClaudeRunnerError('CLAUDE_ERROR', clip(cause?.message || 'Claude run failed.') || 'Claude run failed.', cause?.code);
+          // A parallel lane or planning call can differ from entry.stage.
+          failure.failedStage = stage;
           await logRun(jobId, canvasFilePath, { ...record, event: 'failed', error: auditFailure(failure),
             wallMs: Math.max(0, now() - queuedAt),
             ...(typeof failure.result === 'string' ? { result: failure.result } : {}), ...coverage('incomplete') });
@@ -1242,7 +1270,10 @@ export function createClaudeApplicationRunner({
           } catch { /* fall back to the visible runner failure */ }
         }
         const error = raw instanceof ClaudeRunnerError ? raw : applicationError(raw);
-        setState(jobId, canvasFilePath, { status: 'failed', stage: entry.stage, code: error.code, message: error.message });
+        const failedStage = error.code === 'CLAUDE_SAFEGUARD_BLOCKED' && error.failedStage ? error.failedStage : entry.stage;
+        const upgradeModel = safeguardUpgrade(jobId, error.code, failedStage);
+        setState(jobId, canvasFilePath, { status: 'failed', stage: failedStage, code: error.code,
+          message: upgradeModel ? `${error.message}${SAFEGUARD_UPGRADE_NOTE}` : error.message, ...(upgradeModel ? { upgradeModel } : {}) });
         logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}`);
         await persist();
       } finally {
@@ -1264,8 +1295,13 @@ export function createClaudeApplicationRunner({
     return startDriver(jobId, canvasFilePath);
   }
 
-  async function retry({ jobId, canvasFilePath } = {}) {
+  async function retry({ jobId, canvasFilePath, upgradeModel } = {}) {
     if (!nonEmptyString(jobId) || !nonEmptyString(canvasFilePath)) return { status: 'invalid' };
+    const failed = states.get(jobId);
+    if (upgradeModel === true && failed?.status === 'failed' && safeguardUpgrade(jobId, failed.code, failed.stage)) {
+      if (!modelUpgrades.has(jobId)) modelUpgrades.set(jobId, new Set());
+      modelUpgrades.get(jobId).add(failed.stage);
+    }
     if (['failed', 'done'].includes(states.get(jobId)?.status)) {
       states.delete(jobId);
       await persist();
@@ -1298,7 +1334,7 @@ export function createClaudeApplicationRunner({
       removeState(jobId, event?.canvasFilePath);
       persist();
     }
-    if (sessions.has(jobId) || runCounts.has(jobId)) {
+    if (sessions.has(jobId) || runCounts.has(jobId) || modelUpgrades.has(jobId)) {
       dropSessions(jobId).catch(() => { /* logged inside; never fails a job */ });
     }
   }

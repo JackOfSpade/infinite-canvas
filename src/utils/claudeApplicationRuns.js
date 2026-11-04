@@ -32,6 +32,7 @@ export function normalizeClaudeRun(state) {
     stage: optionalString(state.stage),
     code: optionalString(state.code),
     message: optionalString(state.message).slice(0, MESSAGE_LIMIT),
+    ...(state.upgradeModel === 'Opus' ? { upgradeModel: state.upgradeModel } : {}),
     updatedAt: optionalTime(state.updatedAt),
     lastActivityAt: optionalTime(state.lastActivityAt),
     ...(optionalTime(state.startedAt) !== null ? { startedAt: state.startedAt } : {}),

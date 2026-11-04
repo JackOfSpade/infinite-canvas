@@ -776,8 +776,6 @@ export default [
     name: 'claude runner: Opus plans (xhigh), writes (low), judges and fact-checks (high); Sonnet converts (medium) and repairs (high)',
     run() {
       assert.deepEqual(JSON.parse(JSON.stringify(CLAUDE_STAGE_PROFILES)), {
-        requirements: { model: 'opus', effort: 'medium' },
-        'requirements-audit': { model: 'opus', effort: 'medium' },
         'editorial-plan': { model: 'opus', effort: 'xhigh' },
         write: { model: 'opus', effort: 'low' },
         pick: { model: 'opus', effort: 'high' },
@@ -788,11 +786,8 @@ export default [
         'fact-correction': { model: 'opus', effort: 'high' },
         'fact-recheck': { model: 'opus', effort: 'high' },
       });
-      // Sonnet's safeguard refuses normal listings at these two stages.
-      assert.deepEqual(claudeStageProfile('requirements'), { model: 'opus', effort: 'medium' });
-      assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'opus', effort: 'medium' });
       // A stage the table does not name runs on the Sonnet high default.
-      assert.deepEqual(claudeStageProfile('requirements-adjudication'), { model: 'sonnet', effort: 'high' });
+      assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'sonnet', effort: 'high' });
       assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'low']);
     },
   },
@@ -1273,6 +1268,109 @@ export default [
     },
   },
   {
+    name: 'claude runner safeguard upgrade: moves every call of the blocked stage to Opus at the same effort, only that stage, until the job ends',
+    async run() {
+      const stateFile = tempStateFile();
+      const jobId = 'job-upgrade';
+      const script = sequenceApi([
+        { handoffCode: 'a', stage: 'requirements', prompt: 'page 1' },
+        { handoffCode: 'b', stage: 'requirements', prompt: 'page 2' },
+        { handoffCode: 'c', stage: 'requirements-adjudication', prompt: 'other stage' },
+        { handoffCode: 'd', stage: 'convert', prompt: 'lower effort stage' },
+      ]);
+      const calls = [];
+      let refuse = true;
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile, logger: quietLogger(), homedir: '',
+        runStage: async ({ stage, model, effort }) => {
+          calls.push([stage, model, effort]);
+          if (refuse) { refuse = false; throw new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED', 'Blocked.'); }
+          return { text: '{}' };
+        },
+      });
+      runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status([jobId])[jobId]?.status === 'failed', 'failed');
+      const failed = runner.status([jobId])[jobId];
+      assert.equal(failed.upgradeModel, 'Opus');
+      assert.match(failed.message, /^Blocked\. Upgrade to Opus /u);
+      await runner.retry({ jobId, canvasFilePath: '/c.canvas', upgradeModel: true });
+      await waitFor(() => runner.status([jobId])[jobId]?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.deepEqual(calls, [
+        ['requirements', 'sonnet', 'high'],
+        ['requirements', 'opus', 'high'],
+        ['requirements', 'opus', 'high'],
+        ['requirements-adjudication', 'sonnet', 'high'],
+        ['convert', 'sonnet', 'medium'],
+      ]);
+      assert.equal(runner.status([jobId])[jobId].upgradeModel, undefined);
+      assert.equal(JSON.parse(fs.readFileSync(stateFile, 'utf8')).upgrades, undefined, 'a finished job forgets its upgrade');
+    },
+  },
+  {
+    name: 'claude runner safeguard upgrade: ignored for other failures, and not offered once the stage is on Opus',
+    async run() {
+      const calls = [];
+      const failures = ['CLAUDE_ERROR', 'CLAUDE_SAFEGUARD_BLOCKED', 'CLAUDE_SAFEGUARD_BLOCKED'];
+      const jobId = 'job-no-upgrade';
+      const runner = createClaudeApplicationRunner({
+        api: sequenceApi([{ handoffCode: 'a', stage: 'requirements', prompt: 'p' }]).api, stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        runStage: async ({ model }) => {
+          calls.push(model);
+          const code = failures.shift();
+          if (code) throw new ClaudeRunnerError(code, 'Stopped.');
+          return { text: '{}' };
+        },
+      });
+      const failedAgain = async count => {
+        await waitFor(() => calls.length === count && runner.status([jobId])[jobId]?.status === 'failed', `failed ${count}`);
+        return runner.status([jobId])[jobId];
+      };
+      runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+      assert.equal((await failedAgain(1)).upgradeModel, undefined, 'another failure offers no upgrade');
+      await runner.retry({ jobId, canvasFilePath: '/c.canvas', upgradeModel: true });
+      assert.equal((await failedAgain(2)).upgradeModel, 'Opus');
+      await runner.retry({ jobId, canvasFilePath: '/c.canvas', upgradeModel: true });
+      const onOpus = await failedAgain(3);
+      assert.equal(onOpus.upgradeModel, undefined, 'a refusal on Opus has nothing left to upgrade to');
+      assert.equal(onOpus.message, 'Stopped.');
+      await runner.retry({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status([jobId])[jobId]?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.deepEqual(calls, ['sonnet', 'sonnet', 'opus', 'opus']);
+    },
+  },
+  {
+    name: 'claude runner safeguard upgrade: the offer and an applied upgrade both survive a reload',
+    async run() {
+      const stateFile = tempStateFile();
+      const jobId = 'job-upgrade-reload';
+      const handoffs = () => sequenceApi([
+        { handoffCode: 'a', stage: 'requirements', prompt: 'p' },
+        { handoffCode: 'b', stage: 'requirements', prompt: 'q' },
+      ]).api;
+      const start = runStage => createClaudeApplicationRunner({ api: handoffs(), stateFile, logger: quietLogger(), homedir: '', runStage });
+      const blocked = async () => { throw new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED', 'Blocked.'); };
+      const first = start(blocked);
+      first.ensure({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => first.status([jobId])[jobId]?.status === 'failed', 'failed');
+      await first.shutdown();
+      const second = start(async () => { throw new ClaudeRunnerError('CLAUDE_ERROR', 'Later failure.'); });
+      await second.load();
+      assert.equal(second.status([jobId])[jobId].upgradeModel, 'Opus');
+      await second.retry({ jobId, canvasFilePath: '/c.canvas', upgradeModel: true });
+      await waitFor(() => second.status([jobId])[jobId]?.code === 'CLAUDE_ERROR', 'failed again');
+      await second.shutdown();
+      const models = [];
+      const third = start(async ({ model }) => { models.push(model); return { text: '{}' }; });
+      await third.load();
+      await third.retry({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => third.status([jobId])[jobId]?.status === 'done', 'done');
+      await third.shutdown();
+      assert.deepEqual(models, ['opus', 'opus']);
+    },
+  },
+  {
     name: 'claude runner sessions: retry after a failure in a started chat resumes it, also across a reload',
     async run() {
       const stateFile = tempStateFile();
@@ -1522,7 +1620,7 @@ export default [
         assert.equal(new Set(group.map(row => row.runId)).size, 1);
         assert.equal(new Set(group.map(row => row.handoffSha256)).size, 1);
         for (const row of group) {
-          assert.deepEqual([row.version, row.stage, row.requestedModel, row.requestedEffort], [2, 'requirements', 'opus', 'medium']);
+          assert.deepEqual([row.version, row.stage, row.requestedModel, row.requestedEffort], [2, 'requirements', 'sonnet', 'high']);
           assert.match(row.handoffSha256, /^[0-9a-f]{64}$/);
           assert.match(row.promptSha256, /^[0-9a-f]{64}$/);
           assert.equal(Number.isFinite(Date.parse(row.at)), true);

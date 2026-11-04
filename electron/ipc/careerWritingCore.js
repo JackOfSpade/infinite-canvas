@@ -21,12 +21,7 @@ export const CAREER_WRITING_DEFAULT_PROFILE = Object.freeze({ model: CLAUDE_SONN
 // Chosen on cost and quality, 2026-11-01 (docs/application-improvement-sessions.md).
 // Writing at Opus low cost a quarter of xhigh with no measurable loss in blind
 // panels; Opus high fact-checks catch ownership overstatements Sonnet passes.
-// Requirements stages moved 2026-11-04: Sonnet's reasoning_extraction safeguard
-// refused about half of replays of a normal listing, and no prompt, effort or
-// thinking setting removed that; Opus medium was never refused in 35 replays.
 export const APPLICATION_STAGE_PROFILES = Object.freeze({
-  requirements: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  'requirements-audit': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   'editorial-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
   write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),

@@ -38,6 +38,8 @@ export default [
     run() {
       const run = normalizeClaudeRun({ status: 'needs-review', reason: 'same-rule-repeat', runs: 12 });
       assert(run.reason === 'same-rule-repeat' && run.runs === 12, 'retain closed stop and count');
+      assert(normalizeClaudeRun({ status: 'failed', upgradeModel: 'Opus' }).upgradeModel === 'Opus', 'retain the offered upgrade');
+      assert(!('upgradeModel' in normalizeClaudeRun({ status: 'failed', upgradeModel: 'anything else' })), 'drop an unknown upgrade');
       const malformed = normalizeClaudeRun({ status: 'failed', reason: 'private prose', runs: -1 });
       assert(!('reason' in malformed) && !('runs' in malformed), 'drop untrusted diagnostic values');
     },
