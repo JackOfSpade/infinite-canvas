@@ -624,12 +624,35 @@ export function CardProbe({navigation, queue, card}) {
           let active = null;
           try {
 
-          // Both buttons exist and start only their own document.
+          // The second button starts both documents in one job with no scope.
           let card = await mount({});
+          assert.equal(documentButton('resume').textContent.trim(), 'Generate résumé');
+          assert.equal(documentButton('both').textContent.trim(), 'Generate résumé and cover letter');
+          assert.equal(documentButton('cover'), null, 'a letter is never offered before its résumé');
+          await act(async () => { documentButton('both').click(); });
+          await card.settle(60);
+          assert.equal(card.queued.length, 1);
+          assert.equal(card.queued[0].documentScope ?? null, null, 'one job produces both');
+          assert.equal(documentButton('resume').disabled, true, 'the job covers the résumé');
+          assert.equal(documentButton('cover').disabled, true, 'and the letter');
+          await act(async () => { documentButton('resume').click(); documentButton('cover').click(); });
+          await card.settle(30);
+          assert.equal(card.queued.length, 1, 'neither starts a second job');
+          await card.unmount();
+          card = await mount({ localApplication: { id: 'job-1', status: 'failed', message: 'Stopped.' } });
+          assert.match(documentButton('both').textContent, /Retry résumé and cover letter/u, 'a failed job retries as what it was');
+          assert.equal(documentButton('resume').disabled, false, 'the résumé alone is still a choice');
+          await card.unmount();
+          card = await mount({ localApplication: { id: 'job-1', status: 'saved', savedDir: '/synthetic/folder', savedDocuments: { resume: true, cover: true } } });
           assert.equal(documentButton('resume').textContent.trim(), 'Résumé');
           assert.equal(documentButton('cover').textContent.trim(), 'Cover letter');
+          assert.equal(documentButton('cover').disabled, true, 'both saved, nothing left to generate');
+          await card.unmount();
+
+          // The résumé button starts only the résumé, and the second button then adds the letter.
+          card = await mount({});
           assert.equal(documentButton('resume').disabled, false);
-          assert.equal(documentButton('cover').disabled, false);
+          assert.equal(documentButton('both').disabled, false);
           await act(async () => { documentButton('resume').click(); });
           await card.settle(60);
           assert.equal(card.queued.length, 1);
@@ -641,24 +664,24 @@ export function CardProbe({navigation, queue, card}) {
           await card.unmount();
 
           // Spam clicks in one tick, before anything could render: exactly one run, per document.
-          for (const kind of ['resume', 'cover']) {
-            const other = kind === 'resume' ? 'cover' : 'resume';
+          for (const kind of ['resume', 'both']) {
+            const scope = kind === 'resume' ? 'resume' : null;
             card = await mount({});
             const handler = element => element[Object.keys(element).find(key => key.startsWith('__reactProps$'))].onClick;
             const onClick = handler(documentButton(kind));
             await act(async () => { const event = { stopPropagation() {} }; for (let i = 0; i < 5; i += 1) onClick(event); documentButton(kind).click(); });
             await card.settle(60);
             assert.equal(card.prepared.length, 1, `${kind}: one lookup`);
-            assert.deepEqual(card.queued.map(row => row.documentScope), [kind], `${kind}: one job`);
+            assert.deepEqual(card.queued.map(row => row.documentScope ?? null), [scope], `${kind}: one job`);
             await card.unmount();
 
-            // Both buttons spammed together: one runs now and the other waits once.
+            // Both buttons spammed together: one job, and a résumé first means the letter waits once.
             card = await mount({});
-            const first = handler(documentButton(kind)); const second = handler(documentButton(other));
+            const first = handler(documentButton(kind)); const second = handler(documentButton(kind === 'resume' ? 'both' : 'resume'));
             await act(async () => { const event = { stopPropagation() {} }; for (let i = 0; i < 4; i += 1) { first(event); second(event); } });
             await card.settle(60);
-            assert.deepEqual(card.queued.map(row => row.documentScope), [kind], `${kind} first: the other waits`);
-            assert.equal(card.state.card.data.queuedApplicationDocument, other);
+            assert.deepEqual(card.queued.map(row => row.documentScope ?? null), [scope], `${kind} first: one job now`);
+            assert.equal(card.state.card.data.queuedApplicationDocument ?? null, kind === 'resume' ? 'cover' : null);
             await act(async () => { card.state.card = { ...card.state.card, data: { ...card.state.card.data, queuedApplicationDocument: null } }; });
             await card.settle(1100);
             await card.unmount();

@@ -200,7 +200,7 @@ export default [
             await render([card, card]);
             assert.match(window.document.body.textContent, /Employer unknown/u);
             assert.match(window.document.body.textContent, /via Acme Talent Partners/u);
-            const idle = buttons(window).filter(item => item.textContent.trim() === 'Résumé');
+            const idle = buttons(window).filter(item => item.textContent.trim() === 'Generate résumé');
             const stale = idle[1][Object.keys(idle[1]).find(key => key.startsWith('__reactProps$'))].onClick;
             await act(async () => idle[0].click());
             assert.equal(prepares, 1); assert.equal(button(window, 'Finding posting…').disabled, true);
@@ -208,13 +208,13 @@ export default [
             assert.equal(prepares, 1, 'a pre-render callback in another card instance is synchronously fenced');
             await render([]); await render([card]);
             assert.equal(button(window, 'Finding posting…').disabled, true);
-            assert.equal(button(window, 'Résumé'), undefined);
+            assert.equal(button(window, 'Generate résumé'), undefined);
             const cancel = button(window, 'Cancel'); assert.ok(cancel);
             await act(async () => { cancel.click(); cancel.click(); });
             assert.deepEqual(cancels, [['remount-card', 'official-posting-cancelled']]);
             await act(async () => release({ success: true, resolutionId: 'late-resolution', officialPosting: posting() }));
             assert.equal(queues, 0); assert.equal(leases, 0); assert.equal(prepares, 1); assert.equal(retired.length, 1);
-            assert.equal(button(window, 'Résumé').disabled, false);
+            assert.equal(button(window, 'Generate résumé').disabled, false);
             assert.deepEqual(data, before, 'transient ownership and cancellation never change the job projection');
           } finally { await act(async () => { release?.({ success: false, cancelled: true }); root.unmount(); }); }
           assert.deepEqual(entries, [], 'the real card lifecycle emits no React warnings');
@@ -258,12 +258,12 @@ export default [
             assert.match(window.document.body.textContent, /Previous official posting · check again/u);
             let boardClaim;
             await act(async () => { boardClaim = beginProbePreparation({ canvasFilePath: null, nodeId: 'board', purpose: 'lookup' }); });
-            assert.equal(button(window, 'Retry lookup').disabled, true); assert.equal(button(window, 'Résumé').disabled, true);
+            assert.equal(button(window, 'Retry lookup').disabled, true); assert.equal(button(window, 'Generate résumé').disabled, true);
             await act(async () => boardClaim.finish());
             assert.equal(button(window, 'Retry lookup').disabled, false);
             await act(async () => button(window, 'Retry lookup').click());
             assert.equal(lookups, 1); assert.equal(button(window, 'Checking official posting…').disabled, true);
-            assert.equal(button(window, 'Résumé').disabled, true);
+            assert.equal(button(window, 'Generate résumé').disabled, true);
             assert.equal(button(window, 'Finding posting…'), undefined, 'standalone work must not use application progress');
             await render([]); await render([card]);
             assert.equal(button(window, 'Checking official posting…').disabled, true);
@@ -271,10 +271,10 @@ export default [
             await act(async () => release({ success: true, entries: [{ cardId: card.id, officialPosting: posting(), postedBy: '' }] }));
             assert.deepEqual(cancelled, [[card.id, 'official-posting-cancelled']]);
             assert.equal(retired.length, 0, 'work completion cannot release ownership before host cancellation acknowledgment');
-            assert.equal(button(window, 'Résumé').disabled, true);
+            assert.equal(button(window, 'Generate résumé').disabled, true);
             await act(async () => { acknowledgeCancellation(); await retirement; });
             assert.equal(retired.length, 1); assert.equal(applications, 0); assert.equal(leases, 0); assert.equal(updates.length, 0);
-            assert.equal(button(window, 'Résumé').disabled, false); assert.deepEqual(data, before);
+            assert.equal(button(window, 'Generate résumé').disabled, false); assert.deepEqual(data, before);
           } finally { await act(async () => { acknowledgeCancellation?.(); release?.({ success: false, cancelled: true }); root.unmount(); }); }
           assert.deepEqual(entries, []);
         }));

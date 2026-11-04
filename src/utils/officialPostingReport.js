@@ -1,13 +1,13 @@
 import { classifyResearchEligibility, RESEARCH_ELIGIBILITY } from '../../electron/ipc/researchGate.js';
 import {
-  normalizeOfficialPosting, officialPostingLookupStatus, officialResearchSettled,
+  normalizeOfficialPosting, officialPostingExhausted, officialPostingLookupStatus, officialResearchSettled,
   OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL,
   OFFICIAL_FETCH_FAILURE_REASONS, OFFICIAL_FETCH_FAILURE_LIMIT,
 } from '../../electron/ipc/officialPostingFields.js';
 
 export const OFFICIAL_REPORT_MAX_NODES = 20_000;
 export const OFFICIAL_REPORT_MAX_CARDS = 1000;
-export const OFFICIAL_REPORT_STATES = Object.freeze(['verified', 'not-found', 'ambiguous', 'closed', 'incomplete', 'unchecked', 'not-researched']);
+export const OFFICIAL_REPORT_STATES = Object.freeze(['verified', 'not-found', 'ambiguous', 'closed', 'incomplete', 'exhausted', 'unchecked', 'not-researched']);
 export const OFFICIAL_REPORT_FETCH_CODES = Object.freeze(['fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text']);
 export const OFFICIAL_REPORT_PROOFS = Object.freeze(['complete', 'input-only', 'absent']);
 
@@ -55,13 +55,14 @@ export function collectOfficialPostingReport(nodes, { flat = false } = {}) {
       const raw = node.data?.officialPosting;
       const posting = normalizeOfficialPosting(raw);
       const status = officialPostingLookupStatus(posting);
-      // Below the fit threshold, no automatic lookup is a decision rather than a failed one.
-      const notResearched = raw == null && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible
+      // Below the fit threshold, no automatic lookup is a decision rather than a failed
+      // one, and the same goes for a lookup left unfinished from before the gate.
+      const notResearched = (raw == null || status.state === 'incomplete') && classifyResearchEligibility(node.data) !== RESEARCH_ELIGIBILITY.eligible
         && (typeof node.data?.matchScore === 'number' || typeof node.data?.scoreStatus === 'string');
       rows.push(sanitizeOfficialPostingReportRow({ id: node.id,
         record: posting ? 'valid' : raw == null ? 'absent' : 'invalid',
         level: posting?.level, outcome: posting?.outcome, state: notResearched ? 'not-researched' : status.state,
-        retryable: notResearched ? false : status.retryable, settled: officialResearchSettled(posting),
+        retryable: notResearched || officialPostingExhausted(posting) ? false : status.retryable, settled: officialResearchSettled(posting),
         trail: posting?.trail, fetchFailures: posting?.fetchFailures,
         semanticProof: posting?.semanticMatch?.sourceHash ? 'complete' : posting?.semanticMatch ? 'input-only' : 'absent',
       }));

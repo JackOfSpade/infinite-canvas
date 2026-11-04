@@ -5661,7 +5661,7 @@ export default [
       const preloadSource = fs.readFileSync(path.resolve('electron/preload.js'), 'utf8');
       const mainSource = fs.readFileSync(path.resolve('electron/main.js'), 'utf8');
       assert(cardSource.includes('const generateApplication = useCallback')
-        && cardSource.includes('Each button generates one document'),
+        && cardSource.includes('a letter never goes out alone'),
       'application-bundle generation remains available on disposable job cards');
       for (const removed of ['markJobApplied', 'unmarkJobApplied', 'isJobApplied', 'Mark applied', 'hiddenApplied', 'filterOutApplied']) {
         assert(!cardSource.includes(removed), `job card no longer references ${removed}`);

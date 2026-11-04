@@ -146,6 +146,7 @@ export default [
         const [done, incomplete, paused, unchecked, locked, low] = probe.nodes.slice(1);
         done.data = { ...done.data, officialPosting: posting(0) };
         incomplete.data = { ...incomplete.data, officialPosting: uncertain() };
+        // The retired marker predates job-board links in snapshots, so that card gets one more try.
         paused.data = { ...paused.data, officialPosting: uncertain({ trail: ['worker-research', 'semantic-uncertain', 'retry-paused'] }) };
         locked.data = { ...locked.data, officialPosting: uncertain(), locked: true };
         low.data = { ...low.data, officialPosting: uncertain(), matchScore: 20 };
@@ -181,10 +182,11 @@ export default [
     },
   },
   {
-    name: 'A lookup pauses only when judges stay uncertain on a second attempt',
+    name: 'A lookup is exhausted only when a second full attempt also ends without a conclusion',
     async run() {
       const { refreshOfficialPostingEntries } = await import('../../electron/ipc/officialPostingRefresh.js');
-      const { officialPostingRetryPaused } = await import('../../electron/ipc/officialPostingFields.js');
+      const { officialPostingExhausted: officialPostingRetryPaused, officialPostingLookupStatus } = await import('../../electron/ipc/officialPostingFields.js');
+      const { officialPostingDisplay, officialPostingNeedsRefresh } = await import('../../src/utils/officialPostingDisplay.js');
       const run = async (previous, next) => (await refreshOfficialPostingEntries({ nodeId: 'board', manualAiRunId: 'official-posting:pause',
         entries: [{ cardId: 'card', job: { ...job(7), ...(previous ? { officialPosting: previous } : {}) } }] }, {
         store: { find: async () => null },
@@ -197,10 +199,32 @@ export default [
       const interrupted = { level: 'L5', outcome: 'failed', employer: '', trail: ['worker-timeout'] };
       assert.equal(officialPostingRetryPaused(await run(uncertain(), interrupted)), false, 'an interrupted run can recover');
       assert.equal(officialPostingRetryPaused(await run(interrupted, uncertain())), false, 'an interrupted first attempt was no judgment');
+      const noLeads = { level: 'L5', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'research-miss'] };
+      assert.equal(officialPostingRetryPaused(await run(noLeads, noLeads)), true, 'two searches that found nothing are a conclusion');
+      assert.equal(officialPostingRetryPaused(await run(uncertain(), { ...noLeads, trail: ['research-miss'] })), false, 'a failed search found nothing only because it failed');
+      const exhausted = await run(uncertain(), uncertain());
+      assert.deepEqual([officialPostingLookupStatus(exhausted).state, officialPostingLookupStatus(exhausted).retryable], ['exhausted', false]);
+      assert.equal(officialPostingNeedsRefresh({ officialPosting: exhausted }), false, 'nothing counts it as unfinished');
+      const unstamped = { ...exhausted, trail: [...exhausted.trail.filter(code => code !== 'lookup-exhausted'), 'retry-paused'] };
+      assert.equal(officialPostingRetryPaused(unstamped), false, 'the retired marker earns one more try');
+      const display = officialPostingDisplay({ officialPosting: exhausted, matchScore: 80 });
+      assert.deepEqual([display.statusLabel, display.lookupExhausted, display.lookupNeedsRefresh, display.lookupActionLabel],
+        ['No confirmed official posting', true, true, 'Check again'], 'the card keeps a quiet way to look again');
+      const standing = posting(1, { trail: ['semantic-match-v1', 'semantic-uncertain', 'reverify-failed', 'lookup-exhausted'] });
+      assert.equal(officialPostingNeedsRefresh({ officialPosting: standing }), false, 'a verification kept through two failed rechecks stops counting');
+      assert.equal(officialPostingDisplay({ officialPosting: standing, boardClosed: undefined }).lookupState, 'verified');
+      const failedSearches = posting(1, { trail: ['worker-research', 'semantic-match-v1', 'research-miss', 'reverify-failed'] });
+      assert.equal(officialPostingRetryPaused({ ...failedSearches, trail: [...failedSearches.trail, 'lookup-exhausted'] }), false, 'failed searches on a kept verification can recover');
+      const { decideGenerationListingCheck } = await import('../../electron/ipc/listingLivenessProbe.js');
+      const closedBoard = { job: { ...job(7), source: 'linkedin', listingLiveness: { state: 'closed', board: 'linkedin', checkedAt: new Date().toISOString() } } };
+      const closedCheck = decideGenerationListingCheck({ ...closedBoard, posting: exhausted, verdict: 'closed', basis: 'open-rule', board: 'linkedin', official: exhausted });
+      assert.equal(closedCheck.listingCheck?.action ?? closedCheck.action, 'refuse-final', 'a closed listing with an exhausted lookup does not loop on retry');
+      const low = officialPostingDisplay({ officialPosting: uncertain(), matchScore: 20 });
+      assert.deepEqual([low.researchSkipped, low.lookupActionLabel], [true, 'Check official posting'], 'a leftover lookup below the threshold is not unfinished work');
       const failedFetch = uncertain({ fetchFailures: [{ url: 'https://careers.example.test/x', code: 'fetch-timeout', reason: 'fetch-timeout' }] });
-      assert.equal(officialPostingRetryPaused({ ...uncertain({ trail: ['semantic-uncertain', 'retry-paused'] }), ...failedFetch }), false,
+      assert.equal(officialPostingRetryPaused({ ...uncertain({ trail: ['semantic-uncertain', 'lookup-exhausted'] }), ...failedFetch }), false,
         'an unread page is not a judgment');
-      assert.equal(officialPostingRetryPaused(posting(1, { trail: ['semantic-match-v1', 'retry-paused'] })), false, 'a settled result is never paused');
+      assert.equal(officialPostingRetryPaused(posting(1, { trail: ['semantic-match-v1', 'lookup-exhausted'] })), false, 'a settled result is never paused');
     },
   },
   {
@@ -308,7 +332,7 @@ export default [
           const summary = probe.getLogs().findLast(line => line.includes('[JobBoard] official-posting refresh finished'));
           assert.ok(summary);
           assert.equal(summary.slice(summary.indexOf('[JobBoard]')),
-            `[JobBoard] official-posting refresh finished mode=all checked=6 verified=${incomplete ? 1 : 3} notFound=1 ambiguous=1 closed=1 retryable=${incomplete ? 2 : 0}`);
+            `[JobBoard] official-posting refresh finished mode=all checked=6 verified=${incomplete ? 1 : 3} notFound=1 ambiguous=1 closed=1 exhausted=0 retryable=${incomplete ? 2 : 0}`);
           for (const source of ['Synthetic Employer', 'careers.example.test', 'Synthetic Role']) assert.equal(summary.includes(source), false);
         });
       }
@@ -323,11 +347,11 @@ export default [
           trail: ['worker-research', 'oversize'] } })];
       const before = structuredClone(results); freeze(results);
       assert.deepEqual(summarizeBoardOfficialPostingChecks(results), {
-        checked: 4, verified: 1, notFound: 0, ambiguous: 0, closed: 0, retryable: 3,
+        checked: 4, verified: 1, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, retryable: 3,
       });
       assert.deepEqual(results, before);
       assert.deepEqual(summarizeBoardOfficialPostingChecks([]), {
-        checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, retryable: 0,
+        checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, retryable: 0,
       });
     },
   },

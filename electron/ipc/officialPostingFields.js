@@ -15,9 +15,13 @@ export const SALARY_PROVENANCES = Object.freeze(['posted', 'estimated', 'unknown
 export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
   'comparative-match', 'comparative-equivalent', 'comparative-disagree', 'comparative-invalid', 'comparative-none', 'comparative-unavailable',
 ]);
-export const OFFICIAL_POSTING_RETRY_PAUSED_TRAIL = 'retry-paused';
+// The second attempt reached the same doubt, so nothing more will come from retrying.
+// 'retry-paused' marked this before careers-page snapshots carried job-board links from
+// page markup. It stays a known code but means nothing, so those cards get one more try.
+export const OFFICIAL_POSTING_EXHAUSTED_TRAIL = 'lookup-exhausted';
+const RETIRED_RETRY_PAUSED_TRAIL = 'retry-paused';
 export const OFFICIAL_POSTING_TRAIL = Object.freeze([
-  OFFICIAL_POSTING_RETRY_PAUSED_TRAIL, 'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
+  OFFICIAL_POSTING_EXHAUSTED_TRAIL, RETIRED_RETRY_PAUSED_TRAIL, 'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
   'salary-anchor', 'identifier-anchor', 'description-anchor', 'quoted-match', 'cache-hit', 'recent-miss',
   'worker-research', 'worker-timeout', 'worker-unavailable', 'worker-aborted', 'research-miss',
   'title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'source-unproven', 'poster-tenant',
@@ -40,7 +44,7 @@ export function officialPostingComparativeTrail({ validA = false, validB = false
     ...(validA === true && validB === true && a && a === b ? [`comparative-choice-${a}`] : [])];
 }
 
-const DURABILITY_TRAIL_CODES = new Set([OFFICIAL_POSTING_RETRY_PAUSED_TRAIL, 'worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
+const DURABILITY_TRAIL_CODES = new Set([OFFICIAL_POSTING_EXHAUSTED_TRAIL, RETIRED_RETRY_PAUSED_TRAIL, 'worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'identifier-anchor', 'reverify-failed',
   'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
@@ -308,6 +312,8 @@ export function officialPostingLookupStatus(value) {
     if (posting.outcome === 'ambiguous' || trail.has('comparative-disagree')) return result('ambiguous', 'Several official postings match', 'The completed lookup could not identify one exact match. The original listing is retained.', false);
     return result('not-found', 'No exact official posting found', 'The lookup completed without a verified exact match. The original listing is retained.', false);
   }
+  if (officialPostingExhausted(posting)) return result('exhausted', 'No confirmed official posting',
+    'Two full lookups could not confirm an official posting, so the original listing is used. Any links shown here are unconfirmed.', false);
   const retry = 'Retry the official posting lookup in the app.';
   const retained = `The original listing is retained. ${retry}`;
   const failureLabels = { 'access-denied': 'access denied', 'rate-limited': 'rate limited', 'server-error': 'server error',
@@ -341,19 +347,33 @@ export function officialPostingLookupStatus(value) {
 const JUDGED_UNCERTAIN_TRAIL = Object.freeze(['semantic-uncertain', 'source-unproven', 'official-liveness-unconfirmed']);
 const INTERRUPTED_RESEARCH_TRAIL = Object.freeze(RESEARCH_UNSETTLED_TRAIL.filter(code => !JUDGED_UNCERTAIN_TRAIL.includes(code)));
 
-/** Research ran to completion and its judges could not confirm the match. A
- * failed download or interrupted worker can recover by itself, so it is excluded. */
-export function officialPostingJudgedUncertain(value) {
+/** Research ran to completion without a conclusion: its judges could not confirm
+ * the match, or both searches found nothing to judge. A failed download or an
+ * interrupted worker can recover by itself, so it is excluded. A verification
+ * still standing counts only once a recheck has failed. */
+export function officialPostingResearchInconclusive(value) {
   const posting = normalizeOfficialPosting(value);
-  if (!posting || !officialPostingLookupStatus(posting).retryable || posting.fetchFailures?.length) return false;
+  if (!posting || posting.fetchFailures?.length) return false;
   const trail = posting.trail || [];
-  return trail.some(code => JUDGED_UNCERTAIN_TRAIL.includes(code))
-    && !trail.some(code => INTERRUPTED_RESEARCH_TRAIL.includes(code));
+  const official = ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && ['found', 'link-only'].includes(posting.outcome);
+  if (official && !trail.includes('reverify-failed')) return false;
+  // Only the no-leads path records research-miss beside worker-research; a failed search records it alone.
+  // A kept verification carries worker-research from its earlier run, so it cannot show this.
+  const noLeads = !official && trail.includes('research-miss') && trail.includes('worker-research');
+  return (noLeads || trail.some(code => JUDGED_UNCERTAIN_TRAIL.includes(code)))
+    && !trail.some(code => INTERRUPTED_RESEARCH_TRAIL.includes(code) && !(noLeads && code === 'research-miss'));
 }
 
-/** The same judged-uncertain result came back twice. Combine stops retrying the
- * row; a person can still retry it. */
-export function officialPostingRetryPaused(value) {
+/** Two attempts ended without a conclusion: a settled end state, not unfinished
+ * work. Only a person's explicit recheck runs it again. */
+export function officialPostingExhausted(value) {
   const posting = normalizeOfficialPosting(value);
-  return Boolean(posting?.trail?.includes(OFFICIAL_POSTING_RETRY_PAUSED_TRAIL)) && officialPostingJudgedUncertain(posting);
+  return Boolean(posting?.trail?.includes(OFFICIAL_POSTING_EXHAUSTED_TRAIL)) && officialPostingResearchInconclusive(posting);
+}
+
+/** The marker never reaches the shared store: it describes one card's own attempts. */
+export function officialPostingAfterRepeatAttempt(previous, next) {
+  const posting = normalizeOfficialPosting(next);
+  if (!posting || !officialPostingResearchInconclusive(previous) || !officialPostingResearchInconclusive(posting)) return next;
+  return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), OFFICIAL_POSTING_EXHAUSTED_TRAIL]) };
 }

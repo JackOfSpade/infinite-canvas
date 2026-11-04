@@ -143,9 +143,9 @@ export function useBoardOfficialPostingRefresh(options) {
       }
       const summary = summarizeBoardOfficialPostingChecks(result.jobs);
       const outcomes = [[summary.verified, 'verified'], [summary.notFound, 'no exact match'],
-        [summary.ambiguous, 'ambiguous'], [summary.closed, 'closed'], [summary.retryable, 'incomplete']]
+        [summary.ambiguous, 'ambiguous'], [summary.closed, 'closed'], [summary.exhausted, 'no confirmed posting'], [summary.retryable, 'incomplete']]
         .filter(([count]) => count).map(([count, label]) => `${count} ${label}`).join(', ');
-      EventLogger.log(`[JobBoard] official-posting refresh finished mode=${onlyIncomplete ? 'incomplete' : 'all'} checked=${summary.checked} verified=${summary.verified} notFound=${summary.notFound} ambiguous=${summary.ambiguous} closed=${summary.closed} retryable=${summary.retryable}`);
+      EventLogger.log(`[JobBoard] official-posting refresh finished mode=${onlyIncomplete ? 'incomplete' : 'all'} checked=${summary.checked} verified=${summary.verified} notFound=${summary.notFound} ambiguous=${summary.ambiguous} closed=${summary.closed} exhausted=${summary.exhausted} retryable=${summary.retryable}`);
       addToast({ title: summary.retryable ? 'Official posting checks incomplete' : 'Official postings checked',
         description: `${summary.checked} check${summary.checked === 1 ? '' : 's'} finished: ${outcomes}. ${summary.retryable ? 'Retry incomplete lookups. ' : ''}Changed or unavailable cards kept their current results.${onlyIncomplete && summary.verified ? ' Re-combine to apply any score or duplicate changes from newly verified postings.' : ''}`,
         type: summary.retryable ? 'info' : 'success' });

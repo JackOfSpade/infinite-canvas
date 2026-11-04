@@ -1,5 +1,5 @@
 import { isResearchEligible, RESEARCH_MIN_FIT_SCORE } from '../../../electron/ipc/researchGate.js';
-import { normalizeOfficialPosting, officialPostingRetryPaused } from '../../../electron/ipc/officialPostingFields.js';
+import { normalizeOfficialPosting, officialPostingExhausted } from '../../../electron/ipc/officialPostingFields.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../utils/officialPostingPreparation.js';
 import { refreshBoardOfficialPostingJobs } from '../../utils/jobBoardOfficialPostingRefresh.js';
 import { officialPostingNeedsRefresh } from '../../utils/officialPostingDisplay.js';
@@ -55,7 +55,7 @@ export function carryBoardRescores(jobs, cards) {
  * The one automatic research stage: official lookup for rows at or above the
  * fit threshold, then the host's listing, dedup, rescore and company checks.
  * Rows below the threshold reach neither call's research, and neither does a
- * lookup whose judges were uncertain twice on this source: a person retries that.
+ * lookup that twice ended without a conclusion on this source.
  * Protected cards stay through any removal, so an application-linked card is never lost.
  * A row the previous Combine of these same runs removed has no card to carry its
  * lookup, so `removedLookups` carries it instead of researching it again.
@@ -79,7 +79,7 @@ export async function runBoardResearchStage(union, {
       reusedIndexes.add(index);
     }
   }
-  const lookupIndexes = eligibleIndexes.filter(index => !reusedIndexes.has(index) && !officialPostingRetryPaused(rows[index]?.officialPosting));
+  const lookupIndexes = eligibleIndexes.filter(index => !reusedIndexes.has(index) && !officialPostingExhausted(rows[index]?.officialPosting));
   const lookupLabel = (completed, total) => `Researching jobs at ${RESEARCH_MIN_FIT_SCORE} or above: ${completed} of ${total}, ${rows.length - eligibleIndexes.length} below skipped`;
   onProgress({ label: lookupLabel(0, lookupIndexes.length) });
   const refreshed = await refreshBoardOfficialPostingJobs(lookupIndexes.map(index => rows[index]), {

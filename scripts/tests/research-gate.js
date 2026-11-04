@@ -621,12 +621,12 @@ export default [
     },
   },
   {
-    name: 'research gate [9 runBoardResearchStage]: a repeat-uncertain lookup waits for a person, every other eligible row still crosses',
+    name: 'research gate [9 runBoardResearchStage]: an exhausted lookup stays settled, every other eligible row still crosses',
     async run() {
       const paused = { ...rawRow('Stage Paused'), cardId: 'card-paused', matchScore: RESEARCH_MIN_FIT_SCORE + 5,
-        officialPosting: { level: 'L5', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'semantic-uncertain', 'retry-paused'] } };
+        officialPosting: { level: 'L5', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'semantic-uncertain', 'lookup-exhausted'] } };
       const interrupted = { ...rawRow('Stage Interrupted'), cardId: 'card-interrupted', matchScore: RESEARCH_MIN_FIT_SCORE + 5,
-        officialPosting: { level: 'L5', outcome: 'failed', employer: '', trail: ['worker-timeout', 'retry-paused'] } };
+        officialPosting: { level: 'L5', outcome: 'failed', employer: '', trail: ['worker-timeout', 'lookup-exhausted'] } };
       const open = { ...rawRow('Stage Open'), cardId: 'card-open', matchScore: RESEARCH_MIN_FIT_SCORE + 5 };
       const refreshed = []; const settled = []; const labels = [];
       const outcome = await runBoardResearchStage([paused, interrupted, open], {
@@ -901,8 +901,8 @@ export default [
       assert.equal(unscoredFields.researchSkipped, false, 'a row with no score fields at all (a dock entry, an export) reports no gate decision');
       assert.equal(unscoredFields.statusLabel, 'Official posting not checked');
       const failed = officialPostingDisplay({ ...rawRow('Below Failed'), ...FIT_KINDS.belowThreshold, officialPosting: retryablePosting() });
-      assert.equal(failed.researchSkipped, false, 'a lookup that ran keeps its own state at any score');
-      assert.notEqual(failed.statusLabel, researchSkipReason(FIT_KINDS.belowThreshold));
+      assert.equal(failed.researchSkipped, true, 'an unfinished lookup below the threshold is not outstanding work');
+      assert.equal(failed.statusLabel, researchSkipReason(FIT_KINDS.belowThreshold));
     },
   },
   // ── 15: report ───────────────────────────────────────────────────────────
@@ -927,8 +927,8 @@ export default [
       assert.equal(rows['no-score'].state, 'unchecked', 'a card with no score fields keeps the old reading');
       assert.equal(rows['below-verified'].state, 'verified');
       assert.equal(rows['below-verified'].retryable, false);
-      assert.equal(rows['below-incomplete'].state, 'incomplete', 'a lookup that ran and failed keeps its own state at any score');
-      assert.equal(rows['below-incomplete'].retryable, true);
+      assert.equal(rows['below-incomplete'].state, 'not-researched', 'an unfinished lookup below the threshold is not outstanding work');
+      assert.equal(rows['below-incomplete'].retryable, false);
     },
   },
   // ── 16: the gate itself ──────────────────────────────────────────────────

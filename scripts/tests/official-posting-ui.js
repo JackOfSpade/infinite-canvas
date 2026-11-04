@@ -856,9 +856,9 @@ export default [
         everyDocumentExists: false, hasApplicationRun: false, localLookupPending: false,
       }), false, 'Generate anyway cannot bypass an official closure');
       const notice = source.slice(source.indexOf('      {listingGenerationPaused && ('),
-        source.indexOf('      {/* Each button generates one document'));
+        source.indexOf('      {/* A site that takes only a résumé'));
       assert.ok(notice.includes('Check again'));
-      assert.ok(notice.includes("requestApplicationDocument(data.listingGenerationNotice?.documentScope === 'cover' ? 'cover' : 'resume');"));
+      assert.ok(notice.includes("requestApplicationDocument(data.listingGenerationNotice?.documentScope || BOTH_APPLICATION_DOCUMENTS);"));
       assert.equal(notice.includes('data.listingHold === true &&'), false);
     },
   },

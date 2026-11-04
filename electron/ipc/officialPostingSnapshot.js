@@ -1,7 +1,7 @@
 import { extractOfficialPostingCandidates, officialDescriptionText, scanOfficialCareersPage } from './officialPostingExtractors.js';
 import { officialHttpsUrl } from './officialPostingFields.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
-import { extractAtsTenant } from './officialSourceHosts.js';
+import { extractAtsTenant, normalizedSourceHost } from './officialSourceHosts.js';
 
 // Claude's WebFetch cannot run JavaScript and returns a summary of a page rather than
 // its text, so the app downloads each lead once and hands the judges what it
@@ -11,6 +11,11 @@ import { extractAtsTenant } from './officialSourceHosts.js';
 export const SNAPSHOT_DESCRIPTION_CHARS = 30_000;
 export const SNAPSHOT_TOTAL_CHARS = 100_000;
 const MAX_BOARD_LINKS = 12;
+const MAX_MARKUP_URLS = 20_000;
+const MAX_MARKUP_URL_CHARS = 300;
+// Hosts on an ATS vendor's domain that name the vendor's own service, not a company.
+const SHARED_ATS_LABELS = new Set(['www', 'www2', 'app', 'api', 'cdn', 'static', 'assets', 'jobs', 'job', 'boards', 'job-boards', 'apply', 'careers',
+  'ats', 'hire', 'secure', 'my', 'login', 'auth', 'developers', 'support', 'help', 'docs', 'status', 'blog', 'go', 'info']);
 
 const text = (value, max) => String(value ?? '').replace(/\s+\n/gu, '\n').trim().slice(0, max);
 const httpStatus = error => Number.isInteger(error?.statusCode) ? error.statusCode : null;
@@ -29,6 +34,34 @@ function postingFacts(candidate) {
   return { title: text(candidate.title, 500), location: text(candidate.location?.display ?? candidate.location, 500),
     description: text(candidate.description, SNAPSHOT_DESCRIPTION_CHARS),
     descriptionTruncated: String(candidate.description || '').length > SNAPSHOT_DESCRIPTION_CHARS };
+}
+
+// Most careers pages put their job board in a script tag or a page's embedded data
+// rather than a plain link. One address per board is enough to show the page names it.
+function jobBoardsInMarkup(body, known = []) {
+  const unescaped = body.replace(/\\u002f/giu, '/').replace(/\\\//gu, '/');
+  const routeKey = route => route && `${route.ats}\u0000${route.tenant}`;
+  const seen = new Set(known.map(url => routeKey(extractAtsTenant(url))));
+  const boards = new Map(); const companyHosts = new Set(known.map(url => normalizedSourceHost(url))); let scanned = 0;
+  for (const [url] of unescaped.matchAll(/https:\/\/[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s"'<>\\`()]*)?/giu)) {
+    if (++scanned > MAX_MARKUP_URLS) break;
+    if (url.length > MAX_MARKUP_URL_CHARS) continue;
+    const route = extractAtsTenant(url);
+    const key = routeKey(route);
+    if (key && !seen.has(key) && !boards.has(key)) boards.set(key, url);
+    if (key) companyHosts.add(normalizedSourceHost(url));
+  }
+  // An embed script or a settings value can name the company's board host with no board path.
+  scanned = 0;
+  for (const [host] of unescaped.matchAll(/(?<![a-z0-9.-])[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+){2,}(?![a-z0-9-])/giu)) {
+    if (++scanned > MAX_MARKUP_URLS) break;
+    const name = normalizedSourceHost(`https://${host}/`);
+    // The same rule that recognises a company's board at a full address decides here.
+    if (!name || companyHosts.has(name) || SHARED_ATS_LABELS.has(name.split('.')[0]) || !['careers', 'board'].some(path => extractAtsTenant(`https://${name}/${path}`))) continue;
+    companyHosts.add(name);
+    boards.set(`host\u0000${name}`, `https://${name}/`);
+  }
+  return [...boards.values()];
 }
 
 async function read(fetch, url, signal) {
@@ -81,6 +114,7 @@ export async function snapshotOfficialPostingLead(lead, { fetch, signal } = {}) 
       boardLinks = [...new Set(scanOfficialCareersPage(body, finalUrl).links
         .filter(link => link.tag === 'a' || link.tag === 'iframe').map(link => link.url).filter(url => extractAtsTenant(url)))].slice(0, MAX_BOARD_LINKS);
     } catch { boardLinks = []; }
+    try { boardLinks = [...new Set([...boardLinks, ...jobBoardsInMarkup(body, boardLinks)])].slice(0, MAX_BOARD_LINKS); } catch { /* The plain links still stand. */ }
   }
   return { id: lead.id, at, source: 'page', read: true, ...(finalUrl !== lead.url ? { finalUrl } : {}),
     ...(match ? postingFacts(match) : pageText ? { pageText, ...(pageTextTruncated ? { pageTextTruncated: true } : {}) } : {}), ...(boardLinks.length ? { jobBoardLinks: boardLinks } : {}) };

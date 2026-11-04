@@ -1349,7 +1349,7 @@ export default [
       const notesStart = card.indexOf('id={`job-notes-${id}`}');
       const notesEnd = card.indexOf('\n        />', notesStart);
       const notes = card.slice(notesStart, notesEnd);
-      const buttonStart = card.indexOf('{/* Each button generates one document', generateEnd);
+      const buttonStart = card.indexOf('{/* A site that takes only a résumé', generateEnd);
       const buttonEnd = card.indexOf('\n\n      </div>', buttonStart);
       const generateButton = card.slice(buttonStart, buttonEnd);
 

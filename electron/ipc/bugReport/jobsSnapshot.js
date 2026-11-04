@@ -135,15 +135,18 @@ function formatCollectionLimitsLine(collectionLimits) {
 // export into an unbounded object walk. These are deliberately independent
 // budgets: a shallow object with many keys is just as expensive as a deep one.
 const MAX_JOB_LINK_TRAVERSAL_DEPTH = 24;
-const MAX_JOB_LINK_VISITED_VALUES = 20_000;
-const MAX_JOB_LINK_OBJECT_KEYS = 50_000;
+const MAX_JOB_LINK_VISITED_VALUES = 200_000;
+const MAX_JOB_LINK_OBJECT_KEYS = 500_000;
 const MAX_JOB_LINK_KEYS_PER_OBJECT = 200;
+// Assessment data holds no listing rows, yet on a real canvas it is most of the
+// objects, so walking it spent the budget before two thirds of the rows were seen.
+const JOB_LINK_NON_LISTING_KEYS = new Set(['preferenceEvaluation', 'preferenceAssessment', 'preferencePlan', 'requirementAssessments', 'materialGaps', 'fitAssessment', 'compensationAssessment']);
 // Root canvas arrays can contain a normal card cascade plus group/container
 // nodes. Keep this independently high enough for the 1,000-row report budget
 // while retaining a finite bound for hostile renderer payloads.
 const MAX_JOB_LINK_ARRAY_ITEMS = 5_000;
 const MAX_JOB_LINK_ROWS = 1_000;
-const MAX_JOB_LINK_STRING_CHARS = 256 * 1024;
+const MAX_JOB_LINK_STRING_CHARS = 8 * 1024 * 1024;
 const MAX_JOB_LINK_FIELD_CHARS = 4_096;
 const MAX_JOB_LINK_SOURCES = 40;
 
@@ -252,7 +255,7 @@ function collectJobLinkRows(nodes) {
     // unbounded array of every property. Restrict to own enumerable data.
     try {
       for (const key in value) {
-        if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+        if (!Object.prototype.hasOwnProperty.call(value, key) || JOB_LINK_NON_LISTING_KEYS.has(key)) continue;
         if (visitedKeys >= MAX_JOB_LINK_OBJECT_KEYS) {
           omissions.add('object-key budget');
           break;
@@ -2454,10 +2457,14 @@ function multiSourceBoardCompletionAssessment(canvasFilePath, hubIds, jobBoardSt
   else if (cards > results) problems.push('rendered cards exceed the Board result count');
   const merged = boardNonnegativeCount(boardDiagnosticValue(board, 'mergeUnique'));
   const collapsed = boardNonnegativeCount(boardDiagnosticValue(board, 'locationPostingsCollapsed'));
-  // Absent on a Board combined before research could remove cards.
-  const researchRemoved = boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved') ?? 0) ?? 0;
-  if (merged != null && collapsed != null && (collapsed > merged || (results != null && merged - collapsed - researchRemoved !== results))) {
-    problems.push('Board result count does not reconcile with merged unique minus collapsed location postings and research removals');
+  // Absent on a Combine older than this counter, which may still have removed cards.
+  // Missing means unknown, so the Board stays unproved, but the report says why.
+  const researchRemovedRecorded = boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved')) != null;
+  const researchRemoved = researchRemovedRecorded ? boardNonnegativeCount(boardDiagnosticValue(board, 'researchRemoved')) : 0;
+  const reconcileGap = merged != null && collapsed != null && results != null ? merged - collapsed - researchRemoved - results : null;
+  if (merged != null && collapsed != null && (collapsed > merged || (reconcileGap != null && reconcileGap !== 0))) {
+    problems.push(`Board result count does not reconcile with merged unique minus collapsed location postings and research removals${!researchRemovedRecorded && reconcileGap > 0
+      ? ` (this Combine predates the research-removal counter, so ${reconcileGap} card(s) are unattributed until the next Combine)` : ''}`);
   }
   // Launch selection only controls which searches start/continue. Combine
   // consumes every connected completed source; a new connection without an
@@ -3564,8 +3571,8 @@ export function buildJobCompletionAssessment(
     // its pre-consolidation count must equal this run's score-ready result.
     // Multi-source boards validate their renderer-side merge receipt above.
     if (board.combinedSourceHubIds.length === 1 && boardExpectedCount != null
-      && board.resultCount + (collapsed ?? 0) !== boardExpectedCount) {
-      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''} ≠ current run ${boardExpectedCount}`);
+      && board.resultCount + (collapsed ?? 0) + board.researchRemoved !== boardExpectedCount) {
+      gaps.push(`Job Board \`${boardLabel(board)}\` results ${board.resultCount}${collapsed ? ` + ${collapsed} location postings collapsed` : ''}${board.researchRemoved ? ` + ${board.researchRemoved} removed after research` : ''} ≠ current run ${boardExpectedCount}`);
     }
   }
 
@@ -5315,7 +5322,7 @@ export function buildNonApiAiHandoffLifecycleMarkdown(currentNodeIds, reportWind
         return reqId ? `request \`${lifecycleLabel(reqId)}\`` : 'unlabelled batch';
       });
       collisionWarnings.push(
-        `> ⚠️ ${items.length} handoffs accepted an identical response body (${descriptors.join(', ')}) — the same answer was pasted into both.`
+        `> ⚠️ ${items.length} handoffs accepted an identical response body (${descriptors.join(', ')}) — a repeated paste, or independent automatic sessions reaching the same text.`
       );
     }
   }

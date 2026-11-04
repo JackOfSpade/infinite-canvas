@@ -3260,7 +3260,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       const researchRemovedLookups = boardResearch.removedLookups?.length
         ? { sourceRuns: sourceRunsAtCombine, entries: boardResearch.removedLookups } : null;
       if (boardResearch.reusedRemovals) EventLogger.log(`[JobBoard] combine reused ${boardResearch.reusedRemovals} official lookup(s) from rows the previous Combine removed id=${id}`);
-      if (boardResearch.pausedRetries) EventLogger.log(`[JobBoard] combine left ${boardResearch.pausedRetries} repeat-uncertain official lookup(s) for manual retry id=${id}`);
+      if (boardResearch.pausedRetries) EventLogger.log(`[JobBoard] combine skipped ${boardResearch.pausedRetries} exhausted official lookup(s) id=${id}`);
       if (cancelled() || !getNode(id)) return { status: 'cancelled' };
       const perModule = completedAtCombine.map((m) => ({ label: m.label, count: m.count }));
       EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);

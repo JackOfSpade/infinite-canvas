@@ -125,7 +125,7 @@ export function JobBoardDoneState({
           onPointerDown={event => event.stopPropagation()}
           disabled={actionsBusy}
           className="nodrag mt-2 w-full rounded-full border border-amber-500/30 bg-amber-500/15 px-2 py-1 text-[10px] text-amber-200/90 hover:bg-amber-500/25 disabled:opacity-50"
-          title="Check only the cards whose official posting lookup is unfinished, in place. Keeps finished lookups, applications, notes and scores, and does not rebuild the board. Re-combine applies any score or duplicate changes afterwards. Re-combine stops retrying a job whose judges were uncertain twice, so this is how to try those again."
+          title="Check only the cards whose official posting lookup is unfinished, in place. Keeps finished lookups, applications, notes and scores, and does not rebuild the board. Re-combine applies any score or duplicate changes afterwards. A job with no conclusion after two full lookups is finished and no longer counts here; Recheck all or the card's Check again tries it anyway."
         >
           Retry {retryableLookups} incomplete lookup{retryableLookups === 1 ? '' : 's'}
         </button>
@@ -138,7 +138,7 @@ export function JobBoardDoneState({
             onPointerDown={event => event.stopPropagation()}
             disabled={actionsBusy}
             className="nodrag flex-1 rounded-full border border-sky-500/20 bg-sky-500/10 px-2 py-1 text-[10px] text-sky-200/90 hover:bg-sky-500/20 disabled:opacity-50"
-            title="Research every eligible card's official posting again, including finished lookups and collapsed cards. Keeps applications, notes and scores."
+            title="Research every eligible card's official posting again, including finished lookups, jobs with no confirmed posting and collapsed cards. Keeps applications, notes and scores."
           >
             {officialPostingRefreshing
               ? officialPostingProgress?.recovering ? 'Lookup needs cancellation'

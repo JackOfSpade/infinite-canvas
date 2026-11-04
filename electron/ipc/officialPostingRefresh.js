@@ -1,7 +1,7 @@
 import { handleSafe } from './ipcUtils.js';
 import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
-import { OFFICIAL_POSTING_RETRY_PAUSED_TRAIL, RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingJudgedUncertain, officialPostingLookupStatus } from './officialPostingFields.js';
+import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus } from './officialPostingFields.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { officialPostingSemanticInputHash } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
@@ -141,10 +141,7 @@ export async function refreshOfficialPostingEntries(args, {
     const settled = retain ? { ...priorRecord, trail,
       ...(alternatives.length ? { alternatives } : {}),
       ...(posting.fetchFailures?.length ? { fetchFailures: posting.fetchFailures } : {}) } : posting;
-    // The store never holds this marker: it describes this card's two attempts on the same source.
-    const repeatedUncertainty = officialPostingJudgedUncertain(args.entries[index].job.officialPosting) && officialPostingJudgedUncertain(settled);
-    const officialPosting = repeatedUncertainty
-      ? { ...settled, trail: boundedOfficialPostingTrail([...(settled.trail || []), OFFICIAL_POSTING_RETRY_PAUSED_TRAIL]) } : settled;
+    const officialPosting = officialPostingAfterRepeatAttempt(args.entries[index].job.officialPosting, settled);
     return { cardId: args.entries[index].cardId, officialPosting,
       postedBy: officialLevels.has(officialPosting.level)
         ? strictEmployerEqual(officialPosting.employer, jobs[index].company) ? '' : jobs[index].company

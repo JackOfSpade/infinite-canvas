@@ -17,7 +17,7 @@ import { openExternalFailureMessage, openExternalUrl } from '../utils/openExtern
 import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
-import { applicationDocumentButtonState, applicationDocumentMustWait, canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationAfterDiscard, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup, savedApplicationDocuments, savedApplicationPointer } from '../utils/localAiApplicationLifecycle';
+import { BOTH_APPLICATION_DOCUMENTS, applicationDocumentButtonState, applicationDocumentMustWait, canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationAfterDiscard, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup, savedApplicationDocuments, savedApplicationPointer } from '../utils/localAiApplicationLifecycle';
 import { claimApplicationDocumentWaiter, claimRunningApplicationDocument, clearRunningApplicationDocument, getRunningApplicationDocument, releaseApplicationDocumentWaiter, subscribeApplicationDocumentRuns } from '../utils/applicationDocumentRuns';
 import {
   APPLICATION_HANDOFF_LIMIT,
@@ -102,10 +102,12 @@ function auditCountLabel(count, singular, plural = `${singular}s`) {
 // Every action that resumes or retries a paused generation shares this tone.
 // Labels still distinguish a safe recheck from an explicit listing override.
 const GENERATION_RECOVERY_BUTTON_CLASS = 'rounded-lg border border-amber-400/25 bg-amber-400/10 text-amber-200 hover:bg-amber-400/15 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300/60 disabled:opacity-50 disabled:cursor-default';
-const APPLICATION_DOCUMENTS = Object.freeze([
-  { kind: 'resume', label: 'Résumé', noun: 'résumé' },
-  { kind: 'cover', label: 'Cover letter', noun: 'cover letter' },
-]);
+// A letter is always sent with a résumé, so the second button starts both in one
+// job unless the résumé already exists or is on its way, and then adds the letter.
+const RESUME_BUTTON = Object.freeze({ kind: 'resume', stateKind: 'resume', label: 'Generate résumé', savedLabel: 'Résumé', noun: 'résumé' });
+const BOTH_BUTTON = Object.freeze({ kind: BOTH_APPLICATION_DOCUMENTS, stateKind: 'cover', label: 'Generate résumé and cover letter', savedLabel: 'Cover letter', noun: 'résumé and cover letter' });
+const COVER_BUTTON = Object.freeze({ kind: 'cover', stateKind: 'cover', label: 'Generate cover letter', savedLabel: 'Cover letter', noun: 'cover letter' });
+const applicationDocumentStarted = state => state.exists || state.inProgress || state.queued;
 const applicationDocumentNoun = kind => (kind === 'cover' ? 'cover letter' : 'résumé');
 const QUEUED_DOCUMENT_POLL_MS = 1000;
 const GENERATION_RECOVERY_SMALL_BUTTON_CLASS = `${GENERATION_RECOVERY_BUTTON_CLASS} mt-2 px-2.5 py-1.5 text-[11px] font-semibold`;
@@ -1321,7 +1323,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
     // No await has run yet in this click, so a repeat click in the same tick
     // finds this claim taken. The finally below releases it on every outcome.
-    if (!claimRunningApplicationDocument(idRef.current, documentScope)) return;
+    if (!claimRunningApplicationDocument(idRef.current, documentScope || BOTH_APPLICATION_DOCUMENTS)) return;
     applicationSubmissionRef.current = true;
     let lease = null;
     let preparation = null;
@@ -1461,7 +1463,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         // runs (see moduleRunQueue.js — lanes are independently FIFO with
         // capacity 1).
         lane: 'application',
-        label: `${documentScope === 'cover' ? 'Cover letter' : 'Résumé'}: ${applicationLabel}`,
+        label: `${documentScope === 'cover' ? 'Cover letter' : documentScope ? 'Résumé' : 'Résumé and cover letter'}: ${applicationLabel}`,
         // The dock caps how many application bundles may hold a slot at once
         // (see applicationHandoffDock.js) — an eleventh prompt could never be
         // worked on. Rather than refusing the click, the queue holds this card
@@ -1676,7 +1678,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         requestApplicationHandoffFocus(queued.localJob.id);
         requestApplicationHandoffRefresh(queued.localJob.id);
         addToast({
-          title: documentScope === 'cover' ? 'Cover Letter Generation Started' : 'Résumé Generation Started',
+          title: documentScope === 'cover' ? 'Cover Letter Generation Started' : documentScope ? 'Résumé Generation Started' : 'Résumé and Cover Letter Generation Started',
           description: 'Open the AI handoff dock in the bottom-right corner, copy each prompt into your local AI chat, and paste back its JSON response. The app will validate every stage and request review-and-edit rounds until the quality checks pass.',
           type: 'success',
         });
@@ -1741,11 +1743,21 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     if (data.queuedApplicationDocument) startQueuedDocumentWaiter();
   }, [data.queuedApplicationDocument, startQueuedDocumentWaiter]);
 
-  const requestApplicationDocument = useCallback((kind, options = {}) => {
+  const requestApplicationDocument = useCallback((requested, options = {}) => {
     const card = getLiveNode(idRef.current);
     if (card?.type !== 'jobcard' || card.data?.locked || getLiveNode(card.data?.hubId)?.data?.locked) return;
     const running = getRunningApplicationDocument(idRef.current);
-    const state = applicationDocumentButtonState(kind, { data: card.data, runningDocument: running });
+    const stateOf = kind => applicationDocumentButtonState(kind, { data: card.data, runningDocument: running });
+    // Rendered state can lag a click, so the live card decides what this press still means.
+    const both = requested === BOTH_APPLICATION_DOCUMENTS;
+    const addsLetter = both && (applicationDocumentStarted(stateOf('resume')) || applicationDocumentStarted(stateOf('cover')));
+    const kind = addsLetter ? 'cover' : requested;
+    if (both && !addsLetter) {
+      if (applicationSubmissionRef.current) return;
+      void generateApplication(null, options);
+      return;
+    }
+    const state = stateOf(kind);
     if (state.disabled) return;
     // The other document already holds its place in line; this one is next.
     if (applicationSubmissionRef.current || applicationDocumentMustWait(card.data, running)) {
@@ -1809,7 +1821,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           <div className="text-white/90 text-sm font-semibold leading-tight truncate">{postingDisplay.title || 'Untitled'}</div>
           <div className="text-white/50 text-xs mt-0.5 truncate">{postingDisplay.employerLabel}{subtitleLocation ? ` · ${subtitleLocation}` : ''}</div>
           {postingDisplay.via && <div className="text-white/35 text-[10px] mt-0.5 truncate">{postingDisplay.via}</div>}
-          {postingDisplay.statusLabel && <div className={`${postingDisplay.researchSkipped ? 'text-white/40' : 'text-amber-300/70'} text-[10px] mt-0.5`} title={postingDisplay.statusDetail || undefined}>{postingDisplay.statusLabel}</div>}
+          {postingDisplay.statusLabel && <div className={`${postingDisplay.researchSkipped || postingDisplay.lookupExhausted ? 'text-white/40' : 'text-amber-300/70'} text-[10px] mt-0.5`} title={postingDisplay.statusDetail || undefined}>{postingDisplay.statusLabel}</div>}
           {data.officialRescore && <div className="text-white/40 text-[10px] mt-0.5">Rescored on the official posting, was {data.officialRescore.previousScore}</div>}
           {unverifiedCompanyRules.length > 0 && <div className="text-white/40 text-[10px] mt-0.5" title={unverifiedCompanyRules.map(match => match.criterion).join('; ')}>Company preference not verified</div>}
           {postingDisplay.candidateLinks.length > 0 && (
@@ -2390,7 +2402,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           <button
             onClick={effectiveLock ? undefined : (e) => { e.stopPropagation();
               if (['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis)) refreshOfficialPosting();
-              else requestApplicationDocument(data.listingGenerationNotice?.documentScope === 'cover' ? 'cover' : 'resume');
+              else requestApplicationDocument(data.listingGenerationNotice?.documentScope || BOTH_APPLICATION_DOCUMENTS);
             }}
             disabled={effectiveLock || !!officialPostingLookup || !!boardPostingPreparation}
             className={GENERATION_RECOVERY_SMALL_BUTTON_CLASS}
@@ -2401,17 +2413,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
       )}
 
-      {/* Each button generates one document, so a site that takes only a résumé
-          spends nothing on a letter. Submission remains a manual action on the
+      {/* A site that takes only a résumé spends nothing on a letter, and
+          a letter never goes out alone. Submission remains a manual action on the
           employer's site; this disposable hierarchy tracks no application state. */}
       <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
-        <div className="flex items-center gap-1.5">
-          {APPLICATION_DOCUMENTS.map(({ kind, label, noun }) => {
-            const state = documentButtonState(kind);
+        <div className="flex items-stretch gap-1.5">
+          {[RESUME_BUTTON, applicationDocumentStarted(documentButtonState('resume')) || applicationDocumentStarted(documentButtonState('cover')) ? COVER_BUTTON : BOTH_BUTTON].map(({ kind, stateKind, label, savedLabel, noun }) => {
+            const state = documentButtonState(stateKind);
             const lookupBusy = !!officialPostingLookup || !!boardPostingPreparation;
             // A run being set up shows its live stage on its own button.
-            const settingUp = state.inProgress && runningDocument === kind;
-            const needsAttention = !state.disabled && !hasApplicationRun && localApplicationNeedsAttention && localApplication?.documentScope === kind;
+            const settingUp = state.inProgress && (runningDocument === kind || runningDocument === BOTH_APPLICATION_DOCUMENTS && stateKind === 'cover');
+            const needsAttention = !state.disabled && !hasApplicationRun && localApplicationNeedsAttention && (localApplication?.documentScope || BOTH_APPLICATION_DOCUMENTS) === kind;
             const disabled = state.disabled || lookupBusy || effectiveLock;
             return (
               <button
@@ -2437,11 +2449,13 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                     ? applicationLimitMessage()
                     : `Queued at position ${displayedApplicationRun.position} — applications start one at a time to protect model quota and document rendering, and this one starts automatically when a slot is free.`)
                   : listingOverrideAvailable ? `Generate the ${noun} even if this listing is closed or could not be confirmed open.`
+                  : kind === BOTH_APPLICATION_DOCUMENTS ? "Generate the résumé and cover letter together. Infinite Canvas writes, checks and saves them next to your canvas, in this job's application folder."
                   : `Generate only the ${noun}. Infinite Canvas writes, checks and saves it next to your canvas, in this job's application folder.`}
               >
                 {state.exists ? <Check size={13} /> : <Sparkles size={13} className={state.inProgress ? 'animate-pulse' : ''} />}
-                <span className="truncate">
-                  {state.queued ? `${label} next`
+                <span className="min-w-0 text-center leading-tight">
+                  {state.exists ? savedLabel
+                    : state.queued ? `${savedLabel} next`
                     : settingUp && displayedApplicationRun.state === 'queued' ? `Queued · #${displayedApplicationRun.position}`
                     : settingUp && displayedApplicationRun.state === 'resolving' ? 'Finding posting…'
                     : state.inProgress ? (localApplication?.status === 'importing' ? 'Importing…' : 'Generating…')

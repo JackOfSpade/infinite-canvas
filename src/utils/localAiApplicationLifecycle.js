@@ -151,9 +151,12 @@ export function activeApplicationDocuments(data) {
  * @param runningDocument the document whose run is being prepared or queued in
  *   this renderer, before any job pointer exists.
  */
+export const BOTH_APPLICATION_DOCUMENTS = 'both';
+
 export function applicationDocumentButtonState(kind, { data, runningDocument = null } = {}) {
   const exists = savedApplicationDocuments(data)[kind] === true;
-  const inProgress = activeApplicationDocuments(data)[kind] === true || runningDocument === kind;
+  // A job with no scope produces both documents, so setting it up occupies both.
+  const inProgress = activeApplicationDocuments(data)[kind] === true || runningDocument === kind || runningDocument === BOTH_APPLICATION_DOCUMENTS;
   const queued = data?.queuedApplicationDocument === kind;
   return { exists, inProgress, queued, disabled: exists || inProgress || queued };
 }

@@ -12,7 +12,7 @@ import {
 import { withListingClosed, withListingLiveness } from './officialPostingBoardClosed.js';
 import {
   boardClosedBoardLabel, normalizeBoardClosed, normalizeListingLiveness,
-  normalizeOfficialPosting, officialResearchSettled,
+  normalizeOfficialPosting, officialPostingExhausted, officialResearchSettled,
 } from './officialPostingFields.js';
 import { cappedHandoff } from './officialPostingService.js';
 import { callLLMText } from './llm.js';
@@ -328,7 +328,8 @@ export function decideGenerationListingCheck({
   let action = 'hold';
   if (isOfficialLive(official) || verdict === 'open' || verdict === 'unobservable') action = 'proceed';
   else if (verdict === 'closed') {
-    action = officialResearchSettled(official) && ['not-found', 'closed'].includes(official.outcome)
+    // Another lookup will not change an exhausted result, so "retry" would loop. The override stays available.
+    action = officialPostingExhausted(official) || officialResearchSettled(official) && ['not-found', 'closed'].includes(official.outcome)
       ? 'refuse-final' : 'refuse-retry';
   } else if (hasClosedMarker(basis)) action = 'refuse-retry';
   // A deliberate user override bypasses board-only listing-status pauses. Keep the

@@ -1,4 +1,4 @@
-import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
+import { normalizeOfficialPosting, officialPostingExhausted, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { isResearchEligible } from '../../electron/ipc/researchGate.js';
 import { officialPostingNeedsRefresh } from './officialPostingDisplay.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from './officialPostingPreparation.js';
@@ -17,7 +17,7 @@ const metadataKey = value => JSON.stringify(canonical(value));
 const postedByValid = value => value === undefined || typeof value === 'string' && value.length <= 500
   && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127);
 
-/** An unlocked Board card a Retry can finish. Paused cards count: only automatic retries stop. */
+/** An unlocked Board card a Retry can still finish. An exhausted lookup is settled, so it does not count. */
 export function boardCardNeedsOfficialRetry(card, boardId) {
   return card?.type === 'jobcard' && card.data?.hubId === boardId && !card.data.locked
     && isResearchEligible(card.data) && officialPostingNeedsRefresh(card.data);
@@ -76,11 +76,12 @@ export function summarizeSearchOfficialLookups(rows, { nodes, boardIds, runCombi
 /** Counts lookup attempts, independently of whether a live card still accepts
  * its result. An interrupted recheck of a verified posting remains incomplete. */
 export function summarizeBoardOfficialPostingChecks(jobs) {
-  const counts = { checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, retryable: 0 };
+  const counts = { checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, retryable: 0 };
   for (const job of Array.isArray(jobs) ? jobs : []) {
     counts.checked++;
     const status = officialPostingLookupStatus(job?.officialPosting);
-    if (status.retryable) counts.retryable++;
+    if (officialPostingExhausted(job?.officialPosting)) counts.exhausted++;
+    else if (status.retryable) counts.retryable++;
     else if (status.state === 'verified') counts.verified++;
     else if (status.state === 'not-found') counts.notFound++;
     else if (status.state === 'ambiguous') counts.ambiguous++;
