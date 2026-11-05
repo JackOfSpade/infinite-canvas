@@ -4,6 +4,7 @@ import { bundleComponent, withDom } from './fixtures/practice-connector/mountCom
 import { attachProtectedCards, consolidateJobLocations } from '../../src/utils/jobLocationConsolidation.js';
 import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
+import { boardCombinePerModule, describeBoardMergeInputs } from '../../src/utils/jobBoardMergeSummary.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../src/utils/officialPostingPreparation.js';
 
 async function inspectSummary(props, inspect) {
@@ -119,6 +120,37 @@ export default [
       const board = fs.readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       assert(board.includes('locationPostingsCollapsed={data.mergeStats?.locationVariantPostingsCollapsed}'));
       assert(board.includes('locationVariantGroups={data.mergeStats?.locationVariantGroups}'));
+    },
+  },
+  {
+    name: 'Board merge inputs balance: rows that entered the merge by module id, with Board preferences shown from checked to incoming',
+    async run() {
+      const ready = [{ id: 'b', label: 'B', count: 426 }, { id: 'a', label: 'A', count: 569 }];
+      const completed = [{ id: 'a', label: 'A', count: 569 }, { id: 'waiting', label: 'Waiting', count: 12 }, { id: 'b', label: 'B', count: 426 }];
+      const perModule = boardCombinePerModule(completed, ready, [new Array(309), new Array(479)]);
+      assert.deepEqual(perModule.map(item => [item.label, item.count, item.sourceCount]), [['A', 479, 569], ['Waiting', 0, 12], ['B', 309, 426]],
+        'merge arrays follow ready modules, so a completed module that was not ready adds 0 instead of shifting the rest');
+      assert.equal(describeBoardMergeInputs({ perModule, totalIncoming: 788, overrideChecked: 2179, overrideCheckedRows: 2182, overrideRemovedRows: 1394 }),
+        'saved 569+12+426 · Board preferences checked 2182 rows (2179 distinct), removed 1394 · incoming 479+0+309=788');
+      assert.equal(2182 - 1394, 788);
+      assert.equal(describeBoardMergeInputs({ perModule: [{ count: 5 }, { count: 7 }], totalIncoming: 12 }), '5+7=12', 'no Board preferences, and older saved stats, keep the plain form');
+      assert.equal(describeBoardMergeInputs({ totalIncoming: 12 }), '12');
+      await inspectSummary({ resultCount: 661, totalIncoming: 788, duplicatesRemoved: 2, boardPreferenceChecked: 2179, boardPreferenceRemoved: 1393, researchRemoved: 14 }, document => {
+        assert.match(document.body.textContent, /2179 posting targets collected · 1393 excluded by preferences · 14 removed after research/);
+        assert(!document.body.textContent.includes('duplicate'), 'distinct checked jobs already count a shared listing once');
+      });
+      await inspectSummary({ resultCount: 5, totalIncoming: 8, duplicatesRemoved: 3, boardPreferenceChecked: 10, boardPreferenceRemoved: 2 }, document => {
+        assert.match(document.body.textContent, /10 posting targets collected · 3 duplicates removed · 2 excluded by preferences/, 'a duplicate the merge found under another key still balances');
+      });
+    },
+  },
+  {
+    name: 'Board combine logs a start line before any wait and a separate merged line with its stage counts',
+    run() {
+      const board = fs.readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const started = board.indexOf('[JobBoard] combine started id=${id}`');
+      assert(started > board.indexOf('setCombining(true);') && started < board.indexOf('lease = await moduleRunQueue.acquireModuleRun'));
+      assert(board.includes('combine merged id=${id} signature=${sigAtCombine} mergedUnique=${mergeStats.unique} locationCollapsed=${locationStats.postingsCollapsed} afterResearch=${union.length}'));
     },
   },
   {

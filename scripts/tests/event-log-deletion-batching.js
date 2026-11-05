@@ -37,7 +37,7 @@ export default [
       const events = logger.getLogs().join('\n');
       const summaries = logger.getLogs().filter(line => line.includes('[JobBoard] child cascade requested'));
       assert(summaries.length === 1
-        && summaries[0].includes('nodes=2 edges=2 dismissals=2')
+        && summaries[0].includes('nodes=2 edges=2 jobcards=2')
         && summaries[0].includes('individual removal events suppressed'),
       'a registered cascade must emit exactly one counted summary');
       assert(!events.includes('node removed id=board-child-1')

@@ -76,11 +76,12 @@ export function summarizeSearchOfficialLookups(rows, { nodes, boardIds, runCombi
 /** Counts lookup attempts, independently of whether a live card still accepts
  * its result. An interrupted recheck of a verified posting remains incomplete. */
 export function summarizeBoardOfficialPostingChecks(jobs) {
-  const counts = { checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, retryable: 0 };
+  const counts = { checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, recheckFailed: 0, retryable: 0 };
   for (const job of Array.isArray(jobs) ? jobs : []) {
     counts.checked++;
     const status = officialPostingLookupStatus(job?.officialPosting);
-    if (officialPostingExhausted(job?.officialPosting)) counts.exhausted++;
+    // A posting verified earlier whose recheck kept failing is still verified: it stopped retrying, but it was found.
+    if (officialPostingExhausted(job?.officialPosting)) counts[status.state === 'verified' ? 'recheckFailed' : 'exhausted']++;
     else if (status.retryable) counts.retryable++;
     else if (status.state === 'verified') counts.verified++;
     else if (status.state === 'not-found') counts.notFound++;

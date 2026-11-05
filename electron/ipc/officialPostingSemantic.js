@@ -1,5 +1,9 @@
 import crypto from 'node:crypto';
-import { officialHttpsUrl } from './officialPostingFields.js';
+import { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, SALARY_PROVENANCES, normalizeApplyOptions, officialHttpsUrl } from './officialPostingFields.js';
+import { projectOfficialPostingSourceFields } from './officialPostingSourceProjection.js';
+import { isUnsafeControlCharacter } from './structuredResume.js';
+import { normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
+import { MULTIPLE_LOCATIONS_LABEL } from '../../src/utils/jobLocationConsolidation.js';
 import { isAggregatorHost } from './officialSourceHosts.js';
 import { plainPostingText } from './officialPostingMatch.js';
 
@@ -148,6 +152,50 @@ export function officialPostingSemanticSourceHash(candidate, { now = Date.now } 
   return crypto.createHash('sha256').update(canonicalRecord(evidenceView(candidate, { status })), 'utf8').digest('hex');
 }
 
+const projectedText = (value, max) => Array.from(String(value ?? ''), char => (
+  char === '\r' || isUnsafeControlCharacter(char) ? ' ' : char)).join('').slice(0, max).trim();
+
+/**
+ * The hashed fields of a card as card refresh and Prepare judge it: the renderer's
+ * projectOfficialPostingGenerationJob, then the host queue projection (safeJob), which fills
+ * defaults the raw Board row lacks (salaryProvenance 'unknown', applyOptions [], empty strings).
+ * A proof saved by those paths hashes this shape, so the raw row it came from never reproduced it.
+ */
+export function officialPostingSemanticProjectedInput(job = {}) {
+  return {
+    ...projectOfficialPostingSourceFields(job),
+    title: projectedText(job.title, 500), company: projectedText(job.company, 500),
+    snippet: projectedText(job.snippet, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS), location: projectedText(job.location, 500),
+    salary: projectedText(job.salary, 500), url: projectedText(normalizeJobListingExternalUrl(job), 2_000),
+    googleCardUrl: projectedText(job.googleCardUrl, 2_000), source: projectedText(job.source, 500),
+    applyOptions: normalizeApplyOptions(job.applyOptions),
+    salaryProvenance: SALARY_PROVENANCES.includes(job.salaryProvenance) ? job.salaryProvenance : 'unknown',
+  };
+}
+
+const CONSOLIDATED_MEMBER_SHAPES = 64;
+/**
+ * Consolidation keeps one member's row and renames its location, so a proof saved for any member
+ * (before consolidation, or for another member whose record shares the same official text) no
+ * longer hashes. Each member is rebuilt only from this row and its own variant. Only a row that
+ * consolidation itself shaped qualifies; any other row gets no extra shapes.
+ */
+export function officialPostingConsolidatedMemberShapes(job) {
+  if (!(Number(job?.consolidatedPostingCount) > 1) || job.location !== MULTIPLE_LOCATIONS_LABEL
+    || !Array.isArray(job.postingVariants) || job.postingVariants.length < 2) return [];
+  return job.postingVariants.slice(0, CONSOLIDATED_MEMBER_SHAPES).flatMap(variant => {
+    if (!variant || typeof variant !== 'object' || typeof variant.location !== 'string' || !variant.location.trim()) return [];
+    const member = { ...job, location: variant.location };
+    for (const key of ['url', 'googleCardUrl', 'source', 'salary']) if (typeof variant[key] === 'string') member[key] = variant[key];
+    return [member];
+  });
+}
+
+/**
+ * A proof holds when its input hash is this row, or this row as refresh/Prepare projected it. For a
+ * consolidated row with a live (found or link-only) posting, a member rebuilt from its own variant
+ * also holds; a closed or missing verdict about one member never speaks for the whole row.
+ */
 export function officialPostingSemanticProofMatches(job, value) {
   const posting = value?.officialPosting || value;
   const proof = posting?.semanticMatch;
@@ -155,6 +203,11 @@ export function officialPostingSemanticProofMatches(job, value) {
     || !Array.isArray(posting?.trail) || !posting.trail.includes('semantic-match-v1')) return false;
   if (['L1', 'L2', 'L3', 'L4'].includes(posting.level)
     && (typeof proof.sourceHash !== 'string' || !/^[a-f0-9]{64}$/iu.test(proof.sourceHash))) return false;
-  try { return proof.inputHash.toLowerCase() === officialPostingSemanticInputHash(job); }
-  catch { return false; }
+  const want = proof.inputHash.toLowerCase();
+  const holds = shape => {
+    try { if (want === officialPostingSemanticInputHash(shape)) return true; } catch { /* An unhashable shape proves nothing. */ }
+    try { return want === officialPostingSemanticInputHash(officialPostingSemanticProjectedInput(shape)); } catch { return false; }
+  };
+  if (holds(job)) return true;
+  return ['found', 'link-only'].includes(posting.outcome) && officialPostingConsolidatedMemberShapes(job).some(holds);
 }

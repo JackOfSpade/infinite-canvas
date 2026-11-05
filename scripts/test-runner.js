@@ -93,6 +93,7 @@ import official_source_hosts from './tests/official-source-hosts.js';
 import official_posting_fields from './tests/official-posting-fields.js';
 import official_posting_scrape from './tests/official-posting-scrape.js';
 import official_posting_semantic from './tests/official-posting-semantic.js';
+import official_posting_consolidated_proof from './tests/official-posting-consolidated-proof.js';
 import official_posting_discovery_diagnostics from './tests/official-posting-discovery-diagnostics.js';
 import official_posting_negative_policy from './tests/official-posting-negative-policy.js';
 import official_posting_embedded_links from './tests/official-posting-embedded-links.js';
@@ -373,6 +374,7 @@ const testGroups = [
   ['official-posting-fields.js', official_posting_fields],
   ['official-posting-scrape.js', official_posting_scrape],
   ['official-posting-semantic.js', official_posting_semantic],
+  ['official-posting-consolidated-proof.js', official_posting_consolidated_proof],
   ['official-posting-discovery-diagnostics.js', official_posting_discovery_diagnostics],
   ['official-posting-negative-policy.js', official_posting_negative_policy],
   ['official-posting-embedded-links.js', official_posting_embedded_links],

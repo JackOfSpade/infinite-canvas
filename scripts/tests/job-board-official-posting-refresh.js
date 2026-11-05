@@ -332,7 +332,7 @@ export default [
           const summary = probe.getLogs().findLast(line => line.includes('[JobBoard] official-posting refresh finished'));
           assert.ok(summary);
           assert.equal(summary.slice(summary.indexOf('[JobBoard]')),
-            `[JobBoard] official-posting refresh finished mode=all checked=6 verified=${incomplete ? 1 : 3} notFound=1 ambiguous=1 closed=1 exhausted=0 retryable=${incomplete ? 2 : 0}`);
+            `[JobBoard] official-posting refresh finished mode=all checked=6 verified=${incomplete ? 1 : 3} notFound=1 ambiguous=1 closed=1 exhausted=0 recheckFailed=0 retryable=${incomplete ? 2 : 0}`);
           for (const source of ['Synthetic Employer', 'careers.example.test', 'Synthetic Role']) assert.equal(summary.includes(source), false);
         });
       }
@@ -347,11 +347,22 @@ export default [
           trail: ['worker-research', 'oversize'] } })];
       const before = structuredClone(results); freeze(results);
       assert.deepEqual(summarizeBoardOfficialPostingChecks(results), {
-        checked: 4, verified: 1, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, retryable: 3,
+        checked: 4, verified: 1, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, recheckFailed: 0, retryable: 3,
       });
       assert.deepEqual(results, before);
       assert.deepEqual(summarizeBoardOfficialPostingChecks([]), {
-        checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, retryable: 0,
+        checked: 0, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 0, recheckFailed: 0, retryable: 0,
+      });
+    },
+  },
+  {
+    name: 'Board refresh check totals: a verified posting whose rechecks are exhausted is its own bucket, neither exhausted nor retryable',
+    run() {
+      const standing = job(0, { officialPosting: posting(0, { trail: ['semantic-match-v1', 'semantic-uncertain', 'reverify-failed', 'lookup-exhausted'] }) });
+      const missing = job(1, { officialPosting: { level: 'L5', outcome: 'ambiguous', employer: 'Synthetic Employer', trail: ['semantic-uncertain', 'lookup-exhausted'] } });
+      const interrupted = job(2, { officialPosting: posting(2, { trail: ['semantic-match-v1', 'reverify-failed'] }) });
+      assert.deepEqual(summarizeBoardOfficialPostingChecks([standing, missing, interrupted]), {
+        checked: 3, verified: 0, notFound: 0, ambiguous: 0, closed: 0, exhausted: 1, recheckFailed: 1, retryable: 1,
       });
     },
   },

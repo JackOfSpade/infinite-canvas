@@ -31,6 +31,26 @@ function pipeline(boardIds = new Set([boardId])) {
 
 export default [
   {
+    name: 'Board report says why jobs were not assessed and warns when some displayed rows cannot become seen',
+    run() {
+      __resetJobsTelemetryForTests();
+      try {
+        recordBoard();
+        run(boardId, 'research-job-compensation', () => {
+          getJobsTelemetry().compensation = { ts: Date.now(), scoredInput: 661, eligible: 37, assessed: 35, researched: 32, failedCohorts: 0,
+            skippedNoLocation: 2, skippedNoCurrency: 0, skippedNoExperience: 1, skippedNoExperienceBand: 0, preResearchCandidates: 4 };
+        });
+        run(boardId, 'append-jobs-history', () => {
+          getJobsTelemetry().history = { boardDisplay: { ts: Date.now(), input: 770, eligible: 759, staged: 1, written: 0 } };
+        });
+        const output = pipeline();
+        assert.match(output, /researched cohorts 32 · failed cohorts 0 · no location 2 · no currency 0 · no experience 1 · no role band 0 · pre-research candidates 4/);
+        assert.match(output, /eligible rows 759 · newly staged rows 1 · committed rows 0 · ⚠️ 11 of 770 displayed rows could not be recorded as seen/);
+        assert.doesNotMatch(output, /provisional/);
+      } finally { __resetJobsTelemetryForTests(); }
+    },
+  },
+  {
     name: 'Board-only process pipeline retains taxonomy compensation and history independently of absent source searches',
     run() {
       __resetJobsTelemetryForTests();
@@ -40,7 +60,7 @@ export default [
         assert.match(output, /### Job Board work \(current process\)/);
         assert.match(output, /Taxonomy.*input 73 · placed 73 · missing 0 · duplicated 0/);
         assert.match(output, /Compensation.*input 73 · eligible 15 · assessed 14 · researched cohorts 14 · failed cohorts 0/);
-        assert.match(output, /Seen-history.*recorded · input 118 · eligible rows 118 · provisional rows 118 · committed rows 0/);
+        assert.match(output, /Seen-history.*recorded · input 118 · eligible rows 118 · newly staged rows 118 · committed rows 0/);
         assert(!output.includes('no taxonomy recorded this session'));
         assert(!output.includes('private posting prose') && !output.includes('private source URL'));
         assert(!output.includes(boardId), 'report correlations must not reveal reusable owner ids');

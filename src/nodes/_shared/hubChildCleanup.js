@@ -41,6 +41,7 @@ export function deleteChildrenByHubId({ getNodes, getEdges, deleteElements, hubI
       edgeIds: edgesToDelete.map(e => e.id),
       jobCardDismissalIds: owned.filter(n => n.type === 'jobcard').map(n => n.id),
       summary: removalLogSummary,
+      displayReplacement,
     })
     : null;
   const finishDisplayRemoval = displayReplacement ? beginJobCardDisplayRemoval(owned) : () => {};

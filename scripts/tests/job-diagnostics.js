@@ -15937,7 +15937,7 @@ export default [
           searchIntent: null,
           pipeline: { runId: `${nodeId}-2`, phase: 'completed', active: false },
         });
-        assert(buildJobsPipelineSnapshot(new Set([nodeId]), null, null).includes('no search recorded this session'),
+        assert(buildJobsPipelineSnapshot(new Set([nodeId]), null, null).includes('no Job Search funnel recorded in this app process'),
           'a session that recorded no search and retained no launch intent still says so');
       } finally {
         Object.assign(telemetry, saved);

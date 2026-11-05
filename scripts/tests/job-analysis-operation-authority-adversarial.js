@@ -556,24 +556,25 @@ export default [
       const canvas = path.join(directory, 'canvas.json');
       const sender = { id: 814 };
       const row = name => ({ source: 'remoteok', company: 'Example', title: name, location: 'Toronto', url: `https://example.test/${name}` });
-      const shown = row('shown'), filtered = row('filtered'), hidden = row('hidden');
+      const shown = row('shown'), filtered = row('filtered'), hidden = row('hidden'), filteredHidden = row('filtered-hidden');
       try {
         await fs.promises.writeFile(canvas, '{}');
         const authority = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId: 'a', operationId: 'display-a', semanticBase: base() });
         const saved = snapshot({ canvasFilePath: canvas, hubId: 'a', authority: authority.receipt });
         // The production snapshot holds every candidate, unscored, and is not rewritten after scoring.
         saved.jobs = [{ ...shown }, { ...hidden }, { ...filtered, preferenceAssessment: { status: 'filtered' } },
-          null, { ...row('oversize'), url: `https://example.test/${'x'.repeat(2500)}` }];
+          { ...filteredHidden, preferenceAssessment: { status: 'filtered' } }, null, { ...row('oversize'), url: `https://example.test/${'x'.repeat(2500)}` }];
         await __saveJobAnalysisSnapshotForTests(saved);
         const sources = [{ hubId: 'a', runId: 'run-1', careerSnapshotId: pin, operationAuthority: authority.receipt }];
+        // `filtered` is the row a Board preference rescued: filtered in the frozen artifact, displayed on the Board.
         const jobs = [shown, filtered];
         const prepared = await __boardHistoryAuthorityForTests.prepare({ sender }, { canvasFilePath: canvas, jobs, sources });
         assert(prepared.success, 'the unscored source artifact still proves ownership');
         const consumed = await __boardHistoryAuthorityForTests.consume({ sender }, { canvasFilePath: canvas, jobs, historyToken: prepared.historyToken });
-        assert(consumed.staged === 1 && consumed.eligible === 1, `only the displayed, unfiltered row is staged; got ${JSON.stringify(consumed)}`);
+        assert(consumed.staged === 2 && consumed.eligible === 2, `both displayed rows are staged, whatever the artifact's preference status; got ${JSON.stringify(consumed)}`);
         await finalizeDisplayedJobsHistory(canvas, 'a', { deleted: true });
-        const remaining = dedupAgainstHistory([shown, hidden, filtered], await loadJobsHistory(canvas)).kept;
-        assert(!remaining.includes(shown) && remaining.includes(hidden) && remaining.includes(filtered), 'only the displayed row becomes seen');
+        const remaining = dedupAgainstHistory([shown, hidden, filtered, filteredHidden], await loadJobsHistory(canvas)).kept;
+        assert(!remaining.includes(shown) && !remaining.includes(filtered) && remaining.includes(hidden) && remaining.includes(filteredHidden), 'displayed rows become seen; undisplayed rows do not, filtered or not');
       } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
     },
   },

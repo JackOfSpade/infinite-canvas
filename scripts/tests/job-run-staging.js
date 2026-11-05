@@ -4731,8 +4731,8 @@ export default [
         { sender, nodeId: null, channel: 'bug-report' },
         () => buildJobsPipelineSnapshot(new Set(['hub-live']), sender.id, null, [], false, new Set(['hub-live'])),
       );
-      assert(soleOwner.includes('### Search\n- (no search recorded this session')
-        && soleOwner.includes('### Scoring\n- (no scoring recorded this session)')
+      assert(soleOwner.includes('### Search\n- (no Job Search funnel recorded in this app process; searches run before this process started leave none)')
+        && soleOwner.includes('### Scoring\n- (no scoring recorded in this app process)')
         && soleOwner.includes('- (no taxonomy recorded this session)')
         && !soleOwner.includes('not attributed:')
         && !soleOwner.includes('### Per-hub records'),

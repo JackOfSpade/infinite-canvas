@@ -151,6 +151,23 @@ const MAX_JOB_LINK_STRING_CHARS = 8 * 1024 * 1024;
 const MAX_JOB_LINK_FIELD_CHARS = 4_096;
 const MAX_JOB_LINK_SOURCES = 40;
 
+/** Why 70+ jobs weren't assessed in the latest in-process run. `no location` is what produces comparison_location_unavailable. */
+function compensationSkipDetail(compensation) {
+  const parts = [['skippedNoLocation', 'no location'], ['skippedNoCurrency', 'no currency'], ['skippedNoExperience', 'no experience'],
+    ['skippedNoExperienceBand', 'no role band'], ['preResearchCandidates', 'pre-research candidates']]
+    .filter(([key]) => nonnegativeCount(compensation?.[key]) !== null)
+    .map(([key, label]) => `${label} ${nonnegativeCount(compensation[key])}`);
+  return parts.length ? ` · ${parts.join(' · ')}` : '';
+}
+
+/** `eligible` is what source artifacts could prove. Anything below `input` was displayed but can't become seen. */
+function seenHistoryGap(history) {
+  const input = nonnegativeCount(history?.input);
+  const eligible = nonnegativeCount(history?.eligible);
+  if (!Number.isFinite(input) || !Number.isFinite(eligible) || input <= 0 || eligible >= input) return '';
+  return eligible === 0 ? ' · ⚠️ no displayed row could be recorded as seen' : ` · ⚠️ ${input - eligible} of ${input} displayed rows could not be recorded as seen`;
+}
+
 const APPLY_OPTION_STATES = ['absent', 'empty', 'present'];
 const MIN_APPLY_OPTION_READS_FOR_WARNING = 5;
 
@@ -2551,8 +2568,8 @@ function multiSourceBoardCompletionAssessment(canvasFilePath, hubIds, jobBoardSt
 - Board \`${reportCorrelationDigest(boardId)}\`: results ${results ?? 'not retained'} · rendered cards ${cards ?? 'not retained'} · consumed sources ${combinedSourceHubIds.length}. Fewer remaining cards can reflect deliberate card removal.
 ${sourceLines.join('\n')}
 - Latest in-process Board taxonomy: ${taxonomy ? `input ${taxonomyInput ?? '?'} · placed ${nonnegativeCount(taxonomy.placed) ?? '?'} · missing ${nonnegativeCount(taxonomy.missing) ?? '?'} · duplicated ${nonnegativeCount(taxonomy.duplicated) ?? '?'}` : 'not retained for this Board in this process'}.
-- Latest in-process Board compensation: ${compensation ? `eligible ${nonnegativeCount(compensation.eligible) ?? '?'} · assessed ${nonnegativeCount(compensation.assessed) ?? '?'} · researched ${nonnegativeCount(compensation.researched) ?? '?'} · failed cohorts ${nonnegativeCount(compensation.failedCohorts) ?? '?'}` : 'not retained for this Board in this process'}.
-- Latest in-process seen-history write: ${history ? history.error ? '⚠️ failed' : `input ${nonnegativeCount(history.input) ?? '?'} · eligible ${nonnegativeCount(history.eligible) ?? 'not recorded'} · provisional ${nonnegativeCount(history.staged) ?? '?'} · written ${nonnegativeCount(history.written) ?? '?'}${history.input > 0 && history.eligible === 0 ? ' · ⚠️ no displayed row could be recorded as seen' : ''}` : 'not retained for this Board in this process'}.
+- Latest in-process Board compensation: ${compensation ? `eligible ${nonnegativeCount(compensation.eligible) ?? '?'} · assessed ${nonnegativeCount(compensation.assessed) ?? '?'} · researched cohorts ${nonnegativeCount(compensation.researched) ?? '?'} · failed cohorts ${nonnegativeCount(compensation.failedCohorts) ?? '?'}${compensationSkipDetail(compensation)}` : 'not retained for this Board in this process'}.
+- Latest in-process seen-history write: ${history ? history.error ? '⚠️ failed' : `input ${nonnegativeCount(history.input) ?? '?'} · eligible ${nonnegativeCount(history.eligible) ?? 'not recorded'} · newly staged ${nonnegativeCount(history.staged) ?? '?'} · written ${nonnegativeCount(history.written) ?? '?'}${seenHistoryGap(history)}` : 'not retained for this Board in this process'}.
 - Attempt correlation: latest in-process phase records are Board/window-scoped; no exact display-generation token was retained for them.
 - Scope: prior source collection coverage was not reverified. These display facts do not prove that the current Board was saved to disk.
 `;
@@ -3762,7 +3779,7 @@ export function buildJobCompletionAssessment(
       ? `- Seen-history write: ❌ failed for ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) — these listings will be offered again on the next search.`
       : historyWrite.skipped
         ? `- Seen-history write: deferred (${receiptIdentifier(historyWrite.skipped, 'reason omitted')}).`
-        : `- Seen-history write: ✅ ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) → ${nonnegativeCount(historyWrite.staged) ?? 0} provisional row(s), ${nonnegativeCount(historyWrite.written) ?? 0} committed row(s). Provisional rows stay unseen until their Job Search is deleted or starts another scrape.`;
+        : `- Seen-history write: ✅ ${nonnegativeCount(historyWrite.input) ?? '?'} job(s) → ${nonnegativeCount(historyWrite.staged) ?? 0} newly staged row(s), ${nonnegativeCount(historyWrite.written) ?? 0} committed row(s)${seenHistoryGap(historyWrite)}. Staged rows stay unseen until their Job Search is deleted or starts another scrape.`;
 
   const boardLine = (totalBoards === 0
     ? '- Job Board consumers: none recorded.'
@@ -5776,11 +5793,11 @@ function boardWorkTelemetryLines(records, ownership = {}) {
     const taxonomy = record.bucketing;
     if (taxonomy) lines.push(`  - Taxonomy${ago(taxonomy.ts)}: input ${count(taxonomy.input)} · placed ${count(taxonomy.placed)} · missing ${count(taxonomy.missing)} · duplicated ${count(taxonomy.duplicated)} · ${taxonomy.error || taxonomy.blocked ? 'failed or blocked' : 'stage recorded'}.`);
     const compensation = record.compensation;
-    if (compensation) lines.push(`  - Compensation${ago(compensation.ts)}: input ${count(compensation.scoredInput)} · eligible ${count(compensation.eligible)} · assessed ${count(compensation.assessed)} · researched cohorts ${count(compensation.researched)} · failed cohorts ${count(compensation.failedCohorts)}.`);
+    if (compensation) lines.push(`  - Compensation${ago(compensation.ts)}: input ${count(compensation.scoredInput)} · eligible ${count(compensation.eligible)} · assessed ${count(compensation.assessed)} · researched cohorts ${count(compensation.researched)} · failed cohorts ${count(compensation.failedCohorts)}${compensationSkipDetail(compensation)}.`);
     const research = record.research;
     if (research) lines.push(`  - Research gate${ago(research.ts)}: at or above ${count(research.minFitScore)}: ${count(research.eligible)} of ${count(research.total)} · skipped below fit ${count(research.skippedBelowFit)} · skipped unscored ${count(research.skippedUnscored)} · official lookups ${count(research.officialLookups)} · official duplicates removed ${count(research.officialDuplicatesDropped)} · closed removed ${count(research.closedDropped)} · below-fit closed removed ${count(research.belowFitClosedDropped)} · listings rechecked ${count(research.livenessRechecked)} of ${count(research.livenessVisited)} visited, ${count(research.livenessStillPending)} still pending · rescored ${count(research.rescoreAttempted)} (changed ${count(research.rescoreChanged)}, fell below ${count(research.rescoreFellBelow)}, failed ${count(research.rescoreFailed)}) · company research ${count(research.preferenceRequests)} request(s) for ${count(research.preferenceRows)} job(s), ${count(research.preferenceFiltered)} filtered, ${count(research.preferenceFailed)} failed${research.error ? ` · error ${research.errorCode || 'OTHER'}` : ''}`);
     const history = record.history?.boardDisplay;
-    if (history) lines.push(`  - Seen-history${ago(history.ts)}: ${history.error ? 'failed' : history.skipped ? 'deferred' : 'recorded'} · input ${count(history.input)} · eligible rows ${count(history.eligible)} · provisional rows ${count(history.staged)} · committed rows ${count(history.written)}${history.input > 0 && history.eligible === 0 ? ' · ⚠️ no displayed row could be recorded as seen' : ''}. Provisional rows remain unseen until source deletion or its next scrape.`);
+    if (history) lines.push(`  - Seen-history${ago(history.ts)}: ${history.error ? 'failed' : history.skipped ? 'deferred' : 'recorded'} · input ${count(history.input)} · eligible rows ${count(history.eligible)} · newly staged rows ${count(history.staged)} · committed rows ${count(history.written)}${seenHistoryGap(history)}. Staged rows remain unseen until source deletion or its next scrape.`);
   }
   return lines;
 }
@@ -7394,7 +7411,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // either a filtered, truncated or never-written section.
       lines.push(telemetryAmbiguity
         ? `### Search\n- (funnel not attributed: ${telemetryAmbiguity}.${hasMultiHubAttribution ? ' The per-hub records that remain attributable are under "Per-hub records" below;' : ' No hub held an independently attributable record either, so no "Per-hub records" section follows;'} the combined funnel is deliberately not re-derived across hubs.)`
-        : '### Search\n- (no search recorded this session — e.g. scoring resumed from a captcha-resolve)');
+        : '### Search\n- (no Job Search funnel recorded in this app process; searches run before this process started leave none)');
     }
   }
   // Indeed browser-session preflight (contract: jobsTelemetry.indeedSession,
@@ -8581,7 +8598,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
   } else {
     lines.push(telemetryAmbiguity
       ? `\n### Scoring\n- (not attributed: ${telemetryAmbiguity}. Scoring counters are not summed across hubs.)`
-      : '\n### Scoring\n- (no scoring recorded this session)');
+      : '\n### Scoring\n- (no scoring recorded in this app process)');
   }
 
   // Competitive salary check (contract: jobsTelemetry.compensation, stamped by

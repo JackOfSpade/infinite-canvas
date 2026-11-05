@@ -216,7 +216,7 @@ export default [
       assert.deepEqual(rows.map(job => job.title).sort(), ['Kept score', 'Was filtered']);
       assert.equal(rows.find(job => job.title === 'Kept score').reasoning, 'Kept');
       assert.ok(rows.every(job => job.originHubId === 'hub'));
-      assert.deepEqual(result.counts, { checked: 3, passed: 2, removed: 1, newlyScored: 1, keptScores: 1, reused: 0, unscored: 0 });
+      assert.deepEqual(result.counts, { checked: 3, passed: 2, removed: 1, checkedRows: 3, removedRows: 1, newlyScored: 1, keptScores: 1, reused: 0, unscored: 0 });
       const resumed = harness();
       const again = await runBoardPreferenceOverrideStage([source], { ...resumed.options, override: saved.at(-1) });
       assert.equal(resumed.calls.interpret, 0);
@@ -268,6 +268,8 @@ export default [
       assert.deepEqual(asked, ['Shared job']);
       assert.deepEqual(scored, ['Shared job']);
       assert.equal(both.jobArrays[1][0].matchScore, 80, 'the second Search shows the same score');
+      assert.deepEqual([both.counts.checked, both.counts.passed, both.counts.removed, both.counts.checkedRows, both.counts.removedRows],
+        [1, 1, 0, 2, 0], 'one shared listing is one job; rows stay per Search so they balance against the merge');
       const scoredSibling = { ...search('a'), scoredJobs: [{ ...shared, matchScore: 91, careerSnapshotId: SNAPSHOT }] };
       scored.length = 0;
       await runBoardPreferenceOverrideStage([search('b'), scoredSibling], options);

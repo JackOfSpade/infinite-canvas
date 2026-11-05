@@ -36,7 +36,11 @@ export async function runBoardPreferenceOverrideStage(modules, {
     // Titles only steer a scan, and the override never changes what a Search scans.
     save({ plan: { ...plan, titles: [] } });
   }
-  const totals = { checked: 0, passed: 0, removed: 0, newlyScored: 0, keptScores: 0, reused: 0, unscored: 0 };
+  // checked, passed and removed count distinct jobs: one listing shared by two Searches is one job, and passes if
+  // any Search's copy passes. The *Rows counts are per Search, which is what balances against the merge's incoming rows.
+  const checkedKeys = new Set();
+  const passedKeys = new Set();
+  const totals = { checked: 0, passed: 0, removed: 0, checkedRows: 0, removedRows: 0, newlyScored: 0, keptScores: 0, reused: 0, unscored: 0 };
   const jobArrays = [];
   // Rule answers read only the listing, and a score only the listing and career
   // record, so one job shared by two Searches is asked once.
@@ -110,13 +114,17 @@ export async function runBoardPreferenceOverrideStage(modules, {
       }
       save({ results: results() });
     }
-    totals.checked += listings.length;
-    totals.passed += passed.length;
-    totals.removed += listings.length - passed.length;
+    for (const listing of listings) checkedKeys.add(jobBoardOverrideJobKey(listing));
+    for (const listing of passed) passedKeys.add(jobBoardOverrideJobKey(listing));
+    totals.checkedRows += listings.length;
+    totals.removedRows += listings.length - passed.length;
     totals.newlyScored += newlyScored.length;
     totals.keptScores += keptScoredJobs.length;
     jobArrays.push([...newlyScored, ...keptScoredJobs].map(job => ({ ...job, originHubId: job.originHubId || module.id })));
   }
+  totals.checked = checkedKeys.size;
+  totals.passed = passedKeys.size;
+  totals.removed = checkedKeys.size - passedKeys.size;
   save({ counts: totals });
   return { jobArrays, override: record, counts: totals };
 }

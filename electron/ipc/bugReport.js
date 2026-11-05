@@ -59,6 +59,7 @@ import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 import { parseWorkspaceText } from './workspaceContentPool.js';
+import { describeBoardMergeInputs } from '../../src/utils/jobBoardMergeSummary.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -1176,9 +1177,7 @@ function buildNodeDiagnosticsMarkdown(nodeInternals, nodeComponentStates, nodes,
       // count / kept the wrong copy" diagnosable: per-module inputs → unique.
       if (n.type === 'jobboard' && d.mergeStats && typeof d.mergeStats === 'object') {
         const ms = d.mergeStats;
-        const breakdown = Array.isArray(ms.perModule) && ms.perModule.length
-          ? `${ms.perModule.map(p => p.count).join('+')}=${ms.totalIncoming}`
-          : `${ms.totalIncoming ?? '?'}`;
+        const breakdown = describeBoardMergeInputs(ms);
         previewParts.push(
           `merge: ${ms.modules ?? '?'} mod · ${breakdown} → ${ms.unique ?? '?'} unique ` +
           `(${ms.duplicatesRemoved ?? '?'} dup, ${ms.collisionUpgrades ?? 0} score-upgrade)`

@@ -4,6 +4,7 @@ import {
   getJobsTelemetry, officialPostingConsumerJobs, researchCompensationAssessments,
   restoreOfficialPostingConsumerIdentity,
 } from '../../electron/ipc/jobs.js';
+import { consolidatedOfficialPostingLocation } from '../../electron/ipc/officialPostingStore.js';
 import { evaluateJobPreferences, listingIdsForRootBatch } from '../../electron/ipc/jobPreferences.js';
 import { confirmSimilarJobLocationPairs } from '../../electron/ipc/jobLocationConsolidation.js';
 import { findSimilarLocationCandidates } from '../../src/utils/jobLocationConsolidation.js';
@@ -152,6 +153,47 @@ export default [
       const invalid = { ...missing, officialPosting: { level: 'invented' } };
       await researchCompensationAssessments([invalid], { signal: { aborted: true }, getPostingView: missingView });
       assert.equal(getJobsTelemetry().compensation.locationLookup.postings, 1, 'a malformed object is not a prior resolution and retains the legacy path');
+    },
+  },
+  {
+    name: 'Official posting consumers: a consolidated row takes only its work location from its own stored record; other rows get no official facts',
+    async run() {
+      const stored = (identityLocation, overrides = {}) => ({ aliases: [`identity:${JSON.stringify(['Scraped title', 'Scraped Poster', identityLocation])}`],
+        officialPosting: { ...rawJob().officialPosting, title: 'Scraped title', employer: 'Scraped Poster', trail: ['semantic-match-v1', 'cache-hit'],
+          semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) }, ...overrides } });
+      const consolidated = (overrides = {}) => ({ ...rawJob(), location: 'Multiple locations', matchScore: 88, consolidatedPostingCount: 2, consolidatedLocationCount: 2,
+        postingVariants: [{ location: 'Toronto, Ontario, Canada', url: 'https://board.example.test/one' }, { location: 'San Francisco, CA', url: 'https://board.example.test/two' }],
+        compensationContext: { roleFamily: 'Engineering', seniority: 'senior', employmentType: 'full-time' },
+        experienceAssessment: { categorySpecificExperience: [{ requiredMinimumYears: 5 }] }, ...overrides });
+      const scrapedView = async job => ({ employer: job.company, title: job.title, location: job.location, salary: job.salary, description: job.snippet });
+      const storeWith = record => ({ find: async () => record });
+      const run = async (job, record) => {
+        await researchCompensationAssessments([job], { signal: { aborted: true }, getPostingView: scrapedView,
+          getConsolidatedLocation: row => consolidatedOfficialPostingLocation(row, { store: storeWith(record) }),
+          locationLookupCallRaw: () => { throw new Error('This row has a prior resolution and starts no research'); } });
+        return job.compensationAssessment;
+      };
+      const both = await run(consolidated(), stored('Toronto, Ontario, Canada'));
+      assert.ok(both.comparisonLocation.display.includes('Toronto'), 'the record gave the place');
+      assert.equal(both.offered.min, 30000, 'official salary stays out: this is the scraped US$30,000, not C$190,000');
+      assert.ok(both.justification.includes('San Francisco, CA') && both.justification.includes('Toronto, Ontario, Canada only'), 'the card says what the verdict covers');
+      assert.ok(both.sourceLinks.some(source => source.url === rawJob().officialPosting.sourceUrl));
+      const samePlace = await run(consolidated({ postingVariants: [{ location: 'Toronto, Ontario, Canada' }, { location: 'Toronto' }] }), stored('Toronto'));
+      assert.ok(samePlace.comparisonLocation.display.includes('Toronto'));
+      assert.ok(!samePlace.justification.includes('also covers'), 'two spellings of one place are not a scope limit');
+
+      assert.equal((await run(consolidated(), null)).reasonCode, 'comparison_location_unavailable', 'no stored record: a well-shaped card supplies nothing');
+      assert.equal((await run(consolidated(), stored('Vancouver'))).reasonCode, 'comparison_location_unavailable', 'a record for another posting supplies nothing');
+      assert.equal((await run(consolidated(), stored('Toronto, Ontario, Canada', { trail: ['cache-hit'] }))).reasonCode, 'comparison_location_unavailable', 'a record never semantically matched supplies nothing');
+      assert.equal((await run(consolidated(), stored('Toronto, Ontario, Canada', { outcome: 'closed' }))).reasonCode, 'comparison_location_unavailable');
+      const single = consolidated({ consolidatedPostingCount: 1, location: '', postingVariants: [] });
+      assert.equal((await run(single, stored(''))).reasonCode, 'comparison_location_unavailable', 'an unconsolidated row with a failed proof still gets no official facts');
+
+      const placed = consolidated({ location: 'Vancouver, British Columbia, Canada' });
+      let asked = 0;
+      await researchCompensationAssessments([placed], { signal: { aborted: true }, getPostingView: scrapedView, getConsolidatedLocation: async () => { asked++; return null; } });
+      assert.equal(asked, 0, 'a row that already resolves to a place keeps it');
+      assert.ok(placed.compensationAssessment.comparisonLocation.display.includes('Vancouver'));
     },
   },
   {

@@ -176,7 +176,7 @@ export class EventLoggerSingleton {
    * because React Flow delivers its remove changes synchronously or in its
    * next controlled batch.
    */
-  beginRemovalBatch({ nodeIds = [], edgeIds = [], jobCardDismissalIds = [], summary }) {
+  beginRemovalBatch({ nodeIds = [], edgeIds = [], jobCardDismissalIds = [], summary, displayReplacement = false }) {
     const nodes = [...new Set(nodeIds.filter(id => typeof id === 'string' && id))];
     const edges = [...new Set(edgeIds.filter(id => typeof id === 'string' && id))];
     const dismissals = [...new Set(jobCardDismissalIds.filter(id => typeof id === 'string' && id))];
@@ -186,7 +186,7 @@ export class EventLoggerSingleton {
     nodes.forEach(id => this._suppressedNodeRemovalIds.set(id, batch));
     edges.forEach(id => this._suppressedEdgeRemovalIds.set(id, batch));
     dismissals.forEach(id => this._suppressedJobCardDismissalIds.set(id, batch));
-    this.log(`${summary || 'bulk removal'} nodes=${nodes.length} edges=${edges.length} dismissals=${dismissals.length} (individual removal events suppressed)`);
+    this.log(`${summary || 'bulk removal'} nodes=${nodes.length} edges=${edges.length} jobcards=${dismissals.length}${displayReplacement ? ' display-replacement' : ''} (individual removal events suppressed)`);
     return batch;
   }
 

@@ -6,7 +6,7 @@ import { googleJobsDocumentId } from '../../src/utils/jobListingUrl.js';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
 import { normalizeOfficialPosting } from './officialPostingFields.js';
 import { coreTitle, locationsCompatible } from './officialPostingMatch.js';
-import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
+import { officialPostingConsolidatedMemberShapes, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 
 const TEXT_BYTE_LIMIT = 3 * 1024 * 1024;
@@ -297,12 +297,56 @@ async function restoreMissingText(record, store, refetch) {
   return attempts.get(hash);
 }
 
+const CONSOLIDATED_LOCATION_LOOKUPS = 12;
+const firstPlace = value => String(value || '').split(',')[0].trim().toLowerCase();
+
+/**
+ * Consolidation renames a row "Multiple locations", which breaks the semantic proof every full view requires, so a
+ * consolidated row can't reach its own verified posting. This returns only that posting's work location, read from the
+ * store and never from the row: no salary, description or other official fact. A row with no matching stored record
+ * gets nothing, however well shaped its card is. `otherPlaces` names postings the location doesn't speak for.
+ */
+export async function consolidatedOfficialPostingLocation(job, { store } = {}) {
+  if (!(Number(job?.consolidatedPostingCount) > 1) || typeof store?.find !== 'function') return null;
+  const variants = Array.isArray(job.postingVariants) ? job.postingVariants : [];
+  const shapes = [job, ...variants.slice(0, CONSOLIDATED_LOCATION_LOOKUPS).map(variant => ({ ...job,
+    location: variant?.location || job.location, url: variant?.url || job.url, source: variant?.source || job.source,
+    sourceJobKey: variant?.sourceJobKey || job.sourceJobKey }))];
+  for (const shape of shapes) {
+    const record = await store.find(shape);
+    if (!record || !officialPostingRecordMatchesScrapedIdentity(shape, record)) continue;
+    const posting = normalizeOfficialPosting(record.officialPosting);
+    const location = posting?.location;
+    if (!posting || !['found', 'link-only'].includes(posting.outcome) || !posting.trail?.includes('semantic-match-v1')
+      || !(location?.display || location?.remote)) continue;
+    const place = firstPlace(location.display);
+    const otherPlaces = location.remote ? [] : [...new Set(variants.map(variant => String(variant?.location || '').trim())
+      .filter(value => value && firstPlace(value) !== place))];
+    return { display: location.display || '', workMode: location.workMode || '', remote: location.remote === true,
+      remoteCountry: location.remoteCountry || '', remoteRegion: location.remoteRegion || '',
+      sourceUrl: posting.sourceUrl || '', otherPlaces };
+  }
+  return null;
+}
+
 /** The one main-process posting view; row metadata alone never supplies official facts. */
 export async function officialPostingView(job, { store, refetch, requireSemantic = false } = {}) {
   if (!store || typeof store.find !== 'function' || typeof store.readText !== 'function') return scrapedView(job);
   let record;
   try { record = await store.find(job); } catch { return scrapedView(job); }
-  if (!record || !officialPostingRecordMatchesScrapedIdentity(job, record)) return scrapedView(job);
+  if (!record || !officialPostingRecordMatchesScrapedIdentity(job, record)) {
+    // A consolidated row's own identity says "Multiple locations"; its record is one a member's identity reaches.
+    record = null;
+    try {
+      for (const member of officialPostingConsolidatedMemberShapes(job)) {
+        const found = await store.find(member);
+        if (found && officialPostingRecordMatchesScrapedIdentity(member, found)
+          && found.officialPosting?.contentHash === job?.officialPosting?.contentHash
+          && officialPostingSemanticProofMatches(job, found.officialPosting)) { record = found; break; }
+      }
+    } catch { return scrapedView(job); }
+    if (!record) return scrapedView(job);
+  }
   const posting = record.officialPosting;
   if (requireSemantic && !officialPostingSemanticProofMatches(job, posting)) return scrapedView(job);
   const fallback = scrapedView(job, posting);
@@ -320,7 +364,8 @@ export async function officialPostingView(job, { store, refetch, requireSemantic
   return {
     employer: posting.employer, postedBy: fallback.postedBy,
     title: posting.title || fallback.title,
-    location: posting.location?.display || fallback.location,
+    // One member's official location never relabels a row that stands for several.
+    location: officialPostingConsolidatedMemberShapes(job).length ? fallback.location : posting.location?.display || fallback.location,
     salary: posting.salary?.text || fallback.salary,
     description, officialPosting: posting,
   };

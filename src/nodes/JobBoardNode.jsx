@@ -5,6 +5,7 @@ import { settlePreFenceCanvasBatches } from '../utils/quitCommitSettle';
 import { jobWorkflowNeedsQuitPause, savedWorkflowQuitPausePatch } from '../utils/quitWorkflowPause';
 import { jobBoardHasSavedAiContinuation } from '../utils/jobBoardSavedAiContinuation';
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { boardCombinePerModule, describeBoardMergeInputs } from '../utils/jobBoardMergeSummary';
 import { describeSourceHealthFailures, sourceHealthCaveats, sourceHealthSiteName } from '../utils/jobCollectionScopeCaveats';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { LayoutGrid } from 'lucide-react';
@@ -1753,7 +1754,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // A card tied to an application outlives its listing, as it does in Combine.
     const applicationCardIds = getNodes().filter(node => node?.data?.hubId === id && isProtectedJobCard(node)).map(node => node.id);
     clearBoardChildren({ preserveNodeIds: applicationCardIds });
-    const perModule = liveInputs.completed.map((m) => ({ label: m.label, count: m.count }));
+    const perModule = liveInputs.completed.map((m) => ({ label: m.label, count: 0, sourceCount: m.count }));
     updateGlobal(id, {
       hubState: 'done', resultCount: applicationCardIds.length, moduleCount: liveInputs.completed.length,
       scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
@@ -3015,6 +3016,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     };
     compensationRequestIdRef.current = compensationRequestId;
     setCombining(true);
+    EventLogger.log(`[JobBoard] combine started id=${id}`);
     setCompensationProgress(null);
     setCombineResearchProgress(null);
     const traceStartedAt = Date.now();
@@ -3141,7 +3143,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           return { status: 'completed' };
         }
         if (afterSearch && allLiveConnectedDone && liveBoardData.hubState !== 'done') {
-          const perModule = completedAtCombine.map((module) => ({ label: module.label, count: 0 }));
+          const perModule = completedAtCombine.map((module) => ({ label: module.label, count: 0, sourceCount: module.count }));
           updateGlobal(id, {
             hubState: 'done', resultCount: 0, moduleCount: completedAtCombine.length,
             scoreThreshold: 0, scoreRangeMin: 0, scoreRangeMax: 100,
@@ -3201,6 +3203,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           .map((j) => ({ ...j, originHubId: j.originHubId || m.id }))
       );
       const preferenceOverrideAtCombine = activeJobBoardPreferenceOverride(getNode(id)?.data);
+      let preferenceOverrideCounts = null;
       if (preferenceOverrideAtCombine) {
         recordCombineStage('board-preferences');
         const applied = await runBoardPreferenceOverrideStage(readyAtCombine, {
@@ -3215,6 +3218,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         });
         if (applied.cancelled) return { status: 'cancelled' };
         jobArrays = applied.jobArrays;
+        preferenceOverrideCounts = applied.counts;
       }
       // The Board's rows no longer come only from the Search's own result.
       const markBoardPreferencesCombined = () => {
@@ -3222,6 +3226,12 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       };
       const mergeStats = {};
       let union = unionScoredJobs(jobArrays, mergeStats);
+      if (preferenceOverrideCounts) {
+        mergeStats.overrideChecked = preferenceOverrideCounts.checked;
+        mergeStats.overrideRemoved = preferenceOverrideCounts.removed;
+        mergeStats.overrideCheckedRows = preferenceOverrideCounts.checkedRows;
+        mergeStats.overrideRemovedRows = preferenceOverrideCounts.removedRows;
+      }
       // Location consolidation runs BEFORE taxonomy so a four-location
       // posting becomes one "Multiple locations" row. Exact descriptions are
       // deterministic; non-identical ≥75%-similar descriptions receive an AI
@@ -3296,11 +3306,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       if (boardResearch.reusedRemovals) EventLogger.log(`[JobBoard] combine reused ${boardResearch.reusedRemovals} official lookup(s) from rows the previous Combine removed id=${id}`);
       if (boardResearch.pausedRetries) EventLogger.log(`[JobBoard] combine skipped ${boardResearch.pausedRetries} exhausted official lookup(s) id=${id}`);
       if (cancelled() || !getNode(id)) return { status: 'cancelled' };
-      const perModule = completedAtCombine.map((m) => ({ label: m.label, count: m.count }));
-      EventLogger.log(`[JobBoard] combine started id=${id} signature=${sigAtCombine} incoming=${union.length}`);
+      const perModule = boardCombinePerModule(completedAtCombine, readyAtCombine, jobArrays);
+      EventLogger.log(`[JobBoard] combine merged id=${id} signature=${sigAtCombine} mergedUnique=${mergeStats.unique} locationCollapsed=${locationStats.postingsCollapsed} afterResearch=${union.length}`);
       EventLogger.log(
         `[JobBoard] Combined ${completedAtCombine.length} completed module(s): ` +
-        `${perModule.map((p) => p.count).join('+')}=${mergeStats.totalIncoming} → ` +
+        `${describeBoardMergeInputs({ ...mergeStats, perModule })} → ` +
         `${mergeStats.unique} unique (${mergeStats.duplicatesRemoved} dup removed, ` +
         // Without this term the printed equation silently stops balancing:
         // incoming − duplicates ≠ unique whenever preference-filtered rows were
@@ -7166,6 +7176,8 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           totalIncoming={data.mergeStats?.totalIncoming || 0}
           duplicatesRemoved={data.mergeStats?.duplicatesRemoved || 0}
           preferenceFilteredSkipped={data.mergeStats?.preferenceFilteredSkipped}
+          boardPreferenceChecked={data.mergeStats?.overrideChecked}
+          boardPreferenceRemoved={data.mergeStats?.overrideRemoved}
           researchRemoved={data.mergeStats?.researchRemoved}
           locationPostingsCollapsed={data.mergeStats?.locationVariantPostingsCollapsed}
           locationVariantGroups={data.mergeStats?.locationVariantGroups}

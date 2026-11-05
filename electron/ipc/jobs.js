@@ -129,9 +129,10 @@ import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, re
 import { parseGuaranteedCashOffer, compensationAssessment, mergeCompetitiveRanges, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource, classifyCompensationLocationGap } from './jobCompensation.js';
 import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
-import { getOfficialPostingView, officialPostingDedup, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
-import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
+import { getOfficialPostingStore, getOfficialPostingView, officialPostingDedup, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
+import { consolidatedOfficialPostingLocation, officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialPostingLookupStatus } from './officialPostingFields.js';
+import { officialPostingConsolidatedMemberShapes } from './officialPostingSemantic.js';
 import { bumpListingLivenessCount, listingLivenessTelemetryBlock, mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { listingEvidenceKey, readListingEvidence } from './listingLivenessStore.js';
 import { createListingLivenessSearchSession } from './listingLivenessSearch.js';
@@ -222,12 +223,13 @@ async function verifySealedHistorySources(canvasFilePath, sources, records, disp
       || !scopedPublicationMatches(records[index], 'current', read.serialized, source.authority)) return null;
     // The source artifact is saved before scoring, so its rows normally carry
     // no score. It proves a displayed row belongs to this source; the Board
-    // sends only rows it has a real score for.
+    // sends only rows it has a real score for. Its frozen preference status is
+    // ignored: Board preferences can show a row the Search filtered, and what
+    // the Board displayed is what limits staging below.
     // One malformed candidate the Board never showed must not block the display.
     const scoredRows = (snapshot.jobs || []).filter(job => job && typeof job === 'object'
       && (job.matchScore == null || (Number.isFinite(job.matchScore) && job.matchScore >= 0 && job.matchScore <= 100))
-      && !isUnscoredPlaceholderCard(job) && !isLegacyUnscoredPlaceholder(job)
-      && job?.preferenceAssessment?.status !== 'filtered').flatMap(job => (
+      && !isUnscoredPlaceholderCard(job) && !isLegacyUnscoredPlaceholder(job)).flatMap(job => (
       Array.isArray(job.postingVariants) && job.postingVariants.length
         ? job.postingVariants.map(variant => ({ source: variant.source || job.source, company: job.company,
           title: job.title, location: variant.location || job.location, url: variant.url || job.url }))
@@ -4258,7 +4260,9 @@ const SCRAPED_CONSUMER_FIELDS = ['title', 'company', 'location', 'salary', 'snip
 export async function officialPostingConsumerJobs(jobs, { getView = getOfficialPostingView } = {}) {
   return Promise.all((Array.isArray(jobs) ? jobs : []).map(async job => {
     const view = await getView(job);
-    const location = view.location && typeof view.location === 'object' ? view.location : view.officialPosting?.location;
+    // A consolidated row's posting speaks for one member's place, never the row's remote status.
+    const location = view.location && typeof view.location === 'object' ? view.location
+      : officialPostingConsolidatedMemberShapes(job).length ? null : view.officialPosting?.location;
     return { ...job, [OFFICIAL_CONSUMER_ORIGINAL]: job, title: view.title, company: view.employer,
       officialPosting: view.officialPosting, postedBy: view.postedBy,
       location: typeof view.location === 'object' ? view.location?.display || '' : view.location,
@@ -10038,13 +10042,18 @@ ${batch.map((entry) => `BEGIN COMPENSATION RESEARCH ${entry.researchId}\nCOHORT 
   return metrics;
 }
 
+async function consolidatedPostingLocationFromStore(job) {
+  if (!(Number(job?.consolidatedPostingCount) > 1)) return null;
+  try { return await consolidatedOfficialPostingLocation(job, { store: getOfficialPostingStore() }); } catch { return null; }
+}
+
 /**
  * Research cash salary at board Combine, after (and independently of) fit
  * scoring and global taxonomy bucketing.
  * Every failure is converted into an assessment on the affected card; no
  * research error may discard a scored job or reject the score-jobs IPC call.
  */
-export async function researchCompensationAssessments(scoredJobs, { remoteResidences = {}, event, nodeId, requestId = null, signal, locationLookupCallRaw = callLLMRaw, careerInputs = new Map(), salaryCareerSnapshotId, getPostingView = getOfficialPostingView } = {}) {
+export async function researchCompensationAssessments(scoredJobs, { remoteResidences = {}, event, nodeId, requestId = null, signal, locationLookupCallRaw = callLLMRaw, careerInputs = new Map(), salaryCareerSnapshotId, getPostingView = getOfficialPostingView, getConsolidatedLocation = consolidatedPostingLocationFromStore } = {}) {
   const postingJob = await officialPostingConsumerMap(scoredJobs, { getView: getPostingView });
   const researchedAt = new Date().toISOString();
   const total = Array.isArray(scoredJobs) ? scoredJobs.length : 0;
@@ -10090,7 +10099,20 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
   for (const job of scoredJobs || []) {
     const consumer = postingJob(job);
     const resolved = consumer.officialPosting;
-    if (!resolved) continue;
+    if (!resolved) {
+      // Consolidation broke this row's proof, so it can't get a full view. Without a place from anywhere else, its own
+      // stored posting may still say where the job is. Location only: the salary stays the scraped one.
+      if (!normalizeOfficialPosting(job?.officialPosting)) continue;
+      const baseContext = compensationContextForSalary(consumer, job.compensationContext || {});
+      if (resolveCompensationLocation(consumer, baseContext, compensationResidencesForJob(job, remoteResidences))) continue;
+      const place = await getConsolidatedLocation(job);
+      if (!place) continue;
+      const otherPlaces = place.otherPlaces.slice(0, 3).join('; ');
+      locationLookupHits.set(job, { ...applyLookedUpLocation(consumer, baseContext, place), official: true,
+        source: place.sourceUrl ? { sourceUrl: place.sourceUrl } : null,
+        scopeNote: otherPlaces ? `This card also covers ${otherPlaces}; this assessment applies to ${place.display} only.` : '' });
+      continue;
+    }
     const salary = typeof resolved.salary?.text === 'string' && resolved.salary.text ? resolved.salary.text : consumer.salary;
     const shadow = { ...consumer, salary, salaryProvenance: resolved.salary?.provenance || job.salaryProvenance || 'unknown' };
     const context = compensationContextForSalary(shadow, job.compensationContext || {});
@@ -10486,6 +10508,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     if (link && assessment && !assessment.sourceLinks?.some(source => source.url === link.url)) {
       assessment.sourceLinks = [...(assessment.sourceLinks || []).slice(0, 4), link];
     }
+    if (lookup?.scopeNote && assessment) assessment.justification = `${assessment.justification || ''} ${lookup.scopeNote}`.trim().slice(0, 2400);
   }
   return scoredJobs;
 }

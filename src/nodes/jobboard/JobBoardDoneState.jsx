@@ -51,16 +51,23 @@ export function JobBoardDoneState({
   officialPostingProgress = null,
   brokenSourceNotices = [],
   researchRemoved,
+  boardPreferenceChecked,
+  boardPreferenceRemoved,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const actionsBusy = combining || scanning || officialPostingRefreshing;
 
   // The merge counts preference exclusions separately, before totalIncoming.
   const mergeInputPostings = summaryCount(totalIncoming);
-  const preferenceExcluded = Math.min(summaryCount(preferenceFilteredSkipped), Number.MAX_SAFE_INTEGER - mergeInputPostings);
-  const collectedPostings = mergeInputPostings + preferenceExcluded;
-  const duplicatePostings = Math.min(summaryCount(duplicatesRemoved), mergeInputPostings);
-  const distinctPostings = mergeInputPostings - duplicatePostings;
+  const legacyExcluded = Math.min(summaryCount(preferenceFilteredSkipped), Number.MAX_SAFE_INTEGER - mergeInputPostings);
+  const mergeDuplicates = Math.min(summaryCount(duplicatesRemoved), mergeInputPostings);
+  const distinctPostings = mergeInputPostings - mergeDuplicates;
+  // Board preferences check every Search's saved candidates, counted once per job, so that total opens the summary
+  // and what's left after its removals are the distinct rows the merge produced.
+  const boardChecked = summaryCount(boardPreferenceChecked);
+  const preferenceExcluded = boardChecked ? Math.min(summaryCount(boardPreferenceRemoved), boardChecked) : legacyExcluded;
+  const collectedPostings = boardChecked || mergeInputPostings + legacyExcluded;
+  const duplicatePostings = boardChecked ? Math.max(0, boardChecked - preferenceExcluded - distinctPostings) : mergeDuplicates;
   const removedByResearch = summaryCount(researchRemoved);
   const retryableLookups = summaryCount(incompleteOfficialLookups);
   const groupedPostings = Math.min(summaryCount(locationPostingsCollapsed), distinctPostings);
@@ -108,9 +115,9 @@ export function JobBoardDoneState({
           {/* Source targets, preference exclusions, and merge duplicates precede location grouping. */}
           {collectedPostings > 0 && (
             <p className="text-white/25 text-[10px]">
-              {collectedPostings} posting target{collectedPostings === 1 ? '' : 's'} collected · {duplicatePostings > 0
-                ? `${duplicatePostings} duplicate${duplicatePostings === 1 ? '' : 's'} removed`
-                : 'no duplicates'}
+              {collectedPostings} posting target{collectedPostings === 1 ? '' : 's'} collected{duplicatePostings > 0
+                ? ` · ${duplicatePostings} duplicate${duplicatePostings === 1 ? '' : 's'} removed`
+                : boardChecked ? '' : ' · no duplicates'}
               {preferenceExcluded > 0 ? ` · ${preferenceExcluded} excluded by preferences` : ''}
               {removedByResearch > 0 ? ` · ${removedByResearch} removed after research` : ''}
             </p>
