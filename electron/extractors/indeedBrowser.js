@@ -176,9 +176,17 @@ const PAGE_DELAY_MS  = [1500, 3000];
 const QUERY_DELAY_MS = [3000, 5000];
 
 const CARD_SELECTOR  = '[data-testid="jobTitle"] a, .jobTitle a, h2.jobTitle a, a[data-jk]';
-const PANEL_SELECTOR = '#jobsearch-ViewjobPaneWrapper, .jobsearch-RightPane, [data-testid="jobPanel"], #vjs-container';
-const DESC_SELECTOR  = '#jobDescriptionText, .jobsearch-jobDescriptionText, [data-testid="job-description"]';
+// Indeed's panel moved to .simple-job-description-html, which also holds a <style> block.
+const DESC_SELECTOR  = '#jobDescriptionText, .jobsearch-jobDescriptionText, [data-testid="job-description"], .simple-job-description-html';
+/** Runs in the page, so it stays self-contained: a description's text, without any CSS or script inside it. */
+export function readIndeedDescriptionText(element) {
+  const copy = element.cloneNode(true);
+  copy.querySelectorAll('style, script').forEach(node => node.remove());
+  return copy.textContent?.trim() || '';
+}
 const DESCRIPTION_EVIDENCE_MIN_CHARS = 400;
+const PANEL_CLICK_ATTEMPTS = 2;
+const PANEL_MIN_DWELL_MS = 3500;
 const MAX_ENRICH_ATTEMPTS_PER_JOB = 4;
 
 function indeedDescriptionLength(job) {
@@ -385,15 +393,26 @@ export function classifyIndeedUnavailablePage({ title = '', body = '' } = {}) {
 
 // Scroll card into view + real mouse move + click — mirrors the probe step 5/6 approach
 // that generated the mouse-event sequence Cloudflare behavioral scoring expects.
-async function humanClick(page, selector, idx) {
-  const box = await page.evaluate((sel, i) => {
-    const el = document.querySelectorAll(sel)[i];
+// The card is found by its job key at click time, because the list can change between reads.
+async function humanClickCard(page, selector, jobKey) {
+  const box = await page.evaluate((sel, wanted) => {
+    const keyOf = (el) => {
+      const direct = el.getAttribute('data-jk') || el.closest('[data-jk]')?.getAttribute('data-jk');
+      if (direct) return direct;
+      try { return new URL(el.getAttribute('href') || '', location.href).searchParams.get('jk') || ''; }
+      catch { return ''; }
+    };
+    const matches = Array.prototype.filter.call(document.querySelectorAll(sel), el => keyOf(el) === wanted);
+    const el = matches.find(item => item.getClientRects().length) || null;
     if (!el) return null;
     el.scrollIntoView({ block: 'center', behavior: 'instant' });
     const r = el.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  }, selector, idx);
-  if (!box) return false;
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    const top = document.elementFromPoint(x, y);
+    return { x, y, covered: top && !el.contains(top) && !top.contains(el) ? top.tagName.toLowerCase() + (top.id ? `#${top.id}` : '') : null };
+  }, selector, jobKey);
+  if (!box) return { clicked: false, covered: null };
   await page.mouse.move(
     box.x + (Math.random() * 8 - 4),
     box.y + (Math.random() * 8 - 4),
@@ -401,7 +420,27 @@ async function humanClick(page, selector, idx) {
   );
   await new Promise(r => setTimeout(r, 60 + Math.round(Math.random() * 100)));
   await page.mouse.click(box.x, box.y);
-  return true;
+  return { clicked: true, covered: box.covered };
+}
+
+/**
+ * Whether the panel now shows this job. A click can leave the previous job's text on screen, and saving that would
+ * score the job on another job's description, so Indeed's own "open job" key in the URL has to agree and the text has
+ * to have changed. Without a key in the URL only the text change is left to go on. Pure + testable.
+ */
+export function indeedPanelShowsJob({ jobKey, before, now }) {
+  if (!now?.text) return false;
+  if (now.openKey && now.openKey !== jobKey) return false;
+  if (before?.openKey === jobKey && now.openKey === jobKey) return true;
+  return now.text !== before?.text;
+}
+
+async function readIndeedPanel(page) {
+  // Text first: if the key changes between these two reads, the old text fails the check and the wait goes on.
+  const text = await page.$eval(DESC_SELECTOR, readIndeedDescriptionText).catch(() => '');
+  let openKey = '';
+  try { openKey = new URL(page.url()).searchParams.get('vjk') || ''; } catch { /* keep blank */ }
+  return { text, openKey };
 }
 
 // Click each job card on the current search results page and read the full
@@ -438,16 +477,17 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
     const job = keyToJob.get(key);
     if (!job) continue;
     claimedKeys.add(key);
-    targets.push({ index: i, job });
+    targets.push({ job });
   }
   if (!targets.length) return { enriched: 0, cfBlankAt: null };
 
   const limit = targets.length;
   let enriched = 0;
+  let stalePanels = 0;
 
   for (let t = 0; t < limit; t++) {
     if (signal?.aborted) break;
-    const { index, job } = targets[t];
+    const { job } = targets[t];
     if (overlayBase) {
       await updateOverlay(page, {
         ...overlayBase,
@@ -457,26 +497,36 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       }).catch(() => {});
     }
 
-    const panelBefore = await page.$eval(PANEL_SELECTOR, el => el.textContent?.slice(0, 80) || '').catch(() => '');
-
-    if (!await humanClick(page, CARD_SELECTOR, index)) continue;
-
-    // Wait up to 4s for panel to update; detect full-page navigation as a glitch.
+    const before = await readIndeedPanel(page);
+    const clickedAt = Date.now();
     let navigatedAway = false;
-    const deadline = Date.now() + 4000;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 200));
-      const url = page.url();
-      if (!url.includes('/jobs') && url.includes('/viewjob')) { navigatedAway = true; break; }
-      const panelNow = await page.$eval(PANEL_SELECTOR, el => el.textContent?.slice(0, 80) || '').catch(() => '');
-      if (panelNow && panelNow !== panelBefore) break;
+    let panelRead = null;
+    let covered = null;
+    let clickedAny = false;
+    // A second click covers one that landed on nothing. Each waits up to 4s, and a detail page means the click navigated.
+    for (let attempt = 0; attempt < PANEL_CLICK_ATTEMPTS && !panelRead && !navigatedAway; attempt++) {
+      const click = await humanClickCard(page, CARD_SELECTOR, job.jobkey);
+      if (!click.clicked) continue;
+      clickedAny = true;
+      covered = click.covered;
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 200));
+        const url = page.url();
+        if (!url.includes('/jobs') && url.includes('/viewjob')) { navigatedAway = true; break; }
+        const now = await readIndeedPanel(page);
+        if (indeedPanelShowsJob({ jobKey: job.jobkey, before, now })) { panelRead = now; break; }
+      }
     }
+    if (!clickedAny) continue;
 
     if (navigatedAway) {
       const awayUrl = page.url();
       logger.warn(`[Indeed/Browser] Card click navigated away → ${awayUrl}`);
       // Already on the full job page — grab the description before going back.
-      const awayDesc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+      let awayKey = '';
+      try { awayKey = new URL(awayUrl).searchParams.get('jk') || ''; } catch { /* keep blank */ }
+      const awayDesc = awayKey && awayKey !== job.jobkey ? '' : await page.$eval(DESC_SELECTOR, readIndeedDescriptionText).catch(() => '');
       if (awayDesc) {
         job.description = awayDesc;
         job.snippet = awayDesc;
@@ -500,10 +550,19 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
       continue;
     }
 
-    await new Promise(r => setTimeout(r, 200 + Math.round(Math.random() * 200)));
+    // Keep the pace this scrape has always run at: a panel can answer in 200ms, but clicking through a page that fast is what bot scoring looks for.
+    const dwellMs = PANEL_MIN_DWELL_MS + Math.round(Math.random() * 1500) - (Date.now() - clickedAt);
+    if (dwellMs > 0) await new Promise(r => setTimeout(r, dwellMs));
 
-    const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
-    if (description) {
+    const settled = await readIndeedPanel(page);
+    // The text can fill in during the wait, so prefer the later read unless another job has opened since.
+    const description = !panelRead ? '' : (settled.openKey && settled.openKey !== job.jobkey ? panelRead.text : settled.text || panelRead.text);
+    if (!panelRead && settled.text) {
+      // Nothing is saved, so the row stays short of evidence and the exact-page retry opens this job's own page.
+      recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'stale-panel', length: 0 });
+      stalePanels++;
+      logger.warn(`[Indeed/Browser] Panel did not open job ${job.jobkey} (card ${t + 1}/${limit}, open job ${settled.openKey || 'none'}${covered ? `, card covered by ${covered}` : ''})`);
+    } else if (description) {
       job.description = description;
       job.snippet = description;
       recordIndeedEnrichmentAttempt(job, {
@@ -527,6 +586,7 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
   }
 
   if (enriched > 0) logger.info(`[Indeed/Browser] Enriched ${enriched}/${limit} jobs with full descriptions`);
+  if (stalePanels > 0) logger.warn(`[Indeed/Browser] ${stalePanels}/${limit} cards never opened their own job; left for the exact-page retry`);
   return { enriched, cfBlankAt: null };
 }
 
@@ -684,7 +744,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
           logger.info(`[Indeed/Browser] Description retry saw structural not-found listing: ${job.jobkey || jobUrl}`);
           continue;
         }
-        const description = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+        const description = await page.$eval(DESC_SELECTOR, readIndeedDescriptionText).catch(() => '');
         if (acceptIndeedScoreSafeDescription(job, description)) {
           recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'recovered', length: description.length });
           recovered++;
@@ -745,7 +805,7 @@ export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUnti
         logger.info(`[Indeed/Browser] ${label} saw structural not-found listing: ${job.jobkey || jobUrl}`);
         continue;
       }
-      const desc = await page.$eval(DESC_SELECTOR, el => el.textContent?.trim() || '').catch(() => '');
+      const desc = await page.$eval(DESC_SELECTOR, readIndeedDescriptionText).catch(() => '');
       if (desc) {
         const scoreSafe = acceptIndeedScoreSafeDescription(job, desc);
         if (!scoreSafe) {

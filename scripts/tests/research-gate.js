@@ -376,7 +376,7 @@ export default [
         filterJobsByPostedSince: items => items,
         loadJobsHistory: async () => ({}), dedupAgainstHistory: items => ({ kept: items, removed: 0, samples: [] }),
         repairJobsMojibake: () => {}, normalizeJobsMarkup: () => {},
-        filterJobsByDescriptionEvidence, scoreSafeRowsWithBoardClosed, filterNonEnglishJobs,
+        filterJobsByDescriptionEvidence, scoreSafeRowsWithBoardClosed, filterNonEnglishJobs, sourceHealthWarningForRows: () => null,
         settleScrapedRowsForScoring: async (rows, options) => { settleCalls.push({ rows, options }); return { jobs: rows }; },
         remainingQueries: ['platform engineer'], resumeStartPages: [0], resumePageBudgets: null, resumeQueryIndexes: [0],
         ageDays: 30, location: '', normalizedCollectionLimits: { jobsPerPlatform: null }, activeSearchWindow: { startTimestamp: 0 },

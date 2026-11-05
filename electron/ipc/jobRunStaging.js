@@ -551,6 +551,8 @@ const RECEIPT_REVEAL_EXITS = new Set([
 ]);
 const RECEIPT_MAX_PAGES_WALKED = 100_000;
 
+const GOOGLE_APPLY_CAPTURE_FIELDS = Object.freeze(['reads', 'captured', 'missed', 'readFailed', 'addressRejected', 'redirectUnresolved', 'noAnchors', 'otherControls', 'ariaHidden', 'inJobCard', 'noLayout', 'pageHidden']);
+
 function sanitizeReceiptRevealOutcomes(values) {
   const outcomes = [];
   for (const value of (Array.isArray(values) ? values : []).slice(0, 20)) {
@@ -624,6 +626,9 @@ function sanitizeReceiptSource(source = {}) {
       }
     : null;
   const revealOutcomes = sanitizeReceiptRevealOutcomes(source.revealOutcomes);
+  const googleApplyCapture = Object.fromEntries(GOOGLE_APPLY_CAPTURE_FIELDS
+    .map(key => [key, Number(source.googleApplyCapture?.[key])])
+    .filter(([, value]) => Number.isSafeInteger(value) && value >= 0));
   const cap = sanitizeReceiptSourceCap(source.cap);
   const caps = sanitizeReceiptSourceCaps(source.caps);
   const stopReason = sanitizeReceiptStopReason(source.stopReason);
@@ -665,6 +670,7 @@ function sanitizeReceiptSource(source = {}) {
     ...(stopReason ? { stopReason } : {}),
     ...(warning && Object.keys(warning).length > 0 ? { warning } : {}),
     ...(revealOutcomes.length > 0 ? { revealOutcomes } : {}),
+    ...(googleApplyCapture.reads > 0 ? { googleApplyCapture } : {}),
   };
 }
 
@@ -767,6 +773,9 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     roleDropped: receiptNumber(receipt.funnel.roleDropped),
     historyDropped: receiptNumber(receipt.funnel.historyDropped),
     descriptionEvidenceDropped: receiptNumber(receipt.funnel.descriptionEvidenceDropped),
+    ...(receipt.funnel.descriptionEvidenceBySource && typeof receipt.funnel.descriptionEvidenceBySource === 'object' ? { descriptionEvidenceBySource: Object.fromEntries(
+      Object.entries(receipt.funnel.descriptionEvidenceBySource).slice(0, 16).filter(([source]) => receiptToken(source)).map(([source, counts]) => [receiptToken(source), {
+        deferred: receiptNumber(counts?.deferred), empty: receiptNumber(counts?.empty), short: receiptNumber(counts?.short) }])) } : {}),
     ...(receipt.funnel.finalDedupDropped != null ? { finalDedupDropped: receiptNumber(receipt.funnel.finalDedupDropped) } : {}),
     ...(receipt.funnel.officialDedupDropped != null ? { officialDedupDropped: receiptNumber(receipt.funnel.officialDedupDropped) } : {}),
     ...(receipt.funnel.officialLookupsIncomplete != null ? { officialLookupsIncomplete: receiptNumber(receipt.funnel.officialLookupsIncomplete) } : {}),

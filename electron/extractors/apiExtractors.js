@@ -696,8 +696,10 @@ function rowWithListingDecision(job, decision, board, evidence = null) {
 }
 
 /** Keep the same description read, then replace the liveness pair together. */
-export function linkedInEnrichedRow(job, text, decision, evidence = null) {
-  return rowWithListingDecision({ ...job, description: text, snippet: text }, decision, 'linkedin', evidence);
+export function linkedInEnrichedRow(job, text, decision, evidence = null, salary = '') {
+  const pay = String(salary || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return rowWithListingDecision({ ...job, description: text, snippet: text,
+    ...(pay && !job?.salary ? { salary: pay, salaryProvenance: 'posted' } : {}) }, decision, 'linkedin', evidence);
 }
 export function linkedInUndescribedRow(job, decision, evidence = null) {
   return rowWithListingDecision(job, decision, 'linkedin', evidence);
@@ -1048,6 +1050,8 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
         // no-desc log is self-diagnosing without a separate browser session.
         const extractDesc = function () {
           const pageTitle = (document.title || '').slice(0, 80);
+          // LinkedIn's own pay line on the page, separate from anything the description says.
+          const salary = (document.querySelector('.compensation__salary')?.textContent || '').trim();
 
           // ── JSON-LD path ─────────────────────────────────────────────────
           const ldScripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
@@ -1060,7 +1064,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
                 const div = document.createElement('div');
                 div.innerHTML = entry.description;
                 const text = (div.textContent || div.innerText || '').replace(/\s+/g, ' ').trim();
-                if (text.length > 50) return { ok: true, text };
+                if (text.length > 50) return { ok: true, text, salary };
               }
             } catch {
               // Ignore malformed structured data and fall back to selectors.
@@ -1085,7 +1089,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
             const el = document.querySelector(sel);
             if (el) {
               const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-              if (text.length > 50) return { ok: true, text };
+              if (text.length > 50) return { ok: true, text, salary };
             }
           }
 
@@ -1137,7 +1141,7 @@ export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAu
         }
 
         if (result.ok) {
-          enriched[i] = linkedInEnrichedRow(job, result.text, decision, evidence);
+          enriched[i] = linkedInEnrichedRow(job, result.text, decision, evidence, result.salary);
           if (decision && decision.verdict !== 'unknown') recordListingEvidence(enriched[i], evidence);
           successCount++;
           consecutiveEvalErrors = 0; // reset streak on success

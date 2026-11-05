@@ -78,6 +78,7 @@ import {
   buildGeoTermSet,
   jobRelevanceEvidence,
 } from '../extractors/apiExtractors.js';
+import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, sourceHealthWarning } from './jobSourceHealth.js';
 import { fetchIndeedListingsBrowser, resolveIndeedPageBudgets, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
 import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority } from './jobRunStaging.js';
@@ -5956,6 +5957,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         cap: source?.cap,
         caps: source?.caps,
         stopReason: source?.stopReason,
+        ...(source?.googleApplyCapture ? { googleApplyCapture: source.googleApplyCapture } : {}),
         revealOutcomes: Array.isArray(source?.revealOutcomes)
           ? source.revealOutcomes.slice(0, 20)
           : [],
@@ -6001,6 +6003,7 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         roleDropped: search.roleDropped,
         historyDropped: search.historyDropped,
         descriptionEvidenceDropped: search.descriptionEvidenceDropped?.total,
+        ...(search.descriptionEvidenceDropped?.bySource ? { descriptionEvidenceBySource: search.descriptionEvidenceDropped.bySource } : {}),
         finalDedupDropped: search.finalDedupDropped,
         ...(search.officialDedupDropped != null ? { officialDedupDropped: search.officialDedupDropped } : {}),
         ...(search.officialLookupsIncomplete != null ? { officialLookupsIncomplete: search.officialLookupsIncomplete } : {}),
@@ -6221,6 +6224,7 @@ const SOURCE_RUN_RESOLVE_SEVERITIES = new Set(['block', 'throttle', 'warn', 'inf
 // field. Keep this conservative list so a bad renderer payload cannot smuggle
 // job text, a URL, a query, or a location through a nominal diagnostic code.
 const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
+  'source-health-failed',
   'description-appcast-temporary-restriction',
   'description-card-unavailable',
   'description-detail-error',
@@ -7208,6 +7212,13 @@ function linkedInShortDescriptionWarning(jobs) {
  * therefore surface on a later run once its employer finishes it; recording it
  * as seen now would hide that improved version for the history retention window.
  */
+/** The same health check for rows that reach a gate through Solve or a resume, not a full search. */
+function sourceHealthWarningForRows(sourceId, rows, nodeId) {
+  const warning = sourceHealthWarning(sourceId, assessSourceHealth(rows));
+  if (warning) logger.error(`[Jobs][${nodeId}] Scrape health failed for ${sourceId}: ${warning.evidence}`);
+  return warning;
+}
+
 export function filterJobsByDescriptionEvidence(jobs, shortThreshold = JOB_DESCRIPTION_EVIDENCE_MIN_CHARS) {
   const retained = [];
   const dropped = [];
@@ -12801,6 +12812,7 @@ Return a JSON object with four arrays of search query strings:
         if (Array.isArray(result.revealOutcomes)) {
           sourceResults[sourceId].revealOutcomes = result.revealOutcomes.slice(0, 20);
         }
+        if (result.googleApplyCapture) sourceResults[sourceId].googleApplyCapture = result.googleApplyCapture;
         if (result.providerGathered != null) sourceResults[sourceId].providerGathered = result.providerGathered;
         if (result.truncated === true) sourceResults[sourceId].truncated = true;
         if (result.relevanceDropped != null) {
@@ -13680,6 +13692,23 @@ Return a JSON object with four arrays of search query strings:
     // Preserve the post-admission source universe before the scoring-evidence
     // gate. In particular, LinkedIn Solve must be able to revisit rows stranded
     // by a guest wall; `jobs` below intentionally contains only score-safe rows.
+    // Measured here because the gate below is exactly what hides a broken site: blank rows just vanish.
+    // A site that already reported a wall, rate limit or sign-in problem has its own loud warning and Solve path, and no
+    // fresh collection means an empty site is a choice the person made, not silence.
+    const sourceHealthKnownStopped = sid => (sourceResults[sid]?.warnings || []).some(item => ['block', 'paste', 'throttle'].includes(item?.severity) || item?.code === 'linkedin-rate-limited');
+    const sourceHealthFailures = assessSourceHealth(kept, {
+      silentlyEmptySourceIds: skipProviderCollection ? [] : activeSourceIds.filter(sid => countryApplicableSourceIds.has(sid)
+        && !(sourceResults[sid]?.jobs?.length) && !(sourceResults[sid]?.warnings?.length)),
+    }).filter(item => !sourceHealthKnownStopped(item.source));
+    for (const sid of new Set(sourceHealthFailures.map(item => item.source))) {
+      const warning = sourceHealthWarning(sid, sourceHealthFailures);
+      logger.error(`[Jobs][${nodeId}] Scrape health failed for ${sid}: ${warning.evidence}`);
+      const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], warnings: [], errors: 0, pagesWalked: 0, stopReasons: new Set() });
+      result.warnings = [...(result.warnings || []), warning];
+      result.healthFailures = sourceHealthFailures.filter(item => item.source === sid).map(({ field, rows, missing }) => ({ field, rows, missing }));
+      scrapeWarnings.push({ sourceId: sid, url: sourceFirstUrl[sid] || null, ...warning });
+      emitProgress({ nodeId, sourceId: sid, status: 'done', count: result.jobs?.length || 0, warning, completed: 1, total: 1 });
+    }
     const descriptionRecoveryJobs = kept.slice();
     const descriptionEvidence = filterJobsByDescriptionEvidence(kept);
     kept = descriptionEvidence.jobs;
@@ -13774,6 +13803,7 @@ Return a JSON object with four arrays of search query strings:
     for (const sid of activeSourceIds) {
       const data = sourceResults[sid] || { jobs: [], warnings: [] };
       const w = (data.warnings || []).find(x => x?.severity === 'block')
+        || (data.warnings || []).find(x => x?.code === SOURCE_HEALTH_WARNING_CODE)
         || (data.warnings || []).find(x => x?.severity === 'info')
         || (data.warnings || [])[0] || null;
       bySource[sid] = {
@@ -13793,6 +13823,7 @@ Return a JSON object with four arrays of search query strings:
       if (Array.isArray(data.revealOutcomes) && data.revealOutcomes.length > 0) {
         bySource[sid].revealOutcomes = data.revealOutcomes.slice(0, 20);
       }
+      if (data.googleApplyCapture) bySource[sid].googleApplyCapture = data.googleApplyCapture;
       if (data.pagesWalked > 0) {
         bySource[sid].pagesWalked = data.pagesWalked;
       }
@@ -17062,6 +17093,7 @@ Return a JSON object with four arrays of search query strings:
     repairJobsMojibake(items);
     normalizeJobsMarkup(items);
     items = items.map(reconcileGlassdoorSalaryFromDescription);
+    const resolveHealthWarning = sourceHealthWarningForRows(sourceId, items, nodeId);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
     const officialResolution = await resolveGenericPostings(
       overlayResolvedRecoveryRows(scoreSafeRowsWithBoardClosed(descriptionEvidence), sourceRecoverySnapshot?.jobs));
@@ -17077,12 +17109,13 @@ Return a JSON object with four arrays of search query strings:
     // renderer silently clear the source card.
     // Board-closed rows are terminal (kept by the official-posting pass or gone),
     // never "still lack a full description": no further Solve can recover them.
-    const resolveWarning = buildResolvedDescriptionWarning(
+    const resolveDescriptionWarning = buildResolvedDescriptionWarning(
       sourceId,
       result?.warning || null,
       items,
       descriptionEvidence.dropped.filter(job => listingStateRank(job) < 3),
     );
+    const resolveWarning = resolveDescriptionWarning || resolveHealthWarning;
 
     logger.info(
       `[Jobs][${nodeId}] Resolve window closed for ${sourceId}; auto-detected=${result.resolved}; ` +
@@ -17684,6 +17717,7 @@ Return a JSON object with four arrays of search query strings:
     // these chokepoints and could score a blank DOM/list-card row.
     repairJobsMojibake(items);
     normalizeJobsMarkup(items);
+    const resumeHealthWarning = sourceHealthWarningForRows(sourceId, items, nodeId);
     const descriptionEvidence = filterJobsByDescriptionEvidence(items);
     const officialResolution = await settleScrapedRowsForScoring(scoreSafeRowsWithBoardClosed(descriptionEvidence), { signal });
     items = officialResolution.jobs;
@@ -17698,7 +17732,7 @@ Return a JSON object with four arrays of search query strings:
       residualAttempts: summarizeIndeedResumeEnrichment(extracted),
     };
     const resolved = items.length > 0 || !result?.warning;
-    const warning = result?.warning || null;
+    const warning = result?.warning || resumeHealthWarning;
     const funnelDetail = `extracted=${extracted.length}, countryScopeDropped=${countryScope.dropped}, ageDropped=${ageDropped}, historyDropped=${historyDropped}, descriptionEvidenceDropped=${descriptionEvidence.dropped.length}, languageDropped=${languageFilter.dropped.length}, new=${items.length}`;
     logger.info(`[Jobs][${nodeId}] Indeed resume complete: ${funnelDetail}`);
 

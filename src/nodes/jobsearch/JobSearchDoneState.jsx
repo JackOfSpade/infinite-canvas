@@ -8,7 +8,7 @@ import { JobCollectionLimitsControl } from '../../components/JobCollectionLimits
 import { JobPlatformSelectionControl } from '../../components/JobPlatformSelectionControl';
 import { JobSearchLocationFields } from '../../components/JobSearchLocationFields';
 import { formatCompletionTimestamp } from '../../utils/completionTimestamp';
-import { hasGlassdoorCountryScopeCaveat } from '../../utils/jobCollectionScopeCaveats';
+import { describeSourceHealthFailures, hasGlassdoorCountryScopeCaveat, sourceHealthCaveats, sourceHealthSiteName } from '../../utils/jobCollectionScopeCaveats';
 import { TwoStepConfirmButton } from './TwoStepConfirmButton';
 
 // Maps a settingConflict's `setting` value (see
@@ -245,6 +245,7 @@ export function JobSearchDoneState({
   const count = skippedAi ? (scrapedCount ?? 0) : (resultCount || 0);
   const noNewResults = rerunOutcome === 'no-new-results';
   const glassdoorCountryScopeUnenforced = hasGlassdoorCountryScopeCaveat(collectionScopeCaveats);
+  const brokenSources = sourceHealthCaveats(collectionScopeCaveats);
   const validCount = (value) => (
     typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
   );
@@ -449,6 +450,13 @@ export function JobSearchDoneState({
           {reanalysisNoticeText}
         </div>
       )}
+
+      {brokenSources.map(item => (
+        <div key={item.sourceId} role="alert" className="w-full mt-1 rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1.5 text-[10px] leading-snug text-red-200">
+          <span className="font-semibold">{sourceHealthSiteName(item.sourceId)} results look broken:</span>{' '}
+          {describeSourceHealthFailures(item.failures)}. This site may have changed, so these results are incomplete. Send a bug report.
+        </div>
+      ))}
 
       {historicalNoticeCount > 0 && (
         <details className="w-full mt-1 rounded-md border border-amber-400/20 bg-amber-400/[0.035] px-2 py-1.5 text-[9px] leading-snug text-amber-100/75">

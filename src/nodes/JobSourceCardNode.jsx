@@ -1879,6 +1879,8 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const hasThrottle = warning?.severity === 'throttle';
   const hasInfo     = warning?.severity === 'info';
   const hasWarn     = warning?.severity === 'warn';
+  // Non-gating, but a broken scraper has to read as broken, not as a footnote.
+  const hasHealthFailure = warning?.code === 'source-health-failed';
   // Keep the durable-recovery poll behind the exact same gate as the Resolve
   // control. Informational cards (notably country-source-skipped) have no
   // resolver control, so polling their recovery receipt every 750ms cannot
@@ -1993,7 +1995,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // Red for hard failures/blocks, amber for throttles/skips/warn
   // (action available), platform color for healthy runs. Stale-selector errors
   // (warn severity) are amber — they need a code fix, not a captcha solve.
-  const accentColor = ((isError && !hasWarn) || hasBlock)
+  const accentColor = ((isError && !hasWarn) || hasBlock || hasHealthFailure)
     ? '#ef4444'
     : (hasThrottle || hasInfo || hasWarn || isSkipped)
       ? '#f59e0b'
@@ -2025,11 +2027,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
           <div className="flex items-center gap-1 mt-0.5">
             {isSearching && <Loader2 size={9} className="text-white/40 animate-spin shrink-0" />}
             {isDone && !warning && <CheckCircle2 size={9} className="text-emerald-400 shrink-0" />}
-            {(isError || hasBlock) && <ShieldAlert size={9} className="text-red-400 shrink-0" />}
-            {(hasThrottle || hasInfo || isSkipped) && !hasBlock && <ShieldAlert size={9} className="text-amber-400 shrink-0" />}
+            {(isError || hasBlock || hasHealthFailure) && <ShieldAlert size={9} className="text-red-400 shrink-0" />}
+            {(hasThrottle || hasInfo || isSkipped || (hasWarn && !hasHealthFailure)) && !hasBlock && <ShieldAlert size={9} className="text-amber-400 shrink-0" />}
             <span
               className="text-[9px] truncate"
-              style={{ color: (isError || hasBlock) ? '#fca5a5' : (hasThrottle || hasInfo || isSkipped) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
+              style={{ color: (isError || hasBlock || hasHealthFailure) ? '#fca5a5' : (hasThrottle || hasInfo || hasWarn || isSkipped) ? '#fcd34d' : isDone ? '#a7f3d0' : 'rgba(255,255,255,0.45)' }}
               title={warningLabel || statusLine}
             >
               {isError || isSkipped ? statusLine : warning ? warningLabel : statusLine}

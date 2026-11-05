@@ -219,6 +219,9 @@ export default [
           state: 'PRIVATE_STATE', retryable: 'PRIVATE_RETRY', trail: ['PRIVATE_TRAIL'] },
       ] });
       assert(!report.includes('PRIVATE_'));
+      const clean = buildOfficialPostingSnapshot([], { rows: [{ id: 'synthetic-clean', record: 'valid', level: 'L1', outcome: 'found', state: 'verified', retryable: false, settled: false, trail: ['comparative-match'] }] });
+      assert(clean.includes('fetch details none') && clean.includes('miss or closure settled no') && !clean.includes('research settled'),
+        'a verified card has no fetch failures to report, and its flag must not read as though research never settled');
       assert(report.includes('trail fetch-timeout') && report.includes('fetch details not recorded (failure detail missing)')
         && report.includes('semantic proof absent') && report.includes('record invalid'));
       const fetches = buildOfficialPostingSnapshot([], { rows: [{ id: 'synthetic-http', record: 'valid', level: 'L5',
@@ -4297,12 +4300,13 @@ export default [
           stagingStarted: true, cleanup: { attempted: true, cleared: true },
           funnel: {
             raw: 13, relevanceDropped: 2, deduped: 11, ageDropped: 4,
-            roleDropped: 2, historyDropped: 1, descriptionEvidenceDropped: 0, languageDropped: 1, kept: 3,
+            roleDropped: 2, historyDropped: 1, descriptionEvidenceDropped: 0, descriptionEvidenceBySource: { indeed: { deferred: 0, empty: 161, short: 0 } }, languageDropped: 1, kept: 3,
           },
           sources: {
             google: {
               count: 11, providerGathered: 13, relevanceDropped: 2,
               stopReason: 'end-of-results',
+              googleApplyCapture: { reads: 4, captured: 0, missed: 4, noLayout: 3 },
               revealOutcomes: [{
                 queryIndex: 1, queryTotal: 1, exit: 'end-of-list', count: 191, iterations: 29,
                 query: 'PRIVATE QUERY', url: 'https://private.example/?token=SECRET_URL_TOKEN',
@@ -4329,6 +4333,8 @@ export default [
           && recovery.includes('description evidence 0, non-English 1')
           && recovery.includes('`google`: 13 candidate identities traversed → 11 usable row(s) retained')
           && recovery.includes('warning rate-limit (block)')
+          && recovery.includes('Apply-on links 0/4 captured (rows missed: links with no layout 3)')
+          && recovery.includes('Description-evidence drops by site: `indeed` 161 empty, 0 deferred, 0 brief')
           && recovery.includes('`google` scroll reveal: q1/1 191 card(s) after 29 reveal pass(es) — board end marker reached')
           && recovery.includes('✅ every query reached the board end marker'),
         'a prior-process receipt preserves terminal status, timing/funnel, source warning codes, and provenance');
@@ -4444,7 +4450,8 @@ export default [
           && section.includes('1 internal Google route(s) exposed as public')
           && section.includes('1 direct Apply-on URL(s)')
           && section.includes('2 missing direct Apply-on URL(s) (1 retain a Google identity fallback)')
-          && section.includes('3 legacy `ibp=htl;jobs`')
+          && section.includes('3 with `ibp=htl;jobs`')
+          && section.includes('Apply-on capture:')
           && section.includes('3 blank raw search query')
           && section.includes('affected row 1')
           && section.includes('public=missing-direct (Google fallback available)')

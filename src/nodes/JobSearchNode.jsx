@@ -32,7 +32,7 @@ import { formatCompletionTimestamp, normalizeCompletionTimestamp } from '../util
 import { jobSearchDateDiagnosticPatch, jobSearchDateRetentionReason } from '../utils/jobSearchDateDiagnostics';
 import { filesToDropPayloads, summarizeFileExtensions } from '../utils/fileDropUtils';
 import { canAutomaticallyResolveJobSourceWarning, descriptionRecoveryCheckpointWriteFailureWarning, isDescriptionRecoverySourceWarning, isDescriptionRecoveryWarningCode, isJobSourceWarningGating, reconcileTerminalJobSourceWarningProjection, reconcileJobSourceWarnings } from '../utils/jobSourceWarningPolicy';
-import { collectionScopeCaveatsForSavedJobReanalysis, normalizeCollectionScopeCaveats } from '../utils/jobCollectionScopeCaveats';
+import { collectionScopeCaveatsForSavedJobReanalysis, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats, sourceHealthSiteName } from '../utils/jobCollectionScopeCaveats';
 import { createRunOwnershipGuard } from '../utils/runOwnership';
 import { createJobAnalysisOperationLedger, jobAnalysisOperationMatches } from '../utils/jobAnalysisOperationLedger';
 import { jobAnalysisInputDigest } from '../utils/jobAnalysisInputDigest';
@@ -4344,6 +4344,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     analysisOperation = null,
   }) => {
     jobRunIdRef.current = jobRunId;
+    for (const item of canCommit() && !cancelled() ? sourceHealthCaveats(collectionScopeCaveats) : []) {
+      addToast({ title: `${sourceHealthSiteName(item.sourceId)} results look broken`, description: `${describeSourceHealthFailures(item.failures)}. This site may have changed, so these results are incomplete. Send a bug report.`,
+        type: 'error', duration: 0, dedupeKey: `job-source-health:${currentId}:${item.sourceId}` });
+    }
     const admittedCareerSnapshotId = normalizedJobCareerSnapshotId(careerSnapshotId);
     const careerSnapshotIsStillCurrent = () => careerSnapshotBindingMatches(
       { careerSnapshotId: getNode(currentId)?.data?.careerSnapshotId },
@@ -4630,7 +4634,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
 
     return { shouldScore: true, warnings };
-  }, [activeEnabledSourceIds, updateGlobal, ensureBlockedSourceCards, cancelCleanSourceCardDismiss, data.careerData, completeJobRun, getNode, operationAuthorityFor, id]);
+  }, [activeEnabledSourceIds, addToast, updateGlobal, ensureBlockedSourceCards, cancelCleanSourceCardDismiss, data.careerData, completeJobRun, getNode, operationAuthorityFor, id]);
 
   /**
    * Drives the full pipeline. Pass `filePath` for a fresh resume parse, or

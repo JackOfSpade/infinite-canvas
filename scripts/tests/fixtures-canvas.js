@@ -526,8 +526,8 @@ export default [
         && descriptionExpansionStrategy('ziprecruiter') === 'detail-navigation'
         && descriptionExpansionStrategy('unknown') === 'none',
       'Glassdoor must stay on the list-panel path while ZipRecruiter retains bounded detail navigation');
-      assert(jobs.length === 2 && jobs[0].url.startsWith('https://fr.glassdoor.ca/'),
-        'list extraction must retain the user-facing regional Glassdoor URL without navigating to it');
+      assert(jobs.length === 2 && jobs[0].url.startsWith('https://www.glassdoor.ca/'),
+        'list extraction must keep the regional Glassdoor site without the language host a redirect put it on');
       assert(targets.map(target => target.key).join('|') === '101|102',
         'Glassdoor jl parameters must map to the exact data-jobid card identities in order');
       assert(firstIdentity === '101' && wrongIdentity === '102' && wrongIdentity !== targets[0].key,
@@ -618,7 +618,7 @@ export default [
       const DESC_STALE_THRESHOLD_VALUE = numeric('DESC_STALE_THRESHOLD');
       assert(Number.isFinite(DETAIL_BLOCK_PROBE_CARDS_VALUE) && Number.isFinite(DESC_STALE_THRESHOLD_VALUE),
         'both the probe size and the stale-timeout threshold are readable constants');
-      assert(source.includes('const DETAIL_BLOCK_COOLDOWN_MS = 120_000;')
+      assert(source.includes('const DETAIL_BLOCK_COOLDOWNS_MS = Object.freeze([120_000, 300_000, 600_000]);')
         && source.includes('const DETAIL_BLOCK_MAX_REPROBES = 3;')
         && source.includes('sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES'),
       'the detail block is time-bounded with a capped number of re-probes rather than latching for the rest of the source');
@@ -626,7 +626,7 @@ export default [
       // Walking while blocked issues no panel requests, so a 19-page remainder
       // finishes in ~40s and would never reach a 120s cooldown — the re-probe
       // would be dead code. The walk must spend that time waiting instead.
-      assert(source.includes('const cooldownRemainingMs = DETAIL_BLOCK_COOLDOWN_MS - (Date.now() - sourceDetailBlockAt);')
+      assert(source.includes('const cooldownRemainingMs = detailBlockCooldownMs(Math.max(sourceDetailReprobes, sourceDetailPartialCycles)) - (Date.now() - sourceDetailBlockAt);')
         && source.includes('await sleepUnlessAborted(cooldownRemainingMs, signal);')
         && source.includes('function sleepUnlessAborted(ms, signal)'),
       'a blocked walk waits out the remaining cooldown before the next page instead of racing to the end collecting unusable rows');

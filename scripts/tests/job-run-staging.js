@@ -4188,6 +4188,7 @@ export default [
               cap: { type: 'jobs-per-platform', limit: 39, url: 'https://MUST NOT PERSIST.example' },
               stopReason: 'feed-exhausted',
               warning: { code: 'safe-code', severity: 'info', evidence: 'MUST NOT PERSIST' },
+              googleApplyCapture: { reads: 3, captured: 1, missed: 2, noLayout: 2, leaked: 'PRIVATE', pageHidden: -1 },
               revealOutcomes: [
                 { queryIndex: 1, queryTotal: 1, exit: 'end-of-list', count: 39, iterations: 7, url: 'https://MUST NOT PERSIST.example' },
                 { queryIndex: 2, queryTotal: 1, exit: 'MUST NOT PERSIST', count: 900, iterations: 900 },
@@ -4209,6 +4210,7 @@ export default [
           && receipt?.sources?.remoteok?.cap?.type === 'jobs-per-platform'
           && receipt.sources.remoteok.cap.limit === 39
           && receipt.sources.remoteok.pagesWalked === 7
+          && JSON.stringify(receipt?.sources?.remoteok?.googleApplyCapture) === JSON.stringify({ reads: 3, captured: 1, missed: 2, noLayout: 2 })
           && receipt?.sources?.remoteok?.revealOutcomes?.length === 1
           && receipt.sources.remoteok.revealOutcomes[0].exit === 'end-of-list'
           && receipt.sources.remoteok.revealOutcomes[0].count === 39,

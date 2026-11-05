@@ -5,6 +5,7 @@ import { settlePreFenceCanvasBatches } from '../utils/quitCommitSettle';
 import { jobWorkflowNeedsQuitPause, savedWorkflowQuitPausePatch } from '../utils/quitWorkflowPause';
 import { jobBoardHasSavedAiContinuation } from '../utils/jobBoardSavedAiContinuation';
 import React, { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { describeSourceHealthFailures, sourceHealthCaveats, sourceHealthSiteName } from '../utils/jobCollectionScopeCaveats';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { LayoutGrid } from 'lucide-react';
 
@@ -956,6 +957,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // edge direction — ConnectionMode.Loose). Returns a STRING signature so the
   // selector is stable (re-renders only when a connection or a module's job count
   // changes), then we derive the rich list via getNodes() keyed on that.
+  // Read from each search's saved result, so a broken scraper stays visible on the Board after a restart.
+  const brokenSourceNotices = useStore(useCallback(store => {
+    const connected = store.edges.filter(edge => edge.source === id || edge.target === id).flatMap(edge => [edge.source, edge.target]);
+    const selected = new Set(getSelectedConnectedJobSearchIds(data.selectedSearchModuleIds, connected));
+    const seen = new Set();
+    for (const node of store.nodes) {
+      if (node.type !== 'jobhub' || !selected.has(node.id)) continue;
+      for (const item of sourceHealthCaveats(node.data?.collectionScopeCaveats)) seen.add(`${sourceHealthSiteName(item.sourceId)}: ${describeSourceHealthFailures(item.failures)}`);
+    }
+    return [...seen].join('\n');
+  }, [id, data.selectedSearchModuleIds]));
   const incompleteOfficialLookups = useStore(useCallback(store => countBoardOfficialRetries(store.nodes, id), [id]));
   // Every path that writes a lookup result (Board refresh, a card's own lookup, Generate) changes this.
   const closedCardIds = useStore(useCallback(store => store.nodes
@@ -7147,6 +7159,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
 
       {hubState === 'done' && (
         <JobBoardDoneState
+          brokenSourceNotices={brokenSourceNotices ? brokenSourceNotices.split('\n') : []}
           resultCount={data.resultCount}
           closedCardCount={closedCardCount}
           moduleCount={data.moduleCount}

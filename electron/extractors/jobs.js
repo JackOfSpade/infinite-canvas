@@ -116,6 +116,9 @@ export const GLASSDOOR_EXTRACTOR = `
     if (typeof value !== 'string' || !value.trim()) return '';
     try {
       const parsed = new URL(value, gdOrigin + '/');
+      // Glassdoor can redirect this browser to a language host such as fr.glassdoor.ca. The saved link
+      // should open in the person's own language, and the same job on two hosts must keep one address.
+      parsed.hostname = parsed.hostname.replace(/^[a-z]{2}\\.(glassdoor\\.)/i, 'www.$1');
       return /^https?:$/.test(parsed.protocol) ? parsed.href : '';
     } catch { return ''; }
   };

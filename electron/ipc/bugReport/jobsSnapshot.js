@@ -151,6 +151,9 @@ const MAX_JOB_LINK_STRING_CHARS = 8 * 1024 * 1024;
 const MAX_JOB_LINK_FIELD_CHARS = 4_096;
 const MAX_JOB_LINK_SOURCES = 40;
 
+const APPLY_OPTION_STATES = ['absent', 'empty', 'present'];
+const MIN_APPLY_OPTION_READS_FOR_WARNING = 5;
+
 function collectJobLinkRows(nodes) {
   const unique = new Map();
   const seenObjects = new WeakSet();
@@ -200,9 +203,15 @@ function collectJobLinkRows(nodes) {
       location: field(value, 'location', 512),
       url: field(value, 'url'),
       googleCardUrl: field(value, 'googleCardUrl'),
+      applyOptionsState: 'absent',
     };
+    try {
+      if (Array.isArray(value.applyOptions)) row.applyOptionsState = value.applyOptions.length > 0 ? 'present' : 'empty';
+    } catch { omissions.add('unreadable value'); }
     const key = [row.source, row.title, row.company, row.location, row.url || row.googleCardUrl].join('\u0000');
     if (!unique.has(key)) unique.set(key, row);
+    // Copies of a row can differ in age: the most complete read counts.
+    else if (APPLY_OPTION_STATES.indexOf(row.applyOptionsState) > APPLY_OPTION_STATES.indexOf(unique.get(key).applyOptionsState)) unique.get(key).applyOptionsState = row.applyOptionsState;
     return true;
   };
 
@@ -330,7 +339,11 @@ export function buildJobLinkSnapshot(nodes) {
     const count = field => shapes.filter(shape => shape[field]).length;
     const fallbackCount = shapes.filter(shape => shape.publicMissing && shape.identityFallbackAvailable).length;
     lines.push(`- \`google\`: ${sourceRows.length} total · ${count('direct')} direct Apply-on URL(s) · ${count('publicInternal')} internal Google route(s) exposed as public · ${count('publicMissing')} missing direct Apply-on URL(s)${fallbackCount ? ` (${fallbackCount} retain a Google identity fallback)` : ''}`);
-    lines.push(`  - Identity-route health: ${count('legacy')} legacy \`ibp=htl;jobs\` · ${count('blankQuery')} blank raw search query (title/company/location are synthesized when fallback opening is needed) · ${count('missingId')} missing htidocid/docid · ${count('webhp')} \`/webhp\` route`);
+    lines.push(`  - Identity-route health: ${count('legacy')} with \`ibp=htl;jobs\` (Google's current share-route shape, not a defect) · ${count('blankQuery')} blank raw search query (title/company/location are synthesized when fallback opening is needed) · ${count('missingId')} missing htidocid/docid · ${count('webhp')} \`/webhp\` route`);
+    // Whether the detail-panel read ran is recorded on each row, so this survives a restart, unlike the per-run counters.
+    const applyState = state => shapes.filter(shape => shape.row.applyOptionsState === state).length;
+    const [optionsPresent, optionsEmpty] = [applyState('present'), applyState('empty')];
+    lines.push(`  - Apply-on capture: ${optionsPresent} row(s) with options · ${optionsEmpty} read with none · ${applyState('absent')} with no read recorded${optionsPresent === 0 && optionsEmpty >= MIN_APPLY_OPTION_READS_FOR_WARNING ? ' · ⚠️ no read found an Apply-on control, so its links may no longer be readable' : ''}`);
     // Missing public destinations and broken identities are actionable. A blank
     // raw q on its own is ordinary current Google markup: click-time repair
     // safely synthesizes it, so it must not crowd actually linkless rows out of
@@ -971,6 +984,10 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
     const languageDropped = nonnegativeCount(funnel.languageDropped) || 0;
     const languageDropDetail = languageDropped > 0 ? `, non-English ${languageDropped}` : '';
     lines.push(`  - Initial-search funnel: ${admissionFlow} · dropped: relevance ${funnel.relevanceDropped}, confirmed cross-border ${funnel.countryScopeDropped || 0}, age ${funnel.ageDropped}, role ${funnel.roleDropped}, history ${funnel.historyDropped}, description evidence ${funnel.descriptionEvidenceDropped}${languageDropDetail}${boardClosedDetail}${officialRetryDetail}${recoveryDetail}${Number.isFinite(terminalScoreReady) && terminalScoreReady !== funnel.kept && recoveryNet == null ? ' · later source recovery changed the terminal score-ready count shown above' : ''}`);
+    const evidenceBySource = Object.entries(funnel.descriptionEvidenceBySource || {});
+    if (evidenceBySource.length > 0) {
+      lines.push(`  - Description-evidence drops by site: ${evidenceBySource.map(([source, counts]) => `\`${source}\` ${counts.empty || 0} empty, ${counts.deferred || 0} deferred, ${counts.short || 0} brief`).join(' · ')}`);
+    }
   }
   const pendingLivenessRows = Object.values(receipt.listingLiveness || {})
     .reduce((total, entry) => total + (nonnegativeCount(entry?.aiPending) || 0), 0);
@@ -1004,6 +1021,13 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       const boardClosedDetailKept = nonnegativeCount(source.boardClosedDetailKept);
       if (boardClosedDetailKept != null && boardClosedDetailKept > 0) {
         parts.push(`${boardClosedDetailKept} board-closed detail listing${boardClosedDetailKept === 1 ? '' : 's'} kept with their description`);
+      }
+      const capture = source.googleApplyCapture;
+      if (nonnegativeCount(capture?.reads) > 0) {
+        const causes = [['readFailed', 'read errors'], ['addressRejected', 'links rejected'], ['redirectUnresolved', 'Google redirects not followed'], ['noAnchors', 'no Apply-on link in the page'], ['otherControls', 'other Apply controls'],
+          ['ariaHidden', 'links in hidden panels'], ['inJobCard', 'links in job cards'], ['noLayout', 'links with no layout'], ['pageHidden', 'page hidden']]
+          .filter(([key]) => nonnegativeCount(capture[key]) > 0).map(([key, label]) => `${label} ${nonnegativeCount(capture[key])}`);
+        parts.push(`Apply-on links ${nonnegativeCount(capture.captured) ?? 0}/${capture.reads} captured${causes.length ? ` (rows missed: ${causes.join(', ')})` : ''}`);
       }
       const pagesWalked = nonnegativeCount(source.pagesWalked);
       if (pagesWalked != null) {
@@ -5510,6 +5534,7 @@ const SOURCE_RUN_RESOLVE_RECOMMENDATIONS = new Set(['retry', 'skip', 'none']);
 const SOURCE_RUN_RESOLVE_CHECKPOINTS = new Set(['saved', 'unchanged', 'not-ready', 'failed', 'not-applicable']);
 const SOURCE_RUN_RESOLVE_SEVERITIES = new Set(['block', 'throttle', 'warn', 'info']);
 const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
+  'source-health-failed',
   'description-appcast-temporary-restriction',
   'description-card-unavailable',
   'description-detail-error',

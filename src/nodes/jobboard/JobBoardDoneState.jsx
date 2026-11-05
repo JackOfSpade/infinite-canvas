@@ -49,6 +49,7 @@ export function JobBoardDoneState({
   onCancelOfficialPostingRefresh,
   officialPostingRefreshing = false,
   officialPostingProgress = null,
+  brokenSourceNotices = [],
   researchRemoved,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -122,6 +123,12 @@ export function JobBoardDoneState({
           )}
         </>
       )}
+
+      {brokenSourceNotices.map(notice => (
+        <div key={notice} role="alert" className="mt-2 w-full rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1.5 text-[10px] leading-snug text-red-200">
+          <span className="font-semibold">Search results look broken.</span> {notice}. This Board may be missing jobs from that site. Send a bug report.
+        </div>
+      ))}
 
       {!locked && !stale && !officialPostingRefreshing && onRetryIncompleteOfficialPostings && retryableLookups > 0 && (
         <button

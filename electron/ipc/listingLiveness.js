@@ -25,7 +25,7 @@ const closedRules = Object.freeze([
 
 const rule = (id, selectors) => Object.freeze({ id, version: 1, state: 'shadow', selectors: Object.freeze(selectors) });
 const commonDescriptionSelectors = Object.freeze([
-  '#job-details', '#jobDescriptionText', '[data-testid="job-description"]',
+  '#job-details', '#jobDescriptionText', '.simple-job-description-html', '[data-testid="job-description"]',
   '.jobs-description-content__text', '.jobs-description__content',
   '.jobs-box__html-content', '.description__text', '.show-more-less-html__markup',
   '[itemprop="description"]', '.job-description', '.jobDescription',
@@ -47,7 +47,7 @@ export const LISTING_LIVENESS_RULES = Object.freeze({
     [rule('linkedin-enabled-apply', ['button.jobs-apply-button', 'a.jobs-apply-button'])],
   ),
   indeed: boardRules(
-    ['#jobDescriptionText', '.jobsearch-JobComponent-description', '[data-testid="jobDescriptionText"]'],
+    ['#jobDescriptionText', '.jobsearch-JobComponent-description', '[data-testid="jobDescriptionText"]', '.simple-job-description-html'],
     [rule('indeed-enabled-apply', ['#indeedApplyButton', 'button[data-testid="apply-button"]'])],
   ),
   ziprecruiter: boardRules(
