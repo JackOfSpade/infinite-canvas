@@ -212,10 +212,13 @@ async function withRenderedPages(leads, snapshots, { render, signal }) {
 }
 
 /** Snapshots for every lead, trimmed so the judgment prompt stays within its bound. */
-export async function snapshotOfficialPostingLeads(leads, { fetch, render, signal } = {}) {
+export async function snapshotOfficialPostingLeads(leads, { fetch, render, signal, observe } = {}) {
   const snapshots = await Promise.all(leads.map(lead => snapshotOfficialPostingLead(lead, { fetch, signal })
     .catch(() => ({ id: lead.id, at: new Date().toISOString(), read: false }))));
+  // A rendered snapshot replaces the plain download's outcome, so read health needs the plain ones kept.
+  const plain = observe ? [...snapshots] : null;
   if (render) await withRenderedPages(leads, snapshots, { render, signal });
+  try { observe?.({ leads, plain, final: snapshots }); } catch { /* Watching the reads never changes them. */ }
   return trimOfficialPostingSnapshots(snapshots);
 }
 

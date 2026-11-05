@@ -18,6 +18,7 @@ import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse } from './officialPostingBridge.js';
 import { CLAUDE_TASK_CONCURRENCY } from './claudeTaskWorker.js';
+import { createOfficialPostingReadMonitor } from './officialPostingReadHealth.js';
 import { snapshotOfficialPostingLeads, trimOfficialPostingSnapshots } from './officialPostingSnapshot.js';
 import { createOfficialPostingRenderSession, renderOfficialPostingPage } from './officialPostingRenderedPage.js';
 import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS, UNREADABLE_PAGE_TEXT_CHARS } from './officialPostingJudge.js';
@@ -595,7 +596,7 @@ export async function resolveOfficialPostings(jobs, {
     let { leads } = initial; const { total } = initial;
     if (!leads.length) return unresolved(member, ['worker-research', 'research-miss']);
     // One download of every lead, shared by both rounds: it is the judges' main input, since WebFetch cannot run JavaScript.
-    let snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, render: renderSession, signal });
+    let snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe });
     const counts = discovery.get(member);
     counts.snapshotReads = snapshots.filter(snapshot => snapshot.read === true).length;
     counts.snapshotFailures = snapshots.filter(snapshot => snapshot.read !== true).length;
@@ -641,7 +642,7 @@ export async function resolveOfficialPostings(jobs, {
     }
     if (added.length) {
       leads = [...leads, ...added];
-      snapshots = trimOfficialPostingSnapshots([...snapshots, ...await snapshotOfficialPostingLeads(added, { fetch: snapshotSession.fetch, render: renderSession, signal })]);
+      snapshots = trimOfficialPostingSnapshots([...snapshots, ...await snapshotOfficialPostingLeads(added, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe })]);
     }
     const second = await judgePair(member, leads, 2, snapshots);
     answers.push(...Object.values(second.answers));
@@ -689,6 +690,8 @@ export async function resolveOfficialPostings(jobs, {
   // One invocation shares successful/in-flight downloads across rows. Failure
   // results never outlive their subscribers, and a later lookup starts fresh.
   const snapshotSession = createOfficialPostingFetchSession({ fetch: snapshotFetch, signal, cacheFailures: false, hostBreaker: false });
+  // Injected downloads are a test or replay, which must not raise alarms about the real network.
+  const readHealth = snapshotFetch === fetchOfficialPosting ? createOfficialPostingReadMonitor({ signal }) : { observe: undefined, flush() {} };
   // One job is someone waiting on this card (Generate or its own lookup), so it goes ahead of a Board's queue.
   const renderSession = snapshotRender ? createOfficialPostingRenderSession(
     (url, options) => snapshotRender(url, { ...options, priority: members.length === 1 })) : null;
@@ -735,6 +738,7 @@ export async function resolveOfficialPostings(jobs, {
     return { jobs: resolved, telemetry: stats, expiryCandidates: rows.map(() => []) };
   } finally {
     await Promise.allSettled(judgmentTasks);
+    readHealth.flush();
     snapshotSession.dispose();
   }
 }

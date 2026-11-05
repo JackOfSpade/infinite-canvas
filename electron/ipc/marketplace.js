@@ -23,6 +23,7 @@ import { getCurrentIpcRequestContext, handleSafe } from './ipcUtils.js';
 import { scrapeMultiple } from './browserPool.js';
 import { fetchHtmlAuthed, getSellMonitorConfig } from './stealthBrowser.js';
 import { getMarketplaceWatchUrls } from './settings.js';
+import { accumulateMarketplaceObservations, assessHubScanWithHistory, assessMarketplaceScrape, reportMarketplaceScrapeHealth } from './marketplaceScrapeHealth.js';
 import { finalizeTerminalHubScan, mergePreparedHubScanSections, packPreparedHubScans, prepareHubPages, scanPreparedHubPageBatch } from './listingStatusCheck.js';
 import { openCaptchaResolveWindow, getLastCaptchaHandoffAt } from './browser/authWindows.js';
 import { shouldUseNativeRead, readHubUrlsViaNativeChrome } from './browser/nativeChromeReader.js';
@@ -817,7 +818,7 @@ export function classifyCompScrapeFailure(error, sourceId, sessionCache = {}) {
     };
   }
   return {
-    sourceId, severity: 'warn', code: 'stale-selectors',
+    sourceId, severity: 'warn', code: 'stale-selectors', ...(notConnected ? { platformLoggedOut: true } : {}),
     // 1400, not 700: the diag payload alone (bodyHead≤200 + card0≤240 + prefix/
     // counts/path/title) commonly runs 750-900 chars, so 700 silently cut the
     // card0=[…] class skeleton off mid-token — exactly the new title/price
@@ -1047,7 +1048,7 @@ async function fetchApiMarketplaceSources(query, signal = null, emit = null, cat
       const items = Array.isArray(result) ? result : (result?.items || []);
       const warning = Array.isArray(result) ? null : (result?.warning || null);
       const url = Array.isArray(result) ? null : (result?.url || null);
-      const settled = { sourceId, items, warning, effectiveQuery, url, category: sourceCategory };
+      const settled = { sourceId, items, warning, effectiveQuery, url, category: sourceCategory, shapeMissing: result?.shapeMissing };
       if (onSourceSettled) await onSourceSettled(sourceId, checkpointApiResult(settled));
       emit?.(sourceId, { status: 'done', count: items.length, warning });
       return settled;
@@ -1133,6 +1134,7 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
   const provenanceBySource = {};  // url + claimed sold/active category per source
   for (const t of tasks) provenanceBySource[t.id] = { url: t.url, category: t.category };
   const apiQueryBySource = {};    // effective (possibly-rewritten) query per API source
+  const shapeBySource = {};       // API sources: flag when the page/response lacked its expected structure, null when it had it
   const samplesBySource = {};     // top-few {title, price} per source — for the report's irrelevance check
   // A small sample of what a source ACTUALLY returned. Counts alone can't reveal
   // an off-target match (PriceCharting's fuzzy catalog hits, Poshmark accessories,
@@ -1162,6 +1164,7 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
   for (const res of apiResults) {
     if (res.warning) scrapeWarnings.push({ sourceId: res.sourceId, ...res.warning });
     bySource[res.sourceId] = Array.isArray(res.items) ? res.items.length : 0;
+    if (res.shapeMissing !== undefined) shapeBySource[res.sourceId] = res.shapeMissing;
     if (typeof res.effectiveQuery === 'string') {
       apiQueryBySource[res.sourceId] = { query: res.effectiveQuery, url: res.url || null };
     }
@@ -1175,7 +1178,7 @@ async function scrapeCompsForQuery(query, { emit, signal, sessionCache, category
     if (res.items.length > 0) comps[res.category === 'active' ? 'active' : 'sold'].push(...res.items);
   }
 
-  return { comps, scrapeWarnings, bySource, yieldBySource, provenanceBySource, apiQueryBySource, samplesBySource, sourceCount: tasks.length + apiSourceIds.length };
+  return { comps, scrapeWarnings, bySource, yieldBySource, shapeBySource, provenanceBySource, apiQueryBySource, samplesBySource, sourceCount: tasks.length + apiSourceIds.length };
 }
 
 /**
@@ -1723,6 +1726,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
     const provenanceBySource = {};  // url + claimed category per source
     const apiQueryBySource = {};    // effective query per API source
     const samplesBySource = {};     // last-item sample of extracted comp titles per source
+    let healthObservations = null;  // yield and shape totals across every item, for the scrape-health alarms
     let sourceCount = 0;
     for (let k = 0; k < items.length; k++) {
       if (signal.aborted) throw new Error('Window closed');
@@ -1746,6 +1750,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       });
       for (const [sid, n] of Object.entries(res.bySource)) bySource[sid] = (bySource[sid] || 0) + n;
       Object.assign(yieldBySource, res.yieldBySource);
+      healthObservations = accumulateMarketplaceObservations(healthObservations, res);
       Object.assign(provenanceBySource, res.provenanceBySource);
       Object.assign(apiQueryBySource, res.apiQueryBySource);
       Object.assign(samplesBySource, res.samplesBySource);
@@ -1773,6 +1778,7 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
         sourceWarnings[w.sourceId] = { code: w.code, severity: w.severity, evidence: w.evidence };
       }
     }
+    reportMarketplaceScrapeHealth(assessMarketplaceScrape({ ...healthObservations, sourceWarnings }));
     // Did a captcha-resolve browser-close land DURING this scrape? We hold the
     // sell-side lock, so a handoff inside our window can only be a JOB-side
     // captcha-resolve (un-gated) closing the shared browser — which would have
@@ -3036,6 +3042,8 @@ Be confident — don't mark everything "good." If you're unsure, lean "good" unl
         try {
           // Scrape + resolve transport-level outcomes only — no LLM call yet.
           const prepared = await prepareHubPages({ urlSpecs, platformId, signal });
+          const hubHealth = assessHubScanWithHistory(prepared);
+          if (hubHealth) reportMarketplaceScrapeHealth([hubHealth]);
           if (prepared.llmInputs.length === 0) {
             // Every hub page already resolved to a terminal outcome (auth wall,
             // fetch error, empty) — there is nothing to hand off to an AI, so

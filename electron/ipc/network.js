@@ -4,6 +4,7 @@
 import { handleSafe, abortNodeTasks, abortNodeTasksAndWait, nodeCancellationError } from './ipcUtils.js';
 import electronPkg from 'electron';
 import { decodeHtmlEntities } from '../../src/utils/textEncoding.js';
+import { listScrapeAlarms } from './scrapeAlarms.js';
 const { ipcMain } = electronPkg;
 
 /** Pre-compiled once at module level to avoid recompilation on every fetch. */
@@ -40,6 +41,8 @@ export function registerNetworkHandlers({ onNodeDeleted = null, ipcMainInstance 
       manualAiRunIds: [manualAiRunId, ...(Array.isArray(manualAiRunIds) ? manualAiRunIds : [])],
     });
   });
+
+  registerHandler('get-scrape-alarms', async () => ({ alarms: listScrapeAlarms() }));
 
   registerHandler('fetch-url-title', async (event, url, signal) => {
     try {

@@ -152,10 +152,10 @@ export function nativeReadToFetchResult({ requestedUrl, finalUrl, title, html, e
     if (isAppleEventsJsDisabledError(error)) {
       return { ...base, ok: false, appleEventsDisabled: true, error: 'Native read needs Chrome → View → Developer → “Allow JavaScript from Apple Events” (it is currently OFF).' };
     }
-    return { ...base, ok: false, error: `Native Chrome read failed: ${error}` };
+    return { ...base, ok: false, readFailure: true, error: `Native Chrome read failed: ${error}` };
   }
   if (sentinel === NR_ERR_NOWINDOW) {
-    return { ...base, ok: false, error: 'Native Chrome window never appeared (spawn failed or was closed).' };
+    return { ...base, ok: false, readFailure: true, error: 'Native Chrome window never appeared (spawn failed or was closed).' };
   }
   const landed = String(finalUrl || requestedUrl || '');
   const landedLower = landed.toLowerCase();
@@ -178,7 +178,7 @@ export function nativeReadToFetchResult({ requestedUrl, finalUrl, title, html, e
     return { ...base, ok: false, loggedOut: true, error: `Native Chrome landed on ${landed} (HTTP 200) but the page is a client-rendered LOGIN FORM — logged out despite the auth-gated hub URL; this window will close, sign in when Check All reopens a fresh one.` };
   }
   if (!html || html.length < 200) {
-    return { ...base, ok: false, error: `Native Chrome returned an empty page (${html ? html.length : 0} bytes) at ${landed}.` };
+    return { ...base, ok: false, readFailure: true, error: `Native Chrome returned an empty page (${html ? html.length : 0} bytes) at ${landed}.` };
   }
   return { ...base, ok: true, status: 200, finalUrl: landed, html };
 }

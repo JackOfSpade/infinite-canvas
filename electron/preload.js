@@ -241,6 +241,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onScoringProgress: createListener('scoring-progress'),
   // Grounded cash-pay research follows fit scoring. Payload: { nodeId, processed, total }.
   onCompensationProgress: createListener('compensation-progress'),
+  getScrapeAlarms: () => ipcRenderer.invoke('get-scrape-alarms'),
+  onScrapeAlarmsChanged: createListener('scrape-alarms-changed'),
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
   resumeJobSource:  (args) => ipcRenderer.invoke('resume-job-source', args),
   // Crash/quit recovery: detect an incomplete prior run, or clear it. Resuming

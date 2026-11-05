@@ -24,6 +24,8 @@ import { getRandomUA, getSessionProfile } from './browser/antiDetectProfiles.js'
 import { createBackgroundScrapePage, prepareBackgroundScrapeLaunchOptions } from './browser/backgroundScrapeBrowser.js';
 import { clearOwnedBrowserTabRestoreState } from './browser/tabRestoreState.js';
 import { saveDiceApiKey } from './settings.js';
+import { reportScrapeHealth } from './scrapeAlarms.js';
+import { diceKeyHarvestReport } from './jobSourcePageShape.js';
 import { isProfileLockCollision, recordLaunchCollision } from './browserLaunchTelemetry.js';
 import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
@@ -1305,7 +1307,8 @@ async function settleWithin(promise, timeoutMs, label) {
   }
 }
 
-export async function refreshDiceApiKey(signal = null) {
+/** `options.browserFallback` is a test seam; it replaces the headed browser step. */
+export async function refreshDiceApiKey(signal = null, options = null) {
   // Bail BEFORE starting anything for a caller that is already cancelled.
   // Starting the refresh here would run a ~15s bundle fetch plus (on failure) a
   // VISIBLE Chrome fallback for a run the user already stopped, and none of it
@@ -1321,12 +1324,16 @@ export async function refreshDiceApiKey(signal = null) {
       // Primary: extract key from dice.com JS bundle via plain HTTP fetch.
       // No browser launched, no Sift fingerprinting — avoids the
       // fresh-userDataDir / no-cookies signal that blocked the XHR approach.
-      const bundleKey = await _fetchDiceKeyFromBundle();
-      if (bundleKey) return bundleKey;
+      const scan = { scriptsRead: 0 };
+      const bundleKey = await _fetchDiceKeyFromBundle(scan);
+      if (bundleKey) { reportDiceKeyHarvest({ keyFound: true, scriptsRead: scan.scriptsRead }); return bundleKey; }
 
       // Fallback: browser to intercept the search XHR header, in case Dice
       // moves the key to a runtime config not embedded in the JS bundle.
-      return await _browserRefreshDiceApiKey();
+      const browserKey = await (options?.browserFallback || _browserRefreshDiceApiKey)();
+      // The smoke test never runs that fallback, so a miss there proves nothing.
+      if (browserKey || !isBackgroundE2E()) reportDiceKeyHarvest({ keyFound: Boolean(browserKey), scriptsRead: scan.scriptsRead });
+      return browserKey;
     } finally {
       _diceRefreshInFlight = null;
     }
@@ -1343,7 +1350,13 @@ export async function refreshDiceApiKey(signal = null) {
   return awaitPromiseOrAbort(inFlight, signal);
 }
 
-async function _fetchDiceKeyFromBundle() {
+function reportDiceKeyHarvest(outcome) {
+  const report = diceKeyHarvestReport(outcome);
+  if (report) reportScrapeHealth({ key: 'job-source:dice:key-harvest', surface: 'job site reads', site: 'Dice', ...report });
+}
+
+/** `scan.scriptsRead` is filled with how many page scripts were downloaded and searched, so a miss can be told from a page that never loaded. */
+async function _fetchDiceKeyFromBundle(scan = {}) {
   const ua = getRandomUA();
   const baseHeaders = { 'User-Agent': ua, 'Accept-Language': 'en-US,en;q=0.9' };
 
@@ -1409,6 +1422,7 @@ async function _fetchDiceKeyFromBundle() {
         });
         if (!r.ok || foundKey) return;
         const code = await r.text();
+        scan.scriptsRead = (scan.scriptsRead || 0) + 1;
         const m = code.match(DICE_API_KEY_RE);
         if (m?.[1] && !foundKey) {
           foundKey = m[1];

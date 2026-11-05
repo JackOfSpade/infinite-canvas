@@ -60,6 +60,7 @@ import { isBackgroundE2E } from '../utils/backgroundE2e.js';
 import { validateIssueReportDescription } from '../../src/utils/issueReportDescription.js';
 import { parseWorkspaceText } from './workspaceContentPool.js';
 import { describeBoardMergeInputs } from '../../src/utils/jobBoardMergeSummary.js';
+import { scrapeAlarmsMarkdown } from './scrapeAlarms.js';
 
 // Captured at module load: the moment this code first ran in the main process.
 // Used to detect when a user edits a source file but forgets to restart
@@ -2856,7 +2857,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 ## Issue Description
 ${description}
 ${filterSummaryMarkdown}
-
+${scrapeAlarmsMarkdown()}
 ## Application State Summary
 - Nodes: ${sectionOmitted('nodes') ? '*(omitted by filter code)*' : (nodes ? nodes.length : 0)}
 - Edges: ${sectionOmitted('edges') ? '*(omitted by filter code)*' : (edges ? edges.length : 0)}

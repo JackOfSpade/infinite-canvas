@@ -5184,7 +5184,7 @@ export default [
         && fanOut.includes('await abortableDelay(waitMs, signal);')
         && !fanOut.includes('await new Promise(res => setTimeout(res, waitMs))')
         && fanOut.includes('const caps = [...new Map(')
-        && fanOut.includes('stopReasons, pagesFetched, cap, caps }'),
+        && fanOut.includes('stopReasons, pagesFetched, cap, caps, '),
       'query fan-out must aggregate Dice page counts, retain every finite extractor cap, and make paced dispatch waits abortable');
       const completeProviderTotals = [401, null].every(value => (
         value != null && value !== '' && Number.isFinite(Number(value))

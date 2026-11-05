@@ -137,6 +137,7 @@ import { bumpListingLivenessCount, listingLivenessTelemetryBlock, mergeListingLi
 import { listingEvidenceKey, readListingEvidence } from './listingLivenessStore.js';
 import { createListingLivenessSearchSession } from './listingLivenessSearch.js';
 import { recheckPendingListings } from './listingLivenessRecheck.js';
+import { holdNotFoundBursts } from './listingLivenessHealth.js';
 import { classifyResearchEligibility, isResearchEligible, RESEARCH_ELIGIBILITY, summarizeResearchEligibility } from './researchGate.js';
 import { createListingLivenessProbe } from './listingLivenessProbe.js';
 import { carryListingAlternates, collectListingAlternates, restoreListingAlternates } from './listingLivenessAlternates.js';
@@ -8522,6 +8523,7 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
     ? results.reduce((sum, r) => sum + Number(r.providerTotal), 0)
     : null;
   const truncated = results.some(r => r?.truncated === true);
+  const pageShapeFailures = results.reduce((sum, r) => sum + (Number.isSafeInteger(r?.pageShapeFailures) && r.pageShapeFailures > 0 ? r.pageShapeFailures : 0), 0);
   // MEASURED, not inferred: rows this fan-out's own dedup removed, i.e. the same
   // listing returned by more than one of the run's queries. Deriving it as a
   // residual would silently relabel any other unexplained shortfall as dedup.
@@ -8561,7 +8563,7 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   // `cap` remains for old callers/receipts, while `caps` preserves the real
   // union when different fan-out queries stopped at distinct finite limits.
   const cap = caps[0] || null;
-  return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace, stopReasons, pagesFetched, cap, caps };
+  return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace, stopReasons, pagesFetched, cap, caps, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
 }
 
 // Keep the pacing/cancellation behavior observable without exposing the
@@ -8574,6 +8576,8 @@ export function __queryFanOutForTests(queries, fetcher, signal, options = {}) {
   } = options || {};
   return queryFanOut(queries, fetcher, signal, concurrency, minIntervalMs, label);
 }
+
+export const __fetchHttpSourcesForTests = (...args) => fetchHttpSources(...args);
 
 async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
@@ -8703,6 +8707,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const sourceCap = Array.isArray(result) ? null : (result?.cap ?? null);
       const sourceCaps = Array.isArray(result) ? [] : (Array.isArray(result?.caps) ? result.caps : []);
       const pagesFetched = Array.isArray(result) ? 0 : Math.max(0, Number(result?.pagesFetched) || 0);
+      const pageShapeFailures = Array.isArray(result) ? 0 : (Number.isSafeInteger(result?.pageShapeFailures) && result.pageShapeFailures > 0 ? result.pageShapeFailures : 0);
       const jobs = rawJobs;
       const capDropped = 0;
       const returnedUrls = new Set(jobs.map(job => job?.url).filter(Boolean));
@@ -8736,7 +8741,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
             && remoteFeedProvenance.some(entry => entry?.fanoutStopped === true));
         await stageSource({ sourceId, jobs, warning, retryablePartial });
       }
-      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace };
+      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
     } catch (error) {
       // Ownership loss is pipeline-wide, not a source-level provider error.
       // Let the search handler return its stable resumeRunMissing/mismatch
@@ -10685,7 +10690,11 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   // a real fit score (settle-board-research and the Board's official stage).
   // Board-closed rows the evidence gate dropped arrive here too (see
   // scoreSafeRowsWithBoardClosed) and are kept or removed by what is known now.
-  const settleScrapedRowsForScoring = async (rows, { signal, alternateReceipts = null } = {}) => {
+  const settleScrapedRowsForScoring = async (incomingRows, { signal, alternateReceipts = null } = {}) => {
+    // A burst of 404s on one board looks like a broken route, so those closes are undone before anything drops a row.
+    const notFoundHold = holdNotFoundBursts(incomingRows);
+    for (const [board, count] of Object.entries(notFoundHold.held)) logger.error(`[ListingLiveness] Kept ${count} ${board} listing(s) pending: most of that board's pages returned 404 at once`);
+    const rows = notFoundHold.rows;
     const context = getCurrentIpcRequestContext();
     if (context) context.listingSetAsideKeys = new Set((Array.isArray(rows) ? rows : [])
       .filter(row => listingStateRank(row) >= 3 && !hasResolvedJobDescription(row)).map(listingEvidenceKey));
@@ -11669,6 +11678,7 @@ Return a JSON object with four arrays of search query strings:
     // Durable, trusted source facts from providers that have already completed
     // and therefore must not be fetched again during this recovery.
     let resumedCollectionScopeCaveats = [];
+    let resumedPageShapeFailures = {};
     // compare-and-clear token returned to the renderer (allocated above so
     // preflight source progress remains correlated).
     let resumeSourceIds = null;   // persisted source breadth; never take it from a changed UI selection
@@ -11836,6 +11846,10 @@ Return a JSON object with four arrays of search query strings:
         }
         const priorSources = prior.manifest.sources || {};
         resumedCollectionScopeCaveats = collectionScopeCaveatsFromCompletedManifestSources(priorSources);
+        // A finished source isn't fetched again, so its unreadable-page count comes from the manifest.
+        resumedPageShapeFailures = Object.fromEntries(Object.entries(priorSources)
+          .filter(([sid, source]) => ACTIVE_SOURCE_ID_SET.has(sid) && source?.status === 'done' && Number.isSafeInteger(source.pageShapeFailures) && source.pageShapeFailures > 0)
+          .map(([sid, source]) => [sid, source.pageShapeFailures]));
         resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId));
         recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
         if (finishSavedRecoveryRequested && recoveredStaged.length === 0) {
@@ -12188,6 +12202,10 @@ Return a JSON object with four arrays of search query strings:
       };
     }
     hydrateCollectionScopeCaveatsIntoSourceResults(sourceResults, resumedCollectionScopeCaveats);
+    for (const [sid, pages] of Object.entries(resumedPageShapeFailures)) {
+      const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], errors: 0, warnings: [], pagesWalked: 0, stopReasons: new Set() });
+      result.pageShapeFailures = (result.pageShapeFailures || 0) + pages;
+    }
 
     // Resume: seed the gathered set with jobs recovered from the prior run's
     // staging so 'done' sources aren't re-scraped and incomplete sources keep the
@@ -12477,6 +12495,7 @@ Return a JSON object with four arrays of search query strings:
           stopReasons: r?.stopReasons,
           truncated: r?.truncated === true,
           cap: r?.cap || null,
+          ...(Number.isSafeInteger(r?.pageShapeFailures) && r.pageShapeFailures > 0 ? { pageShapeFailures: r.pageShapeFailures } : {}),
         };
       } catch (error) {
         if (isJobOperationSupersededError(error)) throw error;
@@ -12571,6 +12590,7 @@ Return a JSON object with four arrays of search query strings:
           collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({
             [sourceId]: { locationScopeUnenforced: rows.some(row => row?.locationScopeUnenforced === true) },
           }),
+          pageShapeFailures: rows.reduce((sum, row) => sum + (Number.isSafeInteger(row?.pageShapeFailures) && row.pageShapeFailures > 0 ? row.pageShapeFailures : 0), 0),
         },
       );
       await assertSearchCurrent();
@@ -12836,6 +12856,7 @@ Return a JSON object with four arrays of search query strings:
           sourceResults[sourceId].revealOutcomes = result.revealOutcomes.slice(0, 20);
         }
         if (result.googleApplyCapture) sourceResults[sourceId].googleApplyCapture = result.googleApplyCapture;
+        if (result.pageShapeFailures > 0) sourceResults[sourceId].pageShapeFailures = (sourceResults[sourceId].pageShapeFailures || 0) + result.pageShapeFailures;
         if (result.providerGathered != null) sourceResults[sourceId].providerGathered = result.providerGathered;
         if (result.truncated === true) sourceResults[sourceId].truncated = true;
         if (result.relevanceDropped != null) {
@@ -12908,6 +12929,7 @@ Return a JSON object with four arrays of search query strings:
       if (res.capDropped != null) sourceResults[res.sourceId].capDropped = res.capDropped;
       if (res.crossQueryDuplicates) sourceResults[res.sourceId].crossQueryDuplicates = res.crossQueryDuplicates;
       if (res.truncated) sourceResults[res.sourceId].truncated = true;
+      if (res.pageShapeFailures > 0) sourceResults[res.sourceId].pageShapeFailures = (sourceResults[res.sourceId].pageShapeFailures || 0) + res.pageShapeFailures;
       if (res.pagesFetched != null) {
         const pagesFetched = Math.max(0, Number(res.pagesFetched) || 0);
         if (pagesFetched > 0) {
@@ -13126,6 +13148,7 @@ Return a JSON object with four arrays of search query strings:
               ? jobSourceRecoveryDisposition(sourceId, effectiveWarnings)
               : null,
             collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({ [sourceId]: data }),
+            pageShapeFailures: data?.pageShapeFailures || 0,
           },
         );
         await assertSearchCurrent();
@@ -13722,6 +13745,7 @@ Return a JSON object with four arrays of search query strings:
     const sourceHealthFailures = assessSourceHealth(kept, {
       silentlyEmptySourceIds: skipProviderCollection ? [] : activeSourceIds.filter(sid => countryApplicableSourceIds.has(sid)
         && !(sourceResults[sid]?.jobs?.length) && !(sourceResults[sid]?.warnings?.length)),
+      pageShapeFailures: Object.fromEntries(Object.entries(sourceResults).map(([sid, data]) => [sid, data?.pageShapeFailures || 0])),
     }).filter(item => !sourceHealthKnownStopped(item.source));
     for (const sid of new Set(sourceHealthFailures.map(item => item.source))) {
       const warning = sourceHealthWarning(sid, sourceHealthFailures);

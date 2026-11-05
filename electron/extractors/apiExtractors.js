@@ -19,6 +19,8 @@ import { htmlToText } from 'html-to-text';
 import { JSDOM } from 'jsdom';
 import { resolveBudget } from '../ipc/scrapeBudget.js';
 import { safeApiFetch } from '../ipc/antiBotDetector.js';
+import { diceDataArrayMissing, linkedInGuestPageUnreadable, mostFirstPagesUnreadable, usaJobsEnvelopeMissing, wwrFeedShapeMissing } from '../ipc/jobSourcePageShape.js';
+import { aptDecoShapeMissing, priceChartingShapeMissing, reverbShapeMissing } from '../ipc/marketplaceScrapeHealth.js';
 import { filterJobsByAge } from '../ipc/jobDateFilter.js';
 import { sourceJobKey, jobTitleCompanyLocationKey } from '../../src/utils/jobIdentity.js';
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
@@ -324,6 +326,9 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   // Per-query walk outcomes, so a ceiling-truncated source is distinguishable
   // from an exhausted one in the bug report (see the return value below).
   const queryStopReasons = [];
+  // First pages that answered cleanly, and those among them with a real-sized body nothing could be read from.
+  let firstPagesAnswered = 0;
+  let firstPagesUnreadable = 0;
 
   for (let qi = 0; qi < queryList.length; qi++) {
     if (signal?.aborted) break;
@@ -409,6 +414,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       }
 
       const html = r.text;
+      if (start === 0 && !r.warning) firstPagesAnswered++;
       if (!html || html.trim().length < 50) { stopReason = 'empty-response'; break; }
 
       // Parse HTML snippets with regex — LinkedIn returns <li> cards
@@ -488,6 +494,8 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         }
       }
 
+      if (!r.warning && linkedInGuestPageUnreadable({ start, html, cardsOnPage })) firstPagesUnreadable++;
+
       // Log URL extraction misses so we can diagnose degraded card HTML.
       if (pageUrlMisses > 0) {
         logger.warn(`[LinkedIn API] Query ${qi + 1} page ${start / 25}: ${pageUrlMisses} card(s) had no extractable URL`);
@@ -541,6 +549,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     gathered: allJobs.length,
     stopReasons: queryStopReasons,
     cap: null,
+    ...(mostFirstPagesUnreadable({ firstPages: firstPagesAnswered, unreadable: firstPagesUnreadable }) ? { pageShapeFailures: firstPagesUnreadable } : {}),
   };
 }
 
@@ -1877,6 +1886,7 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
   let warning = null;
   let lastStatusOk = false;
   let pagesFetched = 0;
+  let pageShapeFailures = 0;
   // True when the walk stopped because a LATER page failed, i.e. we hold a
   // partial result set rather than the whole corpus.
   let truncatedByError = false;
@@ -1927,6 +1937,8 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
     pagesFetched++;
 
     const search = r.json?.SearchResult;
+    // A 200 without the SearchResult envelope is not a search with no matches; one the detector flagged keeps its own warning.
+    if (!r.warning && usaJobsEnvelopeMissing(r.json)) pageShapeFailures++;
     const pageItems = search?.SearchResultItems || [];
     // The provider's exact corpus size for this query. Read once; it is the
     // walk's stop condition and the only way to tell a truncated query from a
@@ -1953,12 +1965,12 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
     if (pageItems.length < USAJOBS_RESULTS_PER_PAGE) break; // short page = last page
   }
 
-  return { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError };
+  return { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError, pageShapeFailures };
 }
 
 async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, location, rowBudget = Infinity) {
   const requestedAgeDays = Math.max(1, Math.floor(maxAgeDays || 30));
-  const { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError } =
+  const { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError, pageShapeFailures } =
     await fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget);
 
   if (!lastStatusOk && rows.length === 0) return { items: [], warning };
@@ -1995,6 +2007,7 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
     truncated: truncatedByError,
     relevanceDropped: 0,
     relevanceRejected: [],
+    ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}),
   };
 }
 
@@ -2489,6 +2502,8 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
 
   const itemPattern = /<item>([\s\S]*?)<\/item>/gi;
   let xml = r.text;
+  // A 200 that is not an RSS document at all is not an empty feed; one the detector already flagged keeps its own warning.
+  const feedShapeMissing = !r.warning && wwrFeedShapeMissing(r.text);
   // Widen with the category feeds this run's queries imply. Additive only: the
   // main feed is always the base, duplicates are dropped by <link>, and a 403 or
   // an unknown slug simply contributes nothing.
@@ -2566,7 +2581,7 @@ export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms =
   const withDesc = items.filter(j => j.description).length;
   logger.info(`[WWR RSS] ${items.length}/${admission.providerGathered} role-matched feed jobs, ${withDesc}/${items.length} have descriptions`);
 
-  return { ...admission, warning: r.warning };
+  return { ...admission, warning: r.warning, ...(feedShapeMissing ? { pageShapeFailures: 1 } : {}) };
 }
 
 
@@ -2647,7 +2662,8 @@ async function fetchReverbActiveListings(query, signal, safeApiFetch) {
   }
   const items = reverbListingsToComps(res.json?.listings || []);
   logger.info(`[Reverb] "${query}" → ${items.length} active listing(s)`);
-  return { items, warning: null };
+  // A 200 with no listings array is not an honest zero; a response the detector already flagged is left to its own warning.
+  return { items, warning: null, ...(res.warning ? {} : { shapeMissing: reverbShapeMissing(res.json) }) };
 }
 
 /**
@@ -2777,12 +2793,14 @@ export async function fetchPriceChartingComps(query, signal = null, { category }
     logger.warn(`[PriceCharting] HTTP ${res.status}`);
     return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
   }
-  const parsed = parsePriceChartingHtml(await res.text());
+  const html = await res.text();
+  const parsed = parsePriceChartingHtml(html);
+  const shapeMissing = priceChartingShapeMissing({ html, finalUrl: res.url, parsedCount: parsed.length });
   const items = filterPriceChartingByRelevance(parsed, q);
   if (parsed.length > 0 && items.length < parsed.length) {
     logger.info(`[PriceCharting] relevance filter kept ${items.length}/${parsed.length} row(s) for "${q.slice(0, 80)}"`);
   }
-  return { items, url, warning: null };
+  return { items, url, warning: null, shapeMissing };
 }
 
 // ── AptDeco (direct HTTP, NOT the stealth browser) ──────────────────────────
@@ -2882,12 +2900,14 @@ export async function fetchAptDecoComps(query, signal = null, { category } = {})
     logger.warn(`[AptDeco] fetch failed: ${String(e?.message || e).slice(0, 160)}`);
     return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `fetch failed: ${String(e?.message || e).slice(0, 200)}` } };
   }
-  if (!res.ok) {
+  // 202 with a 2KB body is what AptDeco's firewall answered live on 2026-11-05: a challenge, not a page.
+  if (!res.ok || res.status === 202) {
     logger.warn(`[AptDeco] HTTP ${res.status}`);
     return { items: [], url, warning: { code: 'task-failed', severity: 'block', evidence: `HTTP ${res.status} (server bot-gate or rate-limit)` } };
   }
-  const items = parseAptDecoComps(await res.text());
-  return { items, url, warning: null };
+  const html = await res.text();
+  const items = parseAptDecoComps(html);
+  return { items, url, warning: null, shapeMissing: aptDecoShapeMissing(html, extractAlgoliaHits(html).length) };
 }
 
 // ── Dice Public API ─────────────────────────────────────────────────────────
@@ -3639,6 +3659,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   let providerRawTotal = null;
   let warning = null;
   let pagesFetched = 0;
+  let pageShapeFailures = 0;
   let rawCorpusExhausted = false;
   let truncated = false;
   let stoppedByJobsLimit = false;
@@ -3681,6 +3702,8 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     if (r.warning && !warning) warning = r.warning;
     const data = r.json;
     const jobs = Array.isArray(data?.data) ? data.data : [];
+    // A 200 with no `data` array is not an empty search; one the detector flagged keeps its own warning.
+    if (!r.warning && diceDataArrayMissing(data)) pageShapeFailures++;
     if (providerRawTotal == null) providerRawTotal = diceProviderTotal(data);
 
     let pageNewRows = 0;
@@ -3764,6 +3787,7 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     relevanceDropped: 0,
     relevanceRejected: [],
     relevanceTrace: [],
+    ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}),
   };
 }
 

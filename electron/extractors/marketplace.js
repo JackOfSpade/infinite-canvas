@@ -644,13 +644,15 @@ export const SWAPPA_EXTRACTOR = `
     var target = pickListingsLink(document, query);
     window.__swappaCompsPromise = (async function() {
       if (!target) return [];
+      // A failed or blank model page is not an honest zero: shapeFlag lets the caller tell the two apart (zero cards seen, so readiness and anti-bot handling are unchanged).
+      var failed = function(flag) { return { items: [], yieldStats: { seen: 0, noFields: 0, shapeFlag: flag } }; };
       try {
         var res = await fetch(target, { credentials: 'include', headers: { 'Accept': 'text/html' } });
-        if (!res.ok) return [];
+        if (!res.ok) return failed('fetch-failed');
         var html = await res.text();
         var doc = new DOMParser().parseFromString(html, 'text/html');
         return extractOffers(doc);
-      } catch (e) { return []; }
+      } catch (e) { return failed('fetch-failed'); }
     })().then(function(items) {
       window.__swappaComps = items;
       return items;
@@ -796,16 +798,18 @@ export const SWAPPA_SOLD_EXTRACTOR = `
     var slug = slugMatch ? slugMatch[1] : '';
     window.__swappaSoldPromise = (async function() {
       if (!slug) return [];
+      var failed = function(flag) { return { items: [], yieldStats: { seen: 0, noFields: 0, shapeFlag: flag } }; };
       try {
         var res = await fetch(ORIGIN + '/xui/product/' + slug + '/sales', {
           credentials: 'include',
           headers: { 'Accept': 'text/html', 'HX-Request': 'true', 'X-Requested-With': 'XMLHttpRequest' },
         });
-        if (!res.ok) return [];
+        if (!res.ok) return failed('fetch-failed');
         var html = await res.text();
+        if (html.trim().length < 200) return failed('empty-body');
         var doc = new DOMParser().parseFromString(html, 'text/html');
         return parseSales(doc, modelNameFromSlug(slug));
-      } catch (e) { return []; }
+      } catch (e) { return failed('fetch-failed'); }
     })().then(function(items) {
       window.__swappaSold = items;
       return items;

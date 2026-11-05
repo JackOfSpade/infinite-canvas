@@ -63,6 +63,7 @@ import { useCanvasContextMenu } from './hooks/useCanvasContextMenu';
 import { useCanvasNavigation } from './hooks/useCanvasNavigation';
 import { useLocalAiFallbackManager } from './hooks/useLocalAiFallbackManager';
 import { useApplicationHandoffDock } from './hooks/useApplicationHandoffDock';
+import { useScrapeAlarms } from './hooks/useScrapeAlarms';
 import { useSettings } from './hooks/useSettings';
 import { useToast } from './components/ToastProvider';
 import { useCanvasWASD } from './hooks/useCanvasWASD';
@@ -434,6 +435,7 @@ export function Canvas() {
   // see useApplicationHandoffDock for why this is a separate, read-only pass
   // from the Local AI fallback manager above.
   useApplicationHandoffDock({ navigation, getCurrentFile, addToast });
+  useScrapeAlarms(addToast);
 
   // ── Initial canvas population on mount ──────────────────────────────────
   // Each window is told what to show via the loaded URL's `init` query param,

@@ -38,7 +38,7 @@ const healthCount = value => (Number.isSafeInteger(value) && value >= 0 ? value 
 /** Persisted input: known field names and counts only, so no listing text can travel with it. */
 function normalizeSourceHealthFailures(value) {
   return (Array.isArray(value) ? value : []).slice(0, MAX_SOURCE_HEALTH_FAILURES)
-    .filter(item => item?.field === 'rows' || item?.field === 'salary' || item?.field === 'same-description' || Object.hasOwn(SOURCE_HEALTH_FIELDS, item?.field))
+    .filter(item => item?.field === 'rows' || item?.field === 'salary' || item?.field === 'same-description' || item?.field === 'page-shape' || Object.hasOwn(SOURCE_HEALTH_FIELDS, item?.field))
     .map(item => ({ field: item.field, rows: healthCount(item.rows), missing: healthCount(item.missing) }));
 }
 
@@ -47,6 +47,7 @@ export function describeSourceHealthFailures(failures) {
   return normalizeSourceHealthFailures(failures).map(item => {
     if (item.field === 'rows') return 'returned no listings and gave no reason';
     if (item.field === 'salary') return `no salary on any of ${item.rows} listings`;
+    if (item.field === 'page-shape') return `${item.missing} page${item.missing === 1 ? '' : 's'} loaded, but no listings could be read from ${item.missing === 1 ? 'it' : 'them'}`;
     if (item.field === 'same-description') return `${item.missing} of ${item.rows} listings have another employer's description`;
     return `${SOURCE_HEALTH_FIELDS[item.field]} missing on ${item.missing} of ${item.rows} listings (${Math.round(item.rows ? (item.missing / item.rows) * 100 : 0)}%)`;
   }).join('; ');

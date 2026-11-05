@@ -68,6 +68,11 @@ import official_posting_eightfold from './tests/official-posting-eightfold.js';
 import official_posting_rendered_page from './tests/official-posting-rendered-page.js';
 import official_posting_run_fixes from './tests/official-posting-run-fixes.js';
 import job_source_health from './tests/job-source-health.js';
+import scrape_alarms from './tests/scrape-alarms.js';
+import scrape_health_official from './tests/scrape-health-official.js';
+import scrape_health_liveness from './tests/scrape-health-liveness.js';
+import scrape_health_marketplace from './tests/scrape-health-marketplace.js';
+import scrape_health_job_sources from './tests/scrape-health-job-sources.js';
 import official_posting_closed_visibility from './tests/official-posting-closed-visibility.js';
 import official_posting_handoff_context from './tests/official-posting-handoff-context.js';
 import official_posting_resilience from './tests/official-posting-resilience.js';
@@ -349,6 +354,11 @@ const testGroups = [
   ['official-posting-rendered-page.js', official_posting_rendered_page],
   ['official-posting-run-fixes.js', official_posting_run_fixes],
   ['job-source-health.js', job_source_health],
+  ['scrape-alarms.js', scrape_alarms],
+  ['scrape-health-official.js', scrape_health_official],
+  ['scrape-health-liveness.js', scrape_health_liveness],
+  ['scrape-health-marketplace.js', scrape_health_marketplace],
+  ['scrape-health-job-sources.js', scrape_health_job_sources],
   ['official-posting-closed-visibility.js', official_posting_closed_visibility],
   ['official-posting-handoff-context.js', official_posting_handoff_context],
   ['official-posting-resilience.js', official_posting_resilience],

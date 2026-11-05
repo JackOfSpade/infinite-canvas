@@ -1744,6 +1744,8 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   // clears an earlier gate after a terminal transition; omission preserves a
   // legacy blocked row, which automatic eligibility treats as manual/fail-safe.
   recoveryDisposition = undefined,
+  // Pages that loaded without the structure the reader needs. Saved so a resumed run still raises the source alarm.
+  pageShapeFailures = undefined,
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
@@ -1751,6 +1753,10 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   return withLiveManifestOperationAuthority(canvasFilePath, files, nodeId, expectedRunId, expectedOperationAuthority, async manifest => {
     const src = manifest.sources[sourceId] || (manifest.sources[sourceId] = { status: 'pending', queries: {} });
     src.status = status;
+    if (pageShapeFailures !== undefined) {
+      if (Number.isSafeInteger(pageShapeFailures) && pageShapeFailures > 0) src.pageShapeFailures = Math.min(pageShapeFailures, 10_000);
+      else delete src.pageShapeFailures;
+    }
     if (status === 'done' || status === 'skipped') {
       delete src.recoveryDisposition;
     } else if (recoveryDisposition !== undefined) {

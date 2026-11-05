@@ -14,6 +14,7 @@ import electronPkg from 'electron';
 import { logger } from '../logger.js';
 import { findChromePath, findSystemChromePath, getUserDataDir, getSharedProfileReservationInfo, launchWithProfileLockRetry, reserveSharedProfile } from '../ipc/stealthBrowser.js';
 import { extractIndeedJobsFromHtml } from './apiExtractors.js';
+import { indeedPageUnreadable, mostFirstPagesUnreadable } from '../ipc/jobSourcePageShape.js';
 import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, isUnlimitedPages, describeJobCollectionLimits } from '../../src/utils/jobCollectionLimits.js';
 import { makeJobPageStop } from '../ipc/jobPageStop.js';
 import { filterJobsByAge, filterJobsByPostedSince } from '../ipc/jobDateFilter.js';
@@ -1128,6 +1129,9 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     // post-window/source-unique aggregate actually overflows.
     let queryRetrievalBudgetReached = false;
     let totalChallenges = 0;
+    // First pages that loaded as results (no challenge, no soft block), and those with a full-size page nothing was read from.
+    let firstPagesRead = 0;
+    let firstPagesUnreadable = 0;
     let loginWallHit = false;
     let challengedQi = -1;
     let challengedPage = 0;
@@ -1317,6 +1321,13 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           perQueryChallenges[qi] = (perQueryChallenges[qi] || 0) + 1;
           manualChallenge = { q, qi, p, reason: 'soft-block', status: 'hard-block' };
           break outer;
+        }
+        if (p === 0) {
+          firstPagesRead++;
+          if (indeedPageUnreadable({ pageIndex: p, htmlLength: html.length, parsedCount: rawPageJobs.length, html })) {
+            firstPagesUnreadable++;
+            logger.warn(`[Indeed/Browser] Full-size first page, 0 jobs read and no no-results message — ${htmlKB}KB q${qi + 1}`);
+          }
         }
 
         // Check for a next-page link as a more reliable last-page signal than result count.
@@ -1618,6 +1629,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       relevanceRejected: [],
       enrichment,
       sessionDiagnostics,
+      ...(mostFirstPagesUnreadable({ firstPages: firstPagesRead, unreadable: firstPagesUnreadable }) ? { pageShapeFailures: firstPagesUnreadable } : {}),
     };
 
   } finally {

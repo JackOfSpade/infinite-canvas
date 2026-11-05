@@ -29,6 +29,13 @@ const OTHER_SITES_ROWS_FOR_SILENCE = 50;
 const SOURCES_THAT_ALWAYS_HAVE_ROWS = Object.freeze(new Set(['google', 'indeed', 'linkedin', 'ziprecruiter', 'glassdoor']));
 /** One description under different employers means a reader saved the wrong job's text. Reposts by one employer are normal. */
 const MAX_SAME_DESCRIPTION_SHARE = 0.1;
+/**
+ * Identical 400+ character text under different employers doesn't happen by chance: 3,177 saved candidates and 661
+ * cards from healthy sites on 2026-11-05 had none. So a smaller sample is enough here than for a missing field, and
+ * the live Indeed runs that showed this bug returned only 15-30 rows.
+ */
+const SAME_DESCRIPTION_MIN_ROWS = 10;
+const SAME_DESCRIPTION_MIN_REPEATS = 3;
 
 function rowsRepeatingAnotherEmployersDescription(list) {
   const employersByText = new Map();
@@ -47,10 +54,11 @@ function rowsRepeatingAnotherEmployersDescription(list) {
 
 /**
  * @param {object[]} rows every row collected this run, before any description or scoring gate
- * @param {{ silentlyEmptySourceIds?: string[] }} [options] sites searched that returned nothing and gave no warning of their own
+ * @param {{ silentlyEmptySourceIds?: string[], pageShapeFailures?: Record<string, number> }} [options] sites searched that
+ *   returned nothing and gave no warning of their own, and per-site counts of responses a fetcher could not read at all
  * @returns {Array<{ source: string, field: string, rows: number, missing: number, share: number, limit: number }>}
  */
-export function assessSourceHealth(rows, { silentlyEmptySourceIds = [] } = {}) {
+export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {} } = {}) {
   const bySource = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const source = text(row?.source).toLowerCase();
@@ -60,14 +68,16 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [] } = {}) {
   }
   const failures = [];
   for (const [source, list] of bySource) {
+    const repeats = rowsRepeatingAnotherEmployersDescription(list);
+    if (list.length >= SAME_DESCRIPTION_MIN_ROWS && repeats >= SAME_DESCRIPTION_MIN_REPEATS && repeats / list.length > MAX_SAME_DESCRIPTION_SHARE) {
+      failures.push({ source, field: 'same-description', rows: list.length, missing: repeats, share: repeats / list.length, limit: MAX_SAME_DESCRIPTION_SHARE });
+    }
     if (list.length < SOURCE_HEALTH_MIN_ROWS) continue;
     for (const check of FIELD_CHECKS) {
       const missing = list.filter(row => !check.present(row)).length;
       const limit = check.maxMissingShareBySource?.[source] ?? check.maxMissingShare ?? DEFAULT_MAX_MISSING_SHARE;
       if (missing / list.length > limit) failures.push({ source, field: check.field, rows: list.length, missing, share: missing / list.length, limit });
     }
-    const repeats = rowsRepeatingAnotherEmployersDescription(list);
-    if (repeats / list.length > MAX_SAME_DESCRIPTION_SHARE) failures.push({ source, field: 'same-description', rows: list.length, missing: repeats, share: repeats / list.length, limit: MAX_SAME_DESCRIPTION_SHARE });
     if (SALARY_USUALLY_SHOWN.has(source) && !list.some(row => text(row?.salary))) {
       failures.push({ source, field: 'salary', rows: list.length, missing: list.length, share: 1, limit: 1 });
     }
@@ -75,6 +85,10 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [] } = {}) {
   const totalRows = [...bySource.values()].reduce((sum, list) => sum + list.length, 0);
   for (const source of silentlyEmptySourceIds) {
     if (totalRows >= OTHER_SITES_ROWS_FOR_SILENCE && SOURCES_THAT_ALWAYS_HAVE_ROWS.has(source) && !bySource.has(source)) failures.push({ source, field: 'rows', rows: 0, missing: 0, share: 1, limit: 0 });
+  }
+  // A fetcher saw a response without the structure it reads, which isn't the same as a search with no results.
+  for (const [source, pages] of Object.entries(pageShapeFailures)) {
+    if (Number.isSafeInteger(pages) && pages > 0) failures.push({ source, field: 'page-shape', rows: 0, missing: pages, share: 1, limit: 0 });
   }
   return failures;
 }

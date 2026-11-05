@@ -34,6 +34,12 @@ export function readListingEvidence(row) {
   return key ? map?.get(key)?.evidence || null : null;
 }
 
+/** Drops a row's captured page, so nothing later judges the listing from it. */
+export function forgetListingEvidence(row) {
+  const map = evidenceMap(); const key = listingEvidenceKey(row);
+  if (map && key) map.delete(key);
+}
+
 export function memoListingVerdict(row, verdict) {
   const map = evidenceMap(); const key = listingEvidenceKey(row);
   if (!map || !key || !map.has(key)) return false;
