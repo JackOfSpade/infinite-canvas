@@ -175,7 +175,9 @@ const needsRender = (lead, snapshot) => lead.kind !== 'careers' || !snapshot.job
 /** The plain snapshot plus what the page showed a person. Null when it showed too little to read. */
 function renderedSnapshot(lead, plain, page) {
   const { pageText: _plain, pageTextTruncated: _plainTruncated, notFound: _notFound, httpStatus: _status, ...kept } = plain;
-  const base = { ...kept, id: lead.id, at: new Date().toISOString(), read: true, source: plain.source || 'page', rendered: true,
+  const base = { ...kept, id: lead.id, at: new Date().toISOString(), read: true,
+    // A board's data that failed to download says nothing, so what the judges read here is the page.
+    source: plain.read && plain.source ? plain.source : 'page', rendered: true,
     ...(page.settled ? {} : { settled: false }), ...(page.finalUrl !== lead.url ? { finalUrl: page.finalUrl } : {}) };
   if (page.status === 404 || page.status === 410) {
     return plain.source === 'board-data' && plain.read ? { ...base, pageHttpStatus: page.status }

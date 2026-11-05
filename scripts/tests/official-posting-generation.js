@@ -280,7 +280,7 @@ export default [
         const prepared = await prepareSemanticOfficialPostingForGeneration({ ...args(original), listingOverride: true }, {
           store,
           resolve: async rows => ({ jobs: rows.map(row => ({ ...row,
-            officialPosting: { level: 'L5', outcome: 'closed', employer: row.company, trail: ['worker-research', 'closed'] } })) }),
+            officialPosting: semanticPosting(original, page(), { outcome: 'closed', trail: ['semantic-match-v1', 'closed', 'closure-page-read'] }) })) }),
           listingProbe: { probe: async () => { probes++; throw new Error('Closed official source cannot reopen through board links.'); } },
         });
         assert.equal(prepared.listingCheck.action, 'refuse-final');
@@ -486,7 +486,7 @@ export default [
     },
   },
   {
-    name: 'official-page expiry is demoted only after quoted AI closure and refuses without probing stale board links',
+    name: 'official-page expiry is demoted only after quoted AI closure and the listing check then decides',
     async run() {
       await withStore(async store => {
         const original = job({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/synthetic-one' });
@@ -505,11 +505,12 @@ export default [
             return { board: 'linkedin', ruleKey: 'linkedin', requestedUrl: url, finalUrl: url,
               httpStatus: 404, title: 'Page not found', chromeText: 'This posting could not be found.' }; } },
         });
-        assert.equal(aiCalls, 1); assert.equal(boardVisits, 0);
+        // An L6 closure is below the Board's official level, so the listing check decides and the board link is visited.
+        assert.equal(aiCalls, 1); assert.equal(boardVisits, 1);
         assert.equal(prepared.officialPosting.level, 'L6'); assert.equal(prepared.officialPosting.outcome, 'closed');
         assert.equal(prepared.listingCheck.action, 'refuse-final');
-        assert.equal(prepared.listingCheck.basis, 'official-closed');
-        assert.equal(prepared.boardClosed, null, 'official closure does not invent a board closure observation');
+        assert.notEqual(prepared.listingCheck.basis, 'official-closed');
+        
         assert.equal((await store.find(original)).officialPosting.outcome, 'closed');
       });
     },

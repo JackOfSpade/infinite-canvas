@@ -12,7 +12,7 @@ import { extractOfficialPostingCandidates } from './officialPostingExtractors.js
 import { officialPostingAdapterUrl, officialPostingChunks, unresolvedOfficialPosting, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
 import { canonicalLeadUrl, descriptionOverlap } from './officialPostingMatch.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
-import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
+import { extractAtsTenant, isAggregatorHost, normalizedSourceHost, strictEmployerEqual } from './officialSourceHosts.js';
 import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
@@ -339,7 +339,7 @@ async function cachedChatResolution(job, store) {
  * their careers pages. Pointers only; the app downloads each one (snapshots) and the judges read what it returned. */
 function judgeLeadsFor(member, found) {
   const leads = []; const seen = new Set();
-  const add = (value, kind, employer = '') => {
+  const add = (value, kind, employer = '', confirmed = {}) => {
     const url = officialHttpsUrl(value); const key = canonicalLeadUrl(url);
     if (!url || !key || seen.has(key)) return;
     seen.add(key);
@@ -348,10 +348,16 @@ function judgeLeadsFor(member, found) {
     const route = kind === 'posting' ? extractAtsTenant(url) : null;
     let dataUrl = '';
     try { dataUrl = route ? officialHttpsUrl(officialPostingAdapterUrl(route, url)) : ''; } catch { dataUrl = ''; }
-    leads.push({ url, kind, employer: String(employer || ''), ...(dataUrl && dataUrl !== url ? { dataUrl } : {}) });
+    leads.push({ url, kind, employer: String(employer || ''), ...(dataUrl && dataUrl !== url ? { dataUrl } : {}), ...confirmed });
   };
   const prior = normalizeOfficialPosting(member.priorOfficialRecord?.officialPosting);
-  for (const url of [prior?.sourceUrl, prior?.officialApplyUrl]) add(url, 'posting', prior?.employer);
+  // Only a verification of this same listing counts: the judges may then accept that its page has gone without any text to compare.
+  const confirmedEarlier = prior && VERIFIED_LEVELS.has(prior.level) && ['found', 'link-only'].includes(prior.outcome)
+    && officialPostingSemanticProofMatches(member.job, prior);
+  add(prior?.sourceUrl, 'posting', prior?.employer, confirmedEarlier ? { confirmedEarlier: true, title: prior.title } : {});
+  add(prior?.officialApplyUrl, 'posting', prior?.employer);
+  // Addresses earlier judges cited stay leads: a new search may not find them again, and the page itself can settle them.
+  for (const item of prior?.alternatives || []) if (item?.title?.startsWith('Unconfirmed · cited')) add(item.url, 'posting', prior?.employer);
   for (const lead of member.candidateUrls) {
     if (typeof lead === 'string') add(lead, 'posting');
     else { add(lead?.postingUrl || lead?.url, 'posting', lead?.employer); add(lead?.careersPageUrl, 'careers', lead?.employer); }
@@ -612,9 +618,14 @@ export async function resolveOfficialPostings(jobs, {
     // A page a first judge found by its own search gets the same full-page read before the second pair judges it.
     const known = new Set(leads.map(lead => canonicalLeadUrl(lead.url)));
     const added = [];
-    for (const answer of answers) {
-      const url = answer?.choice === 'other' ? officialHttpsUrl(answer.postingUrl) : '';
-      if (!url || known.has(canonicalLeadUrl(url)) || leads.length + added.length >= MAX_JUDGE_LEADS) continue;
+    // Pages a judge actually read come first, then ones it could only name, without the markup or punctuation around them.
+    const judgeOwnPostings = answers.filter(answer => answer?.choice === 'other').map(answer => ({ answer, cited: answer.postingUrl }));
+    const judgeNamed = answers.filter(answer => ['none', 'uncertain'].includes(answer?.choice))
+      .flatMap(answer => (answer.conflicts || []).flatMap(text => text.match(/https:\/\/[^\s"'<>)\]]+/gu) || [])
+        .map(url => ({ answer, cited: url.replace(/[^\p{L}\p{N}/=#&%_~-]+$/u, '') })));
+    for (const { answer, cited } of [...judgeOwnPostings, ...judgeNamed]) {
+      const url = officialHttpsUrl(cited);
+      if (!url || isAggregatorHost(normalizedSourceHost(url)) || known.has(canonicalLeadUrl(url)) || leads.length + added.length >= MAX_JUDGE_LEADS) continue;
       known.add(canonicalLeadUrl(url));
       added.push({ id: `P${leads.length + added.length + 1}`, url, kind: 'posting', employer: String(answer.employer || '') });
     }

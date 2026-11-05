@@ -23,6 +23,11 @@ const POLL_MS = 250;
 export const MIN_RENDERED_CHARS = 200;
 const MAX_TEXT_CHARS = 300_000;
 const MAX_FRAMES = 20;
+const MAX_FRAME_CHARS = 40_000;
+const MIN_FRAME_WIDTH = 100;
+const MIN_FRAME_HEIGHT = 50;
+const READ_ATTEMPTS = 4;
+const READ_RETRY_MS = 1_000;
 const MAX_HTML_CHARS = 3_000_000;
 const SKIPPED_TYPES = new Set(['image', 'media', 'font', 'ping', 'eventsource', 'websocket', 'manifest']);
 const WATCHED_TYPES = new Set(['xhr', 'fetch', 'document', 'script']);
@@ -100,9 +105,13 @@ async function visit(browser, url, { signal, isPublicUrl }) {
       await cdp.send('Page.setDownloadBehavior', { behavior: 'deny' });
     } catch { /* A protocol change only loses these two extra limits. */ }
     const pending = new Set(); let unsafeNavigation = false; let reachedNonPublic = false;
+    // A page can navigate itself after it starts loading (a challenge, a locale redirect), so the last document answer counts.
+    let documentStatus = 0;
     page.on('response', response => {
       const address = response.remoteAddress?.()?.ip;
       if (address && !isPublicOfficialAddress(address.replace(/^\[|\]$/gu, ''))) reachedNonPublic = true;
+      const request = response.request?.();
+      if (request?.isNavigationRequest?.() && request.frame?.() === page.mainFrame()) documentStatus = response.status();
     });
     await abortable(page.setRequestInterception(true), signal);
     page.on('request', request => {
@@ -127,22 +136,32 @@ async function visit(browser, url, { signal, isPublicUrl }) {
       return failure(unsafeNavigation || reachedNonPublic ? 'unsafe-address' : 'load-failed');
     }
     if (unsafeNavigation || reachedNonPublic) return failure('unsafe-address');
-    const status = typeof response?.status === 'function' ? response.status() : 0;
+    const currentStatus = () => documentStatus || (typeof response?.status === 'function' ? response.status() : 0);
     const finalUrl = officialHttpsUrl(page.url());
     if (!finalUrl) return failure('load-failed');
-    if (status === 404 || status === 410) return { ok: true, status, finalUrl, settled: true, title: '', text: '', html: '' };
+    if (currentStatus() === 404 || currentStatus() === 410) return { ok: true, status: currentStatus(), finalUrl, settled: true, title: '', text: '', html: '' };
+    // A navigation destroys the document being read, which only means there is more page to wait for.
     const settled = await waitForPageToSettle({ signal, pendingRequests: () => pending.size,
-      textLength: () => page.evaluate(() => document.body?.innerText?.length ?? 0) });
-    const seen = await abortable(page.evaluate(limits => ({ title: document.title || '',
-      text: (document.body?.innerText || '').slice(0, limits.text),
-      html: (document.documentElement?.outerHTML || '').slice(0, limits.html) }),
-    { text: MAX_TEXT_CHARS, html: MAX_HTML_CHARS }), signal);
+      textLength: () => page.evaluate(() => document.body?.innerText?.length ?? 0).catch(() => 0) });
+    let seen = null;
+    for (let attempt = 0; attempt < READ_ATTEMPTS && !seen; attempt += 1) {
+      if (attempt) await abortable(new Promise(resolve => setTimeout(resolve, READ_RETRY_MS)), signal);
+      seen = await abortable(page.evaluate(limits => ({ title: document.title || '',
+        text: (document.body?.innerText || '').slice(0, limits.text),
+        html: (document.documentElement?.outerHTML || '').slice(0, limits.html) }),
+      { text: MAX_TEXT_CHARS, html: MAX_HTML_CHARS }).catch(() => null), signal);
+    }
+    if (!seen) return failure('load-failed');
+    const status = currentStatus();
     if (reachedNonPublic) return failure('unsafe-address');
     // Application forms are often embedded. The page's own text, unedited, frame by frame.
     for (const frame of (page.frames?.() || []).filter(item => item !== page.mainFrame()).slice(0, MAX_FRAMES)) {
       try {
+        // Only what a person can see: pages also carry hidden frames full of tracking and consent data.
+        const box = await abortable(frame.frameElement().then(element => element?.boundingBox() ?? null), signal);
+        if (!box || box.width < MIN_FRAME_WIDTH || box.height < MIN_FRAME_HEIGHT) continue;
         const framed = await abortable(frame.evaluate(() => document.body?.innerText || ''), signal);
-        if (framed.trim()) seen.text = `${seen.text}\n\n[Embedded frame: ${frame.url()}]\n${framed}`.slice(0, MAX_TEXT_CHARS);
+        if (framed.trim()) seen.text = `${seen.text}\n\n[Embedded frame: ${frame.url()}]\n${framed.slice(0, MAX_FRAME_CHARS)}`.slice(0, MAX_TEXT_CHARS);
       } catch { /* A frame that navigated away holds nothing to read. */ }
     }
     const wall = detectAntiBotSignal({ status, finalUrl, html: seen.html, title: seen.title });

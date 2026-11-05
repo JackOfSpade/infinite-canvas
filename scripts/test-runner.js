@@ -66,6 +66,7 @@ import official_posting_ground_truth_fixes from './tests/official-posting-ground
 import official_posting_chat_engine from './tests/official-posting-chat-engine.js';
 import official_posting_eightfold from './tests/official-posting-eightfold.js';
 import official_posting_rendered_page from './tests/official-posting-rendered-page.js';
+import official_posting_run_fixes from './tests/official-posting-run-fixes.js';
 import official_posting_closed_visibility from './tests/official-posting-closed-visibility.js';
 import official_posting_handoff_context from './tests/official-posting-handoff-context.js';
 import official_posting_resilience from './tests/official-posting-resilience.js';
@@ -344,6 +345,7 @@ const testGroups = [
   ['official-posting-chat-engine.js', official_posting_chat_engine],
   ['official-posting-eightfold.js', official_posting_eightfold],
   ['official-posting-rendered-page.js', official_posting_rendered_page],
+  ['official-posting-run-fixes.js', official_posting_run_fixes],
   ['official-posting-closed-visibility.js', official_posting_closed_visibility],
   ['official-posting-handoff-context.js', official_posting_handoff_context],
   ['official-posting-resilience.js', official_posting_resilience],

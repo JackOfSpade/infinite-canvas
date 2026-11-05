@@ -91,10 +91,11 @@ export default [
             projectJob: project, now: () => Date.now() - age,
             store: createOfficialPostingStore(path.join(directory, `store-${kind}`)),
             bridgeStatus: () => ({ enabled: true, link: { state: 'linked' } }),
-            resolve: async jobs => ({ jobs: jobs.map(job => ({ ...job, officialPosting: { level: 'L5', employer: job.company,
+            resolve: async jobs => ({ jobs: jobs.map(job => ({ ...job, officialPosting: { level: kind === 'closed' ? 'L2' : 'L5', employer: job.company,
               outcome: kind === 'closed' ? 'closed' : 'not-found',
-              trail: kind === 'closed' ? ['closed', 'semantic-match-v1'] : [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'],
-              semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job) } } })) }),
+              ...(kind === 'closed' ? { sourceUrl: 'https://jobs.ashbyhq.com/northwind-synthetic/posting-one' } : {}),
+              trail: kind === 'closed' ? ['closed', 'semantic-match-v1', 'closure-page-read'] : [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'bridge-research', 'semantic-match-v1'],
+              semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(job), ...(kind === 'closed' ? { sourceHash: 'e'.repeat(64) } : {}) } } })) }),
           });
           assert.ok(result.resolutionId);
           await assert.rejects(queueLocalApplicationJob({ canvasFilePath, careerSnapshotId, transport: 'paste', nodeId: 'fresh-card',

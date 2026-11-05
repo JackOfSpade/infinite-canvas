@@ -65,7 +65,7 @@ import { v2RejectionEvidencePaths } from './applicationV2RejectionEvidence.js';
 import { archiveV2Content } from './applicationV2EvidenceArchive.js';
 import { archiveV2WriterNotes, splitWriteVerifyWriterResponse } from './applicationV2WriterShortlist.js';
 import { tryGetStore } from './settings.js';
-import { officialPostingEmployerText, officialPostingLookupStatus, normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS } from './officialPostingFields.js';
+import { officialPostingEmployerText, officialPostingLookupStatus, normalizeAlternateListings, normalizeApplyOptions, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, OFFICIAL_POSTING_ROW_FIELDS, SALARY_PROVENANCES, LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, OFFICIAL_POSTING_GENERATION_RECEIPT_MAX_AGE_MS, officialPostingStatesClosed } from './officialPostingFields.js';
 export { LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS } from './officialPostingFields.js';
 import { unresolvedOfficialPosting } from './officialPostingResolver.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
@@ -16187,7 +16187,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
         throw Object.assign(new Error('The official posting lookup is out of date. Retry Generate to check the current posting before drafting.'),
           { code: 'OFFICIAL_POSTING_LOOKUP_STALE' });
       }
-      if (lookup.state === 'closed') {
+      if (officialPostingStatesClosed(preparedPosting.officialPosting)) {
         throw Object.assign(new Error('The official posting is closed. Check again for a current replacement before generating.'),
           { code: 'OFFICIAL_POSTING_CLOSED' });
       }

@@ -379,13 +379,14 @@ export default [
         title: 'Dispatch Engineer', employer: 'Northwind', location: '', salary: '', description: '', evidence: [], conflicts: [] };
       const decide = snapshot => decideOfficialPostingJudgments(job, { leads, snapshots: [{ id: 'P1', read: true, ...snapshot }], answerA: answer, answerB: answer, now: 0, fallback: unresolvedOfficialPosting,
         comparativeTrail: officialPostingComparativeTrail, inputHash: 'x', negativeProofTrail: 'n', employerEqual: () => true, closureNeedsRenderedPage: true }).officialPosting;
-      const good = decide({ rendered: true });
+      const shown = { pageText: 'Dispatch Engineer\nFilled' };
+      const good = decide({ rendered: true, ...shown });
       assert.equal(good.outcome, 'closed');
       assert.ok(good.trail.includes('closure-page-read'));
-      for (const bad of [{}, { rendered: true, settled: false }, { rendered: true, pageHttpStatus: 403 }, { rendered: true, pageHttpStatus: 503 }]) {
+      for (const bad of [shown, { rendered: true, settled: false, ...shown }, { rendered: true, pageHttpStatus: 403, ...shown }, { rendered: true, pageHttpStatus: 503, ...shown }, { rendered: true }, { rendered: true, pageHttpStatus: 404 }]) {
         assert.equal(decide(bad).outcome, 'ambiguous', JSON.stringify(bad));
       }
-      assert.equal(decide({ rendered: true, pageHttpStatus: 404 }).outcome, 'closed');
+      assert.equal(decide({ rendered: true, pageHttpStatus: 404, title: 'Dispatch Engineer', description: 'Build routing services.' }).outcome, 'closed');
     },
   },
   {

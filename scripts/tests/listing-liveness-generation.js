@@ -10,6 +10,7 @@ import {
 import {
   getPreparedOfficialPosting, prepareOfficialPostingForGeneration, registerOfficialPostingGenerationHandlers,
 } from '../../electron/ipc/officialPostingGeneration.js';
+import { mostOfficialSource } from '../../electron/ipc/officialPostingFields.js';
 import { LISTING_LIVENESS_RULES } from '../../electron/ipc/listingLiveness.js';
 
 const AT = Date.parse('2026-01-03T12:00:00Z');
@@ -20,6 +21,8 @@ const state = (verdict, basis, at = AT - 60_000) => ({ verdict, basis, board: 'l
 const marker = () => ({ board: 'linkedin', reason: 'linkedin-no-longer-accepting', at: new Date(AT - 60_000).toISOString() });
 const miss = (extra = {}) => ({ level: 'L5', outcome: 'not-found', employer: 'Northwind Labs', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research'], ...extra });
 const ambiguous = () => ({ level: 'L6', outcome: 'ambiguous', employer: '', trail: [OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, 'worker-research', 'ambiguous'] });
+const confirmedClosed = (extra = {}) => ({ level: 'L2', outcome: 'closed', employer: 'Northwind Labs',
+  sourceUrl: 'https://northwind.test/jobs/synthetic-one', trail: ['semantic-match-v1', 'closed', 'closure-page-read'], ...extra });
 const official = () => ({ level: 'L4', outcome: 'link-only', employer: 'Northwind Labs',
   sourceUrl: 'https://northwind.test/jobs/synthetic-one',
   officialApplyUrl: 'https://northwind.test/jobs/synthetic-one', trail: ['description-anchor'] });
@@ -571,7 +574,7 @@ export default [
     async run() {
       for (const row of [job({ listingLiveness: state('open', 'open-marker') }), job({ url: 'https://unobservable.test/job' })]) {
         for (const listingOverride of [false, true]) {
-          const result = await checkListingForGeneration({ job: row, posting: miss({ outcome: 'closed', trail: ['closed'] }),
+          const result = await checkListingForGeneration({ job: row, posting: confirmedClosed(),
             listingOverride, now: () => AT, probe: { probe: async () => { throw new Error('Official closure must win before board probes'); } } });
           assert.equal(result.listingCheck.action, 'refuse-final');
           assert.equal(result.listingCheck.basis, 'official-closed');
@@ -579,6 +582,31 @@ export default [
           assert.equal(result.listingAudit, null);
         }
       }
+    },
+  },
+  {
+    name: 'Generate and the Board agree on whether a job is closed across official and listing sources',
+    async run() {
+      const cases = [
+        ['confirmed official closed', confirmedClosed(), 'open', true],
+        ['older official closed without a page read', confirmedClosed({ trail: ['semantic-match-v1', 'closed'] }), 'open', false],
+        ['L5 closed', miss({ outcome: 'closed', trail: ['closed'] }), 'open', false],
+        ['official open with listing closed', official(), 'closed', false],
+        ['no official with listing closed', miss(), 'closed', true],
+        ['no official with listing open', miss(), 'open', false],
+      ];
+      for (const [name, posting, verdict, closed] of cases) {
+        const row = job({ officialPosting: posting, listingLiveness: state(verdict, 'structural') });
+        assert.equal(mostOfficialSource(row).closed, closed, `Board: ${name}`);
+        const result = decision(row, posting, verdict, 'structural');
+        assert.equal(result.listingCheck.action.startsWith('refuse'), closed, `Generate: ${name}`);
+        // A job the stored sources do not call closed is probed live; the probe sees an open page.
+        const checked = await checkListingForGeneration({ job: row, posting, now: () => AT, callText: async () => ({ rows: [] }),
+          calibrationStore: calibration(), probe: { probe: async () => evidence({ openSignals: ['apply'] }) } });
+        assert.equal(checked.listingCheck.action.startsWith('refuse'), closed, `Generate check: ${name}`);
+      }
+      assert.equal(decision(job(), confirmedClosed(), 'open', 'structural').listingCheck.basis, 'official-closed');
+      assert.notEqual(decision(job(), confirmedClosed({ trail: ['semantic-match-v1', 'closed'] }), 'closed', 'structural').listingCheck.basis, 'official-closed');
     },
   },
   {

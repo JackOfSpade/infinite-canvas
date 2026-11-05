@@ -12,7 +12,7 @@ import {
 import { withListingClosed, withListingLiveness } from './officialPostingBoardClosed.js';
 import {
   boardClosedBoardLabel, normalizeBoardClosed, normalizeListingLiveness,
-  normalizeOfficialPosting, officialPostingExhausted, officialResearchSettled,
+  mostOfficialSource, normalizeOfficialPosting, officialPostingExhausted, officialResearchSettled,
 } from './officialPostingFields.js';
 import { cappedHandoff } from './officialPostingService.js';
 import { callLLMText } from './llm.js';
@@ -298,8 +298,10 @@ const pairOf = job => ({
   listingLiveness: normalizeListingLiveness(job?.listingLiveness),
   boardClosed: normalizeBoardClosed(job?.boardClosed),
 });
-const isOfficialLive = posting => ['L1', 'L2', 'L3', 'L4'].includes(posting?.level)
-  && ['found', 'link-only'].includes(posting?.outcome);
+// The Board's rule, so Generate and the Board always agree on which source decides.
+const officialSource = posting => { const source = mostOfficialSource({ officialPosting: posting }); return source.kind === 'official' ? source : null; };
+const isOfficialLive = posting => officialSource(posting)?.closed === false;
+const isOfficialClosed = posting => officialSource(posting)?.closed === true;
 const hasClosedMarker = basis => basis === 'closed-marker' || basis === 'both';
 function fixedMessage(action, verdict, basis, board, posting) {
   const label = boardClosedBoardLabel(board) || 'Listing';
@@ -321,7 +323,7 @@ export function decideGenerationListingCheck({
   const official = normalizeOfficialPosting(posting);
   const board = boardOf(job);
   const timestamp = new Date(at).toISOString();
-  if (official?.outcome === 'closed') return {
+  if (isOfficialClosed(official)) return {
     listingCheck: { action: 'refuse-final', verdict: 'closed', basis: 'official-closed', board, at: timestamp, override: false },
     message: 'Official posting closed — no current exact open posting found', listingAudit: null,
   };
@@ -379,9 +381,9 @@ export async function checkListingForGeneration({
   };
   const storedVerdict = stored.listingLiveness?.verdict || (stored.boardClosed ? 'pending' : 'unknown');
   const storedBasis = stored.listingLiveness?.basis || (stored.boardClosed ? 'closed-marker' : 'neither');
-  if (official?.outcome === 'closed') return finish(job, 'closed', 'official-closed');
-  if (isOfficialLive(official)) return finish(job, storedVerdict, storedBasis);
-  if (storedVerdict === 'closed' && ['structural', 'ai'].includes(storedBasis)) return finish(job, 'closed', storedBasis);
+  const source = mostOfficialSource({ officialPosting: official, listingLiveness: stored.listingLiveness });
+  if (source.kind === 'official') return source.closed ? finish(job, 'closed', 'official-closed') : finish(job, storedVerdict, storedBasis);
+  if (source.closed) return finish(job, 'closed', storedBasis);
   const latestDemotedAt = async () => {
     try {
       const store = calibrationStore || getListingLivenessCalibrationStore();
