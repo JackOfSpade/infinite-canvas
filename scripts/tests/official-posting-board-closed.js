@@ -352,7 +352,7 @@ const pureTests = [
       const extractor = read('electron/extractors/apiExtractors.js');
       assert.match(extractor, /const response = await page\.goto\(job\.url,/u);
       assert.match(extractor, /page\.evaluate\(listingLivenessPageProbe,/u);
-      assert.match(extractor, /enriched\[i\] = linkedInEnrichedRow\(job, result\.text, decision, evidence\);/u);
+      assert.match(extractor, /enriched\[i\] = linkedInEnrichedRow\(job, result\.text, decision, evidence, result\.salary\);/u);
       assert.match(extractor, /enriched\[i\] = linkedInUndescribedRow\(job, decision, evidence\);/u);
     },
   },

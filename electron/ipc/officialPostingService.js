@@ -12,7 +12,7 @@ import { extractOfficialPostingCandidates } from './officialPostingExtractors.js
 import { officialPostingAdapterUrl, officialPostingChunks, unresolvedOfficialPosting, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
 import { canonicalLeadUrl, descriptionOverlap } from './officialPostingMatch.js';
 import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
-import { extractAtsTenant, isAggregatorHost, normalizedSourceHost, strictEmployerEqual } from './officialSourceHosts.js';
+import { extractAtsTenant, isAggregatorHost, isHostedAtsSurface, normalizedSourceHost, strictEmployerEqual } from './officialSourceHosts.js';
 import { normalizeOfficialPosting, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingComparativeTrail, OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES, OFFICIAL_POSTING_TRAIL, OFFICIAL_POSTING_COMPARATIVE_CODES } from './officialPostingFields.js';
 import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
@@ -20,7 +20,7 @@ import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchRespon
 import { CLAUDE_TASK_CONCURRENCY } from './claudeTaskWorker.js';
 import { snapshotOfficialPostingLeads, trimOfficialPostingSnapshots } from './officialPostingSnapshot.js';
 import { createOfficialPostingRenderSession, renderOfficialPostingPage } from './officialPostingRenderedPage.js';
-import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS } from './officialPostingJudge.js';
+import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS, UNREADABLE_PAGE_TEXT_CHARS } from './officialPostingJudge.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from './officialPostingNegativePolicy.js';
 import { officialPostingHandoffFailureCause, officialPostingHandoffFailureCode, recordOfficialPostingDiscovery } from './officialPostingDiscoveryDiagnostics.js';
 
@@ -364,6 +364,14 @@ function judgeLeadsFor(member, found) {
   }
   for (const lead of found) add(lead.postingUrl, 'posting', lead.employer);
   for (const lead of found) add(lead.careersPageUrl, 'careers', lead.employer);
+  // The employer's own site, for a job the finders placed only on a job board: its pages are where a judge sees that board linked.
+  // Never at the cost of a lead the judges would otherwise read: a cut lead leaves a miss unprovable, and the last slot waits for an address a first-round judge names.
+  for (const lead of [...member.candidateUrls, ...found]) {
+    const site = officialHttpsUrl(lead?.employerDomain); const host = site ? normalizedSourceHost(site).replace(/^www\./u, '') : '';
+    if (!host || leads.length >= MAX_JUDGE_LEADS - 1 || isAggregatorHost(host) || isHostedAtsSurface(host)
+      || leads.some(item => { const other = normalizedSourceHost(item.url); return other === host || other.endsWith(`.${host}`); })) continue;
+    add(site, 'careers', lead.employer);
+  }
   return { total: leads.length, leads: leads.slice(0, MAX_JUDGE_LEADS).map((lead, index) => ({ id: `P${index + 1}`, ...lead })) };
 }
 
@@ -548,7 +556,7 @@ export async function resolveOfficialPostings(jobs, {
           await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
             company: String(member.job?.company || '').slice(0, 120), round, run, route, manualRoutingReason, leads: leads.map(lead => lead.url),
             choice: answer.choice, status: answer.status, statusQuote: answer.statusQuote, employerLinked: answer.employerLinked,
-            employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, descriptionChars: answer.description.length,
+            employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, judgeTitle: answer.title.slice(0, 200), judgeEmployer: answer.employer.slice(0, 120), descriptionChars: answer.description.length,
             conflicts: answer.conflicts, snapshots: snapshotLog(snapshots) });
           break;
         } catch (error) {
@@ -603,9 +611,13 @@ export async function resolveOfficialPostings(jobs, {
     const first = await judgePair(member, leads, 1, snapshots);
     if (first.failed) return first.failed;
     const answers = Object.values(first.answers);
+    const namedInConflicts = list => list.filter(answer => ['none', 'uncertain'].includes(answer?.choice))
+      .flatMap(answer => (answer.conflicts || []).flatMap(text => text.match(/https:\/\/[^\s"'<>)\]]+/gu) || [])
+        .map(url => ({ answer, cited: url.replace(/[^\p{L}\p{N}/=#&%_~-]+$/u, '') })));
+    let named = [];
     const withCitations = result => {
       if (result.officialPosting?.outcome !== 'ambiguous') return result;
-      const alternatives = rankJudgeCitations({ leads, answers, sourceUrls: [member.job?.url, member.job?.applyUrl] });
+      const alternatives = rankJudgeCitations({ leads, answers, named, sourceUrls: [member.job?.url, member.job?.applyUrl] });
       return alternatives.length ? { ...result, officialPosting: { ...result.officialPosting, alternatives } } : result;
     };
     const decided = decide(first.answers);
@@ -620,9 +632,7 @@ export async function resolveOfficialPostings(jobs, {
     const added = [];
     // Pages a judge actually read come first, then ones it could only name, without the markup or punctuation around them.
     const judgeOwnPostings = answers.filter(answer => answer?.choice === 'other').map(answer => ({ answer, cited: answer.postingUrl }));
-    const judgeNamed = answers.filter(answer => ['none', 'uncertain'].includes(answer?.choice))
-      .flatMap(answer => (answer.conflicts || []).flatMap(text => text.match(/https:\/\/[^\s"'<>)\]]+/gu) || [])
-        .map(url => ({ answer, cited: url.replace(/[^\p{L}\p{N}/=#&%_~-]+$/u, '') })));
+    const judgeNamed = namedInConflicts(answers);
     for (const { answer, cited } of [...judgeOwnPostings, ...judgeNamed]) {
       const url = officialHttpsUrl(cited);
       if (!url || isAggregatorHost(normalizedSourceHost(url)) || known.has(canonicalLeadUrl(url)) || leads.length + added.length >= MAX_JUDGE_LEADS) continue;
@@ -638,6 +648,10 @@ export async function resolveOfficialPostings(jobs, {
     // A miss or a closure never settles on one pair: without the confirming pair it stays retryable.
     if (second.failed) return decided.officialPosting?.trail?.includes('comparative-none') || decided.officialPosting?.outcome === 'closed'
       ? second.failed : withCitations(decided);
+    // Where a lead's own redirect ended and the app read a page is that lead's page, not a new address. A shell it couldn't read still counts as unread.
+    const reached = new Set(snapshots.filter(snapshot => snapshot.read === true && (snapshot.description || String(snapshot.pageText || '').length >= UNREADABLE_PAGE_TEXT_CHARS))
+      .map(snapshot => canonicalLeadUrl(snapshot.finalUrl)).filter(Boolean));
+    named = namedInConflicts(Object.values(second.answers)).map(item => item.cited).filter(url => !reached.has(canonicalLeadUrl(url)));
     return withCitations(decide(second.answers));
   };
   const judgmentQueue = []; const judgmentTasks = []; const scheduledJudgments = new Set();

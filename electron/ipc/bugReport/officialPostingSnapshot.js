@@ -25,7 +25,7 @@ export function buildOfficialPostingSnapshot(nodes, snapshot = null) {
     const id = createHash('sha256').update(row.id).digest('hex').slice(0, 10);
     const fetches = row.fetchFailures.map(failure => `${failure.code}${failure.reason ? `/${failure.reason}` : ''}${failure.statusCode ? `/HTTP-${failure.statusCode}` : ''}`);
     const missingFetchDetails = !fetches.length && row.trail.some(code => OFFICIAL_REPORT_FETCH_CODES.includes(code));
-    lines.push(`- card #${id} · record ${row.record} · level ${row.level} · outcome ${row.outcome} · status ${row.state} · retryable ${row.retryable ? 'yes' : 'no'} · research settled ${row.settled ? 'yes' : 'no'} · semantic proof ${row.semanticProof} · trail ${row.trail.join(', ') || 'not recorded'} · fetch details ${fetches.join(', ') || 'not recorded'}${missingFetchDetails ? ' (failure detail missing)' : ''}`);
+    lines.push(`- card #${id} · record ${row.record} · level ${row.level} · outcome ${row.outcome} · status ${row.state} · retryable ${row.retryable ? 'yes' : 'no'} · miss or closure settled ${row.settled ? 'yes' : 'no'} · semantic proof ${row.semanticProof} · trail ${row.trail.join(', ') || 'not recorded'} · fetch details ${fetches.join(', ') || (row.record === 'valid' && !missingFetchDetails ? 'none' : 'not recorded')}${missingFetchDetails ? ' (failure detail missing)' : ''}`);
   }
   return lines.join('\n') + '\n';
 }

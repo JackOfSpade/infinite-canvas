@@ -28,7 +28,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
   'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'storage-failed', 'failed',
-  'semantic-match-v1', 'closure-page-read', 'page-unreadable', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-salary-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
+  'semantic-match-v1', 'closure-page-read', 'page-unreadable', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-salary-split', 'judge-title-split', 'judge-employer-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
   ...['a', 'b', 'choice'].flatMap(run => ['none', 'uncertain', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
@@ -269,10 +269,15 @@ export function listingStateRank(job) {
 
 // Trail codes meaning the research step did not run, did not finish, or hit a
 // transient failure. A miss carrying any of them is retryable, never a conclusion.
+/** A card's own addresses earlier judges cited: on an unsettled card nothing else remembers them, since such a result is not stored. Leads only. */
+export function officialPostingCitedLeadUrls(posting) {
+  return (posting?.alternatives || []).filter(item => item?.title?.startsWith('Unconfirmed · cited')).map(item => item.url).slice(0, 3);
+}
+
 export const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
-  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed']);
+  'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'judge-title-split', 'judge-employer-split', 'semantic-overflow', 'official-liveness-unconfirmed']);
 /** True only for a definitive miss reached after research actually ran (or an official page that is itself closed). */
 export function officialResearchSettled(value) {
   const posting = value && typeof value === 'object' ? value : null;
@@ -346,7 +351,7 @@ export function officialPostingLookupStatus(value) {
   return result('incomplete', 'Official posting lookup incomplete', `The lookup did not finish, so no exact-match conclusion was reached. ${retry}`, true);
 }
 
-const JUDGED_UNCERTAIN_TRAIL = Object.freeze(['semantic-uncertain', 'source-unproven', 'official-liveness-unconfirmed']);
+const JUDGED_UNCERTAIN_TRAIL = Object.freeze(['semantic-uncertain', 'judge-title-split', 'judge-employer-split', 'source-unproven', 'official-liveness-unconfirmed']);
 const INTERRUPTED_RESEARCH_TRAIL = Object.freeze(RESEARCH_UNSETTLED_TRAIL.filter(code => !JUDGED_UNCERTAIN_TRAIL.includes(code)));
 
 /** Research ran to completion without a conclusion: its judges could not confirm

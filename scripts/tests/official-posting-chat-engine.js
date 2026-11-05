@@ -271,7 +271,7 @@ export default [
         const callRaw = async (prompt, options) => {
           if (options.task === 'job-official-posting-research') return requestedIds(prompt).map(id =>
             `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ postingUrl: POSTING, careersPageUrl: '',
-              employer: 'Northwind Labs', employerDomain: 'https://northwind.test', ats: 'Greenhouse' })}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
+              employer: 'Northwind Labs', employerDomain: '', ats: 'Greenhouse' })}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
           const snapshots = JSON.parse(prompt.split('BEGIN UNTRUSTED APP PAGE SNAPSHOTS JSON\n')[1]
             .split('\nEND UNTRUSTED APP PAGE SNAPSHOTS JSON')[0]);
           reads.push(snapshots[0].read);
@@ -1149,7 +1149,9 @@ export default [
         const originalHeading = `Independent official posting judgment run ${run}.`;
         const secondHeading = `Independent official posting judgment run ${run}, second independent review (round 2).`;
         assert.equal(first[run].prompt.slice(0, originalHeading.length), originalHeading);
-        assert.equal(second[run].prompt, secondHeading + first[run].prompt.slice(originalHeading.length));
+        // The only other difference: no later round can read an address a final-round judge names.
+        assert.equal(second[run].prompt, secondHeading + first[run].prompt.slice(originalHeading.length)
+          .replace('open it in a browser for the second review', 'keep it for the next recheck'));
         assert.notEqual(second[run].prompt, first[run].prompt);
         assert.doesNotMatch(first[run].prompt, /\b(?:round 2|second independent review)\b/u);
         assert.deepEqual(hostLeads(second[run].prompt), hostLeads(first[run].prompt));

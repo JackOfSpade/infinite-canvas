@@ -12,7 +12,7 @@ export { adapterUrl as officialPostingAdapterUrl, readableDescription as readabl
 const canonical = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
 const RETRYABLE_MISS_TRAIL = new Set(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'fetch-failed', 'fetch-timeout', 'unsafe-url', 'unsafe-address', 'unsupported-content-type', 'oversize', 'invalid-text',
-  'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed', 'source-unproven']);
+  'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed', 'comparative-invalid', 'comparative-unavailable', 'comparative-truncated', 'insufficient-text', 'judge-title-split', 'judge-employer-split', 'semantic-uncertain', 'semantic-overflow', 'official-liveness-unconfirmed', 'source-unproven']);
 const DEFINITIVE_MISS_TRAIL = new Set(['closed', 'title-mismatch', 'location-mismatch', 'employer-mismatch',
   'tenant-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'comparative-none', 'comparative-disagree']);
 

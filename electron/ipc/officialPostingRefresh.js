@@ -1,7 +1,7 @@
 import { handleSafe } from './ipcUtils.js';
 import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
-import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus } from './officialPostingFields.js';
+import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { officialPostingSemanticInputHash } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
@@ -101,7 +101,7 @@ export async function refreshOfficialPostingEntries(args, {
     priorOfficialRecords.push(record);
     const cardPosting = normalizeOfficialPosting(args.entries[index].job.officialPosting);
     candidateUrlsByRow.push([...new Set([record?.officialPosting?.sourceUrl, record?.officialPosting?.officialApplyUrl,
-      cardPosting?.sourceUrl, cardPosting?.officialApplyUrl].map(officialHttpsUrl).filter(Boolean))]);
+      cardPosting?.sourceUrl, cardPosting?.officialApplyUrl, ...officialPostingCitedLeadUrls(cardPosting)].map(officialHttpsUrl).filter(Boolean))]);
   }
   active(signal);
   const progress = value => {

@@ -8,7 +8,7 @@ import { extractOfficialPostingCandidates } from './officialPostingExtractors.js
 import { evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer } from './officialPostingMatch.js';
 import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
 import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingFetchFailure } from './officialPostingFields.js';
+import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingFetchFailure, officialPostingCitedLeadUrls } from './officialPostingFields.js';
 import { checkListingForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
 import { checkPostingVariantsForGeneration } from './listingLivenessProbe.js';
 import { normaliseJobPostingVariants } from './applicationBundle.js';
@@ -444,7 +444,7 @@ export async function prepareOfficialPostingForGeneration(args, {
         const boundRecord = record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record) ? record : null;
         const cachedPosting = normalizeOfficialPosting(boundRecord?.officialPosting);
         const candidateUrls = [...new Set([cachedPosting?.sourceUrl, cachedPosting?.officialApplyUrl,
-          cardPosting?.sourceUrl, cardPosting?.officialApplyUrl].map(officialHttpsUrl).filter(Boolean))];
+          cardPosting?.sourceUrl, cardPosting?.officialApplyUrl, ...officialPostingCitedLeadUrls(cardPosting)].map(officialHttpsUrl).filter(Boolean))];
         // Every generation uses the current shared discovery and comparison
         // process. Old URLs are leads; neither cached facts nor a weak fresh
         // recheck may authorize this application's official posting.
