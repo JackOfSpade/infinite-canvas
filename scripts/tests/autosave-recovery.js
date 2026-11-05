@@ -95,7 +95,7 @@ export function Probe({ onSnapshot, ...props }) { const state = useCanvasPersist
 
 export default [
   { name: 'A failed auto-load explains the blank canvas with the host reason and keeps the setting', async run() {
-    await withManualSave(async ({ props, render, act, state }) => {
+    await withManualSave(async ({ render, act, state }) => {
       const toasts = [];
       const settings = [];
       await render({ addToast: toast => toasts.push(toast), updateSetting: (key, value) => settings.push([key, value]) });
