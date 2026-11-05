@@ -28,7 +28,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
   'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'storage-failed', 'failed',
-  'semantic-match-v1', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-salary-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
+  'semantic-match-v1', 'closure-page-read', 'page-unreadable', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-salary-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
   ...['a', 'b', 'choice'].flatMap(run => ['none', 'uncertain', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]
@@ -312,8 +312,10 @@ export function officialPostingLookupStatus(value) {
     if (posting.outcome === 'ambiguous' || trail.has('comparative-disagree')) return result('ambiguous', 'Several official postings match', 'The completed lookup could not identify one exact match. The original listing is retained.', false);
     return result('not-found', 'No exact official posting found', 'The lookup completed without a verified exact match. The original listing is retained.', false);
   }
+  // Neither a plain download nor a browser could read the posting page, which says nothing about the posting itself.
+  const unreadablePage = trail.has('page-unreadable') ? ' The employer\'s page could not be read, in a plain download or in a browser.' : '';
   if (officialPostingExhausted(posting)) return result('exhausted', 'No confirmed official posting',
-    'Two full lookups could not confirm an official posting, so the original listing is used. Any links shown here are unconfirmed.', false);
+    `Two full lookups could not confirm an official posting, so the original listing is used. Any links shown here are unconfirmed.${unreadablePage}`, false);
   const retry = 'Retry the official posting lookup in the app.';
   const retained = `The original listing is retained. ${retry}`;
   const failureLabels = { 'access-denied': 'access denied', 'rate-limited': 'rate limited', 'server-error': 'server error',
@@ -336,7 +338,7 @@ export function officialPostingLookupStatus(value) {
   if (trail.has('crawl-budget') || trail.has('crawl-partial')) return result('incomplete', 'Official lookup incomplete: search coverage limited', retry, true);
   if (FETCH_FAILURE_CODES.some(code => trail.has(code)) || posting.fetchFailures?.length) return result('incomplete', 'Employer site verification incomplete', fetchDetail(), true);
   if (posting.outcome === 'ambiguous' || ['semantic-uncertain', 'semantic-overflow', 'comparative-invalid', 'comparative-truncated', 'insufficient-text', 'official-liveness-unconfirmed'].some(code => trail.has(code))) {
-    return result('incomplete', 'Official posting match uncertain', `An exact, current official match has not been verified. ${retry}`, true);
+    return result('incomplete', 'Official posting match uncertain', `An exact, current official match has not been verified.${unreadablePage} ${retry}`, true);
   }
   if (posting.outcome === 'unreadable' || ['official-text-missing', 'unreadable', 'stub-text', 'invalid-text'].some(code => trail.has(code))) return result('incomplete', 'Official lookup incomplete: posting could not be read', retry, true);
   if (officialPostingNegativeNeedsRecheck(posting)) return result('incomplete', 'Outdated lookup · check again',
@@ -376,4 +378,30 @@ export function officialPostingAfterRepeatAttempt(previous, next) {
   const posting = normalizeOfficialPosting(next);
   if (!posting || !officialPostingResearchInconclusive(previous) || !officialPostingResearchInconclusive(posting)) return next;
   return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), OFFICIAL_POSTING_EXHAUSTED_TRAIL]) };
+}
+
+/** Judged on the page as a person sees it. An older closure may rest on a download that could not see the page, so it is rechecked. */
+export function officialPostingClosureReadFullPage(posting) {
+  return (posting?.trail || []).includes('closure-page-read');
+}
+
+/** A confirmed official posting says this job is closed: the source of truth. A third party's closed verdict never counts,
+ * and neither does a lookup below official level or one from before the current checks. */
+export function officialPostingStatesClosed(value) {
+  const posting = normalizeOfficialPosting(value);
+  return Boolean(posting) && ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && Boolean(posting.sourceUrl)
+    && (posting.trail || []).includes('semantic-match-v1') && officialPostingClosureReadFullPage(posting)
+    && officialPostingLookupStatus(posting).state === 'closed';
+}
+
+/**
+ * Sources are ranked by how official they are, and only the top one counts: a confirmed official posting, or else the
+ * listing itself. Whether that one source is closed decides whether the job shows at all.
+ */
+export function mostOfficialSource(job) {
+  const posting = normalizeOfficialPosting(job?.officialPosting);
+  if (officialPostingStatesClosed(posting)) return { kind: 'official', closed: true };
+  if (posting && ['L1', 'L2', 'L3', 'L4'].includes(posting.level) && ['found', 'link-only'].includes(posting.outcome)
+    && (posting.sourceUrl || posting.officialApplyUrl)) return { kind: 'official', closed: false };
+  return { kind: 'listing', closed: normalizeListingLiveness(job?.listingLiveness)?.verdict === 'closed' };
 }

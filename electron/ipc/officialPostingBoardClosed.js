@@ -7,8 +7,9 @@
 // Pure helpers only: no Electron, no network, no store. The caller injects the
 // scraped-evidence test and the stored-view reader so this stays unit-testable.
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
-import { isAggregatorHost } from './officialSourceHosts.js';
+import { isAggregatorHost, listingSourceTier } from './officialSourceHosts.js';
 import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
+import { canonicalLeadUrl } from './officialPostingMatch.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 
 const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
@@ -72,16 +73,16 @@ export function boardClosedDetailAllowed({ expectedUrl = '', finalUrl = '' } = {
 }
 
 /**
- * First-wins dedup keeps the earlier row. Partition copies by the shared
- * liveness rank, preserving arrival order within each rank. A uniform list
- * returns the same array so callers can retain their identity fast path.
+ * First-wins dedup keeps the earlier row. The most official copy comes first, whatever its state, since that copy is
+ * the one whose state counts. Within a tier, copies go by the shared liveness rank, then arrival order.
+ * A uniform list returns the same array so callers can retain their identity fast path.
  */
 export function preferOpenRows(rows) {
   const list = Array.isArray(rows) ? rows : [];
   if (list.length < 2) return list;
-  const ranks = list.map(listingStateRank);
-  if (ranks.every(rank => rank === ranks[0])) return list;
-  return [1, 2, 3, 4].flatMap(rank => list.filter((_, index) => ranks[index] === rank));
+  const ranked = list.map((row, index) => ({ row, index, tier: listingSourceTier(row), rank: listingStateRank(row) }));
+  if (ranked.every(item => item.tier === ranked[0].tier && item.rank === ranked[0].rank)) return list;
+  return ranked.sort((a, b) => a.tier - b.tier || a.rank - b.rank || a.index - b.index).map(item => item.row);
 }
 
 /** Pending-closed and confirmed-closed rows the evidence gate set aside still reach the resolver. */
@@ -100,7 +101,6 @@ export function scoreSafeRowsWithBoardClosed(evidence) {
   return preferOpenRows(aside.length ? [...jobs, ...aside] : jobs);
 }
 
-const normalizedText = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
 // Match the request-local evidence key without importing its IPC context into
 // this pure settlement module. Some boards use the same bare native job id.
 const setAsideIdentity = row => {
@@ -108,6 +108,8 @@ const setAsideIdentity = row => {
   const identity = sourceJobKey(row);
   return source && identity ? `${source}|${identity}` : '';
 };
+
+const normalizedText = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim();
 
 async function officialTextIsEvidence(row, { getView, minChars, requireSemantic }) {
   if (typeof getView !== 'function') return false;
@@ -118,6 +120,15 @@ async function officialTextIsEvidence(row, { getView, minChars, requireSemantic 
   if (requireSemantic && !officialPostingSemanticProofMatches(row, served)) return false;
   const body = normalizedText(view.description);
   return body.length >= minChars && body !== normalizedText(row?.snippet || row?.description);
+}
+
+/** A verified open official posting elsewhere outranks a closed verdict from this page. The same page cannot outrank itself. */
+export function officialPostingOutranksClosedPage(row, closedPageUrl = '') {
+  const posting = normalizeOfficialPosting(row?.officialPosting);
+  if (!posting || !OFFICIAL_LINK_LEVELS.has(posting.level) || !['found', 'link-only'].includes(posting.outcome)
+    || !officialPostingSemanticProofMatches(row, posting)) return false;
+  const closed = canonicalLeadUrl(closedPageUrl);
+  return !closed || ![posting.sourceUrl, posting.officialApplyUrl].some(url => url && canonicalLeadUrl(url) === closed);
 }
 
 /**
@@ -144,17 +155,18 @@ export async function settleBoardClosedRows(rows, {
     const savedPosting = normalizeOfficialPosting(row.officialPosting);
     const posting = requireSemantic && !officialPostingSemanticProofMatches(row, savedPosting) ? null : savedPosting;
     const live = Boolean(posting) && ['found', 'link-only'].includes(posting.outcome);
-    if (live && TEXT_LEVELS.has(posting.level) && (scrapedOk || await officialTextIsEvidence(row, { getView, minChars, requireSemantic }))) {
-      keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue;
+    // The official posting outranks a board's closed verdict. Before scoring (getView supplied) a row with no text to
+    // score waits rather than being scored on nothing; it is not retired, so the official posting can still bring it back.
+    if (live && OFFICIAL_LINK_LEVELS.has(posting.level)) {
+      if (typeof getView !== 'function' || scrapedOk || (TEXT_LEVELS.has(posting.level) && await officialTextIsEvidence(row, { getView, minChars, requireSemantic }))) {
+        keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial);
+      } else dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked });
+      continue;
     }
-    if (live && posting.level === 'L4' && scrapedOk) { keep(row, BOARD_CLOSED_DISPOSITIONS.keptOfficial); continue; }
     if (rank !== 4) {
       if (scrapedOk) kept.push(row);
       else dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.deferredUnchecked });
       continue;
-    }
-    if (live && OFFICIAL_LINK_LEVELS.has(posting.level) && !scrapedOk) {
-      dropped.push({ row, disposition: BOARD_CLOSED_DISPOSITIONS.droppedNoDescription }); continue;
     }
     if (posting?.outcome === 'ambiguous' || posting?.trail?.includes('comparative-disagree')) {
       if (scrapedOk) keep(row, BOARD_CLOSED_DISPOSITIONS.keptAmbiguous);

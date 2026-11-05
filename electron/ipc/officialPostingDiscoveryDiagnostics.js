@@ -87,7 +87,7 @@ export function recordOfficialPostingPlannerTransition({ reason, recommended, qu
 function chatCounts(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   return Object.freeze(Object.fromEntries(['finderCalls', 'judgeRounds', 'judgeCalls', 'snapshotReads',
-    'snapshotFailures', 'truncatedSnapshots'].map(key => [key, count(value[key])])));
+    'snapshotFailures', 'truncatedSnapshots', 'postingDataSnapshots', 'renderedSnapshots', 'renderFailures'].map(key => [key, count(value[key])])));
 }
 
 /** Closed error classes only: arbitrary codes, messages and names may contain private data. */
@@ -173,7 +173,7 @@ export function buildOfficialPostingDiscoveryMarkdown() {
       lines.push(`- ${row.at} · input #${row.input.slice(0, 10)} · candidates ${row.candidateCount ?? 'not recorded'} · validated comparison runs ${row.comparisonRuns ?? 'not recorded'} · outcome ${row.outcome} · settled ${row.settled === null ? 'not recorded' : row.settled ? 'yes' : 'no'}`);
       if (row.chatStats) {
         const chat = row.chatStats;
-        lines.push(`  - Chat discovery: finder calls ${chat.finderCalls ?? 'not recorded'} · judge rounds ${chat.judgeRounds ?? 'not recorded'} · judge calls ${chat.judgeCalls ?? 'not recorded'} · snapshots read ${chat.snapshotReads ?? 'not recorded'} · snapshot failures ${chat.snapshotFailures ?? 'not recorded'} · truncated snapshots ${chat.truncatedSnapshots ?? 'not recorded'}`);
+        lines.push(`  - Chat discovery: finder calls ${chat.finderCalls ?? 'not recorded'} · judge rounds ${chat.judgeRounds ?? 'not recorded'} · judge calls ${chat.judgeCalls ?? 'not recorded'} · snapshots read ${chat.snapshotReads ?? 'not recorded'} · with posting data ${chat.postingDataSnapshots ?? 'not recorded'} · snapshot failures ${chat.snapshotFailures ?? 'not recorded'} · truncated snapshots ${chat.truncatedSnapshots ?? 'not recorded'} · opened in browser ${chat.renderedSnapshots ?? 'not recorded'} · browser attempts failed ${chat.renderFailures ?? 'not recorded'}`);
         lines.push(`  - Chat resolution reasons: ${row.resolutionReasons.length ? row.resolutionReasons.join(', ') : 'none'}`);
       }
       if (row.failureCodes.length) lines.push(`  - Handoff failure classes: ${row.failureCodes.join(', ')}`);

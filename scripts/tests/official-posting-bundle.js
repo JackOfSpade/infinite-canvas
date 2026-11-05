@@ -39,13 +39,16 @@ export default [
     run() {
       const markdown = formatOriginalJobListingMarkdown(job, { audience: 'bundle' });
       const [header, body] = markdown.split('\n---\n');
-      assert.ok(header.includes('**Posted by:** Recruiter \\* Team'));
+      assert.ok(!header.includes('**Posted by:**') && !header.includes('Recruiter'), 'the official posting is the only source shown');
+      assert.ok(!header.includes('**Source:**') && !header.includes('**Posted:**') && !header.includes('**Listing check:**'));
       assert.ok(header.includes(`**Apply URL:** <${job.applyUrl}>`));
       assert.ok(header.includes(`**Official posting:** <${job.officialPosting.sourceUrl}>`));
       assert.ok(header.includes('**Source level:** L3: Employer\'s ATS'));
-      assert.ok(header.includes(`**Listing URL:** <${job.url}>`));
+      assert.ok(!header.includes('**Listing URL:**') && !markdown.includes(job.url), 'no scraped listing URL beside a confirmed official posting');
       assert.ok(body.includes(ORIGINAL_JOB_LISTING_BODY_HEADING)); assert.ok(body.includes(job.snippet));
-      assert.ok(body.includes('## Posting locations') && body.includes('**Ottawa:** <https://board.example.test/jobs/two>'));
+      assert.ok(!markdown.includes('## Posting locations') && !markdown.includes('board.example.test/jobs/two'), 'no posting locations beside a confirmed official posting');
+      const prompt = formatOriginalJobListingMarkdown(job);
+      assert.ok(prompt.includes(`**Listing URL:** <${job.url}>`) && prompt.includes('## Posting locations'), 'the prompt to the AI still gets the listing and its locations');
       const unsafe = formatOriginalJobListingMarkdown({ ...job, applyUrl: 'https://secret@careers.example.test/one', officialPosting: { level: '__proto__' } }, { audience: 'bundle' });
       assert.ok(!unsafe.includes('Apply URL') && !unsafe.includes('Source level') && !unsafe.includes('secret'));
       const absent = formatOriginalJobListingMarkdown({ title: 'Legacy role', snippet: 'Legacy body' }, { audience: 'bundle' });
@@ -241,7 +244,7 @@ export default [
         const document = dom.window.document;
         assert.equal(document.querySelector('[data-ic-official-posting-status] strong').textContent, status.label);
         assert.equal(document.querySelector('.ic-job-posting-link').href, officialPosting.sourceUrl);
-        assert.ok([...document.querySelectorAll('.ic-job-posting-link')].some(link => link.href === job.url), 'original provenance remains visible');
+        assert.deepEqual([...document.querySelectorAll('.ic-job-posting-link')].map(link => link.href), [officialPosting.sourceUrl], 'only the official link is shown');
       } finally { dom.window.close(); }
     },
   },

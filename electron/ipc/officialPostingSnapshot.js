@@ -1,6 +1,8 @@
 import { extractOfficialPostingCandidates, officialDescriptionText, scanOfficialCareersPage } from './officialPostingExtractors.js';
+import { eightfoldBoardPosting, eightfoldDescriptionText, eightfoldPostingRoute, eightfoldRetainedPosting } from './officialPostingEightfold.js';
 import { officialHttpsUrl } from './officialPostingFields.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
+import { MIN_RENDERED_CHARS } from './officialPostingRenderedPage.js';
 import { extractAtsTenant, normalizedSourceHost, registrableDomain } from './officialSourceHosts.js';
 
 // Claude's WebFetch cannot run JavaScript and returns a summary of a page rather than
@@ -9,7 +11,9 @@ import { extractAtsTenant, normalizedSourceHost, registrableDomain } from './off
 // status or ownership. The judges read it as untrusted page content, like the listing.
 
 export const SNAPSHOT_DESCRIPTION_CHARS = 30_000;
-export const SNAPSHOT_TOTAL_CHARS = 100_000;
+export const SNAPSHOT_TOTAL_CHARS = 250_000;
+// The whole page as the browser shows it. Only the prompt's size bound can shorten it.
+export const SNAPSHOT_PAGE_TEXT_CHARS = 120_000;
 const MAX_BOARD_LINKS = 12;
 const MAX_MARKUP_URLS = 20_000;
 const MAX_MARKUP_URL_CHARS = 300;
@@ -92,6 +96,23 @@ async function read(fetch, url, signal) {
   catch (error) { return { error: error?.code || 'fetch-failed', httpStatus: httpStatus(error) }; }
 }
 
+/** The posting's own public data when the page is an Eightfold shell. Null means this page says nothing
+ * either way: only a board that answers not found and a retained record of this posting mean it left the board. */
+async function eightfoldBoardSnapshot(body, finalUrl, { fetch, signal }) {
+  const route = eightfoldPostingRoute(body, finalUrl);
+  if (!route) return null;
+  const board = await read(fetch, route.boardUrl, signal);
+  let posting = board.page ? eightfoldBoardPosting(board.page.body, route.id) : null;
+  if (!posting) {
+    if (board.page || (board.httpStatus !== 404 && board.httpStatus !== 410 && board.error !== 'closed')) return null;
+    const retained = await read(fetch, route.recordUrl, signal);
+    posting = retained.page ? eightfoldRetainedPosting(retained.page.body, route.id) : null;
+    if (!posting) return null;
+  }
+  return { source: 'board-data', postingsInData: 1, listedInBoardData: posting.listed,
+    ...postingFacts({ title: posting.title, location: posting.location, description: eightfoldDescriptionText(posting.html) }) };
+}
+
 /** What one lead returned to a plain download, right now. */
 export async function snapshotOfficialPostingLead(lead, { fetch, signal } = {}) {
   const at = new Date().toISOString();
@@ -118,6 +139,8 @@ export async function snapshotOfficialPostingLead(lead, { fetch, signal } = {}) 
   }
   const body = String(result.page.body || '');
   const finalUrl = officialHttpsUrl(result.page.url || result.page.sourceUrl) || lead.url;
+  const boardData = await eightfoldBoardSnapshot(body, finalUrl, { fetch, signal });
+  if (boardData) return { id: lead.id, at, read: true, ...(finalUrl !== lead.url ? { finalUrl } : {}), ...boardData };
   let candidates = [];
   try { candidates = extractOfficialPostingCandidates({ body, sourceUrl: finalUrl, contentType: result.page.contentType }); } catch { candidates = []; }
   const match = candidates.find(candidate => sameposting(candidate, lead.url) || sameposting(candidate, finalUrl))
@@ -145,19 +168,74 @@ export async function snapshotOfficialPostingLead(lead, { fetch, signal } = {}) 
     ...(match ? postingFacts(match) : pageText ? { pageText, ...(pageTextTruncated ? { pageTextTruncated: true } : {}) } : {}), ...(boardLinks.length ? { jobBoardLinks: boardLinks } : {}), ...(boardLinksFrom ? { jobBoardLinksFrom: boardLinksFrom } : {}) };
 }
 
+/** A posting lead's closed or open status is read from the full page, whatever its data says. A careers lead is only
+ * for finding the board, so it opens when the plain download found none. */
+const needsRender = (lead, snapshot) => lead.kind !== 'careers' || !snapshot.jobBoardLinks?.length;
+
+/** The plain snapshot plus what the page showed a person. Null when it showed too little to read. */
+function renderedSnapshot(lead, plain, page) {
+  const { pageText: _plain, pageTextTruncated: _plainTruncated, notFound: _notFound, httpStatus: _status, ...kept } = plain;
+  const base = { ...kept, id: lead.id, at: new Date().toISOString(), read: true, source: plain.source || 'page', rendered: true,
+    ...(page.settled ? {} : { settled: false }), ...(page.finalUrl !== lead.url ? { finalUrl: page.finalUrl } : {}) };
+  if (page.status === 404 || page.status === 410) {
+    return plain.source === 'board-data' && plain.read ? { ...base, pageHttpStatus: page.status }
+      : { ...base, read: false, httpStatus: page.status, notFound: true };
+  }
+  let boardLinks = [];
+  let match = null;
+  try {
+    boardLinks = lead.kind === 'careers' ? htmlBoards(page.html, page.finalUrl) : [];
+    const candidates = extractOfficialPostingCandidates({ body: page.html, sourceUrl: page.finalUrl, contentType: 'text/html' });
+    match = candidates.find(candidate => sameposting(candidate, lead.url) || sameposting(candidate, page.finalUrl))
+      || (lead.kind === 'posting' && candidates.length === 1 ? candidates[0] : null);
+  } catch { /* The visible text below is still what the page showed. */ }
+  const errorStatus = page.status >= 400 ? { pageHttpStatus: page.status } : {};
+  // A short settled page can be the whole answer ("This job is no longer available"). A short unsettled one is still loading.
+  const shown = page.text.trim().length;
+  if (!boardLinks.length && !match && (!shown || (!page.settled && shown < MIN_RENDERED_CHARS))) return null;
+  return { ...base, ...errorStatus, ...(match && String(match.description || '').length > String(plain.description || '').length ? postingFacts(match) : {}),
+    pageText: page.text.slice(0, SNAPSHOT_PAGE_TEXT_CHARS), ...(page.text.length > SNAPSHOT_PAGE_TEXT_CHARS ? { pageTextTruncated: true } : {}),
+    ...(boardLinks.length ? { jobBoardLinks: boardLinks } : {}) };
+}
+
+async function withRenderedPages(leads, snapshots, { render, signal }) {
+  await Promise.all(leads.map(async (lead, index) => {
+    if (!needsRender(lead, snapshots[index])) return;
+    let page;
+    try { page = await render(lead.url, { signal }); } catch { page = { ok: false, reason: 'load-failed' }; }
+    let seen = null;
+    try { seen = page?.ok ? renderedSnapshot(lead, snapshots[index], page) : null; } catch { page = { ok: false, reason: 'load-failed' }; }
+    snapshots[index] = seen || { ...snapshots[index], renderFailed: page?.ok ? 'empty' : String(page?.reason || 'load-failed') };
+  }));
+}
+
 /** Snapshots for every lead, trimmed so the judgment prompt stays within its bound. */
-export async function snapshotOfficialPostingLeads(leads, { fetch, signal } = {}) {
+export async function snapshotOfficialPostingLeads(leads, { fetch, render, signal } = {}) {
   const snapshots = await Promise.all(leads.map(lead => snapshotOfficialPostingLead(lead, { fetch, signal })
     .catch(() => ({ id: lead.id, at: new Date().toISOString(), read: false }))));
-  let total = JSON.stringify(snapshots).length;
-  for (const snapshot of [...snapshots].sort((a, b) => (b.description || b.pageText || '').length - (a.description || a.pageText || '').length)) {
-    if (total <= SNAPSHOT_TOTAL_CHARS) break;
-    for (const key of ['pageText', 'description']) {
-      if (!snapshot[key]) continue;
-      const keep = Math.max(1000, snapshot[key].length - (total - SNAPSHOT_TOTAL_CHARS));
-      total -= snapshot[key].length - Math.min(keep, snapshot[key].length);
-      if (keep < snapshot[key].length) { snapshot[key] = snapshot[key].slice(0, keep); snapshot[`${key}Truncated`] = true; }
-    }
+  if (render) await withRenderedPages(leads, snapshots, { render, signal });
+  return trimOfficialPostingSnapshots(snapshots);
+}
+
+/** Keeps the judgment prompt within its bound by shortening only the longest texts, all to one length, so no page loses most of its text for another. */
+export function trimOfficialPostingSnapshots(snapshots) {
+  const fields = snapshots.flatMap(snapshot => ['pageText', 'description'].filter(key => snapshot[key]).map(key => ({ snapshot, key, length: snapshot[key].length })));
+  const excess = JSON.stringify(snapshots).length - SNAPSHOT_TOTAL_CHARS;
+  if (excess <= 0 || !fields.length) return snapshots;
+  // Each shortened field also gains its truncation flag.
+  const budget = fields.reduce((sum, field) => sum + field.length, 0) - excess - fields.length * 32;
+  // Longest last: each field below the even share leaves its unused share to the rest.
+  fields.sort((a, b) => a.length - b.length);
+  let remaining = Math.max(0, budget); let left = fields.length; let cap = 0;
+  for (const field of fields) {
+    cap = Math.floor(remaining / left);
+    if (field.length > cap) break;
+    remaining -= field.length; left -= 1;
+  }
+  for (const { snapshot, key, length } of fields) {
+    if (length <= cap) continue;
+    snapshot[key] = snapshot[key].slice(0, cap);
+    snapshot[`${key}Truncated`] = true;
   }
   return snapshots;
 }

@@ -166,6 +166,7 @@ export function finalizeListingEvidence(raw = {}, meta = {}) {
     expectedLocation: input.expectedLocation ?? '',
     wall: input.wall ? bounded(input.wall, 80) : null,
     chromeText: bounded(input.chromeText, MAX_CHROME_CHARS),
+    pageBody: bounded(input.pageBody, MAX_PAGE_TEXT_CHARS),
     descriptionText: bounded(input.descriptionText, MAX_DESCRIPTION_CHARS),
     descriptionIsPage: input.descriptionIsPage === true,
     closedHits: (Array.isArray(input.closedHits) ? input.closedHits : []).slice(0, MAX_HITS)
@@ -353,6 +354,7 @@ export function evidenceFromHtml(html, options = {}) {
   return finalizeListingEvidence({
     ...options, board: options.board || ruleKey, ruleKey, title, h1,
     chromeText: pageText.slice(chromeStart, chromeStart + MAX_CHROME_CHARS),
+    pageBody: pageText,
     descriptionText: description, descriptionIsPage,
     closedHits: collectHits(pageText, descriptionIsPage ? '' : description, rules),
     openSignals: htmlOpenSignals(source, rules), jsonLd: { validThrough: json.validThrough, isListed: json.isListed },
@@ -494,7 +496,7 @@ export function listingLivenessPageProbe({ rules = {}, expectedTitle = '', descr
     } catch { /* a changed selector cannot prove openness */ }
     if (openSignals.length >= 6) break;
   }
-  return { title, h1, chromeText, descriptionText: description,
+  return { title, h1, chromeText, pageBody: body, descriptionText: description,
     descriptionIsPage: Boolean(descriptionIsPage), closedHits, openSignals,
     jsonLd: { validThrough: json.validThrough, isListed: json.isListed },
     workdayPostingAvailable: typeof window.workday?.postingAvailable === 'boolean'

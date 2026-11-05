@@ -7,7 +7,7 @@
  * company, and a pretty, source-faithful Markdown rendering of the scraped
  * job listing.
  */
-import { OFFICIAL_POSTING_LABELS, boardClosedBoardLabel, normalizeOfficialPosting, officialHttpsUrl, officialPostingLookupStatus } from './officialPostingFields.js';
+import { OFFICIAL_POSTING_LABELS, boardClosedBoardLabel, normalizeOfficialPosting, officialHttpsUrl, officialPostingLookupStatus, mostOfficialSource } from './officialPostingFields.js';
 
 const WINDOWS_RESERVED_NAMES = new Set([
   'CON', 'PRN', 'AUX', 'NUL',
@@ -226,11 +226,12 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
     '',
     `**Company:** ${company}`,
   ];
+  // The bundle shows the most official source only. A prompt still gets everything known about the job.
+  const officialOnly = audience === 'bundle' && mostOfficialSource({ ...job, officialPosting: normalizeBundleOfficialPosting(job.officialPosting) }).kind === 'official';
   const metadata = [
     ['Location', job.location],
     ['Compensation', job.salary],
-    ['Posted', job.posted],
-    ['Source', job.source],
+    ...(officialOnly ? [] : [['Posted', job.posted], ['Source', job.source]]),
     ['Language', job.language],
   ];
   for (const [label, value] of metadata) {
@@ -243,7 +244,7 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
   const variants = normaliseJobPostingVariants(job.postingVariants);
   const closedBoard = audience === 'bundle' && !selectedListingUrl && job.listingLiveness?.verdict === 'closed'
     ? boardClosedBoardLabel(job.listingLiveness.board) : '';
-  if (url) lines.push(`**Listing URL:** <${url}>${closedBoard ? ` (closed on ${closedBoard})` : ''}`);
+  if (url && !officialOnly) lines.push(`**Listing URL:** <${url}>${closedBoard ? ` (closed on ${closedBoard})` : ''}`);
   if (audience === 'bundle') {
     const listingOutcomes = {
       open: 'Open', alternate: 'Open alternate listing', unobservable: 'Not re-checked (unobservable)',
@@ -252,14 +253,14 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
     };
     const listingOutcome = Object.hasOwn(listingOutcomes, job.listingAudit?.outcome)
       ? listingOutcomes[job.listingAudit.outcome] : '';
-    if (listingOutcome) lines.push(`**Listing check:** ${listingOutcome}`);
+    if (listingOutcome && !officialOnly) lines.push(`**Listing check:** ${listingOutcome}`);
     const postedBy = markdownInlineText(job.postedBy);
     const officialPosting = normalizeBundleOfficialPosting(job.officialPosting);
     const status = officialPostingLookupStatus(officialPosting);
     const applyUrl = safeHttpUrl(job.applyUrl || status.applyUrl);
     const officialUrl = status.sourceUrl || status.applyUrl;
     const level = officialPosting?.level;
-    if (postedBy) lines.push(`**Posted by:** ${postedBy}`);
+    if (postedBy && !officialOnly) lines.push(`**Posted by:** ${postedBy}`);
     if (applyUrl) lines.push(`**Apply URL:** <${applyUrl}>`);
     if (officialUrl) lines.push(`**Official posting:** <${officialUrl}>`);
     lines.push(`**Official posting check:** ${markdownInlineText(status.label)}${status.detail ? `. ${markdownInlineText(status.detail)}` : ''}`);
@@ -275,7 +276,7 @@ export function formatOriginalJobListingMarkdown(job = {}, { audience = 'prompt'
   else if (snippet) lines.push(textFence(snippet));
   else lines.push(EMPTY_JOB_LISTING_BODY_NOTE);
   const postingTargets = postingTargetLines(variants);
-  if (postingTargets.length) {
+  if (postingTargets.length && !officialOnly) {
     lines.push('', ORIGINAL_JOB_LISTING_TARGETS_HEADING, '', ...postingTargets);
   }
   lines.push('');

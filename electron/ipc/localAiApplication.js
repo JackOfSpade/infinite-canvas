@@ -10242,7 +10242,9 @@ function applyPreparedOfficialPosting(scrapedJob, prepared = null) {
         ? { salary: currentPostedPay, salaryProvenance: currentPostedPay ? 'posted' : 'unknown' } : {}),
     };
   };
-  const withMetadata = () => ({ ...base, ...currentDetails(), company: employer, snippet, postedBy,
+  // A row can carry its scraped text under description too, and readers prefer that field.
+  const withMetadata = () => ({ ...base, ...currentDetails(), company: employer, snippet,
+    ...(!rejectedText && ['L1', 'L2', 'L3'].includes(posting.level) && base.description ? { description: snippet } : {}), postedBy,
     applyUrl: verified ? officialHttpsUrl(posting.officialApplyUrl || posting.sourceUrl) : '', officialPosting: posting });
   if (!rejectedText && ['L1', 'L2', 'L3'].includes(posting.level)) {
     try { jobListingQuoteSource(withMetadata()); } catch { rejectedText = 'oversize'; }

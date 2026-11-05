@@ -1,10 +1,8 @@
-import { boardClosedBoardLabel, normalizeBoardClosed, normalizeOfficialPosting, officialPostingExhausted, officialPostingLookupStatus, OFFICIAL_POSTING_LABELS } from '../../electron/ipc/officialPostingFields.js';
+import { mostOfficialSource, normalizeOfficialPosting, officialPostingClosureReadFullPage, officialPostingExhausted, officialPostingLookupStatus, OFFICIAL_POSTING_LABELS } from '../../electron/ipc/officialPostingFields.js';
 import { normalizeJobListingExternalUrl } from './jobListingUrl.js';
 import { officialPostingNegativeNeedsRecheck } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { researchSkipReason, RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
 
-const sameName = (left, right) => String(left || '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase()
-  === String(right || '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
 const text = value => typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
 
 // Renderer freshness is only a structural indicator. The host compares the
@@ -19,17 +17,8 @@ function hasSemanticReceipt(posting) {
 export function officialPostingNeedsRefresh(job = {}) {
   const posting = normalizeOfficialPosting(job.officialPosting);
   if (officialPostingExhausted(posting)) return false;
-  return !posting || !hasSemanticReceipt(posting) || officialPostingNegativeNeedsRecheck(posting)
+  return !posting || !hasSemanticReceipt(posting) || (posting.outcome === 'closed' && !officialPostingClosureReadFullPage(posting)) || officialPostingNegativeNeedsRecheck(posting)
     || officialPostingLookupStatus(posting).retryable;
-}
-
-/** A row the job board reported closed can stay visible on its description or official source, so say which case this is. */
-function boardClosedStatus(job, status) {
-  const closed = normalizeBoardClosed(job.boardClosed);
-  const board = closed ? boardClosedBoardLabel(closed.board) : '';
-  if (!board) return null;
-  if (status.state === 'verified' && !status.retryable) return `Closed on ${board} · open on official site`;
-  return `Closed on ${board} · ${status.label}`;
 }
 
 /** Display-only facts never replace the card identity used by Board matching. */
@@ -52,7 +41,10 @@ export function officialPostingDisplay(job = {}) {
   const unnamedOfficial = posting?.level === 'L4' && !text(posting.employer);
   const employer = unknown || unnamedOfficial ? '' : text(posting?.employer) || text(job.company);
   const postedBy = text(job.postedBy) || (unknown || unnamedOfficial ? text(job.company) : '');
-  const via = ['L1', 'L2', 'L3', 'L4'].includes(posting?.level) && postedBy && (!employer || !sameName(employer, postedBy)) ? `via ${postedBy}` : '';
+  // With a confirmed official posting, the card shows that source and nothing from the listings beneath it.
+  const officialOnly = mostOfficialSource(job).kind === 'official';
+  // An official link that names no employer leaves the poster as the only way to tell which job this is.
+  const via = unnamedOfficial && postedBy ? `via ${postedBy}` : '';
   const employerLabel = unnamedOfficial ? 'Employer unknown' : employer || postedBy || 'Employer unknown';
   const title = text(posting?.title) || text(job.title);
   const applyUrl = normalizeJobListingExternalUrl({ ...job, url: status.applyUrl || status.sourceUrl || job.url });
@@ -62,9 +54,11 @@ export function officialPostingDisplay(job = {}) {
   return {
     employer, postedBy, via, employerLabel, unnamedOfficial,
     label: unnamedOfficial ? [employerLabel, via].filter(Boolean).join(' · ') : employer || postedBy || title || 'job', title,
-    location: text(posting?.location?.display) || text(job.location), salary: text(posting?.salary?.text) || text(job.salary),
+    officialOnly,
+    location: text(posting?.location?.display) || (officialOnly ? '' : text(job.location)),
+    salary: text(posting?.salary?.text) || (officialOnly ? '' : text(job.salary)),
     levelLabel,
-    statusLabel: [unknown ? 'poster, employer unknown' : '', boardClosedStatus(job, status) ?? status.label].filter(Boolean).join(' · '),
+    statusLabel: [unknown ? 'poster, employer unknown' : '', status.label].filter(Boolean).join(' · '),
     statusDetail: status.detail,
     lookupState: status.state,
     researchSkipped,
@@ -72,7 +66,7 @@ export function officialPostingDisplay(job = {}) {
     lookupExhausted: exhausted,
     lookupNeedsRefresh: exhausted || officialPostingNeedsRefresh(job),
     lookupActionLabel: exhausted ? 'Check again' : savedStatus.state === 'unchecked' || researchSkipped ? 'Check official posting' : 'Retry lookup',
-    candidateLinks: (posting?.alternatives || []).filter(item => item.title.startsWith('Unconfirmed'))
+    candidateLinks: officialOnly ? [] : (posting?.alternatives || []).filter(item => item.title.startsWith('Unconfirmed'))
       .slice(0, 3).map((item, index) => ({ url: item.url, title: item.title, rank: index + 1 })),
     applyUrl,
     viewUrl: closedOfficialUrl || applyUrl,

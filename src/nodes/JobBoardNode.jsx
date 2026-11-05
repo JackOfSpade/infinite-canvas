@@ -22,7 +22,7 @@ import { carryBoardOfficialPostingResults, countBoardOfficialRetries } from '../
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
-import { hubCardFilter, isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
+import { hubCardFilter, isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard, jobCardClosedAtMostOfficialSource } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
@@ -957,6 +957,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // selector is stable (re-renders only when a connection or a module's job count
   // changes), then we derive the rich list via getNodes() keyed on that.
   const incompleteOfficialLookups = useStore(useCallback(store => countBoardOfficialRetries(store.nodes, id), [id]));
+  // Every path that writes a lookup result (Board refresh, a card's own lookup, Generate) changes this.
+  const closedCardIds = useStore(useCallback(store => store.nodes
+    .filter(node => node.type === 'jobcard' && node.data?.hubId === id && jobCardClosedAtMostOfficialSource(node.data))
+    .map(node => `${node.id}\t${node.data?.source || ''}`).join('\n'), [id]));
+  const closedCardCount = closedCardIds ? closedCardIds.split('\n').length : 0;
   const connectedSig = useStore(
     useCallback((s) => {
       const ids = new Set();
@@ -1510,14 +1515,31 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     EventLogger.log(`[JobBoard] review cards ${show ? 'shown' : 'hidden'} below the hiring-fit filter id=${id}`);
   }, [id, updateGlobal, applyCardFilters]);
 
-  // Re-apply filters on mount — card opacities are stripped from save files.
+  // Re-apply filters on mount — card opacities are stripped from save files — and whenever a card's official posting
+  // turns closed or open again. Starts empty so a saved Board with closed cards applies the rule on load.
+  const appliedClosedCardIds = useRef('');
+  // Source pills count what they can show. The selected source keeps its pill so the filter can always be cleared.
+  const openSourceCounts = useMemo(() => {
+    const counts = { ...(data.finalSourceCounts || {}) };
+    for (const [, source] of closedCardIds ? closedCardIds.split('\n').map(line => line.split('\t')) : []) {
+      if (!Object.hasOwn(counts, source)) continue;
+      counts[source] -= 1;
+      if (counts[source] <= 0 && source !== data.sourceFilter) delete counts[source];
+    }
+    return counts;
+  }, [closedCardIds, data.finalSourceCounts, data.sourceFilter]);
   useEffect(() => {
     if (data.stale) return; // stale → cascade is hidden; don't reveal it here
     const min = data.scoreRangeMin ?? 0;
     const hasFilter = data.sourceFilter || (data.scoreThreshold ?? min) > min || data.showReviewCards === false;
-    if (!hasFilter) return;
-    applyCardFilters({});
-  }, [applyCardFilters, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter, data.showReviewCards, data.stale]);
+    const closedCardsChanged = closedCardIds !== appliedClosedCardIds.current;
+    appliedClosedCardIds.current = closedCardIds;
+    if (hasFilter) applyCardFilters({});
+    else if (closedCardsChanged) {
+      const filter = hubCardFilter({ sourceFilter: data.sourceFilter, scoreThreshold: data.scoreThreshold, showReviewCards: data.showReviewCards });
+      setNodes(nodes => computeJobTreeView(nodes, id, filter, undefined, false, { keepUserLayout: true }));
+    }
+  }, [applyCardFilters, closedCardIds, data.scoreThreshold, data.scoreRangeMin, data.sourceFilter, data.showReviewCards, data.stale, id, setNodes]);
 
   // Hide every spawned card/group (results "disappear") without touching their
   // expand/collapse state, so the exact view can be restored later.
@@ -7128,6 +7150,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       {hubState === 'done' && (
         <JobBoardDoneState
           resultCount={data.resultCount}
+          closedCardCount={closedCardCount}
           moduleCount={data.moduleCount}
           totalIncoming={data.mergeStats?.totalIncoming || 0}
           duplicatesRemoved={data.mergeStats?.duplicatesRemoved || 0}
@@ -7145,7 +7168,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           scoreRangeMax={data.scoreRangeMax ?? 100}
           sourceFilter={data.sourceFilter || null}
           toggleSourceFilter={toggleSourceFilter}
-          sourceCounts={data.finalSourceCounts || {}}
+          sourceCounts={openSourceCounts}
           showReviewCards={data.showReviewCards !== false}
           setShowReviewCards={setShowReviewCards}
           onRecombine={boardRunVisible ? null : () => handleCombine()}

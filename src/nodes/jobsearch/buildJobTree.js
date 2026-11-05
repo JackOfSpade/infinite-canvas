@@ -1,3 +1,4 @@
+import { mostOfficialSource, normalizeOfficialPosting } from '../../../electron/ipc/officialPostingFields.js';
 import { structuralEdge } from '../_shared/edgeHelpers.js';
 import { isJobCardVisible } from '../../utils/jobCardFilters.js';
 import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
@@ -43,6 +44,9 @@ const ROW_H = { group: 70, job: 280 }; // module-local: only used within this fi
 // allowed to organize the tree again. A manual card drag also sets the flag
 // (see markJobTreeLayoutUserArranged) so a bundle banner growing the card keeps
 // the user's dropped positions until the next explicit hierarchy action.
+// A salary heading shows what the card shows: the official posting's pay when one is confirmed, never the listing's beneath it.
+const shownSalary = job => (mostOfficialSource(job).kind === 'official' ? normalizeOfficialPosting(job?.officialPosting)?.salary?.text || '' : job?.salary);
+
 export const JOB_TREE_LAYOUT_RESTORE_KEY = '_preserveTreeLayoutOnRestore';
 
 /**
@@ -889,7 +893,7 @@ export function countMatchingDescendantCards(childIds, getNodeById, filter = {},
  * `filter` = { scoreThreshold?, sourceFilter? } (same shape as jobCardFilters).
  * Pure: returns a new nodes array (or the same ref when nothing changed).
  */
-export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, forceLayout = false) {
+export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, forceLayout = false, { keepUserLayout = false } = {}) {
   const list = Array.isArray(nodes) ? nodes : [];
   const byId = new Map(list.map(n => [n.id, n]));
   const cardMatch = (d) => isJobCardVisible(d || {}, filter);
@@ -992,6 +996,8 @@ export function computeJobTreeView(nodes, hubId, filter = {}, COL_X_ = COL_X, fo
   // positions for the old height. Ordinary visibility/filter calls keep the
   // same-reference fast path, which avoids layout churn on initial card mounts.
   if (!changed && !forceLayout) return nodes;
+  // A result arriving on its own must not move cards the user placed by hand.
+  if (keepUserLayout && list.some(n => n.data?.hubId === hubId && n.data?.[JOB_TREE_LAYOUT_RESTORE_KEY] === 'user-arranged')) return withHidden;
 
   const hubPos = byId.get(hubId)?.position || { x: 0, y: 0 };
   const laidOutNodes = changed ? withHidden : list;
@@ -1174,7 +1180,7 @@ export function buildJobTreeNodes({
   const taxonomy = sanitizeJobTaxonomy(
     bucketTree,
     displayedJobs.length,
-    displayedJobs.map(job => job?.salary),
+    displayedJobs.map(shownSalary),
     displayedJobs,
   );
   const bands = taxonomy.likelihoodBands;
@@ -1190,7 +1196,7 @@ export function buildJobTreeNodes({
   const tree = new Map(); // bandLabel -> Map(rangeLabel -> Map(roleName -> jobs[]))
   displayedJobs.forEach((job, index) => {
     const band = placeBand(job.matchScore, bands);
-    const range = placeRange(parseSalaryToNumeric(job.salary), realRanges, unspecified);
+    const range = placeRange(parseSalaryToNumeric(shownSalary(job)), realRanges, unspecified);
     const role = roleByIdx.get(index);
     if (!tree.has(band.label)) tree.set(band.label, new Map());
     const byRange = tree.get(band.label);

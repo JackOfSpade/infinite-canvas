@@ -2,7 +2,7 @@
 // never belong on a job, staging snapshot, receipt, or diagnostic report.
 import { listingStateRank, normalizeAlternateListings, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl } from './officialPostingFields.js';
 import { listingEvidenceKey } from './listingLivenessStore.js';
-import { strictEmployerEqual } from './officialSourceHosts.js';
+import { listingSourceTier, strictEmployerEqual } from './officialSourceHosts.js';
 import { resolveScrapedEmployer } from './officialPostingMatch.js';
 import { nodeCancellationError } from './ipcUtils.js';
 
@@ -138,7 +138,9 @@ export async function restoreListingAlternates(rows, {
     if (!(await shouldTryWinner(winner))) { active(signal); continue; }
     active(signal);
     const winnerSafe = scoreSafe(winner) === true;
+    // A less official copy cannot overrule the closure of a more official one.
     const candidates = alternates.slice(0, MAX_ALTERNATES).filter(row => listingStateRank(row) !== 4
+      && listingSourceTier(row) <= listingSourceTier(winner)
       && (winnerSafe || scoreSafe(row) === true));
     if (candidates.length) eligible.push({ index, winner, candidates });
   }

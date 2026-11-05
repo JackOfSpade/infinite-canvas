@@ -648,7 +648,7 @@ export default [
       const row = title => ({ ...rawRow(title), cardId: `card-${title}`, matchScore: RESEARCH_MIN_FIT_SCORE + 5 });
       const uncertain = { level: 'L5', outcome: 'ambiguous', employer: '', trail: ['worker-research', 'semantic-uncertain'] };
       const finished = { level: 'L1', outcome: 'closed', employer: 'Synthetic Employer', sourceUrl: 'https://careers.example.test/gone',
-        trail: ['closed', 'semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) } };
+        trail: ['closed', 'closure-page-read', 'semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) } };
       const stage = async (union, options) => {
         const refreshed = []; const settled = [];
         const outcome = await runBoardResearchStage(union, { nodeId: 'board', manualAiRunId: 'run-removed', ...options,

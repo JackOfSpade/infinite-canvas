@@ -139,7 +139,7 @@ import { classifyResearchEligibility, isResearchEligible, RESEARCH_ELIGIBILITY, 
 import { createListingLivenessProbe } from './listingLivenessProbe.js';
 import { carryListingAlternates, collectListingAlternates, restoreListingAlternates } from './listingLivenessAlternates.js';
 import { getListingLivenessCalibrationStore } from './listingLivenessCalibration.js';
-import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
+import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, officialPostingOutranksClosedPage, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
@@ -10642,7 +10642,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       if (signal?.aborted) throw signal.reason || error;
       logger.warn(`[OfficialPosting] Board-closed settlement failed: ${error?.code || error?.name || 'Error'}`);
       return settleBoardClosedRows(rows, { scoreSafe: hasResolvedJobDescription,
-        requireSemantic: true, researchDeferred: true,
+        requireSemantic: true, researchDeferred: true, getView: () => null,
         minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, setAsideKeys, expiryCandidatesConfirmedClosed });
     }
   };
@@ -10690,7 +10690,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
     kept = kept.filter(row => {
       const evidence = readListingEvidence(row);
       if (row?.listingLiveness?.verdict !== 'closed' || row.listingLiveness.basis !== 'ai'
-        || evidence?.finalHostClass !== 'ats') return true;
+        || evidence?.finalHostClass !== 'ats' || officialPostingOutranksClosedPage(row, evidence?.finalUrl)) return true;
       officialClosedDrops.push({ kept: null, dropped: row, reason: 'dropped-official-closed',
         stage: 'board-closed', retire: true });
       return false;
@@ -15733,7 +15733,9 @@ Return a JSON object with four arrays of search query strings:
     // AI-confirmed close needs no further check.
     for (const index of eligibleIndexes()) {
       const row = rows[index];
-      if (row?.listingLiveness?.verdict === 'closed' && row.listingLiveness.basis === 'ai' && readListingEvidence(row)?.finalHostClass === 'ats') {
+      const evidence = readListingEvidence(row);
+      if (row?.listingLiveness?.verdict === 'closed' && row.listingLiveness.basis === 'ai' && evidence?.finalHostClass === 'ats'
+        && !officialPostingOutranksClosedPage(row, evidence?.finalUrl)) {
         dropped.set(index, 'closed');
         counts.closedDropped += 1;
       }
@@ -15749,8 +15751,6 @@ Return a JSON object with four arrays of search query strings:
 
     const settled = await settleBoardClosedRowsForHandler(eligibleIndexes().map(index => rows[index]), {
       requireSemantic: true, researchDeferred: true, scoreSafe: hasResolvedJobDescription,
-      getView: row => readOfficialPostingView(row, { store: dependencies.officialPostingStore, signal }),
-      minChars: JOB_DESCRIPTION_EVIDENCE_MIN_CHARS,
     });
     for (const { row } of settled.dropped) {
       dropped.set(positionOfRow.get(row), 'closed');

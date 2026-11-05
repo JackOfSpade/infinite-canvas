@@ -538,17 +538,18 @@ const pureTests = [
       // ... and keep with a description whose official text was not needed.
       const described = withPosting(confirmedClosedRow(), posting({ level: 'L3' }));
       assert.equal((await settle([described], async () => { throw new Error('view not needed'); })).dispositions.get(described), 'kept-official');
-      // Official text that cannot serve as evidence (missing, short, unchanged scraped text) is not evidence.
-      const bare = withPosting(confirmedClosedRow({ snippet: '' }), posting());
-      for (const view of [async () => { throw new Error('store down'); }, viewOf('short'), async job => ({ ...(await viewOf(longText('x'))(job)), officialPosting: posting({ trail: ['official-text-missing'] }) }),
-        async job => ({ ...(await viewOf(longText('x'))(job)), officialPosting: posting({ level: 'L4', outcome: 'link-only' }) })]) {
-        const result = await settle([bare], view);
-        assert.equal(result.kept.length, 0); assert.equal(result.dropped[0].disposition, BOARD_CLOSED_DISPOSITIONS.droppedNoDescription);
+      for (const live of [posting(), posting({ level: 'L4', outcome: 'link-only' })]) {
+        const bare = withPosting(confirmedClosedRow({ snippet: '' }), live);
+        // After scoring, an open official posting always keeps the row.
+        const scored = await settle([bare], null);
+        assert.deepEqual(scored.kept, [bare]); assert.equal(scored.dispositions.get(bare), BOARD_CLOSED_DISPOSITIONS.keptOfficial);
+        // Before scoring, nothing readable means it waits: never scored on no text, never retired.
+        const waiting = await settle([bare], async () => { throw new Error('store down'); });
+        assert.deepEqual(waiting.kept, []); assert.equal(waiting.dropped[0].disposition, BOARD_CLOSED_DISPOSITIONS.deferredUnchecked);
       }
-      assert.equal((await settle([bare], null)).dropped.length, 1, 'no view reader: no official evidence');
 
-      // A confirmed close with a settled miss or a live link without usable text is retired.
-      for (const outcome of [currentMiss(['worker-research']), miss(['closed'], { outcome: 'closed' }), posting({ level: 'L4', outcome: 'link-only' })]) {
+      // A confirmed close with a settled miss is retired.
+      for (const outcome of [currentMiss(['worker-research']), miss(['closed'], { outcome: 'closed' })]) {
         const result = await settle([withPosting(confirmedClosedRow({ snippet: '' }), outcome)]);
         assert.equal(result.kept.length, 0, JSON.stringify(outcome)); assert.equal(result.dropped[0].disposition, 'dropped-no-description');
       }
@@ -622,7 +623,7 @@ const pureTests = [
       const described = pendingClosedRow({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/803' });
       assert.equal(listingStateRank(blank), 3); assert.equal(listingStateRank(legacy), 3);
       for (const postingState of [undefined, miss(['worker-unavailable']), currentMiss(['worker-research']),
-        currentMiss(['worker-research', 'ambiguous'], { outcome: 'ambiguous' }), posting({ level: 'L4', outcome: 'link-only' })]) {
+        currentMiss(['worker-research', 'ambiguous'], { outcome: 'ambiguous' })]) {
         for (const candidate of [blank, legacy]) {
           const input = { ...candidate, officialPosting: postingState };
           const result = await settle([input], null);
@@ -633,9 +634,11 @@ const pureTests = [
         assert.deepEqual(result.kept, [input], 'score-safe pending text remains an ordinary row');
         assert.equal(result.dropped.length, 0);
       }
-      // The official text can rescue a blank pending row without making its scraped text appear score-safe.
-      const live = { ...blank, officialPosting: posting() };
-      assert.equal((await settle([live])).dispositions.get(live), BOARD_CLOSED_DISPOSITIONS.keptOfficial);
+      // An open official posting keeps a blank pending row without making its scraped text appear score-safe.
+      for (const open of [posting(), posting({ level: 'L4', outcome: 'link-only' })]) {
+        const live = { ...blank, officialPosting: open };
+        assert.equal((await settle([live], null)).dispositions.get(live), BOARD_CLOSED_DISPOSITIONS.keptOfficial);
+      }
 
       // AI can lower the rank after capture. The original set-aside identity still controls the blank row.
       for (const verdict of ['open', 'unclear']) {
@@ -709,26 +712,27 @@ const pureTests = [
         const current = { title: 'Platform Engineer', company: 'Northwind Labs', url: 'https://listing.example.test/p', ...job };
         return officialPostingDisplay({ ...current, ...(job.officialPosting ? { officialPosting: semanticPosting(current, job.officialPosting) } : {}) });
       };
-      for (const [board, label] of [['linkedin', 'LinkedIn'], ['indeed', 'Indeed'], ['ziprecruiter', 'ZipRecruiter'], ['glassdoor', 'Glassdoor'], ['dice', 'Dice']]) {
+      for (const board of ['linkedin', 'indeed', 'ziprecruiter', 'glassdoor', 'dice']) {
         for (const level of ['L1', 'L2', 'L3']) {
           assert.equal(display({ boardClosed: marker(board, 'detail-page-not-found'), officialPosting: posting({ level }) }).statusLabel,
-            `Closed on ${label} · open on official site`, `${board} ${level}`);
+            'Exact official posting verified', `${board} ${level}`);
         }
         assert.equal(display({ boardClosed: marker(board, 'detail-page-not-found'), officialPosting: miss(['worker-unavailable']) }).statusLabel,
-          `Closed on ${label} · Official lookup incomplete: research unavailable`);
+          'Official lookup incomplete: research unavailable');
       }
-      assert.equal(display({ boardClosed: marker() }).statusLabel, 'Closed on LinkedIn · Official posting not checked', 'no resolution at all');
-      assert.equal(display({ boardClosed: marker(), officialPosting: miss([], { outcome: 'failed' }) }).statusLabel, 'Closed on LinkedIn · Official posting lookup incomplete', 'the failed lookup stays visible');
+      assert.equal(display({ boardClosed: marker() }).statusLabel, 'Official posting not checked', 'no resolution at all');
+      assert.equal(display({ boardClosed: marker(), officialPosting: miss([], { outcome: 'failed' }) }).statusLabel, 'Official posting lookup incomplete', 'the failed lookup stays visible');
+      // The listing board's closure never shows on the card: only the most official source's own status does.
       // An L6 poster keeps its own label in front.
       assert.equal(display({ boardClosed: marker(), officialPosting: { ...miss(['worker-unavailable']), level: 'L6', employer: '' } }).statusLabel,
-        'poster, employer unknown · Closed on LinkedIn · Official lookup incomplete: research unavailable');
+        'poster, employer unknown · Official lookup incomplete: research unavailable');
       // Settled after a later Generate-time check: say what is known, not "not checked".
-      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['worker-research']) }).statusLabel, 'Closed on LinkedIn · No exact official posting found');
-      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['worker-research'], { outcome: 'closed' }) }).statusLabel, 'Closed on LinkedIn · Official posting closed');
+      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['worker-research']) }).statusLabel, 'No exact official posting found');
+      assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['worker-research'], { outcome: 'closed' }) }).statusLabel, 'Official posting closed');
       assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['worker-research', 'ambiguous'], { outcome: 'ambiguous' }) }).statusLabel,
-        'Closed on LinkedIn · Several official postings match');
+        'Several official postings match');
       assert.equal(display({ boardClosed: marker(), officialPosting: currentMiss(['comparative-disagree']) }).statusLabel,
-        'Closed on LinkedIn · Several official postings match');
+        'Several official postings match');
       // Unflagged and invalid markers change nothing; the link logic is untouched.
       assert.equal(display({ officialPosting: currentMiss(['worker-research']) }).statusLabel, 'No exact official posting found');
       assert.equal(display({ boardClosed: { board: 'linkedin' }, officialPosting: posting() }).statusLabel, 'Exact official posting verified');
@@ -1060,7 +1064,7 @@ handlerTests.push(
         });
         assert.equal(result.success, true, result.error);
         assert.equal(result.jobs.length, 1); assert.equal(result.jobs[0].boardClosed.board, 'linkedin');
-        assert.equal(officialPostingDisplay(result.jobs[0]).statusLabel, 'Closed on LinkedIn · Official posting not checked');
+        assert.equal(officialPostingDisplay(result.jobs[0]).statusLabel, 'Official posting not checked', 'the card never carries the listing board closure');
         assert.deepEqual(getJobsTelemetry().search.officialPosting.boardClosed, { linkedin: { detected: 1, keptOfficial: 0, keptUnchecked: 1, dropped: 0 } });
       });
     },
@@ -1261,6 +1265,42 @@ handlerTests.push(
       }
     },
   },
+  {
+    name: 'preferOpenRows: a company job-board copy outranks an open reposting board, and dedup keeps the official copy whatever its state',
+    run() {
+      const ats = { url: 'https://boards.greenhouse.io/northwind/jobs/501' };
+      const openAggregator = row({ source: 'indeed', url: 'https://www.indeed.com/viewjob?jk=501', listingLiveness: liveness('open', 'open-marker', 'indeed') });
+      const closedAts = confirmedClosedRow({ source: 'greenhouse', ...ats });
+      const openAts = row({ source: 'greenhouse', ...ats, listingLiveness: liveness('open', 'open-marker', 'greenhouse') });
+      const pendingAts = pendingClosedRow({ source: 'greenhouse', ...ats, title: 'Pending Ats' });
+      assert.deepEqual(preferOpenRows([openAggregator, closedAts]), [closedAts, openAggregator], 'the closed ATS copy goes ahead of the open aggregator copy');
+      // Within a tier, liveness rank then arrival order still decide.
+      const closedAggregator = confirmedClosedRow({ source: 'linkedin', url: 'https://www.linkedin.com/jobs/view/501' });
+      assert.deepEqual(preferOpenRows([closedAggregator, openAggregator, pendingAts, closedAts, openAts]),
+        [openAts, pendingAts, closedAts, openAggregator, closedAggregator], 'tier first, then rank, then arrival order');
+      // A uniform list keeps its identity, whether all ATS or all aggregator.
+      const allAts = [closedAts, openAts].map((job, index) => ({ ...job, listingLiveness: closedAts.listingLiveness, boardClosed: closedAts.boardClosed, title: job.title + index }));
+      assert.equal(preferOpenRows(allAts), allAts, 'one tier and one rank returns the same array');
+      const allAggregators = [openAggregator, { ...openAggregator, title: 'Other' }];
+      assert.equal(preferOpenRows(allAggregators), allAggregators, 'uniform aggregators keep identity');
+
+      const dropped = [];
+      const kept = dedupJobsAcrossSources(preferOpenRows([openAggregator, closedAts]), { onDuplicate: entry => dropped.push(entry) });
+      assert.deepEqual(kept.map(job => job.source), ['greenhouse'], 'dedup keeps the ATS copy');
+      assert.equal(kept[0], closedAts);
+      assert.equal(dropped[0].dropped, openAggregator);
+      assert.deepEqual(dedupJobsAcrossSources([openAggregator, closedAts]).map(job => job.source), ['indeed'], 'control: arrival order alone would keep the aggregator');
+    },
+  },
 );
 
-export default [...pureTests, ...handlerTests];
+export default [...pureTests, ...handlerTests,
+  {
+    name: 'A vendor address that names no tenant does not outrank a reposting board',
+    run() {
+      const shared = closedRow({ url: 'https://jobs.workable.com/view/abc' });
+      const open = { ...closedRow({ url: 'https://www.linkedin.com/jobs/view/900' }), boardClosed: undefined };
+      assert.equal(preferOpenRows([open, shared])[0], open);
+    },
+  },
+];

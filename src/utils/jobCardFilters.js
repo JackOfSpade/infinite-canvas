@@ -1,3 +1,4 @@
+import { mostOfficialSource, officialPostingStatesClosed } from '../../electron/ipc/officialPostingFields.js';
 // The board's card filter: a single source pill, a min-score slider, and one
 // review-bucket switch. Job cards are deliberately disposable (anti-CRM) —
 // there is no status field to filter on, so the filter contract is exactly
@@ -66,11 +67,25 @@ export function jobCardReviewReason(jobData = {}, scoreThreshold = 0) {
   return null;
 }
 
+// A confirmed official posting that says closed. Rechecks use this: such a card's own button is out of reach.
+export function jobCardClosedOfficially(jobData = {}) {
+  return jobData.officialPosting?.outcome === 'closed' && !jobData.localApplication && officialPostingStatesClosed(jobData.officialPosting);
+}
+
+// A card leaves view when its most official source is closed. It only leaves view: its data stays, so a later lookup that
+// finds the posting open brings it back. A card holding a generated application stays reachable.
+export function jobCardClosedAtMostOfficialSource(jobData = {}) {
+  if (jobData.localApplication) return false;
+  if (jobData.officialPosting?.outcome !== 'closed' && jobData.listingLiveness?.verdict !== 'closed') return false;
+  return mostOfficialSource(jobData).closed;
+}
+
 export function isJobCardVisible(jobData = {}, {
   sourceFilter = null,
   scoreThreshold = 0,
   showReviewCards = true,
 } = {}) {
+  if (jobCardClosedAtMostOfficialSource(jobData)) return false;
   const sourceOk = !sourceFilter || jobData.source === sourceFilter;
   if (!sourceOk) return false;
   const scoreOk = (jobData.matchScore ?? 0) >= scoreThreshold;

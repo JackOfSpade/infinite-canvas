@@ -112,7 +112,7 @@ export default [
         } }));
         const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
         assert.deepEqual(snapshot.observations[0].chatStats, { finderCalls: 1, judgeRounds: 2, judgeCalls: 5,
-          snapshotReads: null, snapshotFailures: 1_000_000_000, truncatedSnapshots: null });
+          snapshotReads: null, snapshotFailures: 1_000_000_000, truncatedSnapshots: null, postingDataSnapshots: null, renderedSnapshots: null, renderFailures: null });
         assert.deepEqual(snapshot.observations[0].resolutionReasons, ['source-unproven']);
         snapshot.observations[0].resolutionReasons.push('PRIVATE_MUTATION');
         assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot().observations[0].resolutionReasons, ['source-unproven']);

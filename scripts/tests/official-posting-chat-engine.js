@@ -332,12 +332,12 @@ export default [
           assert.equal(observation.comparisonRuns, 2);
           assert.equal(observation.outcome, 'found'); assert.equal(observation.settled, true);
           assert.deepEqual(observation.chatStats, { finderCalls: 1, judgeRounds: 1, judgeCalls: 2,
-            snapshotReads: 0, snapshotFailures: 2, truncatedSnapshots: 0 });
+            snapshotReads: 0, snapshotFailures: 2, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0 });
           await resolveOfficialPostings([row], { store, snapshotFetch: offline, callRaw: () => { throw new Error('cached'); } });
           assert.deepEqual(getOfficialPostingDiscoveryDiagnosticsSnapshot(), before);
           const markdown = buildOfficialPostingDiscoveryMarkdown();
           assert.match(markdown, /candidates 2 · validated comparison runs 2/);
-          assert.match(markdown, /finder calls 1 · judge rounds 1 · judge calls 2 · snapshots read 0 · snapshot failures 2/);
+          assert.match(markdown, /finder calls 1 · judge rounds 1 · judge calls 2 · snapshots read 0 · with posting data 0 · snapshot failures 2/);
           for (const privateText of [DESCRIPTION, POSTING, CAREERS, row.company, row.title]) assert.equal(markdown.includes(privateText), false);
         });
       } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
@@ -356,7 +356,7 @@ export default [
           assert.equal(observation.settled, false);
           assert.deepEqual(observation.resolutionReasons, ['research-miss']);
           assert.deepEqual(observation.chatStats, { finderCalls: 2, judgeRounds: 0, judgeCalls: 0,
-            snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0 });
+            snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0 });
           const callRaw = async (prompt, options) => options.task === 'job-official-posting-research'
             ? research(requestedIds(prompt)) : JSON.stringify(unresolvedAnswer('uncertain'));
           await resolveOfficialPostings([job()], { store, snapshotFetch: offline, callRaw });
@@ -1185,6 +1185,13 @@ export default [
         const entries = (await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8')).trimEnd().split('\n').map(line => JSON.parse(line));
         entries.sort((left, right) => left.run.localeCompare(right.run));
         // Each judge sees the leads in its own order; the log lists them in the host's order.
+        // The log also says what each judge was given, as flags and counts only.
+        for (const entry of entries) {
+          assert.deepEqual(entry.snapshots.map(snapshot => snapshot.id), ['P1', 'P2']);
+          assert.ok(entry.snapshots.every(snapshot => typeof snapshot.read === 'boolean' && Number.isInteger(snapshot.pageTextChars)));
+          assert.ok(!JSON.stringify(entry.snapshots).includes('http'), 'no page text or addresses');
+          delete entry.snapshots;
+        }
         assert.deepEqual(entries, ['A', 'B'].map(run => ({ at: new Date(time).toISOString(), card, title: row.title, company: row.company,
           round: 1, run, route: 'mcp', manualRoutingReason: null, leads: [POSTING, CAREERS], failure: 'comparative-invalid' })));
         for (const run of ['A', 'B']) assert.deepEqual([...judgeLeadUrls[run]].sort(), [CAREERS, POSTING].sort());

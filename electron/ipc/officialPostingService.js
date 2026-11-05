@@ -18,7 +18,8 @@ import { mergeListingLivenessTelemetry } from './listingLivenessTelemetry.js';
 import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse } from './officialPostingBridge.js';
 import { CLAUDE_TASK_CONCURRENCY } from './claudeTaskWorker.js';
-import { snapshotOfficialPostingLeads } from './officialPostingSnapshot.js';
+import { snapshotOfficialPostingLeads, trimOfficialPostingSnapshots } from './officialPostingSnapshot.js';
+import { createOfficialPostingRenderSession, renderOfficialPostingPage } from './officialPostingRenderedPage.js';
 import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS } from './officialPostingJudge.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from './officialPostingNegativePolicy.js';
 import { officialPostingHandoffFailureCause, officialPostingHandoffFailureCode, recordOfficialPostingDiscovery } from './officialPostingDiscoveryDiagnostics.js';
@@ -381,7 +382,9 @@ async function recordJudgment(store, entry) {
  * compares the two judgments (each its own session) for equality, and stores the agreed result. */
 export async function resolveOfficialPostings(jobs, {
   manualAiRunId, nodeId, signal, callRaw = callLLMRaw, callMatch = callRaw, onProgress, telemetry,
-  store, now = Date.now, snapshotFetch = fetchOfficialPosting, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
+  store, now = Date.now, snapshotFetch = fetchOfficialPosting,
+  // Injected downloads mean a test or offline replay, which must never open a browser unless it supplies one.
+  snapshotRender = snapshotFetch === fetchOfficialPosting ? renderOfficialPostingPage : null, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
   priorOfficialRecords = [], timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS,
   timeoutStartsOnAssignment,
 } = {}) {
@@ -391,7 +394,7 @@ export async function resolveOfficialPostings(jobs, {
   const stats = telemetryBlock();
   const results = new Map(); const finished = new Set(); const found = new Map();
   const discovery = new Map(members.map(member => [member, { finderCalls: 0, judgeRounds: 0, judgeCalls: 0,
-    comparisonRuns: 0, snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, failureCodes: [] }]));
+    comparisonRuns: 0, snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0, failureCodes: [] }]));
   for (const member of members) {
     const index = rows.indexOf(member.job);
     member.priorOfficialRecord = priorOfficialRecords[index] || null;
@@ -506,6 +509,14 @@ export async function resolveOfficialPostings(jobs, {
   };
   // Each judge keeps its own transport identity and correction state. The two
   // judges overlap when the worker runs more than one task at a time.
+  // What each judge was given, as counts and flags, so a later miss can be told apart from an unreadable page.
+  const snapshotLog = snapshots => snapshots.map(snapshot => ({ id: snapshot.id, source: snapshot.source, read: snapshot.read === true,
+    ...(snapshot.rendered ? { rendered: true } : {}), ...(snapshot.settled === false ? { settled: false } : {}),
+    ...(snapshot.renderFailed ? { renderFailed: snapshot.renderFailed } : {}),
+    ...(typeof snapshot.listedInBoardData === 'boolean' ? { listed: snapshot.listedInBoardData } : {}),
+    ...(snapshot.httpStatus ? { httpStatus: snapshot.httpStatus } : {}), ...(snapshot.notFound ? { notFound: true } : {}),
+    descriptionChars: String(snapshot.description || '').length, pageTextChars: String(snapshot.pageText || '').length,
+    boardLinks: snapshot.jobBoardLinks?.length || 0 }));
   const judgePair = async (member, leads, round, snapshots) => {
     const counts = discovery.get(member);
     counts.judgeRounds += 1;
@@ -532,7 +543,7 @@ export async function resolveOfficialPostings(jobs, {
             company: String(member.job?.company || '').slice(0, 120), round, run, route, manualRoutingReason, leads: leads.map(lead => lead.url),
             choice: answer.choice, status: answer.status, statusQuote: answer.statusQuote, employerLinked: answer.employerLinked,
             employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, descriptionChars: answer.description.length,
-            conflicts: answer.conflicts });
+            conflicts: answer.conflicts, snapshots: snapshotLog(snapshots) });
           break;
         } catch (error) {
           // The real transport owns its correction rounds; injected callers emulate one with the same identity.
@@ -548,7 +559,7 @@ export async function resolveOfficialPostings(jobs, {
       }
       if (failure) await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
         company: String(member.job?.company || '').slice(0, 120), round, run, route, manualRoutingReason, leads: leads.map(lead => lead.url), failure: failureClass,
-        ...(failureCause ? { failureCause } : {}) });
+        ...(failureCause ? { failureCause } : {}), snapshots: snapshotLog(snapshots) });
       return { run, answer, failure };
     };
     const parallel = CLAUDE_TASK_CONCURRENCY >= 2;
@@ -566,18 +577,23 @@ export async function resolveOfficialPostings(jobs, {
     return { answers };
   };
   const judge = async member => {
-    const { leads, total } = judgeLeadsFor(member, found.get(member) || []);
+    const initial = judgeLeadsFor(member, found.get(member) || []);
+    let { leads } = initial; const { total } = initial;
     if (!leads.length) return unresolved(member, ['worker-research', 'research-miss']);
     // One download of every lead, shared by both rounds: it is the judges' main input, since WebFetch cannot run JavaScript.
-    const snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, signal });
+    let snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, render: renderSession, signal });
     const counts = discovery.get(member);
     counts.snapshotReads = snapshots.filter(snapshot => snapshot.read === true).length;
     counts.snapshotFailures = snapshots.filter(snapshot => snapshot.read !== true).length;
     counts.truncatedSnapshots = snapshots.filter(snapshot => snapshot.descriptionTruncated || snapshot.pageTextTruncated).length;
+    // A read page can be an empty shell. Only these held a posting's own fields rather than the whole page's text.
+    counts.postingDataSnapshots = snapshots.filter(snapshot => snapshot.read === true && (snapshot.title || snapshot.description)).length;
+    counts.renderedSnapshots = snapshots.filter(snapshot => snapshot.rendered === true).length;
+    counts.renderFailures = snapshots.filter(snapshot => snapshot.renderFailed).length;
     const decide = answers => decideOfficialPostingJudgments(member.job, { leads, totalLeads: total, snapshots, answerA: answers.A, answerB: answers.B, now: clock,
       fallback: unresolvedOfficialPosting, comparativeTrail: officialPostingComparativeTrail,
       inputHash: officialPostingSemanticInputHash(member.job), extractRoute: url => extractAtsTenant(url),
-      employerEqual: strictEmployerEqual, negativeProofTrail: OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL });
+      employerEqual: strictEmployerEqual, negativeProofTrail: OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL, closureNeedsRenderedPage: Boolean(renderSession) });
     const first = await judgePair(member, leads, 1, snapshots);
     if (first.failed) return first.failed;
     const answers = Object.values(first.answers);
@@ -593,6 +609,19 @@ export async function resolveOfficialPostings(jobs, {
     const retryable = ['semantic-uncertain', 'official-liveness-unconfirmed', 'source-unproven', 'comparative-none']
       .some(code => decided.officialPosting?.trail?.includes(code)) || decided.officialPosting?.outcome === 'closed';
     if (!retryable || signal?.aborted) return withCitations(decided);
+    // A page a first judge found by its own search gets the same full-page read before the second pair judges it.
+    const known = new Set(leads.map(lead => canonicalLeadUrl(lead.url)));
+    const added = [];
+    for (const answer of answers) {
+      const url = answer?.choice === 'other' ? officialHttpsUrl(answer.postingUrl) : '';
+      if (!url || known.has(canonicalLeadUrl(url)) || leads.length + added.length >= MAX_JUDGE_LEADS) continue;
+      known.add(canonicalLeadUrl(url));
+      added.push({ id: `P${leads.length + added.length + 1}`, url, kind: 'posting', employer: String(answer.employer || '') });
+    }
+    if (added.length) {
+      leads = [...leads, ...added];
+      snapshots = trimOfficialPostingSnapshots([...snapshots, ...await snapshotOfficialPostingLeads(added, { fetch: snapshotSession.fetch, render: renderSession, signal })]);
+    }
     const second = await judgePair(member, leads, 2, snapshots);
     answers.push(...Object.values(second.answers));
     // A miss or a closure never settles on one pair: without the confirming pair it stays retryable.
@@ -635,6 +664,9 @@ export async function resolveOfficialPostings(jobs, {
   // One invocation shares successful/in-flight downloads across rows. Failure
   // results never outlive their subscribers, and a later lookup starts fresh.
   const snapshotSession = createOfficialPostingFetchSession({ fetch: snapshotFetch, signal, cacheFailures: false, hostBreaker: false });
+  // One job is someone waiting on this card (Generate or its own lookup), so it goes ahead of a Board's queue.
+  const renderSession = snapshotRender ? createOfficialPostingRenderSession(
+    (url, options) => snapshotRender(url, { ...options, priority: members.length === 1 })) : null;
   try {
     progress();
     if (store) await parallelRows(members.filter(member => !member.bypassCache), async member => {

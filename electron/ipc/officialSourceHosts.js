@@ -62,6 +62,11 @@ export function isAtsCorporateHost(host) {
 export function isHostedAtsSurface(host) {
   return isKnownAtsHost(host) && !isAtsCorporateHost(host);
 }
+/** How official a listing's own address is, lower first: a company's own job-board tenant outranks a board that reposts it.
+ * The address must name a tenant, so a vendor's shared job search doesn't count. */
+export function listingSourceTier(row) {
+  return isHostedAtsSurface(normalizedSourceHost(row?.url)) && extractAtsTenant(row.url) ? 0 : 1;
+}
 /** Common standalone careers navigation segments. Product descriptions or
  * words merely containing these terms cannot create a careers attestation. */
 export function isOfficialCareersUrl(value) {

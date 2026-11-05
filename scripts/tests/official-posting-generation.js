@@ -544,7 +544,8 @@ export default [
   {
     name: 'official-page unconfirmed expiry preserves the prior proof with a bounded liveness audit fact',
     async run() {
-      for (const kind of ['unclear', 'no-quote', 'description-quote', 'json-only-quote', 'timeout']) await withStore(async store => {
+      // The AI now reads the whole page, so a closure it quotes from anywhere on the page is its call, not this list's.
+      for (const kind of ['unclear', 'no-quote', 'timeout']) await withStore(async store => {
         const original = job(); await store.save(original, { officialPosting: posting(), description: text });
         let calls = 0;
         const body = kind === 'json-only-quote'

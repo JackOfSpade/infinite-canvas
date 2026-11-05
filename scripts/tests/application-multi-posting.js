@@ -139,23 +139,28 @@ export default [
           { location: 'Unsafe', url: 'javascript:alert(1)' },
         ],
       });
-      assert(countOccurrences(multi, 'View original job posting — Lakeview') === 1, 'Lakeview must render one labelled link');
-      assert(countOccurrences(multi, 'View original job posting — Berlin') === 1, 'Berlin must render one labelled link');
+      const postingLinkPattern = /<a class="ic-job-posting-link" href="[^"]+" target="_blank" rel="noopener noreferrer">/g;
+      assert((multi.match(postingLinkPattern) || []).length === 1, 'multiple variants still render exactly one posting link');
+      assert(countOccurrences(multi, 'View original job posting</a>') === 1, 'the one link keeps the plain original label');
+      assert(!multi.includes('View original job posting —'), 'no location-labelled link is rendered');
+      assert(!multi.includes('<div class="ic-job-posting-links">'), 'no posting-links container is rendered');
       assert(!multi.includes('javascript:alert'), 'a javascript: variant URL must be omitted from the document');
-      assert(!multi.includes('View original job posting — Unsafe'), 'an unsafe variant must not render a labelled link');
-      const blankLinks = (multi.match(/<a class="ic-job-posting-link" href="[^"]+" target="_blank" rel="noopener noreferrer">/g) || []);
-      assert(blankLinks.length === 2, `expected exactly two rendered posting links, saw ${blankLinks.length}`);
-      assert(countOccurrences(multi, '<div class="ic-job-posting-links">') === 1, 'multiple links render inside the bounded posting-links container');
-      assert(/href="https:\/\/jobs\.example\.test\/lakeview"/.test(multi), 'the safe Lakeview href must be rendered');
-      assert(/href="https:\/\/jobs\.example\.test\/berlin"/.test(multi), 'the safe Berlin href must be rendered');
+      assert(/href="https:\/\/jobs\.example\.test\/primary"/.test(multi), 'the open job URL is the one link');
+      assert(!/href="https:\/\/jobs\.example\.test\/(?:lakeview|berlin)"/.test(multi), 'variant URLs are not linked while the job URL is open');
       const officialMulti = renderApplication({ jobUrl: 'https://jobs.example.test/primary',
         officialPosting: { level: 'L2', sourceUrl: 'https://careers.example.test/official', officialApplyUrl: 'https://careers.example.test/apply' },
         postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/lakeview' }, { location: 'Berlin', url: 'https://jobs.example.test/berlin' }],
       });
       const officialAt = officialMulti.indexOf('View official job posting</a>');
-      assert(officialAt >= 0 && officialAt < officialMulti.indexOf('View original job posting — Lakeview')
-        && officialAt < officialMulti.indexOf('View original job posting — Berlin'), 'official page precedes retained location-specific scraped links');
+      assert(officialAt >= 0 && !officialMulti.includes('View original job posting'), 'with an official page, that is the only posting link');
+      assert((officialMulti.match(postingLinkPattern) || []).length === 1 && !officialMulti.includes('<div class="ic-job-posting-links">'), 'a confirmed official posting renders exactly one link and no container');
       assert(officialMulti.includes('href="https://careers.example.test/official"'), 'official page URL wins over its apply form');
+
+      // An older closure not read on the full page is not trusted, so the open listing stays the one link.
+      const olderClosure = renderApplication({ jobUrl: 'https://jobs.example.test/only',
+        officialPosting: { level: 'L2', outcome: 'closed', sourceUrl: 'https://careers.example.test/official', trail: ['closed', 'semantic-match-v1'] } });
+      assert(countOccurrences(olderClosure, 'View original job posting</a>') === 1, 'an untrusted closure leaves the listing link');
+      assert(olderClosure.includes('href="https://jobs.example.test/only"'), 'the open listing is that link');
 
       // Legacy one-link: with no variants, the exact legacy label must remain
       // and the new multi-link container must not appear.
@@ -173,7 +178,7 @@ export default [
       assert(countOccurrences(singleVariant, 'View original job posting</a>') === 1, 'one variant keeps the legacy label');
       assert(!singleVariant.includes('<div class="ic-job-posting-links">'), 'one variant does not trigger the multi-link container');
 
-      // Location labels are HTML-escaped.
+      // Location labels never reach a link, so nothing is rendered from them.
       const escaped = renderApplication({
         jobUrl: 'https://jobs.example.test/primary',
         postingVariants: [
@@ -181,8 +186,46 @@ export default [
           { location: 'B & C', url: 'https://jobs.example.test/b' },
         ],
       });
-      assert(escaped.includes('A &quot;quoted&quot; &lt;b&gt;'), 'location labels must be HTML-escaped');
-      assert(escaped.includes('B &amp; C'), 'ampersands in location labels must be escaped');
+      assert(!escaped.includes('A &quot;quoted&quot; &lt;b&gt; </a>') && (escaped.match(postingLinkPattern) || []).length === 1, 'location labels are not rendered as link text');
+
+      // Rule 1: exactly one link in each case.
+      const count = html => (html.match(postingLinkPattern) || []).length;
+      const hrefOf = html => (html.match(/<a class="ic-job-posting-link" href="([^"]+)"/) || [])[1];
+      const closedVariant = (location, url) => ({ location, url, liveness: 'closed' });
+
+      // A closed job URL with an open variant links the open variant, labelled original.
+      const closedPrimary = renderApplication({
+        jobUrl: 'https://jobs.example.test/primary',
+        postingVariants: [closedVariant('Lakeview', 'https://jobs.example.test/primary'), { location: 'Berlin', url: 'https://jobs.example.test/berlin' }],
+      });
+      assert(count(closedPrimary) === 1 && hrefOf(closedPrimary) === 'https://jobs.example.test/berlin', 'a closed job URL is replaced by the first open variant');
+      assert(countOccurrences(closedPrimary, 'View original job posting</a>') === 1, 'the open variant is labelled original');
+      assert(!closedPrimary.includes('<div class="ic-job-posting-links">'), 'no container for the open variant');
+
+      // The selected open alternate wins over the job URL and every variant.
+      const selectedAlternate = renderApplication({
+        jobUrl: 'https://jobs.example.test/primary', listingLinkUrl: 'https://alt.example.test/open',
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/lakeview' }, { location: 'Berlin', url: 'https://jobs.example.test/berlin' }],
+      });
+      assert(count(selectedAlternate) === 1 && hrefOf(selectedAlternate) === 'https://alt.example.test/open', 'the selected alternate is the one link');
+
+      // Every variant closed and no job URL: no link at all.
+      const allClosed = renderApplication({ jobUrl: '', postingVariants: [closedVariant('Lakeview', 'https://jobs.example.test/lakeview')] });
+      assert(count(allClosed) === 0 && !allClosed.includes('<div class="ic-job-posting-links">'), 'nothing open means no link');
+
+      // A confirmed official posting is the only link, with its page ahead of its apply form.
+      const officialOnly = renderApplication({ jobUrl: 'https://jobs.example.test/primary',
+        officialPosting: { level: 'L2', sourceUrl: 'https://careers.example.test/official' },
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/lakeview' }] });
+      assert(count(officialOnly) === 1 && hrefOf(officialOnly) === 'https://careers.example.test/official', 'the official posting is the one link');
+      assert(countOccurrences(officialOnly, 'View official job posting</a>') === 1 && !officialOnly.includes('View original job posting'), 'only the official label appears');
+
+      // A closed official posting leaves no link, however open the scraped URLs look.
+      const officialClosed = renderApplication({ jobUrl: 'https://jobs.example.test/primary', listingLinkUrl: 'https://alt.example.test/open',
+        officialPosting: { level: 'L2', outcome: 'closed', employer: 'Example Co', sourceUrl: 'https://careers.example.test/official', trail: ['closed', 'closure-page-read', 'semantic-match-v1'] },
+        postingVariants: [{ location: 'Lakeview', url: 'https://jobs.example.test/lakeview' }] });
+      assert(officialClosed.includes('data-ic-official-posting-status="closed"'), 'control: the official posting reads as closed');
+      assert(count(officialClosed) === 0 && !officialClosed.includes('<div class="ic-job-posting-links">'), 'a closed official posting means no link at all');
     },
   },
   {

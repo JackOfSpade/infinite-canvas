@@ -121,7 +121,7 @@ export default [
         assert.equal(item.label, 'Employer unknown');
       }
       const named = officialPostingDisplay(job({ officialPosting: posting({ employer: 'Northwind Labs' }) }));
-      assert.equal(named.label, 'Northwind Labs'); assert.equal(named.via, 'via Acme Talent Partners');
+      assert.equal(named.label, 'Northwind Labs'); assert.equal(named.via, '', 'a named official employer shows no poster');
       const l6 = officialPostingDisplay(job({ officialPosting: posting({ level: 'L6', outcome: 'not-found' }) }));
       assert.equal(l6.label, 'Acme Talent Partners'); assert.equal(l6.employerLabel, 'Acme Talent Partners'); assert.equal(l6.via, '');
       assert.equal(officialPostingDisplay(job({ officialPosting: null })).label, 'Acme Talent Partners');

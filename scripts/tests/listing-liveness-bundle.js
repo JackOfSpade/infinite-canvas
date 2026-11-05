@@ -57,7 +57,7 @@ export default [
       assert.equal(dom.window.document.querySelector('.ic-job-posting-link')?.href, selected);
     } finally { dom.window.close(); }
   } },
-  { name: 'listing bundle deferred: selected alternate stays the primary rendered link beside multiple variants', run() {
+  { name: 'listing bundle deferred: selected alternate is the one rendered link beside multiple variants', run() {
     const original = 'https://www.linkedin.com/jobs/view/synthetic-original-multi';
     const selected = 'https://www.indeed.com/viewjob?jk=synthetic-selected-multi';
     const variants = [
@@ -74,8 +74,8 @@ export default [
     const dom = new JSDOM(html);
     try {
       const links = [...dom.window.document.querySelectorAll('.ic-job-posting-link')].map(link => link.href);
-      assert.equal(links[0], selected);
-      assert.ok(links.includes(variants[1].url));
+      assert.deepEqual(links, [selected], 'exactly one link, the selected open alternate');
+      assert.equal(dom.window.document.querySelector('.ic-job-posting-links'), null);
       const data = JSON.parse(dom.window.document.getElementById('ic-application-bundle-data').textContent);
       assert.equal(data.jobUrl, original); assert.equal(data.listingLinkUrl, selected);
     } finally { dom.window.close(); }
@@ -166,11 +166,15 @@ export default [
     assert.equal(prompt.includes('**Listing check:**'), false);
     assert.equal(prompt.includes('(closed on LinkedIn)'), false);
     assert.ok(prompt.includes(`**Listing URL:** <${job.url}>`));
-    assert.ok(bundle.includes(`**Listing URL:** <${job.url}> (closed on LinkedIn)`));
-    assert.ok(bundle.includes('**Listing check:** Official posting found'));
-    assert.equal(bundle.includes('**Toronto:** <https://board.example.test/jobs/toronto>'), false);
-    assert.ok(bundle.includes('**Ottawa:** <https://board.example.test/jobs/ottawa>'));
-    assert.ok(bundle.includes('**Montreal:** <https://board.example.test/jobs/montreal>'));
+    assert.equal(bundle.includes('**Listing URL:**') || bundle.includes('(closed on LinkedIn)'), false, 'a confirmed official posting hides the listing beneath it');
+    assert.equal(bundle.includes('**Listing check:**'), false);
+    assert.equal(bundle.includes('## Posting locations') || bundle.includes('board.example.test/jobs/'), false);
+    // Without a confirmed official posting the bundle still marks the closed listing and hides the closed target.
+    const listingOnly = formatOriginalJobListingMarkdown({ ...job, officialPosting: undefined }, { audience: 'bundle' });
+    assert.ok(listingOnly.includes(`**Listing URL:** <${job.url}> (closed on LinkedIn)`));
+    assert.equal(listingOnly.includes('**Toronto:** <https://board.example.test/jobs/toronto>'), false);
+    assert.ok(listingOnly.includes('**Ottawa:** <https://board.example.test/jobs/ottawa>'));
+    assert.ok(listingOnly.includes('**Montreal:** <https://board.example.test/jobs/montreal>'));
     const html = buildResumeDocument({
       resumeMainHtml, docId: 'synthetic-listing-bundle',
       downloadBundle: { company: job.company, jobUrl: job.url, jobMarkdown: bundle,
@@ -179,10 +183,7 @@ export default [
     const dom = new JSDOM(html);
     try {
       const links = [...dom.window.document.querySelectorAll('.ic-job-posting-link')].map(link => link.href);
-      assert.ok(links.includes('https://careers.example.test/jobs/open'));
-      assert.ok(links.includes('https://board.example.test/jobs/ottawa'));
-      assert.ok(links.includes('https://board.example.test/jobs/montreal'));
-      assert.equal(links.includes('https://board.example.test/jobs/toronto'), false);
+      assert.deepEqual(links, ['https://careers.example.test/jobs/open'], 'the workspace shows only the official link');
       const data = JSON.parse(dom.window.document.getElementById('ic-application-bundle-data').textContent);
       assert.equal(data.jobUrl, job.url, 'the inert bundle retains the scraped URL as an audit value');
       assert.equal(data.postingVariants[0].liveness, 'closed');
@@ -260,7 +261,10 @@ export default [
       assert.deepEqual(frozen.listingLiveness, confirmed.listingLiveness);
       assert.deepEqual(frozen.boardClosed, confirmed.boardClosed);
       assert.equal(frozen.listingAudit.outcome, 'official');
-      assert.ok(formatOriginalJobListingMarkdown(frozen, { audience: 'bundle' })
+      const frozenBundle = formatOriginalJobListingMarkdown(frozen, { audience: 'bundle' });
+      assert.equal(frozenBundle.includes('**Listing URL:**'), false, 'the confirmed official posting is the only source shown');
+      assert.ok(frozenBundle.includes(liveOfficial.sourceUrl));
+      assert.ok(formatOriginalJobListingMarkdown({ ...frozen, officialPosting: undefined }, { audience: 'bundle' })
         .includes(`**Listing URL:** <${confirmed.url}> (closed on LinkedIn)`));
     } finally { await fs.rm(root, { recursive: true, force: true }); }
   } },

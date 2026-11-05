@@ -1,4 +1,5 @@
 import { isResearchEligible, RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
+import { jobCardClosedOfficially } from '../utils/jobCardFilters.js';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation, officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../utils/officialPostingPreparation.js';
 import { boardCardNeedsOfficialRetry, boardOfficialPostingRefreshCardMatches, refreshBoardOfficialPostingJobs, summarizeBoardOfficialPostingChecks } from '../utils/jobBoardOfficialPostingRefresh.js';
@@ -95,7 +96,9 @@ export function useBoardOfficialPostingRefresh(options) {
       const scopeKey = getScopeKey();
       const snapshots = [];
       for (const card of getNodes()) {
-        if (card?.type !== 'jobcard' || card.data?.hubId !== nodeId || card.data.locked || isJobWorkflowDeletionPending(card.id) || !isResearchEligible(card.data)
+        if (card?.type !== 'jobcard' || card.data?.hubId !== nodeId || card.data.locked || isJobWorkflowDeletionPending(card.id)
+          // A closed card is hidden, so its own lookup button cannot reach it: a full recheck is how it can come back.
+          || !(isResearchEligible(card.data) || (!onlyIncomplete && jobCardClosedOfficially(card.data)))
           || (onlyIncomplete && !boardCardNeedsOfficialRetry(card, nodeId))) continue;
         const claim = beginOfficialPostingPreparation({ canvasFilePath, nodeId: card.id, purpose: 'lookup', cancel });
         if (!claim) continue;

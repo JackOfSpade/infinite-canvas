@@ -247,4 +247,31 @@ export default [
     assert.equal(result.rows[0].url, alternate.url);
     assert.equal(result.rows[0].snippet, ownText);
   } },
+  { name: 'listing alternates: an aggregator alternate cannot replace a closed company job-board winner, a same-tier or more official one can', async run() {
+    const atsWinner = closed('greenhouse', 'ats-winner', { url: 'https://boards.greenhouse.io/northwind/jobs/900', officialPosting: posting });
+    const aggregator = row('indeed', 'agg', { listingLiveness: state('open', 'ai', 'indeed') });
+    const refused = await restoreListingAlternates([atsWinner], {
+      alternatesByKey: new Map([[listingEvidenceKey(atsWinner), [aggregator]]]),
+      scoreSafe, shouldTryWinner: async () => true,
+    });
+    assert.equal(refused.restored.length, 0, 'a reposting board cannot overrule the closure of the more official copy');
+    assert.equal(refused.rows[0], atsWinner);
+
+    const sameTier = row('lever', 'ats-alt', { url: 'https://jobs.lever.co/northwind/900', listingLiveness: state('open', 'ai', 'lever') });
+    const allowed = await restoreListingAlternates([atsWinner], {
+      alternatesByKey: new Map([[listingEvidenceKey(atsWinner), [aggregator, sameTier]]]),
+      scoreSafe, shouldTryWinner: async () => true,
+    });
+    assert.equal(allowed.restored.length, 1);
+    assert.equal(allowed.restored[0].alternate, sameTier, 'the same-tier alternate is chosen and the aggregator is skipped');
+    assert.equal(allowed.rows[0].url, sameTier.url);
+
+    const aggregatorWinner = closed('linkedin', 'agg-winner', { officialPosting: posting });
+    const moreOfficial = await restoreListingAlternates([aggregatorWinner], {
+      alternatesByKey: new Map([[listingEvidenceKey(aggregatorWinner), [sameTier]]]),
+      scoreSafe, shouldTryWinner: async () => true,
+    });
+    assert.equal(moreOfficial.restored.length, 1, 'a more official alternate may replace a closed aggregator winner');
+    assert.equal(moreOfficial.rows[0].url, sameTier.url);
+  } },
 ];

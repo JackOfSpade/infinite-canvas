@@ -591,10 +591,10 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   // every posting in the subtitle. Legacy single-location cards are unchanged.
   const subtitleLocation = useMemo(() => {
     const variants = Array.isArray(data.postingVariants) ? data.postingVariants : [];
-    if (!variants.length) return postingDisplay.location;
+    if (!variants.length || postingDisplay.officialOnly) return postingDisplay.location;
     const base = String(postingDisplay.location || 'Multiple locations');
     return `${base} · ${variants.length} posting${variants.length === 1 ? '' : 's'}`;
-  }, [postingDisplay.location, data.postingVariants]);
+  }, [postingDisplay.location, postingDisplay.officialOnly, data.postingVariants]);
 
   const openCardExternalUrl = useCallback(async (url, { onRejected, onDispatched, onFailed } = {}) => {
     if (!url || !window.electronAPI?.openExternal) {
@@ -1261,6 +1261,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         postedBy: typeof entry.postedBy === 'string' ? entry.postedBy : current.data.postedBy,
         ...(clearNotice ? { listingGenerationNotice: null, listingHold: false } : {}),
       });
+      if (lookup.state === 'closed' && !current.data.localApplication) {
+        addToast({ title: 'Official posting closed', description: 'This job is no longer accepting applications, so its card is hidden from the Board.', type: 'info' });
+      }
       EventLogger.log('[JobCard] official-posting lookup finished');
     } catch (error) {
       if (!cancelled && error?.code !== 'APP_QUIT_PAUSED' && error?.message !== 'App paused for quit' && isMountedRef.current) {
@@ -1892,7 +1895,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
 
       {/* Source + posted + open listing */}
       <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px]">
-        {data.source && (
+        {data.source && !postingDisplay.officialOnly && (
           <span className="text-white/30 uppercase tracking-wider">{data.source}</span>
         )}
         {data.language && data.language !== 'en' && (
@@ -1903,7 +1906,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             {data.language}
           </span>
         )}
-        {data.posted && <span className="text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
+        {data.posted && !postingDisplay.officialOnly && <span className="text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
         {postingDisplay.levelLabel && <span className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/60 border border-white/10">{postingDisplay.levelLabel}</span>}
         {(postingDisplay.viewUrl || data.url || data.googleCardUrl) && (
           <button

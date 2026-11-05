@@ -14,6 +14,7 @@ function summaryCount(value) {
  */
 export function JobBoardDoneState({
   resultCount = 0,
+  closedCardCount = 0,
   moduleCount = 0,
   totalIncoming = 0,
   duplicatesRemoved = 0,
@@ -90,8 +91,11 @@ export function JobBoardDoneState({
       ) : (
         <>
           {/* One card can retain several distinct posting targets. */}
-          <div className="text-emerald-400 text-2xl font-bold">{resultCount || 0}</div>
+          <div className="text-emerald-400 text-2xl font-bold">{Math.max(0, (resultCount || 0) - closedCardCount)}</div>
           <p className="text-white/40 text-xs">job cards</p>
+          {closedCardCount > 0 && (
+            <p className="text-white/25 text-[10px] mt-0.5">{closedCardCount} closed {closedCardCount === 1 ? 'job' : 'jobs'} hidden</p>
+          )}
 
           {moduleCount > 0 && (
             <p className="flex items-center gap-1 text-white/25 text-[10px] mt-0.5">

@@ -136,7 +136,7 @@ export default [
         semanticMatch: { version: 1, inputHash: 'a'.repeat(64), sourceHash: 'b'.repeat(64) } });
       const retainedDisplay = officialPostingDisplay(row({ officialPosting: retained }));
       assert.equal(retainedDisplay.lookupState, 'verified');
-      assert.deepEqual(retainedDisplay.candidateLinks, expected);
+      assert.deepEqual(retainedDisplay.candidateLinks, [], 'a confirmed official posting shows no unconfirmed candidates');
       const generic = [{ url: 'https://careers.example.test/generic', title: 'Northwind posting lead' }];
       assert.deepEqual(officialPostingDisplay(row({ officialPosting: posting({ outcome: 'ambiguous', alternatives: generic }) })).candidateLinks, []);
       assert.deepEqual(officialPostingDisplay(row({ officialPosting: posting() })).candidateLinks, []);
@@ -502,11 +502,15 @@ export default [
       for (const level of ['L1', 'L2', 'L3', 'L4']) {
         const job = row({ officialPosting: posting({ level }) }); const before = copy(job);
         const display = officialPostingDisplay(job);
-        assert.equal(display.employerLabel, 'Northwind Labs'); assert.equal(display.via, 'via Acme Talent Partners');
+        assert.equal(display.employerLabel, 'Northwind Labs'); assert.equal(display.via, '', 'a named official posting shows no poster');
+        assert.equal(display.officialOnly, true);
         assert.equal(display.title, 'Official Platform Engineer'); assert.equal(display.location, 'Lakeview, Canada');
         assert.equal(display.salary, 'Synthetic posted salary'); assert.equal(display.levelLabel, OFFICIAL_POSTING_LABELS[level]);
         assert.equal(display.applyUrl, 'https://apply.example.test/platform'); assert.deepEqual(job, before);
       }
+      const bare = officialPostingDisplay(row({ officialPosting: posting({ location: undefined, salary: { text: '', provenance: 'unknown' } }) }));
+      assert.equal(bare.location, '', 'no scraped location fallback beside a confirmed official posting');
+      assert.equal(bare.salary, '', 'no scraped salary fallback beside a confirmed official posting');
       assert.equal(officialPostingDisplay(row({ postedBy: ' NORTHWIND   LABS ' })).via, '');
       const l5 = officialPostingDisplay(row({ officialPosting: posting({ level: 'L5' }) }));
       assert.equal(l5.employer, 'Northwind Labs'); assert.equal(l5.via, '');

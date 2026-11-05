@@ -27,9 +27,11 @@ export default [
         assert.equal(data.jobUrl, job.url); assert.equal(data.officialPosting.sourceUrl, sourceUrl);
         assert.ok(data.jobMarkdown.includes(job.snippet));
         assert.ok(data.jobMarkdown.includes(`**Official posting:** <${sourceUrl}>`));
-        assert.ok(data.jobMarkdown.includes(`**Listing URL:** <${job.url}>`));
+        assert.ok(!data.jobMarkdown.includes('**Listing URL:**') && !data.jobMarkdown.includes(job.url), 'the official posting is the only source shown');
+        assert.ok(!data.jobMarkdown.includes('**Posted by:**') && !data.jobMarkdown.includes('**Source:**'));
         const prompt = formatOriginalJobListingMarkdown(value);
         assert.ok(!prompt.includes('**Official posting:**') && !prompt.includes('**Apply URL:**'));
+        assert.ok(prompt.includes(`**Listing URL:** <${job.url}>`), 'the prompt to the AI still gets the listing');
       });
     },
   },
@@ -49,13 +51,23 @@ export default [
     },
   },
   {
-    name: 'R4 bundle keeps all location-specific original links below the official page',
+    name: 'R4 bundle with an official posting shows only its link and no location-specific original links',
     run() {
       inspect({ level: 'L2', sourceUrl, officialApplyUrl }, document => {
         const links = [...document.querySelectorAll('.ic-job-posting-link')];
-        assert.deepEqual(links.map(link => link.href), [sourceUrl, 'https://mirror.test/lakeview', 'https://mirror.test/bayview']);
-        assert.deepEqual(links.map(link => link.textContent), ['View official job posting',
-          'View original job posting — Lakeview', 'View original job posting — Bayview']);
+        assert.deepEqual(links.map(link => link.href), [sourceUrl]);
+        assert.deepEqual(links.map(link => link.textContent), ['View official job posting']);
+      }, { postingVariants: [{ location: 'Lakeview', url: 'https://mirror.test/lakeview' }, { location: 'Bayview', url: 'https://mirror.test/bayview' }] });
+    },
+  },
+  {
+    name: 'R4 bundle with no confirmed official posting shows exactly one original link and no location-specific links',
+    run() {
+      inspect({ level: 'L5', sourceUrl, officialApplyUrl }, document => {
+        const links = [...document.querySelectorAll('.ic-job-posting-link')];
+        assert.deepEqual(links.map(link => link.href), [job.url]);
+        assert.deepEqual(links.map(link => link.textContent), ['View original job posting']);
+        assert.equal(document.querySelector('.ic-job-posting-links'), null, 'no multi-link container');
       }, { postingVariants: [{ location: 'Lakeview', url: 'https://mirror.test/lakeview' }, { location: 'Bayview', url: 'https://mirror.test/bayview' }] });
     },
   },
