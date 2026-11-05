@@ -15,7 +15,7 @@ import { carryBoardRescores } from '../../src/nodes/jobboard/jobBoardResearchSta
 import { pauseOwnerStatus, showsOwnPauseButton } from '../../src/utils/jobRunStatusStore.js';
 import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { runBoardPreferenceOverrideStage } from '../../src/nodes/jobboard/jobBoardPreferenceOverrideStage.js';
-import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView, jobBoardPreferenceSeed } from '../../src/utils/jobBoardPreferenceOverride.js';
+import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView } from '../../src/utils/jobBoardPreferenceOverride.js';
 
 const SNAPSHOT = 'a'.repeat(64);
 const OTHER_SNAPSHOT = 'b'.repeat(64);
@@ -180,8 +180,6 @@ export default [
       assert.equal(jobBoardPreferenceOverrideView({}).state, 'empty');
       assert.equal(jobBoardPreferenceOverrideView({ jobBoardPreferenceOverride: same }).state, 'pending');
       assert.equal(jobBoardPreferenceOverrideView({ jobBoardPreferenceOverride: { ...same, combinedAt: 4 } }).state, 'applied');
-      assert.deepEqual(jobBoardPreferenceSeed([{ jobPreferences: 'A' }, { jobPreferences: 'A ' }]), { brief: 'A', briefsDiffer: false });
-      assert.deepEqual(jobBoardPreferenceSeed([{ jobPreferences: 'A' }, { jobPreferences: 'B' }]), { brief: 'A', briefsDiffer: true });
     },
   },
   {
@@ -342,7 +340,7 @@ export default [
     },
   },
   {
-    name: 'Board preferences box: stays empty until the person fills it, even when a Search has a brief',
+    name: 'Board preferences box: stays empty until the person types in it, and only Apply to Board applies it',
     async run() {
       const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-board-preferences-'));
       const entry = path.join(directory, 'PanelProbe.jsx');
@@ -350,11 +348,12 @@ export default [
       const controller = new AbortController();
       let bundle;
       try {
-        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 8000);
-        const { React, act, createRoot, JobBoardPreferenceOverridePanel: Panel } = bundle.module;
         await withDom(async window => {
+          // React decides at load whether input events work, so load it with the DOM in place.
+          bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 8000);
+          const { React, act, createRoot, JobBoardPreferenceOverridePanel: Panel } = bundle.module;
           const applied = [];
-          const props = { seed: { brief: 'Remote only', briefsDiffer: false }, hasSavedJobs: true, onApply: brief => applied.push(brief), onClear: () => {} };
+          const props = { hasSavedJobs: true, onApply: brief => applied.push(brief), onClear: () => {} };
           const rootNode = createRoot(window.document.getElementById('root'));
           const render = view => act(async () => { rootNode.render(React.createElement(Panel, { ...props, view })); await Promise.resolve(); });
           const box = () => window.document.querySelector('textarea');
@@ -366,18 +365,19 @@ export default [
             assert.match(box().placeholder, /own rules are in use/);
             assert.equal(button('Apply to Board').disabled, true, 'an empty box has nothing to apply');
             assert.doesNotMatch(window.document.body.textContent, /Not applied yet/);
+            assert.equal(window.document.querySelectorAll('button').length, 1, 'Apply to Board is the only action, so nothing can overwrite the box');
 
-            await click('Use Job Search preferences');
-            assert.equal(box().value, 'Remote only', 'the button fills the box on request');
-            assert.equal(applied.length, 0, 'filling the box applies nothing');
+            await act(async () => {
+              Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set.call(box(), 'Remote only');
+              box().dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'Remote only' }));
+            });
+            assert.equal(applied.length, 0, 'typing applies nothing');
             assert.match(window.document.body.textContent, /Not applied yet.*own rules/);
-            assert.equal(button('Use Job Search preferences'), undefined, 'the box already holds it');
             await click('Apply to Board');
             assert.deepEqual(applied, ['Remote only']);
 
             await render({ state: 'applied', brief: 'No agencies', counts: null });
             assert.equal(box().value, 'No agencies', 'applied preferences show as applied');
-            assert.ok(button('Use Job Search preferences'), 'a person can still replace them with the Search brief');
             assert.doesNotMatch(window.document.body.textContent, /Not applied yet/);
           } finally { await act(async () => rootNode.unmount()); }
         });

@@ -23,12 +23,6 @@ export function applyJobBoardPreferenceBrief(data, brief, { now = Date.now() } =
   return { version: JOB_BOARD_PREFERENCE_OVERRIDE_VERSION, brief: nextBrief, plan: null, appliedAt: now, combinedAt: null, counts: null, results };
 }
 
-/** What the box's "Use Job Search preferences" button offers, and whether the searches disagree. */
-export function jobBoardPreferenceSeed(modules) {
-  const briefs = [...new Set((Array.isArray(modules) ? modules : []).map(module => cleanBrief(module?.jobPreferences)).filter(Boolean))];
-  return { brief: briefs[0] || '', briefsDiffer: briefs.length > 1 };
-}
-
 /** Every saved listing a Search holds, including those its own rules filtered out. */
 export function jobBoardOverrideListings(module) {
   const pool = Array.isArray(module?.preferenceCandidatePool) ? module.preferenceCandidatePool.filter(Boolean) : [];

@@ -3,17 +3,15 @@ import { JOB_BOARD_PREFERENCE_BRIEF_MAX_LENGTH } from '../../utils/jobBoardPrefe
 
 const BUTTON_CLASS = 'nodrag rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] text-white/70 hover:bg-white/10 disabled:opacity-40 disabled:cursor-not-allowed';
 
-export function JobBoardPreferenceOverridePanel({ view, seed, busy = false, hasSavedJobs = false, onApply, onClear }) {
+export function JobBoardPreferenceOverridePanel({ view, busy = false, hasSavedJobs = false, onApply, onClear }) {
   const saved = view?.brief || '';
   const [draft, setDraft] = useState(null);
-  // The box holds only what the person applied or typed. A Search's brief enters it
-  // only through the button below, and nothing takes effect until Apply to Board.
+  // The box holds only what the person applied or typed, and nothing takes effect
+  // until Apply to Board.
   const text = draft ?? saved;
   const trimmed = text.trim();
   const unchanged = view?.state === 'applied' && trimmed === saved.trim();
   const counts = view?.counts;
-  const seedBrief = (seed?.brief || '').trim();
-  const canUseSeed = !!seedBrief && trimmed !== seedBrief;
   return (
     <div className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-2 mt-2" onPointerDown={(e) => e.stopPropagation()}>
       <p className="text-[10px] font-semibold text-white/70">Preferences for these jobs</p>
@@ -39,9 +37,6 @@ export function JobBoardPreferenceOverridePanel({ view, seed, busy = false, hasS
           Not applied yet. Until you press Apply to Board, Combine uses {saved ? 'the preferences applied earlier' : 'each search’s own rules'}.
         </p>
       )}
-      {canUseSeed && seed?.briefsDiffer && (
-        <p className="mt-1 text-[9px] leading-snug text-amber-300/70">The connected searches have different briefs. The button below uses the first one, and it would apply to all of them.</p>
-      )}
       {view?.state === 'applied' && counts && (
         <p className="mt-1 text-[9px] leading-snug text-white/40">
           In use: {counts.passed} of {counts.checked} saved jobs pass, {counts.removed} removed. {counts.newlyScored} newly scored, {counts.keptScores} scores kept.
@@ -57,11 +52,6 @@ export function JobBoardPreferenceOverridePanel({ view, seed, busy = false, hasS
         >
           Apply to Board
         </button>
-        {canUseSeed && (
-          <button type="button" className={BUTTON_CLASS} disabled={busy} onClick={() => setDraft(seedBrief)}>
-            Use Job Search preferences
-          </button>
-        )}
       </div>
     </div>
   );

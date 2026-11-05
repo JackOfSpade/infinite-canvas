@@ -35,7 +35,7 @@ import { JobBoardSearchSelection } from './jobboard/JobBoardSearchSelection';
 import { JobBoardCareerOverridePanel } from './jobboard/JobBoardCareerOverridePanel';
 import { JobBoardPreferenceOverridePanel } from './jobboard/JobBoardPreferenceOverridePanel';
 import { runBoardPreferenceOverrideStage } from './jobboard/jobBoardPreferenceOverrideStage';
-import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView, jobBoardPreferenceSeed } from '../utils/jobBoardPreferenceOverride';
+import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView } from '../utils/jobBoardPreferenceOverride';
 import { CareerCanvasFileImportDialog } from '../components/CareerCanvasFileImportDialog';
 import { canvasCareerImportCandidates, reconcileCareerCanvasFileSelections, selectedCareerCanvasFiles, toggleCareerCanvasFileSelection } from '../utils/careerCanvasFileImport';
 import { filesToDropPayloads } from '../utils/fileDropUtils';
@@ -6989,7 +6989,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   }, [addToast, data.locked, id, retireCareerOverrideRuns, updateGlobal]);
 
   const preferenceOverrideView = jobBoardPreferenceOverrideView(data);
-  const preferenceSeed = jobBoardPreferenceSeed(liveCombineInputs(id, getNodes(), getEdges()).completed);
   const handlePreferenceOverrideApply = useCallback(async (brief) => {
     updateGlobal(id, node => ({ jobBoardPreferenceOverride: applyJobBoardPreferenceBrief(node?.data, brief) }));
     await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
@@ -7139,7 +7138,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         />
         <JobBoardPreferenceOverridePanel
           view={preferenceOverrideView}
-          seed={preferenceSeed}
           busy={!!data.locked || boardRunVisible}
           hasSavedJobs={completedModules.length > 0}
           onApply={handlePreferenceOverrideApply}
