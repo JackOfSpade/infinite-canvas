@@ -229,6 +229,15 @@ export default [
         assert(notice && !notice.hidden && notice.textContent.includes('63 new samples'), 'due count is visible on screen');
         assert(!dom.window.document.querySelector('main.page #ic-improvement-due'), 'notice is outside PDF document pages');
         assert(doc.includes('.ic-toolbar, .ic-banner { display: none !important; }'), 'print CSS hides the notice');
+        const document = dom.window.document;
+        assert(!document.querySelector('.ic-workspace-sidebar #ic-improvement-due'), 'notice is not inside the sidebar');
+        assert(notice.parentElement === document.body, 'notice is a direct child of body');
+        assert(notice.nextElementSibling?.classList.contains('ic-resume-workspace'), 'notice sits immediately before the workspace');
+        assert(notice.getAttribute('data-ic-severity') === 'due', 'due severity attribute is set');
+        assert(notice.querySelector('.ic-improvement-title')?.textContent === 'Improvement session due', 'title text');
+        assert(notice.querySelector('.ic-improvement-message').textContent.includes('63 new samples since last session'), 'message carries the count');
+        notice.querySelector('.ic-improvement-dismiss').click();
+        assert(notice.hidden, 'dismiss button hides the notice');
       } finally { dom.window.close(); }
     },
   },

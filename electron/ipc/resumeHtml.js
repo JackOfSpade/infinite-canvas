@@ -881,6 +881,38 @@ const INJECTED_CHROME_CSS = `
   padding: 8px 20px;
   font: 13px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
 }
+.ic-improvement-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  box-sizing: border-box;
+  width: 100%;
+  padding: 12px 20px;
+  background: #B3261E;
+  color: #fff;
+  font: 14px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
+  position: relative;
+  z-index: 2;
+}
+.ic-improvement-banner[hidden] { display: none; }
+.ic-improvement-banner[data-ic-severity="early"] { background: #9A5B00; }
+.ic-improvement-title { font-weight: 700; }
+.ic-improvement-title::before { content: "\\26A0"; margin-right: 8px; }
+.ic-improvement-message { flex: 1 1 auto; min-width: 0; }
+.ic-improvement-dismiss {
+  margin-left: auto;
+  padding: 0 8px;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-size: 20px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.ic-improvement-dismiss:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .ic-font-warning { background: #FCEFC7; color: #6B4E00; border-bottom: 1px solid #E8CE84; }
 
 /* ---- résumé workspace --------------------------------------------------
@@ -976,6 +1008,8 @@ const INJECTED_CHROME_CSS = `
 .ic-inferred-skill { white-space: normal; }
 @media screen {
   body { padding: 0; background: #e7e0d1; }
+  body.ic-workspace-body { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+  body.ic-workspace-body > .ic-resume-workspace { flex: 1 1 auto; height: auto; min-height: 0; overflow: hidden; }
   .ic-resume-workspace { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
   .ic-workspace-sidebar { height: 100%; max-height: 100%; }
   .ic-preview-area { display: flex; flex-direction: column; min-height: 0; padding: 20px 24px 24px; }
@@ -1722,7 +1756,6 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
     <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
     <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">Sync résumé</button>
     <button type="button" id="ic-remove-cover-btn" class="ic-btn">Remove cover letter</button>
-    <span id="ic-improvement-due" class="ic-banner" role="status" hidden></span>
     ${printVariantIndicator(jobContext)}
     <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
@@ -1834,6 +1867,17 @@ ${editableRuntimeSanitizerSource()}
   var syncBtn = document.getElementById('ic-sync-btn');
   var removeCoverBtn = document.getElementById('ic-remove-cover-btn');
   var improvementDue = document.getElementById('ic-improvement-due');
+  var improvementTitle = improvementDue ? improvementDue.querySelector('.ic-improvement-title') : null;
+  var improvementMessage = improvementDue ? improvementDue.querySelector('.ic-improvement-message') : null;
+  var improvementDismiss = improvementDue ? improvementDue.querySelector('.ic-improvement-dismiss') : null;
+  if (improvementDismiss) improvementDismiss.addEventListener('click', function () { improvementDue.hidden = true; });
+  function showImprovementBanner(severity, title, message) {
+    if (!improvementDue) return;
+    improvementDue.setAttribute('data-ic-severity', severity);
+    if (improvementTitle) improvementTitle.textContent = title;
+    if (improvementMessage) improvementMessage.textContent = message;
+    improvementDue.hidden = false;
+  }
   var printVariantNote = document.getElementById('ic-print-variant-note');
   var pdfBundleNote = document.getElementById('ic-pdf-bundle-note');
   var restoreNote = document.getElementById('ic-restore-note');
@@ -2347,14 +2391,14 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     }).then(function (response) { return response.json(); }).then(function (body) {
 ${APPLICATION_EDIT_NOTES_RESTORE}
       if (improvementDue && body.success && body.due) {
-        improvementDue.textContent = 'Improvement session due: ' + body.count + ' new samples since last session. Run it from Claude Code or Codex.';
-        improvementDue.hidden = false;
+        showImprovementBanner('due', 'Improvement session due',
+          body.count + ' new samples since last session. Run it from Claude Code or Codex.');
       } else if (improvementDue && body.success && body.earlyDue && body.recurring && body.recurring[0]) {
         var recurring = body.recurring[0];
-        improvementDue.textContent = 'Improvement session suggested early: the ' + (recurring.section || 'whole') + ' section of the '
+        showImprovementBanner('early', 'Improvement session suggested early',
+          'The ' + (recurring.section || 'whole') + ' section of the '
           + (recurring.document === 'letter' ? 'cover letter' : 'résumé') + ' was edited in ' + recurring.bundles + ' of the last ' + recurring.of
-          + ' bundles. Run it from Claude Code or Codex.';
-        improvementDue.hidden = false;
+          + ' bundles. Run it from Claude Code or Codex.');
       }
     }).catch(function () {});
   }
@@ -2592,7 +2636,8 @@ ${css}
 ${INJECTED_CHROME_CSS}
 </style>
 </head>
-<body>
+<body class="ic-workspace-body">
+<div id="ic-improvement-due" class="ic-banner ic-improvement-banner" role="status" hidden><span class="ic-improvement-title"></span><span class="ic-improvement-message"></span><button type="button" class="ic-improvement-dismiss" aria-label="Dismiss">×</button></div>
 <div class="ic-resume-workspace">
 ${workspace.markup}
   <div class="ic-preview-area">
