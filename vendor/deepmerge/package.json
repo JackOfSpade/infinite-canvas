@@ -1,0 +1,8 @@
+{
+  "name": "deepmerge",
+  "version": "4.3.2-ic.1",
+  "description": "deepmerge 4.3.1 (MIT, TehShrike) patched for GHSA-gcqx-w48m-w2h4: prototype-bearing keys are never merged. Used through package.json overrides until upstream publishes a fix.",
+  "main": "dist/cjs.js",
+  "types": "index.d.ts",
+  "license": "MIT"
+}
