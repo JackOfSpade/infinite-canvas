@@ -934,7 +934,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   run: () => {
     const researchId = 'e'.repeat(24);
     const evidence = {
-      methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64), experience: [],
+      methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64), experience: [],
       evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built APIs.', jobQuote: 'Build APIs.' }],
     };
     const requests = [{ researchId, group: { jobs: [{ marketCurrency: 'CAD', personalSalaryEvidence: evidence }] } }];
@@ -971,7 +971,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   name: 'Personal salary assessment identity tracks career and listing evidence while market research stays shared',
   run: () => {
     const packet = {
-      methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64),
+      methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64),
       evidence: [{ id: 'requirement-1', status: 'direct', requirement: 'Build APIs', candidateQuote: 'Built production APIs.', jobQuote: 'Build production APIs.' }],
       experience: [],
     };
@@ -1024,7 +1024,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
 }, {
   name: 'Compensation assessment listings carry indexed host career packets without raw career records',
   run: () => {
-    const packet = { methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64), evidence: [], experience: [] };
+    const packet = { methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64), evidence: [], experience: [] };
     const listings = buildCompensationAssessmentListings({ jobs: [{
       job: { title: 'Engineer', company: 'Example', careerData: 'PRIVATE RAW CAREER', profile: { private: true } },
       offer: { usable: false, raw: '' }, marketCurrency: 'CAD', personalSalaryEvidence: packet,
@@ -1049,7 +1049,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   name: 'Applying personal salary guidance preserves market audits for advertised, unadvertised and legacy rows',
   run: () => {
     const packet = {
-      methodologyVersion: 1, careerSnapshotId: 'a'.repeat(64), experience: [],
+      methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64), experience: [],
       evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built APIs.', jobQuote: 'Build APIs.' }],
     };
     const personal = {

@@ -127,7 +127,7 @@ import { makeJobPageStop } from './jobPageStop.js';
 import { flattenJobSearchQueries } from '../../src/utils/jobSearchQueries.js';
 import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, resolveJobSearchDateWindow, startOfLocalDay } from '../../src/utils/jobSearchDateWindow.js';
 import { parseGuaranteedCashOffer, compensationAssessment, mergeCompetitiveRanges, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource, classifyCompensationLocationGap } from './jobCompensation.js';
-import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
+import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, PERSONAL_SALARY_METHODOLOGY_VERSION, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
 import { getOfficialPostingStore, getOfficialPostingView, officialPostingDedup, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
 import { consolidatedOfficialPostingLocation, officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
@@ -8866,7 +8866,7 @@ function compensationOfferSignature(group) {
 // belongs to the exact approved career evidence and recommendation method.
 export function compensationPersonalizationSignature(group) {
   return crypto.createHash('sha256').update(JSON.stringify({
-    methodologyVersion: 1,
+    methodologyVersion: PERSONAL_SALARY_METHODOLOGY_VERSION,
     jobs: group.jobs.map(item => ({
       title: (item.postingJob || item.job)?.title || '',
       company: (item.postingJob || item.job)?.company || '',
@@ -9613,7 +9613,7 @@ function compensationExperienceEstimateDisclosure(item, experienceBand) {
     return `The ${experienceBand.label} experience band was estimated from the listing's seniority wording; it does not represent candidate tenure.`;
   }
   if (basis === 'description-unspecified-estimate') {
-    return `The ${experienceBand.label} experience band was conservatively estimated from the listing description because it states no numeric experience requirement; it does not represent candidate tenure.`;
+    return `The listing states no level or years of experience, so the ${experienceBand.label} experience band is a mid-level placeholder; it does not represent candidate tenure.`;
   }
   return '';
 }

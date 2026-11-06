@@ -157,7 +157,7 @@ export default [
       assert.deepEqual(normalized.range, { min: 110000, max: 130000, currency: 'CAD', period: 'annual' });
       assert.equal(normalized.desiredSalary, 125000);
       assert.equal(normalized.careerSnapshotId, SNAPSHOT);
-      assert.equal(normalized.methodologyVersion, 1);
+      assert.equal(normalized.methodologyVersion, 2);
       assert.equal(normalized.researchedAt, options.researchedAt);
       assert.equal(normalizePersonalSalaryRecommendation(answer({ evidenceIds: ['experience-1'] }), options).status, 'personalized', 'host-recomputed category tenure can independently support positioning');
       for (const invalid of [
@@ -190,7 +190,7 @@ export default [
       assert.ok(fallback.limitations.some(value => /advertised salary is below/.test(value)));
       const declared = answer({ status: 'market_estimate', ...MARKET, desiredSalary: 100000, evidenceIds: [], confidence: 'low' });
       assert.equal(normalizePersonalSalaryRecommendation(declared, options).desiredSalary, 150000, 'market-only answers use a deterministic midpoint');
-      assert.throws(() => validatePersonalSalaryRecommendation({ ...declared, max: 130000 }, options), /full market range/);
+      assert.throws(() => validatePersonalSalaryRecommendation({ ...declared, max: 130000 }, options), /full recommendation bounds/);
       assert.equal(normalizePersonalSalaryRecommendation(undefined, { ...options, evidence: packet() }).status, 'unavailable', 'existing career evidence requires a fresh personal assessment');
       assert.equal(normalizePersonalSalaryRecommendation(undefined, { evidence: empty }).status, 'unavailable');
       assert.equal(normalizePersonalSalaryRecommendation(undefined, { ...options, marketRange: { ...MARKET, min: 102100, max: 102300 } }).desiredSalary, 102200, 'narrow published bands must not be rounded outside their bounds');
@@ -205,7 +205,7 @@ export default [
       assert.throws(() => validatePersonalSalaryRecommendation(answer({ min: 140000, max: 180000, desiredSalary: 150000 }), options), /advertised minimum/);
       assert.equal(normalizePersonalSalaryRecommendation(answer({ min: 160000, max: 180000, desiredSalary: 170000 }), options).status, 'personalized');
       const general = normalizePersonalSalaryRecommendation(undefined, { ...options, evidence: packet(job(), { careerData: '' }) });
-      assert.deepEqual(general.range, MARKET, 'the displayed market range remains the full independently researched range');
+      assert.deepEqual(general.range, { ...MARKET, min: 160000 }, 'the estimate range starts at the employer floor; the researched market range is kept separately on the assessment');
       assert.equal(general.desiredSalary, 180000, 'the market estimate uses the market interval above the employer floor');
       assert.match(general.explanation, /employer’s advertised minimum/);
       const limitedBudget = { ...offered, min: 100000, max: 120000 };

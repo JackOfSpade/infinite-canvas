@@ -301,7 +301,7 @@ export default [
         [],
         { ...personalRecommendation, schemaVersion: 2 },
         { ...personalRecommendation, schemaVersion: '1' },
-        { ...personalRecommendation, methodologyVersion: 2 },
+        { ...personalRecommendation, methodologyVersion: 3 },
         { ...personalRecommendation, status: 'invented' },
         { ...personalRecommendation, confidence: 'certain' },
         { ...personalRecommendation, explanation: '' },
@@ -436,12 +436,12 @@ export default [
         'a reporting line must not upgrade a junior listing into the director salary market');
       assert(juniorManager.years === 1 && juniorManager.basis === 'description-seniority-estimate',
         'a junior title must take precedence over a role noun when pricing the experience band');
-      assert(unspecifiedDescription.years === 2 && unspecifiedDescription.basis === 'description-unspecified-estimate',
-        'a real description with no stated level must use the disclosed conservative market anchor instead of abandoning salary research');
-      assert(noEvidence.years === 2 && noEvidence.basis === 'description-unspecified-estimate',
-        'a complete listing description with no numeric experience signal must still receive the disclosed conservative market anchor');
-      assert(titleOnly.years === 2 && titleOnly.basis === 'description-unspecified-estimate',
-        'a title-only listing must receive the disclosed conservative market anchor instead of abandoning salary research');
+      assert(unspecifiedDescription.years === 3 && unspecifiedDescription.basis === 'description-unspecified-estimate',
+        'a real description with no stated level must use the disclosed mid-level market anchor instead of abandoning salary research');
+      assert(noEvidence.years === 3 && noEvidence.basis === 'description-unspecified-estimate',
+        'a complete listing description with no numeric experience signal must still receive the disclosed mid-level market anchor');
+      assert(titleOnly.years === 3 && titleOnly.basis === 'description-unspecified-estimate',
+        'a title-only listing must receive the disclosed mid-level market anchor instead of abandoning salary research');
       assert(externalPageEstimate.years === 1 && externalPageEstimate.basis === 'description-seniority-estimate'
         && unsupportedCategory.years === null && unsupportedCandidateYears.years === null,
       'an unrelated full-page role, grounded quote without its claimed number, or ungrounded candidate years must not upgrade this listing’s salary band');

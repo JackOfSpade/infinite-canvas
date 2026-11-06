@@ -4,7 +4,7 @@
  * but it cannot accidentally add a hidden safety margin or value benefits.
  */
 
-import { explicitSalaryCurrencies, inferSalaryCurrency } from '../../src/utils/salaryCurrency.js';
+import { explicitSalaryCurrencies, inferSalaryCurrency, salaryCurrencyAmbiguousAcrossLocations } from '../../src/utils/salaryCurrency.js';
 import { advertisedSalaryForJob } from '../../src/utils/jobAdvertisedSalary.js';
 import { normalizeLocationInput, normalizeCountry } from '../../src/utils/jobLocation.js';
 import { GROUNDED_SOURCE_METADATA_MARKER, groundedMetadataUrls } from './groundedSourceAppendix.js';
@@ -290,6 +290,15 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
   if (!rangeAmounts.length && /\bstarting\s+(?:at|from)\b/i.test(text)) {
     return { usable: false, reasonCode: 'salary_maximum_unstated' };
   }
+  // The comparison city decides which currency a bare "$" is READ in, but
+  // the amount was posted for every place the posting lists. When those
+  // places do not share one currency, the reading is a guess; keep it usable
+  // (the posted floor still matters) and disclose it.
+  const postedPlaces = typeof job.officialPosting?.location === 'object'
+    ? job.officialPosting.location?.display
+    : job.officialPosting?.location;
+  const currencyAmbiguous = !statedCurrency
+    && [postedPlaces, job.location].some(places => salaryCurrencyAmbiguousAcrossLocations(cashText, places, currency));
   return {
     usable: true,
     min,
@@ -297,6 +306,7 @@ export function parseGuaranteedCashOffer(job = {}, comparisonLocation = null) {
     fixed,
     currency,
     currencyInferredFromLocation: !statedCurrency && Boolean(inferred?.inferred),
+    ...(currencyAmbiguous ? { currencyAmbiguous: true } : {}),
     period: 'annual',
     annualized,
     raw: text.slice(0, 500),
@@ -349,6 +359,34 @@ export function compensationMarketCurrency(comparisonLocation = null) {
   return resolveCompensationMarketCurrency({}, comparisonLocation).currency;
 }
 
+function comparableSourceCount(ranges, currency) {
+  return (Array.isArray(ranges) ? ranges : []).filter(r =>
+    Number(r?.min) > 0 && Number(r?.max) >= Number(r?.min)
+    && String(r?.currency || '').trim().toUpperCase() === currency).length;
+}
+
+// The research prompt asks for two independent sources; one is still usable,
+// but a reader must know the range rests on a single survey.
+function sourceCountNote(ranges, currency) {
+  return comparableSourceCount(ranges, currency) === 1
+    ? 'Only one comparable salary source was found, so the researched market range is less reliable than usual.'
+    : '';
+}
+
+// The host's own conclusions must survive a long model justification: trim
+// the justification, never the decision and disclosures appended after it.
+function withReservedNotes(justification, notes, limit = 2400) {
+  const tail = notes.filter(Boolean).join(' ');
+  const room = Math.max(0, limit - tail.length - (tail ? 1 : 0));
+  return [String(justification || '').slice(0, room).trim(), tail].filter(Boolean).join(' ').slice(0, limit);
+}
+
+function ambiguousCurrencyNote(offer) {
+  return offer?.currencyAmbiguous
+    ? `The posting gives one "$" range for locations in more than one country without naming a currency; it was read as ${offer.currency} for this comparison, but the employer may mean another currency (often USD).`
+    : '';
+}
+
 export function compensationAssessment({ offer, competitiveRanges, marketCurrency = '', currencyInferredFromLocation = false, comparisonLocation = null, justification = '', sourceLinks = [], researchedAt = new Date().toISOString(), reasonCode = '', researchAttempted = false, personalRecommendation, personalSalaryEvidence } = {}) {
   const base = {
     schemaVersion: 1,
@@ -364,6 +402,7 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     sourceLinks: sanitizeLinks(sourceLinks),
     researchedAt,
     currencyInferredFromLocation: Boolean(currencyInferredFromLocation || offer?.currencyInferredFromLocation),
+    ...(offer?.usable && offer.currencyAmbiguous ? { currencyAmbiguous: true } : {}),
   };
   const currency = String(marketCurrency || offer?.currency || '').trim().toUpperCase();
   // Market-only evidence still needs one explicit target currency. Otherwise
@@ -377,10 +416,10 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
   }
   if (!offer?.usable) {
     if (merged) {
-      const explanation = [
-        base.justification,
+      const explanation = withReservedNotes(base.justification, [
         `The listing does not state a usable guaranteed cash salary, so no listing comparison was made. This researched ${merged.currency} market range provides context for the separate desired-salary guidance.`,
-      ].filter(Boolean).join(' ').slice(0, 2400);
+        sourceCountNote(competitiveRanges, merged.currency),
+      ]);
       return {
         ...base,
         status: 'market_recommendation',
@@ -406,15 +445,22 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
   // This is the entire threshold: the stated maximum (or fixed amount) must
   // reach the merged competitive floor. No buffer is applied.
   const status = offer.max < merged.min ? 'below_market' : 'competitive';
+  // A posted floor above the entire researched range is still competitive pay,
+  // but it also proves the benchmark does not describe this job. Say so, so
+  // nobody reads the market range as what this employer pays.
+  const aboveCeiling = offer.min > merged.max;
   const money = (value) => `${offer.currency ? `${offer.currency} ` : ''}${Math.round(value).toLocaleString('en-US')}`;
   const decision = status === 'below_market'
     ? `The listing's highest stated guaranteed cash salary (${money(offer.max)}) is below the merged competitive floor (${money(merged.min)}).`
-    : `The listing's highest stated guaranteed cash salary (${money(offer.max)}) reaches or exceeds the merged competitive floor (${money(merged.min)}).`;
-  const explanation = [base.justification, decision].filter(Boolean).join(' ').slice(0, 2400);
+    : aboveCeiling
+      ? `The listing's lowest stated guaranteed cash salary (${money(offer.min)}) is above the top of the researched market range (${money(merged.max)}), so that benchmark likely reflects a different level, employer tier or specialty than this job. Desired-salary guidance uses the employer's posted band instead.`
+      : `The listing's highest stated guaranteed cash salary (${money(offer.max)}) reaches or exceeds the merged competitive floor (${money(merged.min)}).`;
+  const explanation = withReservedNotes(base.justification, [decision, sourceCountNote(competitiveRanges, merged.currency), ambiguousCurrencyNote(offer)]);
   return {
     ...base,
     status,
-    reasonCode: status === 'below_market' ? 'offered_max_below_competitive_floor' : 'offered_reaches_competitive_floor',
+    reasonCode: status === 'below_market' ? 'offered_max_below_competitive_floor'
+      : aboveCeiling ? 'offered_min_above_competitive_ceiling' : 'offered_reaches_competitive_floor',
     competitiveRange: merged,
     justification: explanation,
   };
@@ -822,9 +868,12 @@ export function estimateCompensationExperienceYearsFromDescription(job = {}, con
     if (pattern.test(contextSeniority)) return { years, basis: 'description-seniority-estimate' };
   }
   // A real job description with no explicit level still describes a concrete
-  // role. Use a conservative early-career anchor rather than abandoning the
-  // entire market comparison; this is deliberately disclosed to the card.
-  if (description || String(job?.title || '').trim()) return { years: 2, basis: 'description-unspecified-estimate' };
+  // role. An unstated level is not evidence of a junior role: a plain
+  // "Software Engineer" title usually spans new-grad to mid-level hires. Use
+  // the same mid-level anchor as an explicit "intermediate" title rather than
+  // an early-career one, which biased every such benchmark (and the desired
+  // salary built on it) downward. This is deliberately disclosed to the card.
+  if (description || String(job?.title || '').trim()) return { years: 3, basis: 'description-unspecified-estimate' };
   return { years: null, basis: 'not-established' };
 }
 

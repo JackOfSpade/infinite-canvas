@@ -3,6 +3,7 @@ import { structuralEdge } from '../_shared/edgeHelpers.js';
 import { isJobCardVisible } from '../../utils/jobCardFilters.js';
 import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
 import { mergeDeadSourceUrls } from '../../utils/jobSourceLinks.js';
+import { salaryRecommendationBounds } from '../../utils/salaryRecommendationBounds.js';
 
 /**
  * Pure helpers for turning scored jobs + taxonomy metadata into the React
@@ -183,11 +184,11 @@ function unavailablePersonalRecommendation() {
 // Personal guidance is optional, and has a stricter boundary than legacy market
 // research. Never coerce numeric strings, fill a missing endpoint, infer units,
 // or silently repair a target: the copyable number must be a validated answer.
-function normalizedPersonalRecommendation(value, marketRange) {
+function normalizedPersonalRecommendation(value, marketRange, offered) {
   if (value === undefined) return null;
   const unavailable = unavailablePersonalRecommendation();
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || value.schemaVersion !== 1 || value.methodologyVersion !== 1
+    || value.schemaVersion !== 1 || ![1, 2].includes(value.methodologyVersion)
     || !PERSONAL_RECOMMENDATION_STATUSES.has(value.status)
     || !PERSONAL_RECOMMENDATION_CONFIDENCES.has(value.confidence)
     || typeof value.explanation !== 'string' || !value.explanation.trim()
@@ -203,12 +204,17 @@ function normalizedPersonalRecommendation(value, marketRange) {
     explanation: value.explanation.trim().slice(0, MAX_COMPENSATION_TEXT_LENGTH),
     limitations: value.limitations.map((item) => item.trim().slice(0, 500)).filter(Boolean).slice(0, 8),
     careerSnapshotId: value.careerSnapshotId.trim(),
-    methodologyVersion: 1,
+    methodologyVersion: value.methodologyVersion,
   };
   if (value.status === 'unavailable') {
     return value.range === null && value.desiredSalary === null ? normalized : unavailable;
   }
   const range = value.range;
+  // v1 answers were bounded by the market range alone; v2 answers by the
+  // shared market-plus-advertised-band rule the backend validated them with.
+  const bounds = value.methodologyVersion === 1
+    ? { min: marketRange.min, max: marketRange.max }
+    : salaryRecommendationBounds(marketRange, offered) || { min: NaN, max: NaN };
   const isPositiveCash = (amount) => typeof amount === 'number' && Number.isFinite(amount)
     && amount > 0 && amount <= MAX_CREDIBLE_ANNUAL_CASH;
   if (!range || typeof range !== 'object' || Array.isArray(range)
@@ -217,18 +223,28 @@ function normalizedPersonalRecommendation(value, marketRange) {
     || typeof range.currency !== 'string' || !/^[A-Z]{3}$/.test(range.currency)
     || range.currency !== marketRange.currency || range.period !== 'annual' || marketRange.period !== 'annual'
     || !(marketRange.min > 0) || !(marketRange.max > 0)
-    || range.min < marketRange.min || range.max > marketRange.max
+    || !(range.min >= bounds.min) || !(range.max <= bounds.max)
     || (value.status === 'personalized' && !/^[a-f0-9]{64}$/.test(normalized.careerSnapshotId))
     || (value.status === 'market_estimate' && (value.confidence !== 'low'
-      || range.min !== marketRange.min || range.max !== marketRange.max))) return unavailable;
+      || range.min !== bounds.min || range.max !== bounds.max))) return unavailable;
   normalized.range = { min: range.min, max: range.max, currency: range.currency, period: 'annual' };
   normalized.desiredSalary = value.desiredSalary;
+  // A v1 answer stays readable, but when today's rule would not allow it
+  // (typically: below an employer's posted floor that sits above the market)
+  // it is shown as outdated rather than as a number to enter.
+  if (value.methodologyVersion === 1) {
+    const current = salaryRecommendationBounds(marketRange, offered);
+    if (current && (range.min < current.min || range.max > current.max
+      || (value.status === 'market_estimate' && (range.min !== current.min || range.max !== current.max)))) {
+      normalized.superseded = true;
+    }
+  }
   return normalized;
 }
 
 /** Whether a saved answer matches the current career snapshot; older answers remain displayable with an outdated label. */
 export function isCompensationRecommendationCurrent(recommendation, careerSnapshotId) {
-  return Boolean(recommendation && recommendation.status !== 'unavailable'
+  return Boolean(recommendation && recommendation.status !== 'unavailable' && !recommendation.superseded
     && recommendation.careerSnapshotId === (typeof careerSnapshotId === 'string' ? careerSnapshotId.trim() : ''));
 }
 
@@ -339,7 +355,7 @@ export function normalizeCompensationAssessment(value) {
       status: 'not_evaluated',
       reasonCode: 'legacy_unresearched',
       justification: 'Compensation research was not run for this saved result. Combine jobs again on the Job Board to evaluate the advertised cash salary.',
-      offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, sourceLinks: [],
+      offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, currencyAmbiguous: false, sourceLinks: [],
       personalRecommendation: null,
       isLegacy: true,
     };
@@ -357,6 +373,7 @@ export function normalizeCompensationAssessment(value) {
     justification: textValue(source.justification ?? source.reasoning ?? source.explanation ?? source.summary).slice(0, MAX_COMPENSATION_TEXT_LENGTH),
     researchedAt: textValue(source.researchedAt ?? source.researchDate ?? source.researchedOn).slice(0, 100),
     currencyInferredFromLocation: source.currencyInferredFromLocation === true,
+    currencyAmbiguous: source.currencyAmbiguous === true,
     sourceLinks: normalizedSourceLinks(source.sourceLinks ?? source.sources ?? source.evidence),
     isLegacy: false,
   };
@@ -413,7 +430,7 @@ export function normalizeCompensationAssessment(value) {
           : 'The listing did not provide enough guaranteed recurring cash compensation to evaluate.';
   }
   normalized.personalRecommendation = schemaVersion === 1
-    ? normalizedPersonalRecommendation(source.personalRecommendation, normalized.competitiveRange)
+    ? normalizedPersonalRecommendation(source.personalRecommendation, normalized.competitiveRange, normalized.offered)
     : null;
   return normalized;
 }

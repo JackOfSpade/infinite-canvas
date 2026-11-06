@@ -1,0 +1,178 @@
+import assert from 'node:assert/strict';
+import { salaryRecommendationBounds } from '../../src/utils/salaryRecommendationBounds.js';
+import {
+  normalizePersonalSalaryRecommendation,
+  validatePersonalSalaryRecommendation,
+} from '../../electron/ipc/personalSalaryRecommendation.js';
+import { compensationAssessment, parseGuaranteedCashOffer } from '../../electron/ipc/jobCompensation.js';
+import { formatSalaryCurrencyLabel, inferSalaryCurrency, salaryCurrencyAmbiguousAcrossLocations } from '../../src/utils/salaryCurrency.js';
+import { isCompensationRecommendationCurrent, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
+
+const SNAPSHOT = 'a'.repeat(64);
+const PACKET = {
+  methodologyVersion: 2, careerSnapshotId: SNAPSHOT, experience: [],
+  evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built web applications.', jobQuote: 'Familiarity with web applications.' }],
+};
+// The saved Baseten case that prompted this rule: one Montreal junior survey
+// (CAD 57–91K) against an employer band whose floor is far above it.
+const MARKET = { min: 57000, max: 91000, currency: 'CAD', period: 'annual' };
+const POSTED = { usable: true, min: 165000, max: 330000, currency: 'CAD', period: 'annual' };
+
+function personal(overrides = {}) {
+  return {
+    status: 'personalized', min: 70000, max: 90000, desiredSalary: 85000, currency: 'CAD', confidence: 'low',
+    explanation: 'Documented web-application work supports this position.', limitations: [], evidenceIds: ['requirement-1'],
+    ...overrides,
+  };
+}
+
+export default [
+  {
+    name: 'Recommendation bounds cover every relation between the market range and the posted band',
+    run: () => {
+      const market = { min: 100000, max: 150000, currency: 'CAD', period: 'annual' };
+      const band = (min, max, extra = {}) => ({ usable: true, min, max, currency: 'CAD', period: 'annual', ...extra });
+      assert.deepEqual(salaryRecommendationBounds(market, null), { min: 100000, max: 150000, basis: 'market' });
+      assert.deepEqual(salaryRecommendationBounds(market, band(60000, 90000)), { min: 100000, max: 150000, basis: 'market_above_posted' });
+      assert.deepEqual(salaryRecommendationBounds(market, band(165000, 330000)), { min: 165000, max: 330000, basis: 'posted_above_market' });
+      assert.deepEqual(salaryRecommendationBounds(market, band(120000, 200000)), { min: 120000, max: 150000, basis: 'market_with_posted_floor' });
+      assert.deepEqual(salaryRecommendationBounds(market, band(90000, 140000)), { min: 100000, max: 150000, basis: 'market' });
+      // A band that cannot be compared never moves the bounds.
+      for (const unusable of [
+        band(165000, 330000, { currency: 'USD' }), band(165000, 330000, { period: 'hourly' }),
+        band(165000, 330000, { usable: false }), band(330000, 165000), band(0, 330000),
+      ]) {
+        assert.equal(salaryRecommendationBounds(market, unusable).basis, 'market', JSON.stringify(unusable));
+      }
+      assert.equal(salaryRecommendationBounds({ ...market, min: 0 }, band(1, 2)), null);
+    },
+  },
+  {
+    name: 'A posted floor above the whole market bounds the desired salary by the posted band',
+    run: () => {
+      const options = { marketRange: MARKET, evidence: PACKET, offered: POSTED };
+      assert.throws(() => validatePersonalSalaryRecommendation(personal(), options), /recommendation bounds \(165000–330000 CAD/,
+        'the saved CAD 85,000 answer sits below the employer floor and must be rejected');
+      assert.equal(normalizePersonalSalaryRecommendation(personal(), options).status, 'unavailable');
+      const accepted = normalizePersonalSalaryRecommendation(personal({ min: 165000, max: 200000, desiredSalary: 175000 }), options);
+      assert.equal(accepted.status, 'personalized');
+      assert.equal(accepted.desiredSalary, 175000);
+      assert.ok(accepted.limitations.some(value => /posted minimum is above the whole researched market range/.test(value)),
+        'the card must say why the answer is not inside the researched market range');
+      assert.throws(() => validatePersonalSalaryRecommendation(personal({ min: 165000, max: 340000, desiredSalary: 200000 }), options), /recommendation bounds/);
+
+      const estimate = normalizePersonalSalaryRecommendation(undefined, { ...options, evidence: { ...PACKET, evidence: [] } });
+      assert.equal(estimate.status, 'market_estimate');
+      assert.deepEqual(estimate.range, { min: 165000, max: 330000, currency: 'CAD', period: 'annual' });
+      assert.equal(estimate.desiredSalary, 250000);
+      assert.match(estimate.explanation, /benchmark does not describe this job/);
+      assert.equal(estimate.limitations.length, 2);
+    },
+  },
+  {
+    name: 'The assessment names a benchmark below the posted floor and a single-source market range',
+    run: () => {
+      const assessment = compensationAssessment({
+        offer: POSTED, competitiveRanges: [{ min: 57000, max: 91000, currency: 'CAD' }], marketCurrency: 'CAD',
+        comparisonLocation: { display: 'Montreal, Quebec, Canada' }, researchedAt: '2026-11-05T00:00:00.000Z',
+      });
+      assert.equal(assessment.status, 'competitive');
+      assert.equal(assessment.reasonCode, 'offered_min_above_competitive_ceiling');
+      assert.match(assessment.justification, /lowest stated guaranteed cash salary \(CAD 165,000\) is above the top/);
+      assert.match(assessment.justification, /Only one comparable salary source/);
+      const twoSources = compensationAssessment({
+        offer: { ...POSTED, min: 60000, max: 90000 }, marketCurrency: 'CAD',
+        competitiveRanges: [{ min: 57000, max: 91000, currency: 'CAD' }, { min: 60000, max: 85000, currency: 'CAD' }],
+      });
+      assert.equal(twoSources.reasonCode, 'offered_reaches_competitive_floor');
+      assert.doesNotMatch(twoSources.justification, /Only one comparable salary source/);
+      assert.equal(twoSources.currencyAmbiguous, undefined);
+      const verbose = compensationAssessment({
+        offer: POSTED, competitiveRanges: [{ min: 57000, max: 91000, currency: 'CAD' }], marketCurrency: 'CAD', justification: 'z'.repeat(5000),
+      });
+      assert.ok(verbose.justification.length <= 2400);
+      assert.match(verbose.justification, /Desired-salary guidance uses the employer's posted band instead\. Only one comparable salary source/,
+        'a long model justification is trimmed, never the host conclusion appended after it');
+      // The renderer keeps a valid verdict for the new reason code.
+      const rendered = normalizeCompensationAssessment(assessment);
+      assert.equal(rendered.status, 'competitive');
+      assert.equal(rendered.personalRecommendation.status, 'market_estimate');
+      assert.equal(rendered.personalRecommendation.desiredSalary, 250000);
+    },
+  },
+  {
+    name: 'A bare "$" amount read in one currency while its posted places name another is flagged as a reading',
+    run: () => {
+      const list = 'San Francisco | Toronto | New York | Montreal | Seattle';
+      // The header keeps its location inference; the conflict is with the
+      // CAD reading used for a Montreal comparison.
+      assert.equal(formatSalaryCurrencyLabel('$165K - $330K', list), 'USD · inferred from location');
+      assert.equal(salaryCurrencyAmbiguousAcrossLocations('$165K - $330K', list, 'CAD'), true);
+      assert.equal(salaryCurrencyAmbiguousAcrossLocations('$165K - $330K', list, 'USD'), false);
+      assert.equal(formatSalaryCurrencyLabel('$165K - $330K', 'New York, NY; Toronto, ON'), 'Currency not stated · multiple countries');
+      // Places that name no country neither confirm nor contradict.
+      for (const [places, read] of [['Toronto, ON; Ottawa', 'CAD'], ['Toronto, ON • Full-time', 'CAD'], ['Austin | Dallas', 'USD'], ['Austin, TX | Remote', 'USD']]) {
+        assert.equal(salaryCurrencyAmbiguousAcrossLocations('$120K', places, read), false, places);
+      }
+      assert.deepEqual(inferSalaryCurrency('$120K', 'Toronto, ON; Ottawa'), { currency: 'CAD', inferred: true }, 'one named province still decides a list');
+      assert.deepEqual(inferSalaryCurrency('$120K', 'Austin, TX | Remote'), { currency: 'USD', inferred: true });
+      assert.deepEqual(inferSalaryCurrency('US$120K', list), { currency: 'USD', inferred: false }, 'a stated currency always wins');
+      assert.equal(salaryCurrencyAmbiguousAcrossLocations('US$120K', list, 'CAD'), false);
+      assert.equal(salaryCurrencyAmbiguousAcrossLocations('$120K', 'Montreal, Quebec, Canada', 'USD'), false, 'one place is never a list');
+      assert.equal(formatSalaryCurrencyLabel('$120K', 'Remote'), 'Currency not specified');
+
+      const job = {
+        title: 'Software Engineer', location: 'Montreal, Quebec, Canada', salary: '$165K - $330K',
+        officialPosting: { location: { display: list } },
+      };
+      const offer = parseGuaranteedCashOffer(job, { display: 'Montreal, Quebec, Canada' });
+      assert.equal(offer.usable, true, 'the posted floor still matters when its currency is only a reading');
+      assert.equal(offer.currency, 'CAD');
+      assert.equal(offer.currencyAmbiguous, true);
+      const single = parseGuaranteedCashOffer({ ...job, officialPosting: { location: { display: 'Montreal, QC' } } }, { display: 'Montreal, Quebec, Canada' });
+      assert.equal(single.currencyAmbiguous, undefined);
+      const stated = parseGuaranteedCashOffer({ ...job, salary: 'CAD 165K - 330K' }, { display: 'Montreal, Quebec, Canada' });
+      assert.equal(stated.currencyAmbiguous, undefined);
+
+      const assessment = compensationAssessment({ offer, competitiveRanges: [{ min: 57000, max: 91000, currency: 'CAD' }], marketCurrency: 'CAD' });
+      assert.equal(assessment.currencyAmbiguous, true);
+      assert.match(assessment.justification, /read as CAD for this comparison/);
+      assert.equal(normalizeCompensationAssessment(assessment).currencyAmbiguous, true);
+    },
+  },
+  {
+    name: 'Saved v1 answers keep their market-only rule while v2 answers use the shared bounds',
+    run: () => {
+      const base = {
+        schemaVersion: 1, status: 'competitive', reasonCode: 'offered_min_above_competitive_ceiling',
+        offered: POSTED, competitiveRange: MARKET, justification: 'Saved.', researchedAt: '2026-11-05T00:00:00.000Z',
+      };
+      const saved = (methodologyVersion, range, desiredSalary, status = 'personalized') => normalizeCompensationAssessment({
+        ...base,
+        personalRecommendation: {
+          schemaVersion: 1, methodologyVersion, status, confidence: 'low', explanation: 'Saved answer.', limitations: [],
+          careerSnapshotId: status === 'personalized' ? SNAPSHOT : '', range: { ...range, currency: 'CAD', period: 'annual' }, desiredSalary,
+        },
+      }).personalRecommendation;
+      // The original Baseten card stays readable, but as an outdated answer, not a number to enter.
+      const baseten = saved(1, { min: 70000, max: 90000 }, 85000);
+      assert.equal(baseten.desiredSalary, 85000);
+      assert.equal(baseten.superseded, true);
+      assert.equal(isCompensationRecommendationCurrent(baseten, SNAPSHOT), false);
+      const unaffected = normalizeCompensationAssessment({
+        ...base, status: 'competitive', reasonCode: 'offered_reaches_competitive_floor', offered: { ...POSTED, min: 50000, max: 95000 },
+        personalRecommendation: { schemaVersion: 1, methodologyVersion: 1, status: 'personalized', confidence: 'low', explanation: 'Saved.', limitations: [],
+          careerSnapshotId: SNAPSHOT, range: { min: 70000, max: 90000, currency: 'CAD', period: 'annual' }, desiredSalary: 85000 },
+      }).personalRecommendation;
+      assert.equal(unaffected.superseded, undefined, 'a v1 answer today’s rule still allows stays current');
+      assert.equal(isCompensationRecommendationCurrent(unaffected, SNAPSHOT), true);
+      assert.equal(saved(1, { min: 165000, max: 200000 }, 175000).status, 'unavailable', 'v1 answers were never allowed outside the market');
+      assert.equal(saved(2, { min: 165000, max: 200000 }, 175000).desiredSalary, 175000);
+      assert.equal(saved(2, { min: 165000, max: 200000 }, 175000).methodologyVersion, 2);
+      assert.equal(saved(2, { min: 70000, max: 90000 }, 85000).status, 'unavailable', 'a v2 answer below the posted floor is invalid');
+      assert.equal(saved(2, { min: 165000, max: 330000 }, 250000, 'market_estimate').status, 'market_estimate');
+      assert.equal(saved(2, { min: 57000, max: 91000 }, 75000, 'market_estimate').status, 'unavailable');
+      assert.equal(saved(3, { min: 165000, max: 200000 }, 175000).status, 'unavailable', 'an unknown methodology fails closed');
+    },
+  },
+];

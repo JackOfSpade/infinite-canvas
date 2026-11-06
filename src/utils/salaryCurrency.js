@@ -83,18 +83,60 @@ export function inferSalaryCurrency(salary, location) {
 
   const place = String(location || '');
   if (!place.trim()) return null;
+  const currency = locationCurrency(place);
+  return currency ? { currency, inferred: true } : null;
+}
+
+function locationCurrency(place) {
   const currencies = new Set();
   if (CANADIAN_PROVINCE_CODE_RE.test(place)) currencies.add('CAD');
   if (US_STATE_CODE_RE.test(place)) currencies.add('USD');
   for (const [currency, pattern] of LOCATION_CURRENCIES) {
     if (pattern.test(place)) currencies.add(currency);
   }
-  return currencies.size === 1 ? { currency: [...currencies][0], inferred: true } : null;
+  return currencies.size === 1 ? [...currencies][0] : null;
+}
+
+// Work-mode words are not places and carry no currency of their own.
+const PLACEHOLDER_LOCATION_RE = /^(?:remote|hybrid|on[-\s]?site|in[-\s]?office|anywhere|worldwide|global|flexible|multiple locations?)$/i;
+
+/**
+ * Split a posting's list of work locations. Only list separators are used
+ * ("|", ";", "•", newline); a comma separates parts of ONE place
+ * ("Toronto, ON, Canada") and is never a list separator here.
+ */
+export function locationListSegments(location) {
+  return String(location || '')
+    .split(/\s*(?:\||;|•|\n)\s*/)
+    .map((segment) => segment.replace(/\((?:remote|hybrid|on[-\s]?site)\)/ig, '').trim())
+    .filter((segment) => segment && !PLACEHOLDER_LOCATION_RE.test(segment));
+}
+
+/** The currencies named by the individual places of a posting's location list. */
+export function locationListCurrencies(location) {
+  return new Set(locationListSegments(location).map(locationCurrency).filter(Boolean));
+}
+
+/**
+ * Whether a bare-symbol amount posted for this list of places cannot be tied
+ * to one currency: its places name more than one country's currency, or one
+ * that differs from the currency the amount is being read in. A place that
+ * names no country ("Ottawa", "Seattle") neither confirms nor contradicts.
+ * Example: "San Francisco | Toronto | New York | Montreal" read as CAD for a
+ * Montreal comparison — "New York" points to USD.
+ */
+export function salaryCurrencyAmbiguousAcrossLocations(salary, location, readCurrency = '') {
+  if (explicitSalaryCurrencies(salary).length) return false;
+  if (locationListSegments(location).length < 2) return false;
+  const currencies = locationListCurrencies(location);
+  if (readCurrency) currencies.add(String(readCurrency).trim().toUpperCase());
+  return currencies.size > 1;
 }
 
 export function formatSalaryCurrencyLabel(salary, location) {
   if (explicitSalaryCurrencies(salary).length > 1) return 'Multiple currencies · see listing';
   const info = inferSalaryCurrency(salary, location);
+  if (!info && salaryCurrencyAmbiguousAcrossLocations(salary, location)) return 'Currency not stated · multiple countries';
   if (!info) return 'Currency not specified';
   return info.inferred ? `${info.currency} · inferred from location` : info.currency;
 }

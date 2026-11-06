@@ -565,7 +565,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     try {
       await navigator.clipboard.writeText(text);
       addToast(personalRecommendationOutdated
-        ? { title: `Previous ${label} copied`, description: 'This recommendation is outdated because your career data changed.', type: 'success' }
+        ? { title: `Previous ${label} copied`, description: personalRecommendation.superseded ? 'This recommendation is outdated: it ignored the employer’s posted pay range.' : 'This recommendation is outdated because your career data changed.', type: 'success' }
         : { title: `${label.charAt(0).toUpperCase()}${label.slice(1)} copied`, description: kind === 'range' ? 'The range is ready to paste into an application.' : 'The number is ready to paste into an application.', type: 'success' });
     } catch {
       addToast({ title: 'Could not copy salary', description: `Select and copy the ${label} manually.`, type: 'error' });
@@ -2025,7 +2025,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                 {personalRecommendationOutdated && (
                   <div className="mb-2 rounded border border-amber-300/20 bg-amber-300/[0.06] p-2 text-[11px] text-amber-200/85">
                     <span className="font-semibold">Outdated recommendation.</span>{' '}
-                    Your career data changed. The previous recommendation is shown below. Combine saved results again on the Job Board to refresh it.
+                    {personalRecommendation.superseded
+                      ? 'It was made before desired salaries respected the employer’s posted pay range. The previous recommendation is shown below. Combine saved results again on the Job Board to refresh it.'
+                      : 'Your career data changed. The previous recommendation is shown below. Combine saved results again on the Job Board to refresh it.'}
                   </div>
                 )}
                 <div className="text-[10px] font-medium uppercase tracking-wider text-blue-200/65">
@@ -2081,6 +2083,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             )}
             <p className="text-white/70">{compensationDisplay.assessmentOutdated ? compensationDisplay.explanation : compensationAssessment.justification}</p>
             <div className="mt-1.5"><span className="text-white/35">Advertised cash:</span> {cashRangeLabel(compensationAssessment.offered) || compensationDisplay.salary || 'Not advertised'}</div>
+            {compensationAssessment.currencyAmbiguous && (
+              <div className="text-amber-300/70">Currency is a reading, not stated: the posting gives one “$” range for several locations.</div>
+            )}
             {compensationDisplay.marketGuidanceAvailable && (
               <div><span className="text-white/35">Researched market range:</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
             )}

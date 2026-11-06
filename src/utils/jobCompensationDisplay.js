@@ -16,6 +16,7 @@ export const COMPENSATION_COMPARISON_REASONS = new Set([
   'inconsistent_comparison_verdict',
   'market_range_recommended', 'market_range_unavailable', 'market_evidence_unavailable',
   'offered_max_below_competitive_floor', 'offered_reaches_competitive_floor',
+  'offered_min_above_competitive_ceiling',
   'below_fit_threshold', 'fit_score_unavailable', 'comparison_location_unavailable',
   'market_currency_unavailable', 'experience_band_unavailable', 'research_interrupted',
   'research_unavailable',
