@@ -125,7 +125,7 @@ export function useCanvasInitialization({
         retry(AUTOSAVE_SYNC_LINK_RETRY_MS);
         if (!failure.notified && Date.now() - failure.syncWaitSince >= AUTOSAVE_SYNC_LINK_NOTICE_MS) {
           failure.notified = true;
-          failure.toastId = addToast?.({ title: 'Waiting for Cloud Sync', description: 'Your sync app is still uploading this canvas, so newer changes are not saved yet. Auto-save will save them as soon as the upload finishes.', type: 'info', duration: 0 });
+          failure.toastId = addToast?.({ title: 'Waiting for Cloud Sync', description: 'Another file entry shares this canvas file (usually a cloud-sync app mid-upload), so newer changes are not saved yet. Auto-save keeps retrying and will save them as soon as that link is released.', type: 'info', duration: 0 });
         }
         return;
       }

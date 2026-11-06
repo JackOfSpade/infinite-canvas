@@ -247,6 +247,90 @@ export default [
     },
   },
   {
+    name: 'workspace save proceeds through a proven Google Drive upload-staging link, and only that link',
+    run: async () => {
+      const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(process.cwd(), '.workspace-drive-staging-')));
+      const folder = path.join(root, 'Job Search');
+      const canvas = path.join(folder, 'canvas.json');
+      const staging = path.join(folder, '.tmp.driveupload');
+      const stagingLink = path.join(staging, '46752');
+      const noWait = { waitMs: 0, now: () => 0, sleep: async () => { throw new Error('must not wait'); } };
+      try {
+        await fs.promises.mkdir(staging, { recursive: true });
+        await atomicWriteRendererWorkspaceFile(canvas, '{"v":1}');
+        // Drive's staging folder holds many unrelated entries besides ours.
+        for (let i = 0; i < 20; i++) await fs.promises.writeFile(path.join(staging, String(40000 + i)), 'other');
+        await fs.promises.link(canvas, stagingLink);
+        const saved = await writeWorkspaceAwaitingSyncLink(canvas, '{"v":2}', noWait);
+        assert(saved?.filePath && await fs.promises.readFile(canvas, 'utf8') === '{"v":2}',
+          'a save lands immediately while Drive stages the previous upload');
+        assert((await fs.promises.stat(canvas)).nlink === 2 && await fs.promises.readFile(stagingLink, 'utf8') === '{"v":2}',
+          'the save writes in place; Drive sees the changed file and uploads it again');
+        assert(JSON.parse((await readRendererWorkspaceFile(canvas)).content).v === 2, 'loading is not blocked either');
+        assert((await inspectRendererWatchPath(canvas))?.exists === true, 'file watching is not paused by the staging link');
+
+        // A canvas stored INSIDE a staging folder must not vouch for its own name.
+        const inside = path.join(staging, 'canvas.json');
+        await fs.promises.writeFile(path.join(root, 'private-store-file'), 'private');
+        await fs.promises.link(path.join(root, 'private-store-file'), inside);
+        let insideRefused;
+        try { await atomicWriteRendererWorkspaceFile(inside, '{"stolen":true}'); } catch (error) { insideRefused = error; }
+        assert(insideRefused?.workspacePathCheck === 'target-hardlink'
+          && await fs.promises.readFile(path.join(root, 'private-store-file'), 'utf8') === 'private',
+          'a workspace inside a staging folder is never exempt');
+        await fs.promises.unlink(inside);
+
+        // The wait loop retries as soon as an unexplained link turns into a staging link.
+        await fs.promises.unlink(stagingLink);
+        const transient = path.join(root, 'transient-link');
+        await fs.promises.link(canvas, transient);
+        let clock = 0;
+        let polls = 0;
+        const waited = await writeWorkspaceAwaitingSyncLink(canvas, '{"v":2.5}', {
+          waitMs: 10_000, pollMs: 250, now: () => clock,
+          sleep: async (ms) => {
+            clock += ms; polls += 1;
+            if (polls === 2) { await fs.promises.unlink(transient); await fs.promises.link(canvas, stagingLink); }
+          },
+        });
+        assert(waited?.filePath && polls === 2 && await fs.promises.readFile(canvas, 'utf8') === '{"v":2.5}',
+          'the wait ends as soon as the remaining link is proven to be Drive staging');
+        await fs.promises.unlink(stagingLink);
+        await atomicWriteRendererWorkspaceFile(canvas, '{"v":2}');
+        await fs.promises.link(canvas, stagingLink);
+
+        // A third name means some other entry shares the inode: refuse as before.
+        const stray = path.join(root, 'stray-link');
+        await fs.promises.link(canvas, stray);
+        let refused;
+        try { await atomicWriteRendererWorkspaceFile(canvas, '{"v":3}'); } catch (error) { refused = error; }
+        assert(refused?.workspacePathCheck === 'target-hardlink' && await fs.promises.readFile(stray, 'utf8') === '{"v":2}',
+          'nlink 3 is never accepted, even with a staging link present');
+        await fs.promises.unlink(stray);
+
+        // A second link that is NOT in a staging folder still refuses.
+        await fs.promises.unlink(stagingLink);
+        const elsewhere = path.join(root, '.tmp.driveupload-lookalike');
+        await fs.promises.link(canvas, elsewhere);
+        refused = null;
+        try { await atomicWriteRendererWorkspaceFile(canvas, '{"v":4}'); } catch (error) { refused = error; }
+        assert(refused?.workspacePathCheck === 'target-hardlink', 'an unexplained second link still refuses');
+        await fs.promises.unlink(elsewhere);
+
+        // A staging folder that is a symlink cannot vouch for the link.
+        await fs.promises.rm(staging, { recursive: true });
+        const realElsewhere = path.join(root, 'real-dir');
+        await fs.promises.mkdir(realElsewhere);
+        await fs.promises.symlink(realElsewhere, staging);
+        await fs.promises.link(canvas, path.join(realElsewhere, '46752'));
+        refused = null;
+        try { await atomicWriteRendererWorkspaceFile(canvas, '{"v":5}'); } catch (error) { refused = error; }
+        assert(refused?.workspacePathCheck === 'target-hardlink' && await fs.promises.readFile(canvas, 'utf8') === '{"v":2}',
+          'a symlinked staging folder is not trusted');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'interview private stores: post-guard directory swaps cannot redirect workspace reads or handle-bound saves',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.interview-private-store-race-'));

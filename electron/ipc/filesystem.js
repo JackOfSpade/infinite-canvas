@@ -1187,7 +1187,10 @@ export async function writeWorkspaceAwaitingSyncLink(targetPath, payload, {
       while (linked && now() < deadline) {
         await sleep(pollMs);
         const stat = await fs.promises.lstat(targetPath).catch(() => null);
-        linked = Boolean(stat && typeof stat.nlink === 'number' && stat.nlink > 1);
+        // Stop waiting as soon as the link is gone OR is proven to be a
+        // sync-staging link, which the re-run write now accepts.
+        const canonical = stat ? await fs.promises.realpath(targetPath).catch(() => targetPath) : targetPath;
+        linked = Boolean(stat && !(await isWorkspaceLinkCountSafe(canonical, stat)));
       }
       if (linked) {
         const busy = workspaceSyncLinkBusyError(error);
@@ -1196,6 +1199,75 @@ export async function writeWorkspaceAwaitingSyncLink(targetPath, payload, {
       }
     }
   }
+}
+
+// Google Drive for desktop stages every file it uploads by hard-linking it into
+// a hidden `.tmp.driveupload` folder, and keeps that link until the upload
+// finishes. With a long upload queue that is many minutes, during which the
+// workspace gate below used to refuse every save ("Waiting for Cloud Sync").
+// The gate exists because an unexplained second link could name a private
+// store's inode. A link whose OTHER name is proven to be Drive's own staging
+// entry is not that: nlink is exactly 2, this path is one name, the staging
+// entry (same dev+ino, a plain file inside a real, non-symlinked
+// `.tmp.driveupload` directory beside the workspace or in an ancestor) is the
+// other, so no third name can exist. Anything else still refuses.
+const SYNC_STAGING_DIR_NAMES = ['.tmp.driveupload'];
+// A Drive backlog is normally a few thousand entries. Past this, fail closed
+// (the old wait-and-retry behaviour) rather than stall every save on a scan.
+const SYNC_STAGING_MAX_ENTRIES = 20_000;
+// An unexplained second link is re-checked several times per save attempt;
+// remember a failed scan briefly so each check does not rescan the folder.
+const SYNC_STAGING_NEGATIVE_TTL_MS = 2_000;
+const syncStagingLinkCache = new Map();
+const syncStagingMissCache = new Map();
+
+async function stagingEntryMatches(entryPath, stat) {
+  const entry = await fs.promises.lstat(entryPath).catch(() => null);
+  return Boolean(entry && entry.isFile() && !entry.isSymbolicLink() && hasSameIdentity(entry, stat));
+}
+
+async function findSyncStagingLink(canonicalPath, stat) {
+  // A workspace that itself lives inside a staging folder would match its own
+  // entry and could vouch for an unrelated second name. Never exempt it.
+  if (canonicalPath.split(path.sep).some(part => SYNC_STAGING_DIR_NAMES.includes(part.toLowerCase()))) return null;
+  let dir = path.dirname(canonicalPath);
+  for (;;) {
+    for (const name of SYNC_STAGING_DIR_NAMES) {
+      const stagingDir = path.join(dir, name);
+      const dirStat = await fs.promises.lstat(stagingDir).catch(() => null);
+      if (!dirStat || !dirStat.isDirectory() || dirStat.isSymbolicLink() || dirStat.dev !== stat.dev) continue;
+      const entries = await fs.promises.readdir(stagingDir, { withFileTypes: true }).catch(() => []);
+      if (entries.length > SYNC_STAGING_MAX_ENTRIES) continue;
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const entryPath = path.join(stagingDir, entry.name);
+        if (await stagingEntryMatches(entryPath, stat)) return entryPath;
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/** Whether a workspace inode's link count is safe: one name, or one name plus Drive's upload staging link. */
+export async function isWorkspaceLinkCountSafe(canonicalPath, stat) {
+  if (!stat || typeof stat.nlink !== 'number' || stat.nlink <= 1) return true;
+  if (stat.nlink !== 2) return false;
+  const cached = syncStagingLinkCache.get(canonicalPath);
+  if (cached && cached !== canonicalPath && await stagingEntryMatches(cached, stat)) return true;
+  const missKey = `${canonicalPath}\0${stat.dev}:${stat.ino}:${stat.ctimeMs}`;
+  if ((syncStagingMissCache.get(missKey) || 0) > Date.now()) return false;
+  const found = await findSyncStagingLink(canonicalPath, stat);
+  if (found) {
+    syncStagingLinkCache.set(canonicalPath, found);
+    syncStagingMissCache.delete(missKey);
+  } else {
+    syncStagingLinkCache.delete(canonicalPath);
+    if (syncStagingMissCache.size > 64) syncStagingMissCache.clear();
+    syncStagingMissCache.set(missKey, Date.now() + SYNC_STAGING_NEGATIVE_TTL_MS);
+  }
+  return Boolean(found);
 }
 
 function rendererWorkspacePathChangedError(reason = 'binding-changed') {
@@ -1330,8 +1402,9 @@ export async function inspectRendererWorkspacePath(filePath, { allowMissing = fa
     if (!targetStat.isFile() || targetStat.isSymbolicLink()
         // A public hard link can name an Interview-store inode without any
         // sensitive path component. Workspace documents do not need hard-link
-        // semantics, so reject ambiguity before either reads or writes.
-        || (typeof targetStat.nlink === 'number' && targetStat.nlink > 1)
+        // semantics, so reject ambiguity before either reads or writes. The
+        // one proven-harmless second name is a cloud-sync upload staging link.
+        || !(await isWorkspaceLinkCountSafe(canonicalPath, targetStat))
         || !sameRendererWorkspacePath(await fs.promises.realpath(canonicalPath), canonicalPath)) {
       throw rendererWorkspacePathChangedError(targetStat.isSymbolicLink() ? 'target-symlink'
         : !targetStat.isFile() ? 'target-not-file'
@@ -1367,7 +1440,7 @@ export async function inspectRendererWatchPath(filePath, { allowMissing = false 
     if (!allowMissing) throw error;
   }
   if (targetStat && (!targetStat.isFile() || targetStat.isSymbolicLink()
-      || (typeof targetStat.nlink === 'number' && targetStat.nlink > 1))) {
+      || !(await isWorkspaceLinkCountSafe(canonicalPath, targetStat)))) {
     if (targetStat.isFile() && !targetStat.isSymbolicLink() && targetStat.nlink > 1) {
       const error = new Error('Document change notifications are paused while the file has another hard link.');
       error.code = 'RENDERER_WORKSPACE_PATH_CHANGED';
@@ -1437,8 +1510,8 @@ async function assertRendererWorkspaceHandleBinding(target, handleStat, {
     fs.promises.lstat(target.parentPath),
     fs.promises.lstat(target.canonicalPath),
   ]);
-  const targetHardLinked = (typeof entryStat.nlink === 'number' && entryStat.nlink > 1)
-    || (typeof handleStat?.nlink === 'number' && handleStat.nlink > 1);
+  const targetHardLinked = !(await isWorkspaceLinkCountSafe(target.canonicalPath, entryStat))
+    || !(await isWorkspaceLinkCountSafe(target.canonicalPath, handleStat));
   if (!guarded?.resolvedPath || !sameRendererWorkspacePath(guarded.resolvedPath, target.canonicalPath)
       || !sameRendererWorkspacePath(parentRealPath, target.parentPath)
       || !parentStat.isDirectory() || parentStat.isSymbolicLink()
@@ -1565,7 +1638,7 @@ async function hasWorkspaceFirstSaveMarker(handle, creationNonce) {
     && actual.equals(marker);
 }
 
-async function assertWorkspaceHandlePayload(handle, payload) {
+async function assertWorkspaceHandlePayload(handle, payload, canonicalPath = '') {
   const before = await handle.stat();
   if (!before.isFile() || before.size !== payload.length) throw rendererWorkspacePathChangedError();
   const digest = createHash('sha256');
@@ -1592,7 +1665,8 @@ async function assertWorkspaceHandlePayload(handle, payload) {
   // The bytes are proven intact; only metadata moved during a read of a large
   // file. A cloud-sync client linking the file does that, so wait and rewrite
   // as for any sync link. Otherwise the caller's binding check still decides.
-  if (after.ctimeMs !== before.ctimeMs && after.nlink > 1) {
+  if (after.ctimeMs !== before.ctimeMs && after.nlink > 1
+      && !(canonicalPath && await isWorkspaceLinkCountSafe(canonicalPath, after))) {
     throw rendererWorkspacePathChangedError('target-hardlink');
   }
 }
@@ -1807,7 +1881,7 @@ async function recoverRendererWorkspaceMutation(target) {
     // publication rather than writing a payload through a stale handle.
     await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
     await writeWorkspaceHandle(opened.handle, journal.payload);
-    await assertWorkspaceHandlePayload(opened.handle, journal.payload);
+    await assertWorkspaceHandlePayload(opened.handle, journal.payload, opened.target.canonicalPath);
     await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
   } finally {
     await opened.handle.close().catch(() => {});
@@ -2046,7 +2120,7 @@ async function writeRendererWorkspaceFile(filePath, data, {
           tempIdentity: opened.target.targetIdentity,
         });
       }
-      await assertWorkspaceHandlePayload(opened.handle, payload);
+      await assertWorkspaceHandlePayload(opened.handle, payload, opened.target.canonicalPath);
       await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
       const clearDirectorySyncConfirmed = await clearWorkspaceMutationJournal(mutationJournal.journalPath);
       journalDirectorySyncConfirmed = journalDirectorySyncConfirmed

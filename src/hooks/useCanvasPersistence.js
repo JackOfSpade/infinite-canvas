@@ -201,7 +201,7 @@ export function useCanvasPersistence({
         EventLogger.recordSaveError(reason, attemptedFilePath);
         setSaveStatus('idle');
         addToast(res?.errorCode === 'WORKSPACE_SYNC_LINK_BUSY'
-          ? { title: 'Waiting for Cloud Sync', description: 'Your sync app is still uploading this canvas. Auto-save will save your changes as soon as the upload finishes.', type: 'info' }
+          ? { title: 'Waiting for Cloud Sync', description: 'Another file entry shares this canvas file (usually a cloud-sync app mid-upload). Auto-save keeps retrying and will save your changes as soon as that link is released.', type: 'info' }
           : { title: 'Save Failed', description: reason, type: 'error' });
         return false;
       }
