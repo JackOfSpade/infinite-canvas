@@ -11,7 +11,7 @@ import {
 } from './interview-match-shared.mjs';
 
 const USAGE = `Usage: node scripts/interview-match-benchmark.mjs --bank <file> --cases <file> --out <dir>
-  [--claude-models haiku,sonnet,opus] [--claude-efforts default,low,high]
+  [--claude-models haiku,sonnet,opus] [--claude-efforts default,low,high] [--claude-ultracode on,off]
   [--timeout-ms 30000] [--claude-bin claude] [--report-only]
 
 Run outside the agent sandbox. Concurrency is always 1. Each configuration is
@@ -309,7 +309,7 @@ export async function runBenchmark(options) {
 
 function parseArguments(argv) {
   const boolean = new Set(['--help', '--report-only']);
-  const values = new Set(['--bank', '--cases', '--out', '--claude-models', '--claude-efforts', '--timeout-ms', '--claude-bin']);
+  const values = new Set(['--bank', '--cases', '--out', '--claude-models', '--claude-efforts', '--claude-ultracode', '--timeout-ms', '--claude-bin']);
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -329,7 +329,12 @@ function configurations(args, claudeHelp) {
   const models = list(args['--claude-models'] || 'haiku,sonnet,opus');
   const efforts = list(args['--claude-efforts'] || (claudeHelp.includes('--effort') ? 'default,low,high' : 'default'));
   if (!models.length || !efforts.length || efforts.some(value => !['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value))) throw new Error('Invalid model/effort list.');
-  return models.flatMap(model => efforts.map(effort => ({ id: `${model}/${effort}`, model, effort })));
+  // Without --claude-ultracode, ids stay as before and the transport matches production (ultracode off).
+  const ultracodes = args['--claude-ultracode'] ? list(args['--claude-ultracode']) : [null];
+  if (ultracodes.some(value => value !== null && !['on', 'off'].includes(value))) throw new Error('Invalid --claude-ultracode list (use on,off).');
+  return models.flatMap(model => efforts.flatMap(effort => ultracodes.map(uc => uc === null
+    ? { id: `${model}/${effort}`, model, effort }
+    : { id: `${model}/${effort}/ultracode-${uc}`, model, effort, ultracode: uc === 'on' })));
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -347,7 +352,7 @@ export async function main(argv = process.argv.slice(2)) {
   let cliMetadata = manifest?.cliMetadata || {};
   // This is a help/version probe only, before the sequential paid run.
   if (!reportOnly) cliMetadata = { claude: await inspectCli(claudeBin) };
-  const hasConfigArgs = ['--claude-models', '--claude-efforts'].some(key => args[key]);
+  const hasConfigArgs = ['--claude-models', '--claude-efforts', '--claude-ultracode'].some(key => args[key]);
   const configs = manifest && !hasConfigArgs ? manifest.identity.configs : configurations(args, cliMetadata.claude?.help || '');
   const summary = await runBenchmark({ cards, cases, configs, outDir, reportOnly, claudeBin, cliMetadata,
     timeoutMs: Number(args['--timeout-ms'] || manifest?.identity.timeoutMs || 30_000),

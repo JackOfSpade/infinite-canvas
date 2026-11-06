@@ -23,6 +23,7 @@ import {
   parseClaudeStreamOutput,
   resolveClaudeBinary,
   runClaudeStage,
+  withWorkflowTool,
 } from '../../electron/ipc/claudeApplicationRunner.js';
 
 const REJECTED_INTRO = n => `\n\nYour previous response to this handoff was rejected by the app. Fix ${n === 1 ? 'this item' : `these ${n} items`} and reply again with the complete corrected response:\n`;
@@ -61,6 +62,10 @@ function resultLine({ result = 'final answer', isError = false, subtype = 'succe
     type: 'result', subtype, is_error: isError, result, session_id: 's1', duration_ms: 42, modelUsage,
     ...(apiErrorStatus !== undefined ? { api_error_status: apiErrorStatus } : {}),
   });
+}
+
+function workflowLaunchLine() {
+  return JSON.stringify({ type: 'assistant', parent_tool_use_id: null, message: { model: 'claude-sonnet-5-5', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }] } });
 }
 
 function fakeSpawnFactory() {
@@ -546,11 +551,11 @@ export default [
   },
 
   {
-    name: 'claude runner: CLI args are exactly the headless, tool-less latest-Sonnet invocation',
+    name: 'claude runner: CLI args are exactly the headless, Workflow-only, ultracode latest-Sonnet invocation',
     run() {
       assert.deepEqual(claudeCliArgs(), [
         '-p', '--model', 'sonnet', '--effort', 'high', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
-        '--tools', '', '--input-format', 'stream-json',
+        '--settings', '{"ultracode":true}', '--tools', 'Workflow', '--allowedTools', 'Workflow', '--input-format', 'stream-json',
         '--output-format', 'stream-json', '--verbose',
       ]);
       assert.equal(claudeCliArgs().includes('--no-session-persistence'), false);
@@ -560,7 +565,7 @@ export default [
     name: 'claude runner: CLI args start a session with --session-id or continue it with --resume right after -p',
     run() {
       const tail = ['--model', 'opus', '--effort', 'xhigh', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
-        '--tools', '', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+        '--settings', '{"ultracode":true}', '--tools', 'Workflow', '--allowedTools', 'Workflow', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: false }), ['-p', '--session-id', 'S', ...tail]);
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: true }), ['-p', '--resume', 'S', ...tail]);
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', resume: true }), ['-p', ...tail]);
@@ -880,6 +885,174 @@ export default [
       assert.equal(timers[1].ms, 5000);
       timers[1].fn();
       assert.deepEqual(calls[0].child.kills, ['SIGTERM', 'SIGKILL']);
+    },
+  },
+  {
+    name: 'claude runner: research tools are offered and allowed together with Workflow; effort is never ultracode',
+    run() {
+      const args = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
+      const at = args.indexOf('--tools');
+      assert.deepEqual(args.slice(at, at + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow']);
+      assert.equal(args[args.indexOf('--effort') + 1], 'high');
+      assert.equal(args.includes('ultracode'), false);
+      assert.deepEqual(withWorkflowTool('Workflow'), ['Workflow']);
+      assert.deepEqual(withWorkflowTool(['WebSearch']), ['WebSearch', 'Workflow']);
+    },
+  },
+  {
+    name: 'claude runner: the stub result after a workflow launch is skipped and the final result is the answer',
+    async run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'w1', task_type: 'local_workflow', description: 'd' }] }),
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' }),
+        resultLine({ result: 'The workflow is running in the background.' }),
+        JSON.stringify({ type: 'system', subtype: 'task_progress', task_id: 'w1' }),
+        JSON.stringify({ type: 'system', subtype: 'task_updated', task_id: 'w1', patch: { status: 'completed' } }),
+        JSON.stringify({ type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' }),
+        JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', tasks: [] }),
+        resultLine({ result: '{"ok":true}' }),
+        '',
+      ].join('\n');
+      const { promise } = await stageWith({ stdout });
+      assert.deepEqual(await promise, { text: '{"ok":true}', model: 'claude-sonnet-5-5', durationMs: 42 });
+    },
+  },
+  {
+    name: 'claude runner: a stub that arrives after the workflow finished is still not the answer',
+    run() {
+      const lines = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1' }),
+        JSON.stringify({ type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' }),
+        resultLine({ result: 'stub' }),
+      ];
+      assert.equal(parseClaudeStreamOutput(lines.join('\n')).workflowUnfinished, true);
+      assert.equal(parseClaudeStreamOutput([...lines, resultLine({ result: 'final' })].join('\n')).result, 'final');
+      assert.equal('workflowUnfinished' in parseClaudeStreamOutput([...lines, resultLine({ result: 'final' })].join('\n')), false);
+    },
+  },
+  {
+    name: 'claude runner: exit with a pending workflow task after the stub is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' }),
+        resultLine({ result: 'The workflow is running in the background.' }),
+        '',
+      ].join('\n');
+      const { promise } = await stageWith({ stdout });
+      const error = await rejection(promise);
+      assert.equal(error.code, 'CLAUDE_WORKFLOW_UNFINISHED');
+      assert.equal(error.message, 'Claude\'s workflow did not finish, so its answer was not used.');
+      assert.equal(error.result, undefined, 'the stub is never handed back as an answer');
+    },
+  },
+  {
+    name: 'claude runner: exit with a pending task and no result is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const stdout = `${JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1' })}\n`;
+      const { promise } = await stageWith({ stdout });
+      assert.equal((await rejection(promise)).code, 'CLAUDE_WORKFLOW_UNFINISHED');
+    },
+  },
+  {
+    name: 'claude runner: an error result after a workflow stub keeps its own classification',
+    async run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1' }),
+        resultLine({ result: 'stub' }),
+        resultLine({ result: 'Claude usage limit reached', isError: true, subtype: 'error_during_execution', apiErrorStatus: 429 }),
+        '',
+      ].join('\n');
+      const { promise } = await stageWith({ stdout, code: 1 });
+      assert.equal((await rejection(promise)).code, 'CLAUDE_USAGE_LIMIT');
+    },
+  },
+  {
+    name: 'claude runner: a Workflow call that fails starts nothing, so the answer after it is used',
+    async run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: '<tool_use_error>Invalid workflow script</tool_use_error>' }] } }),
+        resultLine({ result: 'DONE' }),
+        '',
+      ].join('\n');
+      assert.equal('workflowUnfinished' in parseClaudeStreamOutput(stdout), false);
+      const { promise } = await stageWith({ stdout });
+      assert.equal((await promise).text, 'DONE');
+    },
+  },
+  {
+    name: 'claude runner: a successful Workflow tool result keeps the following result provisional',
+    run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'started' }] } }),
+        resultLine({ result: 'The workflow is running in the background.' }),
+      ].join('\n');
+      assert.equal(parseClaudeStreamOutput(stdout).workflowUnfinished, true);
+    },
+  },
+  {
+    name: 'claude runner: a stream cut off after an interim error_max_turns with a pending task is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1' }),
+        resultLine({ result: '', isError: true, subtype: 'error_max_turns' }),
+        '',
+      ].join('\n');
+      const { promise } = await stageWith({ stdout, code: 1 });
+      assert.equal((await rejection(promise)).code, 'CLAUDE_WORKFLOW_UNFINISHED');
+    },
+  },
+  {
+    name: 'claude runner: error_max_turns then the workflow final result uses the final result',
+    async run() {
+      const stdout = [
+        workflowLaunchLine(),
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1' }),
+        resultLine({ result: '', isError: true, subtype: 'error_max_turns' }),
+        JSON.stringify({ type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' }),
+        resultLine({ result: 'final' }),
+        '',
+      ].join('\n');
+      const { promise } = await stageWith({ stdout });
+      assert.equal((await promise).text, 'final');
+    },
+  },
+  {
+    name: 'claude runner: ambient tasks never hold an answer back',
+    async run() {
+      const stdout = [
+        JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'a1', ambient: true }),
+        JSON.stringify({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a1', ambient: true }] }),
+        resultLine({ result: 'answer' }),
+        '',
+      ].join('\n');
+      const { promise } = await stageWith({ stdout });
+      assert.equal((await promise).text, 'answer');
+    },
+  },
+  {
+    name: 'claude runner: a timeout while a workflow runs is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const { calls, spawnImpl } = fakeSpawnFactory();
+      const timers = [];
+      const promise = runClaudeStage({
+        text: 't', binary: '/bin/claude', env: {}, cwd: '/tmp', spawnImpl, timeoutMs: 3 * 60_000,
+        setTimeoutImpl: (fn, ms) => { timers.push({ fn, ms }); return timers.length; },
+        clearTimeoutImpl: () => {},
+      });
+      calls[0].child.stdout.write(`${workflowLaunchLine()}\n${JSON.stringify({ type: 'system', subtype: 'task_started', task_id: 'w1' })}\n${resultLine({ result: 'stub' })}\n`);
+      await new Promise(resolve => setImmediate(resolve));
+      timers[0].fn();
+      const error = await rejection(promise);
+      assert.equal(error.code, 'CLAUDE_WORKFLOW_UNFINISHED');
+      assert.equal(error.message, 'Claude\'s workflow did not finish within 3 minutes, so its answer was not used.');
+      assert.deepEqual(calls[0].child.kills, ['SIGTERM']);
     },
   },
   {

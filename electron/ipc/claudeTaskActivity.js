@@ -78,6 +78,7 @@ export function describeClaudeSdkMessage(message) {
 
 export const CLAUDE_TASK_FAILURE_LABELS = Object.freeze({
   CLAUDE_TIMEOUT: 'Claude did not finish in time',
+  CLAUDE_WORKFLOW_UNFINISHED: 'Claude\'s workflow did not finish',
   CLAUDE_OUTPUT_TRUNCATED: 'The reply hit the output limit',
   CLAUDE_SAFEGUARD_BLOCKED: 'Claude blocked this request with its safeguards',
   CLAUDE_WRONG_MODEL: 'The reply came from the wrong model',

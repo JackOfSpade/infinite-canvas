@@ -188,7 +188,7 @@ export default [
     } finally { await matcher.close(); }
   } },
   { name: 'interview AI matcher: benchmark defaults select warm Opus with independent startup and question deadlines', async run() {
-    assert.deepEqual(INTERVIEW_AI_MATCH_DEFAULTS, { model: 'opus', effort: 'default',
+    assert.deepEqual(INTERVIEW_AI_MATCH_DEFAULTS, { model: 'opus', effort: 'medium',
       timeoutMs: 2500, initTimeoutMs: 10000, latencyThresholdMs: 2500, minConfidence: 0.55 });
     const configs = [];
     for (const config of [{}, { model: 'synthetic-model', effort: 'low' }]) {
@@ -199,7 +199,7 @@ export default [
       finally { await matcher.close(); }
     }
     assert.deepEqual(configs.map(({ model, effort }) => ({ model, effort })), [
-      { model: 'opus', effort: 'default' },
+      { model: 'opus', effort: 'medium' },
       { model: 'synthetic-model', effort: 'low' },
     ]);
   } },
@@ -552,7 +552,7 @@ export default [
       assert.equal(fake.writes.filter(message => message.message.content.includes('Reply only READY.')).length, 1);
       const args = fake.children[1].args;
       assert.equal(args[args.indexOf('--model') + 1], 'opus');
-      assert.equal(args.includes('--effort'), false, 'default effort must leave Claude effort selection at its default');
+      assert.equal(args[args.indexOf('--effort') + 1], 'medium', 'the live matcher runs at the benchmarked medium effort');
     } finally { await matcher.close(); }
   } },
   { name: 'interview AI matcher: protocol failures retire the process before a later turn recovers', async run() {

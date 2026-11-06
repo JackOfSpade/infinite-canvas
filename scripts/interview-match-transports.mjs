@@ -110,18 +110,23 @@ function requireFlags(help, flags) {
 }
 
 function claudeArguments(config, help, systemPrompt = SYSTEM_PROMPT) {
-  requireFlags(help, ['--print', '--model', '--output-format', '--tools', '--system-prompt', '--no-session-persistence', '--strict-mcp-config', '--mcp-config']);
-  const args = ['-p', '--model', config.model, '--tools', '', '--system-prompt', systemPrompt,
+  requireFlags(help, ['--print', '--model', '--output-format', '--tools', '--allowedTools', '--settings', '--system-prompt', '--no-session-persistence', '--strict-mcp-config', '--mcp-config']);
+  // Production's live matcher runs tool-free without ultracode (it added
+  // latency and no quality in the 2026-11-05 benchmark); `ultracode: true`
+  // measures the alternative.
+  const ultracode = config.ultracode === true;
+  const tools = ultracode ? ['--tools', 'Workflow', '--allowedTools', 'Workflow'] : ['--tools', ''];
+  const args = ['-p', '--model', config.model, ...tools, '--system-prompt', systemPrompt,
     '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
     '--output-format', 'stream-json'];
   if (config.effort && config.effort !== 'default') {
     requireFlags(help, ['--effort']);
     args.push('--effort', config.effort);
   }
-  if (has(help, '--safe-mode')) args.push('--safe-mode');
+  if (has(help, '--safe-mode')) args.push('--safe-mode', ...(ultracode ? ['--settings', '{"ultracode":true}'] : []));
   else {
-    requireFlags(help, ['--settings', '--setting-sources', '--disable-slash-commands']);
-    args.push('--settings', '{"disableAllHooks":true}', '--setting-sources', '', '--disable-slash-commands');
+    requireFlags(help, ['--setting-sources', '--disable-slash-commands']);
+    args.push('--settings', ultracode ? '{"disableAllHooks":true,"ultracode":true}' : '{"disableAllHooks":true}', '--setting-sources', '', '--disable-slash-commands');
   }
   if (has(help, '--permission-mode') && help.includes('dontAsk')) args.push('--permission-mode', 'dontAsk');
   if (has(help, '--permission-prompts')) args.push('--permission-prompts', 'none');

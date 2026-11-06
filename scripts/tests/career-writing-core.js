@@ -34,8 +34,8 @@ export default [
     assert.deepEqual(claudeCliArgs({}), golden.cliArgs);
     assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 's1' }), golden.cliArgsOpus);
     const research = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
-    assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch'], 'research tools are offered and allowed; nothing else');
-    assert(!golden.cliArgs.includes('--allowedTools'), 'application runs never allow tools');
+    assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow'], 'research tools and Workflow are offered and allowed; nothing else');
+    assert.equal(golden.cliArgs[golden.cliArgs.indexOf('--allowedTools') + 1], 'Workflow', 'application runs allow only the Workflow tool');
     assert.equal(CLAUDE_STAGE_PROFILES, APPLICATION_STAGE_PROFILES, 'the application runner reads the shared table');
     assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'medium' });
     assert.equal(careerWritingStageProfile('qa-fact-check'), careerWritingStageProfile('fact-check'), 'Q&A checks use the application fact-check profile object');

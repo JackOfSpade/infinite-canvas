@@ -5,9 +5,10 @@ import { createInterviewAiTransport } from './interviewAiTransports.js';
 import { selectInterviewCallQuestion } from './interviewCallQuestionDetector.js';
 
 export const INTERVIEW_AI_MATCH_DEFAULTS = Object.freeze({
-  // Real 13-card / 63-utterance benchmark: 100% top-1/none recall;
-  // quiet p95 950–996 ms, loaded p95 904–969 ms. High effort adds no quality.
-  model: 'opus', effort: 'default',
+  // Real 13-card / 81-turn benchmark (2026-11-05, docs/interview-live-ai-matching.md):
+  // medium is the fastest Opus effort (quiet p50 925–939 ms, loaded p50
+  // 914–975 ms) and low is no faster; high and default add no quality.
+  model: 'opus', effort: 'medium',
   timeoutMs: 2_500, initTimeoutMs: 10_000, latencyThresholdMs: 2_500,
   minConfidence: 0.55,
 });

@@ -70,6 +70,7 @@ const MESSAGES = Object.freeze({
   promptTooLong: 'This AI request is too large for Claude to accept.',
   login: 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.',
   timeout: minutes => `Claude did not finish this stage within ${minutes} minutes.`,
+  workflowTimeout: minutes => `Claude's workflow did not finish within ${minutes} minutes, so its answer was not used.`,
   cancelled: 'Claude run was cancelled.',
   tooMany: runs => `Stopped after ${runs} Claude runs without finishing this application.`,
 });
@@ -91,18 +92,106 @@ function clip(value, max = 300) {
   return text.length > max ? text.slice(0, max) : text;
 }
 
+// Ultracode is a setting, not an effort level: `--effort ultracode` would force
+// xhigh, while this setting leaves each stage's own effort in place.
+export const CLAUDE_ULTRACODE_SETTINGS = Object.freeze({ ultracode: true });
+// Ultracode orchestrates through the Workflow tool, so every call offers it.
+// Under --restricted the workflow's agents get no file, shell or web tools.
+export const CLAUDE_WORKFLOW_TOOL = 'Workflow';
+export const CLAUDE_WORKFLOW_UNFINISHED = 'CLAUDE_WORKFLOW_UNFINISHED';
+export const CLAUDE_WORKFLOW_UNFINISHED_MESSAGE = 'Claude\'s workflow did not finish, so its answer was not used.';
+
+/** The offered tools plus Workflow, from a comma list or an array. */
+export function withWorkflowTool(tools) {
+  const list = (Array.isArray(tools) ? tools : String(tools ?? '').split(','))
+    .map(name => String(name).trim()).filter(Boolean);
+  return list.includes(CLAUDE_WORKFLOW_TOOL) ? list : [...list, CLAUDE_WORKFLOW_TOOL];
+}
+
+const TASK_END_STATUSES = new Set(['completed', 'failed', 'killed', 'stopped']);
+
+function mainThreadBlocks(event, type) {
+  if (event?.type !== type || event.parent_tool_use_id || event.agent_id) return [];
+  return Array.isArray(event.message?.content) ? event.message.content.filter(block => block && typeof block === 'object') : [];
+}
+
+/**
+ * Tells a run's real answer from the stub Claude writes after launching a
+ * background workflow. A headless run then emits two results: the stub ("the
+ * workflow is running in the background") and, after the task notification
+ * starts another turn, the real answer. A result is provisional when its turn
+ * launched a workflow or while any background task is still running; the
+ * stub can arrive after the task already finished, so the launch itself must
+ * count, not only the live task set. A Workflow call whose tool result is an
+ * error (an invalid script, say) started nothing, so no follow-up turn will
+ * come and the answer that follows it in the same turn is the real one.
+ */
+export function createClaudeBackgroundTasks() {
+  const live = new Set();
+  const ended = new Set();
+  const foreground = new Set();
+  // Workflow calls of the current turn that have not failed.
+  const launches = new Set();
+  let provisionalSeen = false;
+  const start = id => { if (id && !ended.has(id)) live.add(id); };
+  const end = id => { if (!id) return; live.delete(id); foreground.delete(id); ended.add(id); };
+  return {
+    observe(event) {
+      if (!event || typeof event !== 'object') return;
+      for (const block of mainThreadBlocks(event, 'assistant')) {
+        if (block.type === 'tool_use' && block.name === CLAUDE_WORKFLOW_TOOL) launches.add(String(block.id ?? `workflow-${launches.size}`));
+      }
+      for (const block of mainThreadBlocks(event, 'user')) {
+        if (block.type === 'tool_result' && block.is_error === true) launches.delete(String(block.tool_use_id ?? ''));
+      }
+      if (event.type !== 'system') return;
+      const id = typeof event.task_id === 'string' ? event.task_id : null;
+      if (event.subtype === 'task_started') {
+        // Housekeeping tasks never start another turn, so they cannot hold an answer back.
+        if (event.ambient === true || event.skip_transcript === true) return;
+        if (event.is_backgrounded === false) { if (id && !ended.has(id)) foreground.add(id); return; }
+        start(id);
+      } else if (event.subtype === 'task_updated') {
+        if (TASK_END_STATUSES.has(event.patch?.status)) end(id);
+        else if (event.patch?.is_backgrounded === true && foreground.has(id)) { foreground.delete(id); start(id); }
+      } else if (event.subtype === 'task_notification') {
+        end(id);
+      } else if (event.subtype === 'background_tasks_changed' && Array.isArray(event.tasks)) {
+        // A level signal with replace semantics: anything missing has ended.
+        const current = new Set(event.tasks
+          .filter(task => task && task.ambient !== true && typeof task.task_id === 'string')
+          .map(task => task.task_id));
+        for (const id of [...live]) if (!current.has(id)) end(id);
+        for (const id of current) { foreground.delete(id); start(id); }
+      }
+    },
+    /** Classify a result frame; true when it is provisional (a stub). Error results are never stubs. */
+    settle(result) {
+      const isError = result?.is_error === true || (typeof result?.subtype === 'string' && result.subtype !== 'success');
+      const provisional = !isError && (launches.size > 0 || live.size > 0);
+      launches.clear();
+      if (provisional) provisionalSeen = true;
+      return provisional;
+    },
+    get pending() { return live.size; },
+    /** True once a stub arrived or while a task runs: a cut-off run then lost the workflow's answer. */
+    get workflowStarted() { return provisionalSeen || live.size > 0; },
+  };
+}
+
 export function claudeCliArgs({
   model = CLAUDE_APPLICATION_MODEL,
   effort = CLAUDE_APPLICATION_EFFORT,
   sessionId,
   resume = false,
-  // Application stages run with no tools. Interview research alone opts into
-  // a named allow-list (web search/fetch); no file, shell or MCP tools.
+  // Every stage offers only Workflow (for ultracode); interview research also
+  // adds the read-only web tools (search/fetch). No file, shell or MCP tools.
   tools = '', partialMessages = false } = {}) {
   let sessionArgs = [];
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     sessionArgs = resume === true ? ['--resume', sessionId] : ['--session-id', sessionId];
   }
+  const offered = withWorkflowTool(tools).join(',');
   return [
     '-p',
     ...sessionArgs,
@@ -111,9 +200,10 @@ export function claudeCliArgs({
     '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT,
     '--restricted',
     '--strict-mcp-config',
-    '--tools', tools,
+    '--settings', JSON.stringify(CLAUDE_ULTRACODE_SETTINGS),
+    '--tools', offered,
     // Headless runs cannot prompt, so an offered tool must also be allowed.
-    ...(tools ? ['--allowedTools', tools] : []),
+    '--allowedTools', offered,
     '--input-format', 'stream-json',
     '--output-format', 'stream-json',
     '--verbose',
@@ -176,25 +266,40 @@ export function buildClaudeInputMessage({ text, pageImages } = {}) {
   return `${JSON.stringify({ type: 'user', message: { role: 'user', content } })}\n`;
 }
 
-export function parseClaudeStreamOutput(stdoutText) {
-  const lines = String(stdoutText ?? '').split(/\r?\n/);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i].trim();
+/** The last result of a stream-json run, with whether a workflow left it unfinished. */
+export function readClaudeStream(stdoutText) {
+  const tasks = createClaudeBackgroundTasks();
+  let last = null;
+  let provisional = false;
+  for (const raw of String(stdoutText ?? '').split(/\r?\n/)) {
+    const line = raw.trim();
     if (!line) continue;
     let obj;
     try { obj = JSON.parse(line); } catch { continue; }
-    if (!obj || typeof obj !== 'object' || obj.type !== 'result') continue;
-    return {
-      isError: obj.is_error === true || obj.subtype !== 'success',
-      subtype: obj.subtype,
-      result: typeof obj.result === 'string' ? obj.result : '',
-      apiErrorStatus: obj.api_error_status ?? null,
-      models: Object.keys(obj.modelUsage || {}),
-      sessionId: obj.session_id,
-      durationMs: obj.duration_ms,
-    };
+    if (!obj || typeof obj !== 'object') continue;
+    tasks.observe(obj);
+    if (obj.type !== 'result') continue;
+    provisional = tasks.settle(obj);
+    last = obj;
   }
-  return null;
+  return { last, provisional, pendingTasks: tasks.pending, workflowStarted: tasks.workflowStarted };
+}
+
+export function parseClaudeStreamOutput(stdoutText) {
+  const { last: obj, provisional, pendingTasks } = readClaudeStream(stdoutText);
+  if (!obj) return null;
+  const isError = obj.is_error === true || obj.subtype !== 'success';
+  return {
+    isError,
+    subtype: obj.subtype,
+    result: typeof obj.result === 'string' ? obj.result : '',
+    apiErrorStatus: obj.api_error_status ?? null,
+    models: Object.keys(obj.modelUsage || {}),
+    sessionId: obj.session_id,
+    durationMs: obj.duration_ms,
+    // The stub after a workflow launch is never the answer.
+    ...(!isError && (provisional || pendingTasks > 0) ? { workflowUnfinished: true } : {}),
+  };
 }
 
 const USAGE_RE = /usage limit|limit reached|hit your limit|rate.?limit|out of (extra )?usage/i;
@@ -332,7 +437,11 @@ export function runClaudeStage({
     timer = setTimeoutImpl(() => {
       timer = null;
       killChild();
-      finish(new ClaudeRunnerError('CLAUDE_TIMEOUT', MESSAGES.timeout(Math.round(timeoutMs / 60000))));
+      const minutes = Math.round(timeoutMs / 60000);
+      const stream = readClaudeStream(Buffer.concat(stdoutChunks).toString('utf8'));
+      finish(stream.workflowStarted
+        ? new ClaudeRunnerError(CLAUDE_WORKFLOW_UNFINISHED, MESSAGES.workflowTimeout(minutes))
+        : new ClaudeRunnerError('CLAUDE_TIMEOUT', MESSAGES.timeout(minutes)));
     }, timeoutMs);
     timer?.unref?.();
 
@@ -370,8 +479,19 @@ export function runClaudeStage({
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
       const exitCode = code ?? (closeSignal ? closeSignal : null);
       const parsed = parseClaudeStreamOutput(stdout);
+      const unfinishedError = () => new ClaudeRunnerError(CLAUDE_WORKFLOW_UNFINISHED, CLAUDE_WORKFLOW_UNFINISHED_MESSAGE,
+        { models: parsed?.models ?? [], subtype: parsed?.subtype ?? null, apiErrorStatus: parsed?.apiErrorStatus ?? null, exitCode, durationMs: parsed?.durationMs ?? null });
+      const pendingTasks = readClaudeStream(stdout).pendingTasks;
+      if (parsed?.workflowUnfinished || (!parsed && pendingTasks > 0)) {
+        finish(unfinishedError());
+        return;
+      }
       if (!parsed || parsed.isError || code !== 0) {
-        finish(classifyClaudeFailure({ parsed, stderr, exitCode }));
+        const failure = classifyClaudeFailure({ parsed, stderr, exitCode });
+        // An interim error (error_max_turns while the workflow runs) followed
+        // by a cut-off stream lost the workflow's answer. Usage, sign-in,
+        // prompt-size and safeguard failures keep their own classification.
+        finish(failure.code === 'CLAUDE_ERROR' && pendingTasks > 0 ? unfinishedError() : failure);
         return;
       }
       const answered = answeringModel(model, parsed.models);

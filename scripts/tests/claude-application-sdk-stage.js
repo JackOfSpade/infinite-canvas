@@ -52,7 +52,7 @@ async function rejected(promise, code) {
 
 export default [
   {
-    name: 'claude SDK: uses the native summarized display with restricted prompt-only options and no fallback',
+    name: 'claude SDK: uses the native summarized display with restricted Workflow-only options, ultracode and no fallback',
     async run() {
       const fake = fakeQuery();
       const value = await stage(fake.queryImpl);
@@ -61,7 +61,11 @@ export default [
       assert.equal(prompt, 'private prompt');
       assert.equal(closed, true);
       assert.deepEqual(options.thinking, { type: 'adaptive', display: 'summarized' });
-      assert.deepEqual(options.tools, []);
+      assert.deepEqual(options.tools, ['Workflow']);
+      assert.deepEqual(options.allowedTools, ['Workflow']);
+      assert.equal(options.permissionMode, 'dontAsk');
+      assert.deepEqual(options.settings, { ultracode: true });
+      assert.equal(options.effort, 'high', 'ultracode is a setting; the stage effort is unchanged');
       assert.deepEqual(options.mcpServers, {});
       assert.deepEqual(options.settingSources, []);
       assert.deepEqual(options.extraArgs, { restricted: null });
@@ -529,6 +533,184 @@ export default [
       const fake = fakeQuery([streamEvent, streamEvent, assistant(), result()]);
       const value = await stage(fake.queryImpl);
       assert.equal(value.text, 'answer');
+    },
+  },
+  {
+    name: 'claude SDK: research tools are offered and allowed together with Workflow',
+    async run() {
+      const fake = fakeQuery();
+      await stage(fake.queryImpl, { tools: ['WebSearch', 'WebFetch'], maxTurns: 16 });
+      const { options } = fake.calls[0];
+      assert.deepEqual(options.tools, ['WebSearch', 'WebFetch', 'Workflow']);
+      assert.deepEqual(options.allowedTools, ['WebSearch', 'WebFetch', 'Workflow']);
+      assert.equal(options.maxTurns, 16);
+    },
+  },
+  {
+    name: 'claude SDK: the stub result after a workflow launch is skipped and the final answer is used',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'w1', task_type: 'local_workflow', description: 'd' }] },
+        { type: 'system', subtype: 'task_started', task_id: 'w1', tool_use_id: 'toolu_1', task_type: 'local_workflow' },
+        assistant([{ type: 'text', text: 'The workflow is running in the background.' }]),
+        result({ result: 'The workflow is running in the background.' }),
+        { type: 'system', subtype: 'task_progress', task_id: 'w1' },
+        { type: 'system', subtype: 'task_updated', task_id: 'w1', patch: { status: 'completed' } },
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'final answer', duration_ms: 99 }),
+      ]);
+      const value = await stage(fake.queryImpl);
+      assert.equal(value.text, 'final answer');
+      assert.equal(value.durationMs, 99);
+      assert.equal(value.model, SONNET);
+    },
+  },
+  {
+    name: 'claude SDK: a stub that arrives after the workflow already finished is still not the answer',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'stub' }]),
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'stub' }),
+        result({ result: 'final answer' }),
+      ]);
+      assert.equal((await stage(fake.queryImpl)).text, 'final answer');
+    },
+  },
+  {
+    name: 'claude SDK: a stream that ends on the stub with a task still running is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        assistant([{ type: 'text', text: 'The workflow is running in the background.' }]),
+        result({ result: 'The workflow is running in the background.' }),
+      ]);
+      const error = await rejected(stage(fake.queryImpl), 'CLAUDE_WORKFLOW_UNFINISHED');
+      assert.equal(error.message, 'Claude\'s workflow did not finish, so its answer was not used.');
+      assert.equal(error.result, undefined, 'the stub is never handed back as an answer');
+    },
+  },
+  {
+    name: 'claude SDK: a stream that ends on the stub after the task finished is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'stub' }]),
+        result({ result: 'stub' }),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WORKFLOW_UNFINISHED');
+    },
+  },
+  {
+    name: 'claude SDK: a timeout while a workflow runs is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const entered = deferred();
+      const fake = fakeQuery(async function* produce() {
+        yield assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]);
+        yield { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' };
+        yield result({ result: 'stub' });
+        entered.resolve();
+        yield await new Promise(() => {});
+      });
+      const timers = [];
+      const pending = stage(fake.queryImpl, {
+        setTimeoutImpl: callback => { const timer = { callback, unref() {} }; timers.push(timer); return timer; },
+        clearTimeoutImpl: () => {},
+      });
+      const observed = rejected(pending, 'CLAUDE_WORKFLOW_UNFINISHED');
+      await entered.promise;
+      timers[0].callback();
+      const error = await observed;
+      assert.match(error.message, /workflow did not finish within 45 minutes/u);
+    },
+  },
+  {
+    name: 'claude SDK: ambient background tasks and runs without tasks keep the single-result behaviour',
+    async run() {
+      const fake = fakeQuery([
+        { type: 'system', subtype: 'task_started', task_id: 'a1', ambient: true },
+        { type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a1', ambient: true, task_type: 'x', description: 'd' }] },
+        assistant(),
+        result(),
+      ]);
+      assert.equal((await stage(fake.queryImpl)).text, 'answer');
+    },
+  },
+  {
+    name: 'claude SDK: a Workflow call that fails starts nothing, so the answer after it is used',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: '<tool_use_error>Invalid workflow script</tool_use_error>' }] } },
+        assistant([{ type: 'text', text: 'ANSWER' }]),
+        result({ result: 'ANSWER' }),
+      ]);
+      assert.equal((await stage(fake.queryImpl, { maxTurns: 16 })).text, 'ANSWER');
+    },
+  },
+  {
+    name: 'claude SDK: a stream that ends on an interim error_max_turns with a task pending is CLAUDE_WORKFLOW_UNFINISHED',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ subtype: 'error_max_turns', is_error: true, result: '' }),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_WORKFLOW_UNFINISHED');
+    },
+  },
+  {
+    name: 'claude SDK: error_max_turns while the workflow runs, then the final result, uses the final result',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ subtype: 'error_max_turns', is_error: true, result: '' }),
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'final answer' }),
+      ]);
+      assert.equal((await stage(fake.queryImpl)).text, 'final answer');
+    },
+  },
+  {
+    name: 'claude SDK: an error result after a workflow stub keeps its own classification',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ result: 'stub' }),
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        result({ subtype: 'error_during_execution', is_error: true, result: 'Claude usage limit reached', api_error_status: 429 }),
+      ]);
+      await rejected(stage(fake.queryImpl), 'CLAUDE_USAGE_LIMIT');
+    },
+  },
+  {
+    name: 'claude SDK: workflow agent frames do not count toward the answering-model check',
+    async run() {
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Workflow', input: {} }]),
+        { type: 'system', subtype: 'task_started', task_id: 'w1', task_type: 'local_workflow' },
+        result({ result: 'stub' }),
+        assistant([{ type: 'text', text: 'agent work' }], 'claude-haiku-4-5', { parent_tool_use_id: 'toolu_1' }),
+        assistant([{ type: 'text', text: 'agent work' }], 'claude-haiku-4-5', { agent_id: 'a-1' }),
+        { type: 'system', subtype: 'task_notification', task_id: 'w1', status: 'completed' },
+        assistant([{ type: 'text', text: 'final answer' }]),
+        result({ result: 'final answer', modelUsage: { [SONNET]: {}, 'claude-haiku-4-5': {} } }),
+      ]);
+      const value = await stage(fake.queryImpl);
+      assert.equal(value.text, 'final answer');
+      assert.equal(value.model, SONNET);
     },
   },
 ];

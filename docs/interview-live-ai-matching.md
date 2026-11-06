@@ -60,7 +60,7 @@ CLI capability checks run through help before provider calls. Calls use isolated
 
 One matcher lifecycle belongs to the live window. Next question reuses its context and latency observations. A changed validated bank/pin replaces the matcher; close, crash, owner deletion and owner close release it. A question timeout or cancellation while waiting for initialization ends only that question: startup continues under its independent `initTimeoutMs` deadline, and the expired question is never dispatched when startup finishes. Later questions reuse the ready session. Initialization failure/expiry, protocol/process failures, and timeouts or cancellation after dispatch retire uncertain transport state; the next question can initialize a fresh transport. Invalid selection content/schema alone does not retire the warm transport. Late initialization/results are fenced. Claude warm is the adapter with a real persistent provider conversation. One-shot CLIs and the existing bridge do not gain a provider warm-session API: the bridge currently inlines its cached prefix for each handoff and uses its existing ChatGPT chat/model. Model/effort configuration directly controls the CLI adapters; bridge model selection remains in ChatGPT.
 
-The measured default is **`claude-warm`, `opus`, default effort**. The historical selection benchmark used the real **13-card bank and 63 labelled utterances**, across both warm passes in all four stages; it predates turn classification. The user's criteria are the **fastest configuration where quality stops improving, which must also stay fast under heavy machine load**. An isolated fast median is insufficient: later quiet runs, tail latency, abstention quality and loaded runs all count.
+The measured default is **`claude-warm`, `opus`, medium effort, ultracode off** (re-benchmarked 2026-11-05; see the next section). The 2026-10-30 selection below chose Opus/default effort on the older contract. The historical selection benchmark used the real **13-card bank and 63 labelled utterances**, across both warm passes in all four stages; it predates turn classification. The user's criteria are the **fastest configuration where quality stops improving, which must also stay fast under heavy machine load**. An isolated fast median is insufficient: later quiet runs, tail latency, abstention quality and loaded runs all count.
 
 | Configuration / conditions | p50 seconds | p95 seconds | Top-1 | `none` recall | Evidence / decision |
 | --- | ---: | ---: | ---: | ---: | --- |
@@ -83,13 +83,33 @@ Main-process configuration is read from the environment; the child cannot supply
 | Environment variable | Default |
 | --- | --- |
 | `INTERVIEW_MATCH_MODEL` | `opus` |
-| `INTERVIEW_MATCH_EFFORT` | `default` (no explicit effort flag) |
+| `INTERVIEW_MATCH_EFFORT` | `medium` (`default` omits the effort flag) |
 | `INTERVIEW_MATCH_TIMEOUT_MS` | `2500` total per question, including remaining initialization; expiry while warming leaves startup running |
 | `INTERVIEW_MATCH_INIT_TIMEOUT_MS` | `10000` independent initialization deadline |
 | `INTERVIEW_MATCH_LATENCY_THRESHOLD_MS` | `2500` |
 | `INTERVIEW_MATCH_CLAUDE_BIN` | `claude` |
 
 The fallback order is **warm Opus → deterministic Approximate matching**. A failed or invalid warm turn reports Approximate matching for that turn only, and a failed warm process restarts during idle time; there is no second provider route. A timeout exhausts the question budget and goes directly to Approximate. Busy calls also fall back without launching another AI turn. The deterministic result is labelled **Approximate · fallback matching**. Timeout results cannot arrive later and overwrite it. A successful AI abstention or low-confidence result does not trigger another provider or deterministic prepared-card selection. The audio fallback retains the conservative multipart/story gate only after AI fails; the semantic path sees the full endpointed turn instead of lexically choosing its tail. Audio capture/ASR remains local; submitting the turn to AI is part of live matching. No raw audio is sent to any AI transport.
+
+## 2026-11-05 re-benchmark: effort ladder and ultracode
+
+Re-run on the current contract (turn classification, 81 labelled turns from the same 13-card bank, host labels reviewed by three independent reviewers) after ultracode was enabled on the app's other Claude calls. The user's rule: optimize speed until it stops improving, then quality. Every configuration answered all 81 turns twice in one warm process; quiet runs had other background load (load average about 6); the loaded run kept all cores but two busy.
+
+| Configuration | Conditions | p50 ms (pass 1 / 2) | p95 ms (pass 1 / 2) | Selection |
+| --- | --- | ---: | ---: | ---: |
+| **Opus / medium / ultracode off** | quiet | **939 / 925** | **1142 / 1015** | 98.8% |
+| **Opus / medium / ultracode off** | loaded | **975 / 914** | **1182 / 1017** | 100% |
+| Opus / high / ultracode off | quiet | 983 / 963 | 1223 / 1080 | 100% |
+| Opus / high / ultracode off | loaded | 993 / 1228 | 1207 / 1358 | 98.8% |
+| Opus / default / ultracode off | quiet | 1084 / 1089 | 1479 / 1192 | 98.8% |
+| Opus / default / ultracode off | loaded | 1082 / 1099 | 1416 / 1223 | 100% |
+| Opus / low / ultracode off | quiet | 1089 / 1093 | 1334 / 1164 | 98.8% |
+| Opus / default / ultracode on | quiet (two runs) | 1085–1104 / 1095–1113 | 1262–1385 / 1177–1293 | 100% |
+| Opus / high / ultracode on | quiet | 1122 / 1109 | 1456 / 1335 | 100% |
+| Sonnet / low, medium, default | quiet | 1126–1229 / 1140–1889 | 1916–2798 / 1657–5320 | 97.5–100% |
+| Haiku / low, medium, default | quiet | 1240–1289 / 1231–1256 | 1546–1988 / 1371–1595 | 93.8–96.3%, drops follow-ups |
+
+Every Opus miss is the same turn, "Would you like a glass of water before we continue?", labelled an unmatched question and answered as a not-question with no card; that answer keeps the locked card, and Opus high flipped on it between the quiet and loaded runs, so it is not a quality difference. Medium is the fastest Opus effort in every condition and low is no faster, so speed stops improving at medium; no higher effort adds quality, so medium is also the quality choice. Ultracode never launched a workflow on this path and only added latency, so the live warm process stays tool-free without ultracode, unlike the app's other Claude calls. Results: `/tmp/interview-match-bench/s1-ultracode`, `s2-ladder`, `s2-opus-extra`, `s2-opus-default-on`, `s3-loaded`. The benchmark harness takes `--claude-ultracode on,off` (default off, matching production).
 
 ## Latency layouts
 

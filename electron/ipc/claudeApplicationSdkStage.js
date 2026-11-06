@@ -7,7 +7,12 @@ import {
   classifyClaudeFailure,
   CLAUDE_HANDOFF_SYSTEM_PROMPT,
   CLAUDE_STAGE_TIMEOUT_MS,
+  CLAUDE_ULTRACODE_SETTINGS,
+  CLAUDE_WORKFLOW_UNFINISHED,
+  CLAUDE_WORKFLOW_UNFINISHED_MESSAGE,
   ClaudeRunnerError,
+  createClaudeBackgroundTasks,
+  withWorkflowTool,
 } from './claudeApplicationRunner.js';
 import { claudeResetTimeMs, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
@@ -46,6 +51,9 @@ export async function runClaudeSdkStage({
   sessionId,
   resume = false,
   tools = [],
+  // One turn suffices for a launched workflow (the CLI still runs the turn
+  // after its task notification), but a failed Workflow call leaves no turn
+  // to answer in, so such a stage ends on error_max_turns.
   maxTurns = 1,
   persistSession = true,
   systemAppend = '',
@@ -71,6 +79,9 @@ export async function runClaudeSdkStage({
   let queryHandle;
   let iterator;
   let terminal = null;
+  let terminalProvisional = false;
+  const backgroundTasks = createClaudeBackgroundTasks();
+  const offeredTools = withWorkflowTool(tools);
   let summaryCount = 0;
   let summaryChars = 0;
   let usageResetsAt = null;
@@ -138,9 +149,12 @@ export async function runClaudeSdkStage({
         cwd,
         env,
         abortController: controller,
-        tools,
-        // Only web research names tools, and only those run without a prompt.
-        ...(tools.length ? { allowedTools: tools, permissionMode: 'dontAsk' } : {}),
+        // Workflow is always offered for ultracode; research adds its web tools.
+        // Every offered tool must run without a prompt in a headless stage.
+        tools: offeredTools,
+        allowedTools: offeredTools,
+        permissionMode: 'dontAsk',
+        settings: { ...CLAUDE_ULTRACODE_SETTINGS },
         strictMcpConfig: true,
         mcpServers: {},
         settingSources: [],
@@ -166,6 +180,7 @@ export async function runClaudeSdkStage({
       if (message.type === 'rate_limit_event' && message.rate_limit_info?.status === 'rejected') usageResetsAt = claudeResetTimeMs(message.rate_limit_info.resetsAt);
       // Never awaited: activity reporting must not fail or slow a stage.
       try { if (typeof onActivity === 'function') onActivity(describeClaudeSdkMessage(message)); } catch { /* liveness only */ }
+      backgroundTasks.observe(message);
 
       if (message.type === 'assistant' && !message.parent_tool_use_id && !message.agent_id) {
         // SDK modelUsage also includes auxiliary calls. Only main assistant
@@ -202,6 +217,7 @@ export async function runClaudeSdkStage({
         countText(result);
         const errors = Array.isArray(message.errors) ? message.errors.filter(value => typeof value === 'string') : [];
         errors.forEach(countText);
+        terminalProvisional = backgroundTasks.settle(message);
         terminal = {
           subtype: typeof message.subtype === 'string' ? message.subtype : null,
           isError: message.is_error === true || message.subtype !== 'success',
@@ -239,6 +255,15 @@ export async function runClaudeSdkStage({
     if (refuse || stopReasons.has('refusal') || terminal?.stopReason === 'refusal') {
       throw new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED', SAFEGUARD_MESSAGE, detail(), terminal?.result || '');
     }
+    // The stub written after a workflow launch is never the answer; a stream
+    // that ends there, or with a task still running, lost the real one.
+    // An interim error result (error_max_turns while the workflow runs) also
+    // counts when a task is still pending; the classifications above, and
+    // usage, sign-in and prompt-size failures, keep their own codes.
+    if ((terminal && !terminal.isError && terminalProvisional) || (backgroundTasks.pending > 0 &&
+      (!terminal || !terminal.isError || classified.code === 'CLAUDE_ERROR'))) {
+      throw new ClaudeRunnerError(CLAUDE_WORKFLOW_UNFINISHED, CLAUDE_WORKFLOW_UNFINISHED_MESSAGE, detail());
+    }
     if (!terminal || terminal.isError || terminal.errors.length > 0 || assistantErrors.size > 0) {
       classified.detail = { ...classified.detail, ...detail() };
       throw classified;
@@ -270,8 +295,11 @@ export async function runClaudeSdkStage({
   signal?.addEventListener?.('abort', onAbort, { once: true });
   // Close the race between the first aborted check and installing the listener.
   if (signal?.aborted) onAbort();
-  timer = setTimeoutImpl(() => interrupt(new ClaudeRunnerError('CLAUDE_TIMEOUT',
-    `Claude did not finish this stage within ${Math.round(timeoutMs / 60000)} minutes.`, detail())), timeoutMs);
+  timer = setTimeoutImpl(() => interrupt(backgroundTasks.workflowStarted
+    ? new ClaudeRunnerError(CLAUDE_WORKFLOW_UNFINISHED,
+      `Claude's workflow did not finish within ${Math.round(timeoutMs / 60000)} minutes, so its answer was not used.`, detail())
+    : new ClaudeRunnerError('CLAUDE_TIMEOUT',
+      `Claude did not finish this stage within ${Math.round(timeoutMs / 60000)} minutes.`, detail())), timeoutMs);
   timer?.unref?.();
   const work = consume().catch(error => {
     if (interrupted) throw interrupted;
