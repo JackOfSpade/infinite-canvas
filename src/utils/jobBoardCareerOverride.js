@@ -53,9 +53,18 @@ export function isJobBoardCareerOverrideRunId(value) {
 // These independent workflows share the Board's AI handoff hub but own their own
 // lifecycle. In particular, card research uses the Board node id for routing
 // while its official-posting run id remains owned by the requesting card.
+export const BOARD_STAGE_RUN_PREFIX = 'board-stage:';
+
+export function isBoardStageRunId(runId) {
+  return typeof runId === 'string' && runId.startsWith(BOARD_STAGE_RUN_PREFIX);
+}
+
 export function isBoardIndependentManualAiRunId(runId) {
   return isJobBoardCareerOverrideRunId(runId)
-    || isCardOfficialPostingRunId(runId);
+    || isCardOfficialPostingRunId(runId)
+    // A single-stage Board rerun owns its own short lifecycle and never
+    // becomes Combine recovery state.
+    || isBoardStageRunId(runId);
 }
 
 // Preserve legacy Combine ids, which predate the job-board: prefix, while

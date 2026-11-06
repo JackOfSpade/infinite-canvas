@@ -64,13 +64,17 @@ export function subscribeOfficialPostingPreparation(listener) {
 }
 
 /** A synchronous claim also fences callbacks captured before a rerender. */
-export function beginOfficialPostingPreparation({ canvasFilePath, nodeId, cancel, purpose = 'generation', owner = 'card' }) {
+export function beginOfficialPostingPreparation({ canvasFilePath, nodeId, cancel, purpose = 'generation', owner = 'card', stage = null }) {
   const key = keyFor(canvasFilePath, nodeId);
   if (preparations.has(key)) return null;
   let cancelled = false;
   const entry = Object.freeze({
     state: 'resolving', position: null, purpose: purpose === 'lookup' ? 'lookup' : 'generation',
     owner: owner === 'board-refresh' ? 'board-refresh' : 'card',
+    // A board-wide single-stage rerun (salary, listings, grouping) holds the
+    // same Board claim as the official-posting refresh, so Combine, scans and
+    // card lookups refuse it identically. `stage` only tells the two apart.
+    stage: owner === 'board-refresh' && typeof stage === 'string' && stage ? stage : null,
     cancel() {
       if (preparations.get(key) !== entry || cancelled) return;
       cancelled = true;

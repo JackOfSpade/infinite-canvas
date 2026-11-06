@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { JOB_SOURCE_BY_ID } from '../../utils/constants';
 import { SlidersHorizontal, X, RefreshCw, Trash2, Layers, AlertTriangle } from 'lucide-react';
+import { BOARD_STAGES } from './boardStageRerun';
 
 function summaryCount(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -53,9 +54,14 @@ export function JobBoardDoneState({
   researchRemoved,
   boardPreferenceChecked,
   boardPreferenceRemoved,
+  onRerunStage,
+  onCancelStageRerun,
+  stageRerunning = false,
+  stageRerunProgress = null,
+  salaryNeedsRefresh = false,
 }) {
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const actionsBusy = combining || scanning || officialPostingRefreshing;
+  const actionsBusy = combining || scanning || officialPostingRefreshing || stageRerunning;
 
   // The merge counts preference exclusions separately, before totalIncoming.
   const mergeInputPostings = summaryCount(totalIncoming);
@@ -171,6 +177,55 @@ export function JobBoardDoneState({
               className="nodrag rounded-full bg-white/10 px-2 py-1 text-[10px] text-white/60 disabled:opacity-50">
               Cancel
             </button>
+          )}
+        </div>
+      )}
+
+      {/* A running step keeps its Cancel even if the board turns stale or locked meanwhile. */}
+      {(stageRerunning || (!locked && !stale && onRerunStage)) && (
+        <div className="mt-2 w-full">
+          <div className="mb-1 text-center text-[9px] uppercase tracking-wider text-white/30">Redo one step only</div>
+          {stageRerunning ? (
+            <div className="flex w-full items-center gap-1">
+              <div className="flex-1 truncate rounded-full border border-violet-500/20 bg-violet-500/10 px-2 py-1 text-center text-[10px] text-violet-200/90">
+                {stageRerunProgress?.recovering ? `${BOARD_STAGES[stageRerunProgress.stage]?.label || 'Board step'} still running`
+                  : stageRerunProgress?.stopping ? 'Stopping…'
+                  : stageRerunProgress?.queued ? 'Queued…'
+                    : stageRerunProgress?.total ? `${BOARD_STAGES[stageRerunProgress.stage]?.progressLabel || 'Working'} ${stageRerunProgress.completed || 0}/${stageRerunProgress.total}`
+                      : stageRerunProgress?.label || `${BOARD_STAGES[stageRerunProgress?.stage]?.progressLabel || 'Working'}…`}
+              </div>
+              <button onClick={onCancelStageRerun} onPointerDown={event => event.stopPropagation()}
+                disabled={stageRerunProgress?.stopping}
+                className="nodrag rounded-full bg-white/10 px-2 py-1 text-[10px] text-white/60 disabled:opacity-50">
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <div className="flex w-full gap-1">
+              {[
+                ['compensation', salaryNeedsRefresh,
+                  'Redo only the salary research and desired-salary guidance on the current cards. Use after a career-data or salary-method change. Official postings, listing checks, scores and grouping stay as they are.'],
+                ['listings', false,
+                  'Redo only the listing checks on the current cards: closed listings, duplicates of the same official posting, a rescore where the official text changed, and company preference research. Removes closed or duplicate cards (never ones with an application) and regroups only if something moved. Does not look up official postings again or redo salary.'],
+                ['regroup', false,
+                  'Redo only the grouping into hiring-fit, salary and role groups for the current cards. Card contents are not changed.'],
+              ].map(([stage, highlight, title]) => (
+                <button key={stage}
+                  onClick={() => onRerunStage(stage)}
+                  onPointerDown={event => event.stopPropagation()}
+                  disabled={actionsBusy}
+                  title={title}
+                  className={`nodrag flex-1 rounded-full border px-1.5 py-1 text-[10px] disabled:opacity-50 ${highlight
+                    ? 'border-amber-500/30 bg-amber-500/15 text-amber-200 hover:bg-amber-500/25'
+                    : 'border-violet-500/20 bg-violet-500/10 text-violet-200/90 hover:bg-violet-500/20'}`}
+                >
+                  {BOARD_STAGES[stage].button}
+                </button>
+              ))}
+            </div>
+          )}
+          {salaryNeedsRefresh && !stageRerunning && (
+            <div className="mt-1 text-center text-[9px] text-amber-200/70">Salary analysis is out of date. Redo Salary instead of a full Re-combine.</div>
           )}
         </div>
       )}

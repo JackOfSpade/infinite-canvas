@@ -20,6 +20,10 @@ import { useToast } from '../components/ToastProvider';
 import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { useBoardOfficialPostingRefresh } from '../hooks/useBoardOfficialPostingRefresh';
+import { useBoardStageRerun } from '../hooks/useBoardStageRerun';
+import { RESEARCH_MIN_FIT_SCORE } from '../../electron/ipc/researchGate.js';
+import { boardStageCards, compensationRowsFromCards, taxonomyRowsFromCards, rebuildRowFromCard, stageCardSnapshot, stageCardUnchanged,
+  COMPENSATION_FIELDS, LISTING_FIELDS, compensationPatch, listingPatch, listingChangedGrouping, listingChangedSalaryInputs, finalSourceCountsOf } from './jobboard/boardStageRerun';
 import { carryBoardOfficialPostingResults, countBoardOfficialRetries } from '../utils/jobBoardOfficialPostingRefresh';
 import { carryBoardDeadSourceUrls } from '../utils/jobSourceLinks';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
@@ -29,7 +33,7 @@ import { hubCardFilter, isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard, 
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
-import { runBoardResearchStage } from './jobboard/jobBoardResearchStage.js';
+import { runBoardResearchStage, removedLookupEntry, MAX_BOARD_REMOVED_LOOKUPS } from './jobboard/jobBoardResearchStage.js';
 import { attachProtectedCards, consolidateJobLocations, isProtectedJobCard } from '../utils/jobLocationConsolidation';
 // Shown only for a restored marker: 'Saved AI handoff ready. Choose Continue saved AI handoff…'
 import { SAVED_HANDOFF_READY_MESSAGE, isLiveCombineOwnedMarker, combineCommitMismatchReason } from './jobboard/boardRecoveryNotice';
@@ -3786,6 +3790,259 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     }
   }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, setNodes, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage, officialPostingRefreshRunRef]);
 
+  // ── Single-stage reruns ─────────────────────────────────────────────────
+  // Combine stays the do-everything action. These redo ONE of its stages on
+  // the cards already shown, so a salary-only change does not repay official
+  // lookups, listing checks and grouping. Each stage uses the same IPC
+  // Combine uses, and writes back only its own card fields, skipping any card
+  // that changed meanwhile.
+  const stageTaxonomy = async (rows, manualAiRunId, current) => {
+    const res = await window.electronAPI.bucketJobs({ jobs: taxonomyRowsFromCards(rows), nodeId: id, manualAiRunId });
+    if (!current()) return null;
+    if (!res?.success) {
+      if (isJobBoardUserCancellation(res)) return null;
+      throw new Error(res?.error || 'Job Board grouping failed.');
+    }
+    const bucketTree = { likelihoodBands: res.likelihoodBands, salaryRanges: res.salaryRanges, roles: res.roles };
+    const check = validateJobBoardTaxonomy(bucketTree, rows.length);
+    if (!check.valid) throw new Error(`Job Board grouping was invalid: ${check.reason}`);
+    return bucketTree;
+  };
+
+  // Rebuild the group tree in the given card order. Each entry names a card to
+  // keep plus the fields this stage changed on it; everything else is read
+  // from the LIVE card right now, so a note, application or link Restore made
+  // while the stage ran is kept. A card with no entry is deleted.
+  const stageRebuildTree = (entries, bucketTree, { removedCount = 0 } = {}) => {
+    // useReactFlow is scoped to the canvas level on screen. Only rebuild when
+    // this Board is on it; otherwise the tree would land on another level.
+    if (!getNode(id)) throw new Error('Return to this board’s canvas and run the step again.');
+    const liveCards = getNodes().filter(node => node?.type === 'jobcard' && node.data?.hubId === id);
+    const liveById = new Map(liveCards.map(card => [card.id, card]));
+    const displayedJobs = entries.map(({ cardId, changes = {} }) => {
+      const live = liveById.get(cardId);
+      if (!live) throw new Error('A card was removed while this step ran. Run it again.');
+      return { ...live.data, ...changes, reuseCardId: cardId };
+    });
+    const { newNodes, newEdges, scoreRangeMin, scoreRangeMax, taxonomy } = buildJobTreeNodes({
+      displayedJobs, bucketTree, originalPos: getNode(id)?.position || { x: 0, y: 0 }, hubId: id,
+      baseNodeId: `board-${id}-${Date.now()}`, protectedCards: liveCards,
+    });
+    document.dispatchEvent(new CustomEvent('canvas-take-snapshot'));
+    if (newNodes.length > 0) {
+      replaceBoardDisplayChildren({
+        hubId: id, newNodes, newEdges, getNodes, clearChildren: clearBoardChildren, updateNodeData: updateGlobal, setNodes,
+        addElements: (addedNodes, addedEdges) => {
+          if (addElementsGlobally) addElementsGlobally(id, addedNodes, addedEdges, 'sibling');
+          else { addNodes(addedNodes); addEdges(addedEdges); }
+        },
+      });
+    } else {
+      clearBoardChildren();
+    }
+    const finalSourceCounts = finalSourceCountsOf(displayedJobs);
+    const liveBoard = getNode(id)?.data || {};
+    const priorThreshold = Number(liveBoard.scoreThreshold);
+    // Keep the user's filters unless the new tree no longer has what they select.
+    const filter = {
+      sourceFilter: liveBoard.sourceFilter && finalSourceCounts[liveBoard.sourceFilter] ? liveBoard.sourceFilter : null,
+      scoreThreshold: Number.isFinite(priorThreshold) ? Math.min(Math.max(priorThreshold, scoreRangeMin), scoreRangeMax) : scoreRangeMin,
+      showReviewCards: liveBoard.showReviewCards,
+    };
+    updateGlobal(id, node => ({
+      resultCount: displayedJobs.length, scoreRangeMin, scoreRangeMax, finalSourceCounts,
+      sourceFilter: filter.sourceFilter, scoreThreshold: filter.scoreThreshold,
+      jobTaxonomy: { likelihoodBands: taxonomy.likelihoodBands, salaryRanges: taxonomy.salaryRanges },
+      ...(removedCount ? { mergeStats: { ...(node?.data?.mergeStats || {}), researchRemoved: (node?.data?.mergeStats?.researchRemoved || 0) + removedCount } } : {}),
+    }));
+    // New group nodes arrive unfiltered; apply the kept filters once they exist.
+    requestAnimationFrame(() => {
+      applyCardFilters(filter);
+      fitView({ duration: 600, padding: 0.2 });
+    });
+  };
+
+  const runSalaryStage = async ({ manualAiRunId, current, stillOwned, setProgress }) => {
+    const nodes = refreshNodes();
+    const edges = refreshEdges();
+    const cards = boardStageCards(nodes, id);
+    const lockedCount = nodes.filter(node => node?.type === 'jobcard' && node.data?.hubId === id).length - cards.length;
+    if (!cards.length) {
+      addToast({ title: 'No job cards to update', description: 'This board has no unlocked job cards.', type: 'info' });
+      return;
+    }
+    const salarySources = new Set(getConnectedJobSearchIds(id, nodes, edges));
+    const salaryCareer = resolveSalaryCareerSnapshotId({
+      boardData: refreshNode(id)?.data,
+      searchModules: nodes.filter(node => node.type === 'jobhub' && salarySources.has(node.id)),
+    });
+    if (salaryCareer.blocked) {
+      addToast({ title: 'Career data import pending', description: 'Finish or discard the Job Board career-data import before salary analysis.', type: 'info' });
+      return;
+    }
+    const { rows, matched } = compensationRowsFromCards(cards, liveCombineInputs(id, nodes, edges).all);
+    const snapshots = cards.map(card => stageCardSnapshot(card, COMPENSATION_FIELDS));
+    const requestId = `board-stage-compensation:${id}:${globalThis.crypto.randomUUID()}`;
+    setProgress({ completed: 0, total: 0 });
+    const unsubscribe = window.electronAPI.onCompensationProgress?.(payload => {
+      if (payload?.nodeId === id && payload.requestId === requestId) setProgress({ completed: payload.processed ?? 0, total: payload.total ?? 0 });
+    });
+    let result;
+    try {
+      result = await window.electronAPI.researchJobCompensation({
+        jobs: rows, nodeId: id, requestId, manualAiRunId, salaryCareerSnapshotId: salaryCareer.careerSnapshotId,
+      });
+    } finally { unsubscribe?.(); }
+    if (!current()) return;
+    if (!result?.success || !Array.isArray(result.jobs) || result.jobs.length !== rows.length) {
+      if (isJobBoardUserCancellation(result)) return;
+      throw new Error(result?.error || 'Salary research failed. The board kept its previous salary results.');
+    }
+    // Node updaters apply in order, so the Board updater below sees every
+    // card's outcome. A skipped card keeps the Board marked out of date.
+    let skipped = lockedCount;
+    result.jobs.forEach((row, index) => {
+      const snapshot = snapshots[index];
+      updateGlobal(snapshot.id, node => {
+        if (stillOwned() && stageCardUnchanged(node, snapshot, id, COMPENSATION_FIELDS)) return compensationPatch(row);
+        skipped++;
+        return null;
+      });
+    });
+    updateGlobal(id, () => (stillOwned() && skipped === 0
+      ? { salaryCareerSnapshotId: salaryCareer.careerSnapshotId, salaryMethodVersion: JOB_COMPENSATION_METHOD_VERSION } : null));
+    const researched = result.jobs.filter(row => !['below_fit_threshold', 'fit_score_unavailable'].includes(row.compensationAssessment?.reasonCode)).length;
+    EventLogger.log(`[JobBoard] salary rerun finished id=${id} cards=${cards.length} researched=${researched} sourceRows=${matched} locked=${lockedCount}`);
+    requestAnimationFrame(() => addToast({
+      title: skipped ? 'Salary analysis partly updated' : 'Salary analysis updated',
+      description: `${researched} card${researched === 1 ? '' : 's'} at fit ${RESEARCH_MIN_FIT_SCORE} or above were researched again; nothing else on the board was redone.`
+        + (skipped ? ` ${skipped} card${skipped === 1 ? ' was' : 's were'} locked or changed meanwhile and kept the old result, so the board still shows salary as out of date.` : '')
+        + (matched < cards.length ? ` ${cards.length - matched} card${cards.length - matched === 1 ? '' : 's'} no longer had a saved search row, so their salary context came from the card itself.` : ''),
+      type: skipped ? 'info' : 'success',
+    }));
+  };
+
+  const runRegroupStage = async ({ manualAiRunId, current, stillOwned, setProgress }) => {
+    const cards = boardStageCards(refreshNodes(), id);
+    if (!cards.length) {
+      addToast({ title: 'No job cards to sort', description: 'This board has no unlocked job cards.', type: 'info' });
+      return;
+    }
+    if (cards.length !== refreshNodes().filter(node => node?.type === 'jobcard' && node.data?.hubId === id).length) {
+      addToast({ title: 'Locked cards on this board', description: 'Re-sorting would move locked cards. Unlock them or use Re-combine.', type: 'info' });
+      return;
+    }
+    setProgress({ label: 'Grouping jobs' });
+    const bucketTree = await stageTaxonomy(cards.map(rebuildRowFromCard), manualAiRunId, current);
+    if (!bucketTree || !stillOwned()) return;
+    const liveIds = boardStageCards(refreshNodes(), id).map(card => card.id).sort().join('\u0000');
+    if (liveIds !== cards.map(card => card.id).sort().join('\u0000')) {
+      throw new Error('Cards were added or removed while sorting. Run the grouping step again.');
+    }
+    const live = new Map(refreshNodes().map(node => [node.id, node]));
+    const groupingFields = ['matchScore', 'careerDirection', 'title', 'salary', 'source', 'officialPosting'];
+    if (cards.some(card => !stageCardUnchanged(live.get(card.id), stageCardSnapshot(card, groupingFields), id, groupingFields))) {
+      throw new Error('A card’s fit, role or pay changed while sorting. Run the grouping step again.');
+    }
+    stageRebuildTree(cards.map(card => ({ cardId: card.id })), bucketTree);
+    addToast({ title: 'Board re-sorted', description: `${cards.length} card${cards.length === 1 ? '' : 's'} regrouped by hiring fit, salary and role. Card contents were not changed.`, type: 'success' });
+  };
+
+  const runListingStage = async ({ manualAiRunId, current, stillOwned, setProgress }) => {
+    const allCards = refreshNodes().filter(node => node?.type === 'jobcard' && node.data?.hubId === id);
+    const cards = boardStageCards(refreshNodes(), id);
+    if (!cards.length) {
+      addToast({ title: 'No job cards to check', description: 'This board has no unlocked job cards.', type: 'info' });
+      return;
+    }
+    if (cards.length !== allCards.length) {
+      addToast({ title: 'Locked cards on this board', description: 'A listing check can remove or regroup cards. Unlock them or use Re-combine.', type: 'info' });
+      return;
+    }
+    setProgress({ label: `Checking ${cards.length} listing${cards.length === 1 ? '' : 's'}` });
+    const snapshots = cards.map(card => stageCardSnapshot(card, LISTING_FIELDS));
+    const settled = await window.electronAPI.settleBoardResearch({
+      jobs: cards.map(card => ({ ...card.data, cardId: card.id })), nodeId: id, manualAiRunId, officialLookups: 0,
+    });
+    if (!current()) return;
+    if (!settled?.success || !Array.isArray(settled.jobs) || settled.jobs.length !== cards.length) {
+      if (isJobBoardUserCancellation(settled) || settled?.cancelled) return;
+      throw new Error(settled?.error || 'The listing check failed. The board kept its previous results.');
+    }
+    // Application-linked cards are never removed, exactly as in Combine.
+    const removed = new Set((settled.dropped || []).map(entry => entry?.index)
+      .filter(index => Number.isSafeInteger(index) && !cards[index]?.data?.localApplication));
+    const keptIndexes = cards.map((_card, index) => index).filter(index => !removed.has(index));
+    const keptRows = keptIndexes.map(index => settled.jobs[index]);
+    const keptCards = keptIndexes.map(index => cards[index]);
+    const regroup = removed.size > 0 || listingChangedGrouping(keptRows, keptCards);
+    const salaryInputsChanged = listingChangedSalaryInputs(keptRows, keptCards);
+    if (!regroup) {
+      keptIndexes.forEach((index, position) => {
+        const patch = listingPatch(keptRows[position], cards[index]);
+        if (!Object.keys(patch).length) return;
+        updateGlobal(snapshots[index].id, node => (stillOwned() && stageCardUnchanged(node, snapshots[index], id, LISTING_FIELDS) ? patch : null));
+      });
+    } else {
+      setProgress({ label: 'Regrouping changed cards' });
+      const bucketTree = await stageTaxonomy(keptRows, manualAiRunId, current);
+      if (!bucketTree || !stillOwned()) return;
+      // A concurrent edit to any listing field, or a card that gained an
+      // application meanwhile and is due for removal, cancels the rebuild.
+      const live = new Map(refreshNodes().map(node => [node.id, node]));
+      if (snapshots.some(snapshot => !stageCardUnchanged(live.get(snapshot.id), snapshot, id, LISTING_FIELDS))
+        || [...removed].some(index => isProtectedJobCard(live.get(cards[index].id)))) {
+        throw new Error('A card changed while its listing was checked. Run the listings step again.');
+      }
+      stageRebuildTree(keptIndexes.map((index, position) => ({ cardId: cards[index].id, changes: listingPatch(keptRows[position], cards[index]) })),
+        bucketTree, { removedCount: removed.size });
+      // Let the next Combine reuse the finished lookups of the removed rows,
+      // which still exist in the Searches, instead of researching them again.
+      const entries = (await Promise.all([...removed].map(index => removedLookupEntry(settled.jobs[index])))).filter(Boolean);
+      if (entries.length) {
+        updateGlobal(id, node => {
+          const sourceRuns = node?.data?.combineSourceRuns ?? null;
+          const saved = node?.data?.researchRemovedLookups;
+          const prior = JSON.stringify(saved?.sourceRuns) === JSON.stringify(sourceRuns) && Array.isArray(saved?.entries) ? saved.entries : [];
+          const keys = new Set(entries.map(entry => entry.key));
+          return { researchRemovedLookups: { sourceRuns, entries: [...prior.filter(entry => !keys.has(entry?.key)), ...entries].slice(-MAX_BOARD_REMOVED_LOOKUPS) } };
+        });
+      }
+    }
+    // A rescore changes what salary analysis read; flag it rather than keep
+    // a salary answer computed from the old fit audit.
+    if (salaryInputsChanged) updateGlobal(id, () => (stillOwned() ? { salaryMethodVersion: null } : null));
+    const counts = settled.counts || {};
+    const parts = [
+      [removed.size, 'removed (closed or duplicate)'], [counts.rescoreChanged, 'rescored'], [counts.livenessRechecked, 'listing status rechecked'],
+    ].filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`);
+    addToast({
+      title: 'Listings re-checked',
+      description: `${parts.length ? parts.join(', ') : 'No changes'}. Official postings were not looked up again${regroup ? '; the board was regrouped' : ''}.`
+        + (salaryInputsChanged ? ' Scores changed, so salary analysis is now marked out of date: redo the Salary step.' : ''),
+      type: 'success',
+    });
+  };
+
+  const { running: stageRerunning, progress: stageRerunProgress, start: startStageRerun, cancel: cancelStageRerun } = useBoardStageRerun({
+    nodeId: id, canvasFilePath, getNode: refreshNode, getNodes: refreshNodes,
+    getCurrentFile: nav?.getCurrentFile, moduleRunQueue, addToast,
+    canStart: () => {
+      const live = refreshNode(id)?.data;
+      return !!live && live.hubState === 'done' && !live.stale && !live.locked && !live.boardCancellation
+        && !hasPendingManualAiRetirement(live) && !combineRunRef.current && !scanRunRef.current
+        && !scanPreflightRef.current && !cancellationInFlightRef.current && !combineRecoveryTokenClaimRef.current
+        && !officialPostingRefreshRunRef.current && !careerOverrideRunRef.current
+        && !live.boardScanResume && !isBoardCombineManualAiRunId(live.manualAiResume?.runId);
+    },
+    getScopeKey: () => {
+      const inputs = liveCombineInputs(id, refreshNodes(), refreshEdges());
+      return JSON.stringify([refreshNode(id)?.data?.combineSignature, boardInputSignature(inputs.completed, inputs.all),
+        inputs.completed.map(combineSourceRunEntry)]);
+    },
+    stages: { compensation: runSalaryStage, listings: runListingStage, regroup: runRegroupStage },
+  });
+
   const handleSearchSelected = useCallback(async (request = null) => {
     if (officialPostingRefreshRunRef.current || getOfficialPostingPreparation(canvasFilePath, id)?.owner === 'board-refresh') return { status: 'busy' };
     if (isJobWorkflowDeletionPending(id)) return { status: 'cancelled' };
@@ -7212,6 +7469,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           onRetryIncompleteOfficialPostings={boardRunVisible ? null : retryIncompleteOfficialPostings}
           incompleteOfficialLookups={incompleteOfficialLookups}
           onCancelOfficialPostingRefresh={cancelOfficialPostingRefresh}
+          onRerunStage={boardRunVisible ? null : startStageRerun}
+          onCancelStageRerun={cancelStageRerun}
+          stageRerunning={stageRerunning}
+          stageRerunProgress={stageRerunProgress}
+          salaryNeedsRefresh={salaryNeedsRefresh}
         />
       )}
       </HubContainer>

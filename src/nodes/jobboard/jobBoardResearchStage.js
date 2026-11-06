@@ -19,6 +19,12 @@ const finishedLookup = value => {
   const posting = normalizeOfficialPosting(value);
   return posting && !officialPostingNeedsRefresh({ officialPosting: posting }) ? posting : null;
 };
+/** What a later Combine needs to skip re-researching a row this Board removed, or null. */
+export async function removedLookupEntry(job) {
+  const posting = finishedLookup(job?.officialPosting);
+  return posting ? { key: await sourceDigest(job), officialPosting: posting, postedBy: job.postedBy } : null;
+}
+export const MAX_BOARD_REMOVED_LOOKUPS = MAX_REMOVED_LOOKUPS;
 const ruleKeys = assessment => (Array.isArray(assessment?.matches) ? assessment.matches : []).map(match => `${match?.preferenceId}\u0000${match?.criterion}`).sort().join('\u0001');
 
 /**

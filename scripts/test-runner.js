@@ -143,6 +143,7 @@ import compensation_assessment from './tests/compensation-assessment.js';
 import job_compensation_display from './tests/job-compensation-display.js';
 import personal_salary_recommendation from './tests/personal-salary-recommendation.js';
 import salary_recommendation_bounds from './tests/salary-recommendation-bounds.js';
+import board_stage_rerun from './tests/board-stage-rerun.js';
 import job_compensation_pipeline from './tests/job-compensation-pipeline.js';
 import job_location_lookup from './tests/job-location-lookup.js';
 import job_location_consolidation from './tests/job-location-consolidation.js';
@@ -434,6 +435,7 @@ const testGroups = [
   ['job-compensation-display.js', job_compensation_display],
   ['personal-salary-recommendation.js', personal_salary_recommendation],
   ['salary-recommendation-bounds.js', salary_recommendation_bounds],
+  ['board-stage-rerun.js', board_stage_rerun],
   ['application-bundle-links.js', application_bundle_links],
   ['job-compensation-pipeline.js', job_compensation_pipeline],
   ['job-location-lookup.js', job_location_lookup],

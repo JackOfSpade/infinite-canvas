@@ -34,7 +34,7 @@ export function useBoardOfficialPostingRefresh(options) {
     const run = runRef.current;
     if (!run) {
       const saved = getOfficialPostingPreparation(latest.current.canvasFilePath, latest.current.nodeId);
-      if (saved?.owner === 'board-refresh') saved.cancel();
+      if (saved?.owner === 'board-refresh' && !saved.stage) saved.cancel();
       return true;
     }
     run.cancelled = true;
@@ -171,7 +171,7 @@ export function useBoardOfficialPostingRefresh(options) {
   }, [cancel]);
   const start = useCallback(() => runLookups({ onlyIncomplete: false }), [runLookups]);
   const retryIncomplete = useCallback(() => runLookups({ onlyIncomplete: true }), [runLookups]);
-  const recovering = retained?.owner === 'board-refresh';
+  const recovering = retained?.owner === 'board-refresh' && !retained.stage;
   return { runRef, refreshing: progress !== null || recovering,
     progress: progress || (recovering ? { recovering: true } : null), start, retryIncomplete, cancel };
 }
