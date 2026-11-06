@@ -551,15 +551,17 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     && personalRecommendation.status !== 'unavailable' && personalRecommendation.range
     && personalRecommendation.desiredSalary > 0);
   const personalRecommendationOutdated = personalRecommendationAvailable && !personalRecommendationCurrent;
-  // Both copies are plain numbers (no currency or separators) so they paste
-  // cleanly into application salary fields; a range is "min-max".
+  // The desired salary copies as a plain number (no currency or separators) so
+  // it pastes cleanly into numeric application fields; a range copies as
+  // thousands-grouped bounds joined by " - " (e.g. "135,000 - 150,000").
   const copySalaryText = useCallback(async (event, kind) => {
     event.stopPropagation();
     if (!personalRecommendationAvailable) return;
     const plainNumber = amount => amount.toLocaleString('en-US', { useGrouping: false, maximumFractionDigits: 20 });
+    const groupedNumber = amount => amount.toLocaleString('en-US', { maximumFractionDigits: 20 });
     const { min, max } = personalRecommendation.range;
     const text = kind === 'range'
-      ? (min === max ? plainNumber(min) : `${plainNumber(min)}-${plainNumber(max)}`)
+      ? (min === max ? groupedNumber(min) : `${groupedNumber(min)} - ${groupedNumber(max)}`)
       : plainNumber(personalRecommendation.desiredSalary);
     const label = kind === 'range' ? 'salary range' : 'desired salary';
     try {
