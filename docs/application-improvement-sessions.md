@@ -61,6 +61,20 @@ Patterns below the recurrence bar are watched, not forgotten. The private `appli
 
 ## Session log
 
+### 2026-11-06 — improvement session; no guidance change shipped; career source reworded; counter reset
+
+Run at the user's request with the counter at 8. Coverage: all 8 pairs since the 2026-10-31 sessions were retained, under one model label, none superseded. Six bundles were résumé-only, and all eight résumés were kept unedited. Two letters carried edits, both with notes. No truth errors, and no edit was source-resolved.
+
+Findings, notes first:
+- **Ready by count, lever not proven: a body point resting on a need any applicant could claim.** The user cut a letter paragraph about strong coding fundamentals as not persuasive and asked why the strongest-points rule had not removed it. The watch item for too many body points reached 3 corrections against 4 keeps in 7 reviewed bundles, and a new item opened for the generic-need pattern. The evidence under the cut paragraph was real; the weakness was the need.
+- **Fixed in the career source: "I co-built".** The brief allows a qualifier word only where a quote the unit cites states it word for word, so letters wrote "I co-built" because the source said "Co-built". The source now says "Built together with the other engineer" (private backup kept); résumé bullets read the same way. The watch item stays `acting` until a bundle on the re-imported source confirms it.
+- **The closing change is holding.** Both closings were kept and the user praised one; neither opens on a stock phrase or passes a verdict on the writer.
+- **Watched, not acted on:** a link sentence that addresses the employer as "you" and joins need and proof with "and", a bare "also" linking paragraphs, and a claim of ability where the source shows past experience.
+
+Test: one sentence was added to the shared evidence-selection rule ("A need any applicant could claim does not earn a point of its own.") and tried on the planner stage, since the planner chooses the points. Archived planner prompts were replayed on the production planner profile (latest Opus, xhigh) with the sentence swapped. A first round of two replays on six postings was inconsistent: one replay per posting dropped the generic paragraph and the other did not. A paired round on the three postings that had one, four old-rule and four new-rule replays each, found no effect. Paragraphs resting on a generic need (strong fundamentals, write-test-debug, SQL experience) appeared in about 9 of 12 old-rule plans and about 8 of 12 new-rule plans, and the mean paragraph count was 3.9 in both. The postings list those needs as requirements, and the planner covers every requirement it can support. Not shipped, and the edit was reverted, so no blind panel was run. Not run: writer, conversion, validators, fit, fact-check and page-image judge on the replays, truth recall, and the frozen-set replay. If the pattern recurs, the next levers are a judge-rubric line or letting the planner mark a posting requirement as not worth a point, not another planner sentence.
+
+Frozen regression set: the two oldest pairs dropped, the two edited-letter pairs of this window added (20). Watch list reviewed for all 8 pairs. Counter reset after this entry.
+
 ### 2026-10-31 (second) — improvement session; first-person closing replaces the self-verdict; counter reset
 
 Run at the user's request with the counter at 4, since this morning's session. Coverage: all 4 pairs retained, one model label, none superseded. Three letters kept and one marked not needed. All three kept letters carry notes. No truth errors.
