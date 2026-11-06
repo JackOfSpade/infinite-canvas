@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { officialHttpsUrl } from './officialPostingFields.js';
-import { canonicalLeadUrl, flatPostingText, plainPostingText } from './officialPostingMatch.js';
+import { canonicalLeadUrl, flatPostingText, isSingleStatedPlace, locationsCompatible, plainPostingText } from './officialPostingMatch.js';
 import { officialPostingSemanticScrapedEvidence } from './officialPostingSemantic.js';
 import { OFFICIAL_POSTING_MATCH_TASK } from './officialPostingBridge.js';
 import { collector } from './validationLines.js';
@@ -278,6 +278,30 @@ const display = (value, max) => Array.from(String(value ?? '').normalize('NFKC')
   char => (char.charCodeAt(0) < 32 || isUnsafeControlCharacter(char) ? ' ' : char)).join('').replace(/\s+/gu, ' ').trim().slice(0, max);
 
 /**
+ * The judges' two location copies as one stored fact, or '' when they cannot be one. Both must name compatible places
+ * (same remote status and work mode, and the same city, region and country wherever both state one), and the copy kept is
+ * the fullest one the chosen lead's snapshot shows verbatim, so neither judge's unshown wording becomes a posting fact.
+ */
+export function reconciledJudgeLocation(copyA, copyB, snapshot) {
+  const copies = [display(copyA, 500), display(copyB, 500)];
+  if (!copies.every(isSingleStatedPlace) || !locationsCompatible({ location: copies[0] }, { location: copies[1] })) return '';
+  const pageText = flatPostingText([snapshot?.title, snapshot?.location, snapshot?.description, snapshot?.pageText]
+    .filter(value => typeof value === 'string' && value).join('\n'));
+  if (!pageText) return '';
+  const shown = copies.filter(copy => { const flat = flatPostingText(copy); return flat !== '' && pageText.includes(flat); })
+    .sort((x, y) => y.length - x.length);
+  if (!shown.length) return '';
+  const count = flat => pageText.split(flat).length - 1;
+  const kept = flatPostingText(shown[0]);
+  const other = copies.map(copy => flatPostingText(copy)).find(flat => flat !== kept) || '';
+  // Keeping the fuller copy speaks for the other judge only when the shorter one names nothing else: on a page listing
+  // "Springfield, Missouri" and "Springfield, Illinois", "Springfield" is not the Missouri copy. Every time the page
+  // shows the shorter copy, it must be inside the fuller one.
+  if (other && kept.includes(other) && count(other) !== count(kept)) return '';
+  return shown[0];
+}
+
+/**
  * Turns two validated judgments into a record. Only equality decides: the same
  * lead (or the same reported posting page), the same open/closed status, and
  * both judges seeing the employer's own link. Anything else stays retryable.
@@ -363,8 +387,14 @@ export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?
   if (identitySplits.length) return unsettled('semantic-uncertain', identitySplits);
   // Location and pay are facts, not identity: when the copies differ, the agreed page is still the posting, but neither copy
   // is stored. The split is recorded so a frozen application keeps the scraped listing's value instead of a blank.
-  const locationAgrees = copiedAgree('location', 500); const salaryAgrees = copiedAgree('salary', 500);
-  const factSplits = [...(locationAgrees ? [] : ['judge-location-split']), ...(salaryAgrees ? [] : ['judge-salary-split'])];
+  const locationCopied = copiedAgree('location', 500); const salaryAgrees = copiedAgree('salary', 500);
+  // Two copies naming one place in different detail ("Burnaby" and "Burnaby, British Columbia, Canada") are not a
+  // disagreement about where the job is. Keep the fullest copy the chosen page itself shows; anything else stays split.
+  const equivalentLocation = locationCopied ? '' : reconciledJudgeLocation(answerA.location, answerB.location,
+    snapshots.find(item => item.id === chosen?.id) || snapshots.find(item => item.finalUrl && canonicalLeadUrl(item.finalUrl) === urlA));
+  const locationAgrees = locationCopied || Boolean(equivalentLocation);
+  const factSplits = [...(locationAgrees ? [] : ['judge-location-split']), ...(equivalentLocation ? ['judge-location-equivalent'] : []),
+    ...(salaryAgrees ? [] : ['judge-salary-split'])];
   const agreedChoice = choiceA === choiceB ? choiceA
     : [choiceA, choiceB].sort((x, y) => x.localeCompare(y))[0];
   const agreedTrail = choiceA === choiceB ? [] : ['comparative-equivalent', `comparative-choice-${agreedChoice.toLowerCase()}`];
@@ -376,7 +406,7 @@ export function decideOfficialPostingJudgments(job, { leads, totalLeads = leads?
     && [answerA, answerB].every(answer => judgeDescriptionBeyondTruncatedSnapshot(answer, { leads: ordered, snapshots }));
   const level = status === 'open' && !textAgrees ? 'L4' : route ? 'L2' : 'L1';
   const employer = employerCopy;
-  const location = locationAgrees ? display(answerA.location, 500) : ''; const salary = salaryAgrees ? display(answerA.salary, 500) : '';
+  const location = equivalentLocation || (locationAgrees ? display(answerA.location, 500) : ''); const salary = salaryAgrees ? display(answerA.salary, 500) : '';
   const sourceHash = crypto.createHash('sha256').update(JSON.stringify({ contract: OFFICIAL_POSTING_JUDGE_CONTRACT, sourceUrl, status,
     title: display(answerA.title, 500), employer, location, salary,
     description: description ? crypto.createHash('sha256').update(description).digest('hex') : '' })).digest('hex');

@@ -74,6 +74,33 @@ export function locationsCompatible(row, candidate) {
   return left.places.some(a => right.places.some(b => placesAgree(a, b)));
 }
 
+/**
+ * The one place every posting merged into a consolidated row names, or null. Boards spell one city differently
+ * ("Burnaby" and "Burnaby, British Columbia, Canada"), and consolidation then labels the row "Multiple locations"
+ * although all its postings are in the same place. Only when every variant states a location, none is remote, and
+ * every pair is compatible is the most specific spelling returned; otherwise the row really spans places (or one is
+ * unknown) and stays unresolved.
+ */
+/** One stated, non-remote place: not a list ("Burnaby | Vancouver"), a work mode, or "Multiple locations". */
+export function isSingleStatedPlace(value) {
+  const parts = locationParts(value);
+  return !parts.remote && !parts.unknown && parts.places.length === 1;
+}
+export function consolidatedSinglePlace(job) {
+  const variants = Array.isArray(job?.postingVariants) ? job.postingVariants : [];
+  if (variants.length < 2) return null;
+  const stated = variants.map(variant => text(variant?.location));
+  if (stated.some(place => !place)) return null;
+  const places = [...new Set(stated)];
+  // A variant that itself lists several places ("Vancouver | Toronto") is not one place.
+  if (!places.every(isSingleStatedPlace)) return null;
+  for (let i = 0; i < places.length; i++) {
+    for (let j = i + 1; j < places.length; j++) if (!locationsCompatible({ location: places[i] }, { location: places[j] })) return null;
+  }
+  const detail = place => place.split(',').filter(part => part.trim()).length;
+  return places.slice().sort((a, b) => detail(b) - detail(a) || b.length - a.length || a.localeCompare(b))[0];
+}
+
 function schoolWithinDistrict(row, namedSchool) {
   // A district posting a teacher at its own named school is an ordinary
   // school location, not evidence of an employment intermediary. Require the

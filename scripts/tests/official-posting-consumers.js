@@ -181,6 +181,15 @@ export default [
       const samePlace = await run(consolidated({ postingVariants: [{ location: 'Toronto, Ontario, Canada' }, { location: 'Toronto' }] }), stored('Toronto'));
       assert.ok(samePlace.comparisonLocation.display.includes('Toronto'));
       assert.ok(!samePlace.justification.includes('also covers'), 'two spellings of one place are not a scope limit');
+      // No usable record at all: postings that all name one place, spelled differently, still give that place.
+      const spellings = await run(consolidated({ postingVariants: [{ location: 'Toronto' }, { location: 'Toronto, Ontario, Canada' }] }), null);
+      assert.equal(spellings.comparisonLocation?.display, 'Toronto, Ontario, Canada', 'the most specific spelling is the place');
+      assert.ok(!spellings.justification.includes('also covers'));
+      for (const postingVariants of [[{ location: 'Toronto' }, { location: 'Toronto, Ohio' }, { location: 'Toronto, Ontario, Canada' }],
+        [{ location: 'Toronto, Ontario, Canada' }, { location: '' }], [{ location: 'Toronto, Ontario, Canada' }, { location: 'Remote - Canada' }],
+        [{ location: 'Vancouver | Toronto' }, { location: 'Toronto' }]]) {
+        assert.equal((await run(consolidated({ postingVariants }), null)).reasonCode, 'comparison_location_unavailable', JSON.stringify(postingVariants));
+      }
 
       assert.equal((await run(consolidated(), null)).reasonCode, 'comparison_location_unavailable', 'no stored record: a well-shaped card supplies nothing');
       assert.equal((await run(consolidated(), stored('Vancouver'))).reasonCode, 'comparison_location_unavailable', 'a record for another posting supplies nothing');

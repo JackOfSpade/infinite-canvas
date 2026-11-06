@@ -28,7 +28,7 @@ export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize',
   'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type',
   'crawl-budget', 'crawl-partial', 'invalid-text', 'stub-text', 'official-text-missing', 'no-resolution', 'reverified', 'reverify-failed', 'official-liveness-unconfirmed', 'material-jd-change', 'storage-failed', 'failed',
-  'semantic-match-v1', 'closure-page-read', 'page-unreadable', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-salary-split', 'judge-title-split', 'judge-employer-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
+  'semantic-match-v1', 'closure-page-read', 'page-unreadable', 'semantic-uncertain', 'semantic-overflow', 'judge-location-split', 'judge-location-equivalent', 'judge-salary-split', 'judge-title-split', 'judge-employer-split', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL,
   ...OFFICIAL_POSTING_COMPARATIVE_CODES,
   'comparative-a-valid', 'comparative-a-invalid', 'comparative-b-valid', 'comparative-b-invalid', 'comparative-truncated', 'insufficient-text',
   ...['a', 'b', 'choice'].flatMap(run => ['none', 'uncertain', ...Array.from({ length: 8 }, (_, index) => `p${index + 1}`)]

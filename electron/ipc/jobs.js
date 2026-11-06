@@ -129,6 +129,7 @@ import { normalizeJobSearchInitialLookbackDays, providerLookbackDaysForStart, re
 import { parseGuaranteedCashOffer, compensationAssessment, mergeCompetitiveRanges, resolveCompensationMarketCurrency, resolveCompensationLocation, compensationResidencesForJob, compensationCohortKey, selectComparableEvidence, classifyCompensationFitEligibility, selectCompensationExperienceYears, estimateCompensationExperienceYearsFromDescription, isValidCompensationExperienceBandLadder, selectCompensationExperienceBand, sourcesPresentInGroundedResearch, isAuditableCompensationSource, classifyCompensationLocationGap } from './jobCompensation.js';
 import { buildPersonalSalaryEvidence, PERSONAL_SALARY_GUIDANCE_PROMPT, PERSONAL_SALARY_METHODOLOGY_VERSION, validatePersonalSalaryRecommendation } from './personalSalaryRecommendation.js';
 import { buildJobLocationLookupRequest, selectLookupRequests, runJobLocationLookup, applyLookedUpLocation, locationSourceLink } from './jobLocationLookup.js';
+import { consolidatedSinglePlace } from './officialPostingMatch.js';
 import { getOfficialPostingStore, getOfficialPostingView, officialPostingDedup, mergeOfficialPostingTelemetry, createOfficialPostingRecoveryPassResolver } from './officialPostingService.js';
 import { consolidatedOfficialPostingLocation, officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialPostingLookupStatus } from './officialPostingFields.js';
@@ -10126,6 +10127,20 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
     locationLookupHits.set(job, { ...located, official: true,
       source: resolved.sourceUrl && (found?.display || found?.remote) ? { sourceUrl: resolved.sourceUrl } : null });
   }
+  // A consolidated row whose postings all name one place, spelled differently by each board, is labeled "Multiple
+  // locations" but is not several places. When nothing above gave it a usable location, use its most specific spelling.
+  for (const job of scoredJobs || []) {
+    const hit = locationLookupHits.get(job);
+    const evaluationJob = hit?.job || postingJob(job);
+    const baseContext = hit?.context || compensationContextForSalary(evaluationJob, job.compensationContext || {});
+    // Only a row that names no usable place: a remote posting missing a saved residence keeps its official facts.
+    if (classifyCompensationLocationGap(evaluationJob, baseContext, compensationResidencesForJob(job, remoteResidences)) !== 'fixable') continue;
+    if (hit?.job?.remote === true) continue;
+    const place = consolidatedSinglePlace(job);
+    if (!place) continue;
+    locationLookupHits.set(job, { ...(hit || {}), official: true, source: hit?.source || null,
+      ...applyLookedUpLocation(evaluationJob, baseContext, { display: place, workMode: baseContext.workMode || '', remote: false }) });
+  }
   let roleBandLookups = 0;
   let roleBandResearches = 0;
   let roleBandCacheHits = 0;
@@ -10156,6 +10171,8 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       // A well-shaped prior resolution still suppresses new Combine research
       // when its record is missing; its untrusted facts stay out of the view.
       if (postingJob(job)?.officialPosting || normalizeOfficialPosting(job?.officialPosting)) continue;
+      // Its own postings already agree on one place (see above); no career-site lookup is needed.
+      if (locationLookupHits.has(job)) continue;
       if (classifyCompensationFitEligibility(job.matchScore, {
         minScore: RESEARCH_MIN_FIT_SCORE,
         unscored: isUnscoredPlaceholderCard(job) || isLegacyUnscoredPlaceholder(job),

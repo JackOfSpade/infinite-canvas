@@ -661,6 +661,36 @@ export default [
     },
   },
   {
+    name: 'Two copies of one place in different detail store the fullest copy the chosen page shows; other splits stay unstored',
+    run() {
+      const row = job();
+      const page = { id: 'P1', rendered: true, pageText: `Dispatch Engineer\nApply\nlocations\nLakeview, Ontario, Canada\ntime type\nFull time\n${DESCRIPTION}` };
+      const check = (a, b, snapshots = [page]) => decide(row, chosen({ location: a }), chosen({ location: b }), { snapshots });
+      for (const [a, b] of [['Lakeview', 'Lakeview, Ontario, Canada'], ['Lakeview, Ontario, Canada', 'Lakeview'], ['Lakeview, ON, Canada', 'Lakeview, Ontario, Canada']]) {
+        const kept = check(a, b);
+        assert.equal(kept.officialPosting.outcome, 'found', `${a} / ${b}`);
+        assert.equal(kept.officialPosting.location?.display, 'Lakeview, Ontario, Canada', `${a} / ${b}`);
+        assert.ok(kept.officialPosting.trail.includes('judge-location-equivalent'));
+        assert.ok(!kept.officialPosting.trail.includes('judge-location-split'));
+        assert.ok(normalizeOfficialPosting({ ...kept.officialPosting, contentHash: 'a'.repeat(64) }).trail.includes('judge-location-equivalent'));
+      }
+      // Only the copy the page shows is stored, even when the other adds detail.
+      assert.equal(check('Lakeview, Ontario, Canada', 'Lakeview, Ontario, Canada (Hybrid)').officialPosting.location?.display, 'Lakeview, Ontario, Canada');
+      // Different places, a work-mode-only copy, a copy the page never shows, or no page text: still a split.
+      for (const [a, b, snapshots] of [['Lakeview, Ontario, Canada', 'Hillcrest, Ontario, Canada'], ['Hybrid', 'Lakeview, Ontario, Canada'],
+        ['Lakeview', 'Lakeview, Ontario, Canada', [{ id: 'P1', pageText: 'Dispatch Engineer\nApply' }]],
+        ['Lakeview', 'Lakeview, Ontario, Canada', []],
+        // A copy listing several places, and a short copy the page also uses for another place, are not one place.
+        ['Lakeview | Hillcrest', 'Hillcrest', [{ id: 'P1', pageText: 'Lakeview | Hillcrest' }]],
+        ['Lakeview', 'Lakeview, Ontario, Canada', [{ id: 'P1', pageText: 'Lakeview, Ontario, Canada; Lakeview, Oregon' }]]]) {
+        const split = check(a, b, snapshots);
+        assert.equal(split.officialPosting.outcome, 'found', `${a} / ${b}`);
+        assert.equal(split.officialPosting.location, undefined, `${a} / ${b}`);
+        assert.ok(split.officialPosting.trail.includes('judge-location-split'), `${a} / ${b}`);
+      }
+    },
+  },
+  {
     name: 'Copied title and employer must agree; a differing location or pay is not stored and the frozen job keeps the listing value',
     async run() {
       const row = job({ salary: '', salaryProvenance: 'unknown' });

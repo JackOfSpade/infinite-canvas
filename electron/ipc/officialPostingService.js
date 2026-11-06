@@ -557,7 +557,7 @@ export async function resolveOfficialPostings(jobs, {
           await recordJudgment(store, { at: new Date(clock()).toISOString(), card: member.id, title: String(member.job?.title || '').slice(0, 200),
             company: String(member.job?.company || '').slice(0, 120), round, run, route, manualRoutingReason, leads: leads.map(lead => lead.url),
             choice: answer.choice, status: answer.status, statusQuote: answer.statusQuote, employerLinked: answer.employerLinked,
-            employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, judgeTitle: answer.title.slice(0, 200), judgeEmployer: answer.employer.slice(0, 120), descriptionChars: answer.description.length,
+            employerPageUrl: answer.employerPageUrl, postingUrl: answer.postingUrl, judgeTitle: answer.title.slice(0, 200), judgeEmployer: answer.employer.slice(0, 120), judgeLocation: answer.location.slice(0, 200), judgeSalary: answer.salary.slice(0, 200), descriptionChars: answer.description.length,
             conflicts: answer.conflicts, snapshots: snapshotLog(snapshots) });
           break;
         } catch (error) {
