@@ -41,7 +41,7 @@ export function CardProbe({navigation, queue, cards}) {
 
 export default [
   {
-    name: 'real JobCard walks its saved links with Link gone? Next source, reports exhaustion, restores, and respects the lock',
+    name: 'real JobCard walks its saved links with the Next link button, reports exhaustion, restores, and respects the lock',
     async run() {
       const { bundle, directory } = await cardBundle();
       try {
@@ -70,20 +70,20 @@ export default [
             .some(item => item.textContent.trim() === 'No more saved links for this job.');
           try {
             await render();
-            assert.ok(button(window, 'Link gone? Next source'), 'the next-source button shows while a link exists');
+            assert.ok(button(window, 'Next link'), 'the next-source button shows while a link exists');
             assert.equal(linkButton().getAttribute('title'), 'Open listing on jobs.lever.co');
             assert.equal(exhaustedText(), false, 'nothing reports exhaustion before the last link is marked');
             assert.equal(button(window, 'Restore links'), undefined);
-            await act(async () => button(window, 'Link gone? Next source').click());
+            await act(async () => button(window, 'Next link').click());
             assert.deepEqual(patches.at(-1), { deadSourceUrls: [lever] });
             await render();
             assert.equal(linkButton().getAttribute('title'), 'Open Google Jobs card');
             assert.equal(exhaustedText(), false);
-            await act(async () => button(window, 'Link gone? Next source').click());
+            await act(async () => button(window, 'Next link').click());
             assert.deepEqual(patches.at(-1), { deadSourceUrls: [lever, google] });
             await render();
             assert.equal(linkButton(), null, 'no link button once every saved link is marked');
-            assert.equal(button(window, 'Link gone? Next source'), undefined);
+            assert.equal(button(window, 'Next link'), undefined);
             assert.equal(exhaustedText(), true);
             card = { ...card, data: { ...card.data, locked: true } };
             await render();
@@ -100,8 +100,8 @@ export default [
             assert.equal(linkButton().getAttribute('title'), 'Open listing on jobs.lever.co');
             card = { ...card, data: { ...card.data, locked: true } };
             await render();
-            assert.equal(button(window, 'Link gone? Next source').disabled, true, 'a locked card cannot mark a link gone');
-            await act(async () => button(window, 'Link gone? Next source').click());
+            assert.equal(button(window, 'Next link').disabled, true, 'a locked card cannot mark a link gone');
+            await act(async () => button(window, 'Next link').click());
             assert.equal(patches.length, sent + 1, 'a locked card sends no mark');
           } finally { await act(async () => root.unmount()); }
           assert.deepEqual(entries, [], 'the source-link controls emit no React warnings');

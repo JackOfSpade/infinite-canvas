@@ -1925,9 +1925,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       </div>
 
       {/* Source + posted + open listing */}
-      <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px]">
+      <div className="px-3 py-1.5 flex items-center gap-1.5 text-[10px] min-w-0">
         {data.source && !postingDisplay.officialOnly && (
-          <span className="text-white/30 uppercase tracking-wider">{data.source}</span>
+          <span className="shrink-0 whitespace-nowrap text-white/30 uppercase tracking-wider">{data.source}</span>
         )}
         {data.language && data.language !== 'en' && (
           <span
@@ -1937,19 +1937,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             {data.language}
           </span>
         )}
-        {data.posted && !postingDisplay.officialOnly && <span className="text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
-        {postingDisplay.levelLabel && <span className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/60 border border-white/10">{postingDisplay.levelLabel}</span>}
+        {data.posted && !postingDisplay.officialOnly && <span className="shrink-0 whitespace-nowrap text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
+        {postingDisplay.levelLabel && <span className="min-w-0 truncate text-white/40" title={postingDisplay.levelLabel}>· {postingDisplay.levelLabel}</span>}
         {currentSourceLink && (
-          <span className="ml-auto -my-1 flex items-center gap-1" onPointerDown={(e) => e.stopPropagation()}>
+          <span className="ml-auto -my-1 shrink-0 flex items-center gap-1" onPointerDown={(e) => e.stopPropagation()}>
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); markSourceLinkGone(); }}
               disabled={effectiveLock}
-              className="rounded px-1 py-0.5 text-white/35 hover:text-white/70 disabled:opacity-50 transition-colors"
+              className="whitespace-nowrap rounded-md border border-white/15 bg-white/5 px-1.5 py-0.5 text-white/60 hover:bg-white/10 hover:text-white/85 disabled:opacity-50 transition-colors"
               title={sourceLinkState.remaining.length > 0
-                ? 'The link no longer shows this job: show the next most official saved link'
-                : 'The link no longer shows this job: this is the last saved link'}
-            >Link gone? Next source</button>
+                ? 'Link gone? Show the next most official saved link for this job'
+                : 'Link gone? This is the last saved link for this job'}
+            >Next link</button>
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
