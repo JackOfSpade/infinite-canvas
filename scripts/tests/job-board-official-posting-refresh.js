@@ -7,6 +7,10 @@ import {
   searchRowsWithIncompleteLookups, summarizeBoardOfficialPostingChecks, summarizeSearchOfficialLookups,
 } from '../../src/utils/jobBoardOfficialPostingRefresh.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../src/utils/officialPostingPreparation.js';
+import { appendDeadSourceUrl, carryBoardDeadSourceUrls, jobCardSourceLinks, jobSourceLinkMark, jobSourceLinks, MAX_DEAD_SOURCE_URLS,
+  mergeDeadSourceUrls, pickCurrentJobSourceLink, sourceLinkHostClass } from '../../src/utils/jobSourceLinks.js';
+import { AGGREGATOR_BASE_DOMAINS, ATS_BASE_DOMAINS } from '../../electron/ipc/officialSourceHosts.js';
+import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withConsoleCollector } from './fixtures/practice-connector/renderHarness.js';
@@ -816,4 +820,208 @@ function BoardProbe({ navigation, capture, addToast }) {
       } }), { code: 'JOB_OFFICIAL_REFRESH_CANCELLED' });
     },
   },
+  {
+    name: 'Job source links rank a confirmed official posting first, then ATS, employer, boards, unknown sites, reposters and the Google card last',
+    run() {
+      const row = job(60, {
+        company: 'Acme Inc.',
+        url: 'https://www.linkedin.com/jobs/view/123',
+        googleCardUrl: 'https://www.google.com/search?q=Synthetic+Role&udm=8&htidocid=doc-60',
+        applyOptions: [{ label: 'Apply on ZipRecruiter', href: 'https://www.ziprecruiter.com/c/x/job/1' },
+          { label: 'Apply on Acme', href: 'https://careers.acme.example/jobs/60' },
+          { label: 'Apply on Greenhouse', href: 'https://boards.greenhouse.io/acme/jobs/60' },
+          { label: 'Apply on LinkedIn', href: 'https://www.linkedin.com/jobs/view/123' },
+          { label: 'Apply on Unknown', href: 'https://reposts.example/job/60' },
+          { label: 'Apply on Built In NYC', href: 'https://www.builtinnyc.com/job/60' }],
+        alternateListings: [{ board: 'indeed', url: 'https://ca.indeed.com/viewjob?jk=60' },
+          { board: 'talent', url: 'https://ca.talent.com/view?id=60' }],
+        postingVariants: [{ location: 'Elsewhere', url: 'https://jobs.lever.co/acme/60' },
+          { location: 'Closed city', url: 'https://jobs.ashbyhq.com/acme/closed', liveness: 'closed' }],
+        officialPosting: posting(60, { officialApplyUrl: 'https://careers.example.test/60/apply' }),
+      });
+      const links = jobSourceLinks(row);
+      assert.deepEqual(links.map(link => link.url), [
+        'https://careers.example.test/60', 'https://careers.example.test/60/apply',
+        'https://boards.greenhouse.io/acme/jobs/60', 'https://jobs.lever.co/acme/60', 'https://careers.acme.example/jobs/60',
+        'https://www.linkedin.com/jobs/view/123', 'https://www.builtinnyc.com/job/60', 'https://ca.indeed.com/viewjob?jk=60',
+        'https://reposts.example/job/60',
+        'https://www.ziprecruiter.com/c/x/job/1', 'https://ca.talent.com/view?id=60',
+        links.at(-1).url,
+      ]);
+      assert.deepEqual(links.map(link => link.kind), ['official', 'official', 'employer', 'employer', 'employer',
+        'board', 'board', 'board', 'other', 'aggregator', 'aggregator', 'google']);
+      assert.match(links.at(-1).url, /^https:\/\/www\.google\.com\/search\?.*htidocid=doc-60/u);
+      assert.equal(links[0].label, 'Open official posting');
+      assert.equal(links[5].label, 'Open listing on linkedin.com');
+      assert.equal(links.at(-1).label, 'Open Google Jobs card');
+      assert.ok(!links.some(link => link.url.includes('closed')), 'a sibling posting already found closed is skipped');
+    },
+  },
+  {
+    name: 'Job source links drop unsafe URLs, exclude closed and unconfirmed official addresses, and repair legacy Google routes',
+    run() {
+      const row = job(61, {
+        company: 'Acme',
+        url: 'javascript:alert(1)',
+        googleCardUrl: 'https://www.google.com/webhp?ibp=htl;jobs#htivrt=jobs&htidocid=legacy-61',
+        applyOptions: [{ href: 'https://user:secret@careers.acme.example/x' }, { href: 'data:text/html,hi' },
+          { href: 'linkedin' }, { href: 'https://careers.acme.example/jobs/61' }],
+        officialPosting: posting(61, { level: 'L1', outcome: 'closed', trail: ['closed'] }),
+      });
+      const links = jobSourceLinks(row);
+      assert.deepEqual(links.map(link => link.kind), ['employer', 'google']);
+      assert.equal(links[0].url, 'https://careers.acme.example/jobs/61');
+      assert.match(links[1].url, /^https:\/\/www\.google\.com\/search\?q=.*&udm=8&htidocid=legacy-61/u);
+      const card = jobCardSourceLinks(row);
+      assert.equal(card[0].kind, 'closed-official', 'the card still opens a previously closed official page first');
+      assert.equal(card[0].url, posting(61).sourceUrl);
+      assert.deepEqual(card.slice(1), links);
+      const ambiguous = job(62, { url: '', officialPosting: posting(62, { outcome: 'ambiguous', level: 'L5',
+        sourceUrl: undefined, alternatives: [{ url: 'https://careers.example.test/maybe', title: 'Unconfirmed · cited by 2 of 2 judges' }] }) });
+      assert.deepEqual(jobSourceLinks(ambiguous), [], 'unconfirmed candidates keep their own UI and are never in the chain');
+      assert.deepEqual(jobSourceLinks(null), []);
+    },
+  },
+  {
+    name: 'Job source links de-duplicate by normalized URL across fields and keep stable order inside a host class',
+    run() {
+      const row = job(63, { url: 'https://Jobs.Lever.co/acme/63', applyOptions: [{ href: 'https://jobs.lever.co/acme/63' },
+        { href: 'https://acme.wd5.myworkdayjobs.com/en-US/careers/job/63' }],
+      alternateListings: [{ url: 'https://jobs.lever.co/acme/63' }], postingVariants: [{ url: 'https://jobs.lever.co/acme/63' }] });
+      assert.deepEqual(jobSourceLinks(row).map(link => link.url),
+        ['https://jobs.lever.co/acme/63', 'https://acme.wd5.myworkdayjobs.com/en-US/careers/job/63']);
+    },
+  },
+  {
+    name: 'Job source link host tables cover every host ATS and reposting domain',
+    run() {
+      for (const domain of ATS_BASE_DOMAINS) assert.equal(sourceLinkHostClass(`https://tenant.${domain}/job`), 'ats', domain);
+      for (const domain of AGGREGATOR_BASE_DOMAINS) {
+        assert.ok(['board', 'aggregator', 'google'].includes(sourceLinkHostClass(`https://${domain}/job`)), domain);
+      }
+      assert.equal(sourceLinkHostClass('https://uk.linkedin.com/jobs/view/1'), 'board');
+      assert.equal(sourceLinkHostClass('https://www.glassdoor.co.uk/job'), 'board');
+      assert.equal(sourceLinkHostClass('https://www.simplyhired.ca/job/1'), 'aggregator');
+      assert.equal(sourceLinkHostClass('https://google.com.evil.example/search'), 'other');
+      for (const host of ['www.builtinnyc.com', 'www.builtinchicago.org', 'builtin.com']) {
+        assert.equal(sourceLinkHostClass(`https://${host}/job/1`), 'board', host);
+      }
+      for (const host of ['talentify.io', 'www.salary.com']) assert.equal(sourceLinkHostClass(`https://${host}/job/1`), 'aggregator', host);
+      // An unknown host is the employer's own site only when it carries the company's name.
+      assert.equal(sourceLinkHostClass('https://careers.northwind.example/1', ['Northwind Labs Inc.']), 'employer');
+      assert.equal(sourceLinkHostClass('https://jobs.bankofamerica.com/1', ['Bank of America']), 'employer');
+      assert.equal(sourceLinkHostClass('https://reposter.example/1', ['Northwind Labs Inc.']), 'other');
+      assert.equal(sourceLinkHostClass('https://careers.northwind.example/1'), 'other');
+    },
+  },
+  {
+    name: 'Job source link dead marks on a Google card survive consolidation rewriting the row location',
+    run() {
+      const raw = 'https://www.google.com/search?udm=8&htidocid=abc';
+      const single = job(64, { url: '', googleCardUrl: raw, location: 'Toronto, ON' });
+      const merged = { ...single, location: 'Multiple locations' };
+      const [before] = jobSourceLinks(single);
+      const [after] = jobSourceLinks(merged);
+      assert.notEqual(before.url, after.url, 'the opened Google search carries the row location');
+      assert.equal(jobSourceLinkMark(before), raw, 'the mark is the stored address, not the repaired one');
+      assert.equal(jobSourceLinkMark(before), jobSourceLinkMark(after));
+      assert.deepEqual(pickCurrentJobSourceLink([after], [jobSourceLinkMark(before)]), { current: null, remaining: [], exhausted: true });
+      const saved = card({ ...single, deadSourceUrls: [jobSourceLinkMark(before)] });
+      assert.deepEqual(carryBoardDeadSourceUrls([merged], [saved])[0].deadSourceUrls, [raw]);
+    },
+  },
+  {
+    name: 'Job source link dead marks pick the next link, report exhaustion, and cap stored marks',
+    run() {
+      const links = [{ url: 'https://a.example/1', kind: 'employer' }, { url: 'https://b.example/2', kind: 'board' }];
+      assert.deepEqual(pickCurrentJobSourceLink(links, undefined), { current: links[0], remaining: [links[1]], exhausted: false });
+      assert.deepEqual(pickCurrentJobSourceLink(links, ['https://a.example/1']), { current: links[1], remaining: [], exhausted: false });
+      assert.deepEqual(pickCurrentJobSourceLink(links, ['https://b.example/2', 'https://a.example/1', 42]),
+        { current: null, remaining: [], exhausted: true });
+      assert.deepEqual(pickCurrentJobSourceLink([], ['https://a.example/1']), { current: null, remaining: [], exhausted: false });
+      const once = appendDeadSourceUrl(undefined, 'https://a.example/1');
+      assert.deepEqual(once, ['https://a.example/1']);
+      assert.equal(appendDeadSourceUrl(once, 'https://a.example/1'), once, 'a repeated mark is a no-op');
+      assert.deepEqual(appendDeadSourceUrl(once, 'javascript:alert(1)'), once);
+      const many = Array.from({ length: MAX_DEAD_SOURCE_URLS + 5 }, (_, index) => `https://dead.example/${index}`);
+      const capped = mergeDeadSourceUrls(many);
+      assert.equal(capped.length, MAX_DEAD_SOURCE_URLS);
+      assert.equal(capped.at(-1), many.at(-1), 'the newest marks are kept');
+    },
+  },
+  {
+    name: 'Board Combine carries each card\'s dead marks onto its own rebuilt row and returns untouched rows unchanged',
+    run() {
+      const marked = job(70, { url: 'https://www.linkedin.com/jobs/view/70', applyOptions: [{ href: 'https://jobs.lever.co/acme/70' }] });
+      const other = job(71, { url: 'https://www.linkedin.com/jobs/view/71' });
+      const saved = card({ ...marked, deadSourceUrls: ['https://jobs.lever.co/acme/70'] });
+      // Consolidation gave the job a new representative: a different source key,
+      // but the marked card's own listing is still in its link list.
+      const consolidated = job(72, { url: 'https://www.indeed.com/viewjob?jk=72', location: 'Multiple locations',
+        postingVariants: [{ location: 'Elsewhere', url: 'https://www.linkedin.com/jobs/view/70' },
+          { location: 'Here', url: 'https://jobs.lever.co/acme/70' }] });
+      freeze(marked); freeze(other); freeze(saved); freeze(consolidated);
+      const out = carryBoardDeadSourceUrls([marked, other], [saved, { type: 'text', data: { deadSourceUrls: ['https://www.linkedin.com/jobs/view/71'] } }]);
+      assert.deepEqual(out[0], { ...marked, deadSourceUrls: ['https://jobs.lever.co/acme/70'] });
+      assert.equal(out[1], other, 'a row whose links were never marked keeps its identity');
+      assert.deepEqual(carryBoardDeadSourceUrls([consolidated], [saved])[0].deadSourceUrls, ['https://jobs.lever.co/acme/70'],
+        'a rebuilt row is matched by a link only it holds, not by source key');
+      const already = { ...marked, deadSourceUrls: ['https://jobs.lever.co/acme/70'] };
+      assert.equal(carryBoardDeadSourceUrls([already], [saved])[0], already, 'nothing new to carry keeps identity');
+      assert.equal(carryBoardDeadSourceUrls([marked], [])[0], marked);
+      assert.deepEqual(carryBoardDeadSourceUrls([already], [card(marked)])[0], marked,
+        'the live cards are the authority: a list copied from an older snapshot is replaced');
+      assert.equal(key(out[0]), key(marked), 'dead marks never change the lookup source key');
+      const built = buildJobTreeNodes({ displayedJobs: [out[0], other],
+        bucketTree: { roles: [{ name: 'Synthetic', jobIndices: [0, 1] }],
+          likelihoodBands: [{ label: 'Strong (70-100%)', minScore: 70, maxScore: 100 }],
+          salaryRanges: [{ label: 'Any', minSalary: 0, maxSalary: null }] },
+        originalPos: { x: 0, y: 0 }, hubId: 'board', baseNodeId: 'board' });
+      const cards = built.newNodes.filter(node => node.type === 'jobcard');
+      assert.deepEqual(cards.find(node => node.data.title === marked.title).data.deadSourceUrls, ['https://jobs.lever.co/acme/70']);
+      assert.equal(Object.hasOwn(cards.find(node => node.data.title === other.title).data, 'deadSourceUrls'), false);
+    },
+  },
+  {
+    name: 'Board Combine never moves a dead mark to a different job that shares the address',
+    run() {
+      const careers = 'https://careers.acme.com/';
+      const a = job(73, { company: 'Acme', url: careers, applyOptions: [{ href: 'https://jobs.lever.co/acme/73' }] });
+      const b = job(74, { company: 'Acme', url: careers });
+      const markedA = card({ ...a, deadSourceUrls: [careers] }, 'card-a');
+      const out = carryBoardDeadSourceUrls([a, b], [markedA, card(b, 'card-b')]);
+      assert.deepEqual(out[0].deadSourceUrls, [careers]);
+      assert.equal(out[1], b, 'the other job keeps its only link');
+      assert.deepEqual(pickCurrentJobSourceLink(jobCardSourceLinks(out[1]), out[1].deadSourceUrls).current.url, careers);
+    },
+  },
+  {
+    name: 'Board Combine keeps a Restore when a sibling card still marks the shared address',
+    run() {
+      const lever = 'https://jobs.lever.co/acme/75';
+      const a = job(75, { url: 'https://www.linkedin.com/jobs/view/75', applyOptions: [{ href: lever }] });
+      const b = job(76, { url: 'https://www.indeed.com/viewjob?jk=76', postingVariants: [{ location: 'Elsewhere', url: lever }] });
+      const first = carryBoardDeadSourceUrls([a, b], [card({ ...a, deadSourceUrls: [lever] }, 'card-a'), card({ ...b, deadSourceUrls: [lever] }, 'card-b')]);
+      assert.deepEqual(first.map(row => row.deadSourceUrls), [[lever], [lever]]);
+      // The user restores links on A only; B keeps its own mark.
+      const restoredA = card({ ...first[0], deadSourceUrls: [] }, 'card-a');
+      const second = carryBoardDeadSourceUrls([a, b], [restoredA, card(first[1], 'card-b')]);
+      assert.equal(second[0], a, 'the restored card gets nothing back from its sibling');
+      assert.deepEqual(second[1].deadSourceUrls, [lever]);
+      assert.equal(pickCurrentJobSourceLink(jobCardSourceLinks(second[0]), second[0].deadSourceUrls).current.url, lever);
+    },
+  },
+  {
+    name: 'Board Combine carries dead marks from the live cards right before the tree build',
+    async run() {
+      const source = await fs.readFile(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
+      const carry = source.indexOf('union = carryBoardDeadSourceUrls(union, liveBoardCards);');
+      const live = source.indexOf("const liveBoardCards = getNodes().filter(node => node?.type === 'jobcard' && node?.data?.hubId === id);");
+      const build = source.indexOf('buildJobTreeNodes({\n        displayedJobs: union,');
+      assert.ok(live > 0 && carry > live && build > carry, 'the carry reads live cards and runs before the build');
+      assert.ok(!/\bawait\b/u.test(source.slice(live, build)), 'nothing yields between the live read and the build');
+      assert.equal(source.split('carryBoardDeadSourceUrls(').length - 1, 1, 'there is no earlier carry from the Combine snapshot');
+    },
+  },
+
 ];

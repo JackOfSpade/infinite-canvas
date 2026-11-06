@@ -41,6 +41,75 @@ export function CardProbe({navigation, queue, cards}) {
 
 export default [
   {
+    name: 'real JobCard walks its saved links with Link gone? Next source, reports exhaustion, restores, and respects the lock',
+    async run() {
+      const { bundle, directory } = await cardBundle();
+      try {
+        const { React, act, createRoot, CardProbe } = bundle.module;
+        await withDom(async window => withConsoleCollector(async entries => {
+          window.electronAPI = { openExternal: async () => ({ success: true }) };
+          const lever = 'https://jobs.lever.co/acme/1';
+          const google = 'https://www.google.com/search?q=Platform+Engineer&udm=8&htidocid=doc-1';
+          let card = { id: 'source-link-card', type: 'jobcard',
+            data: job({ officialPosting: null, company: 'Acme', url: lever, googleCardUrl: google }) };
+          const board = { id: 'board', type: 'jobboard', data: {} };
+          const patches = [];
+          const navigation = { getCurrentFile: () => null, enumerateAllNodes: () => [card, board], enumerateAllEdges: () => [],
+            updateNodeDataGlobally: (_id, patch) => {
+              const next = typeof patch === 'function' ? patch(card) : patch;
+              if (!next) return;
+              patches.push(next);
+              card = { ...card, data: { ...card.data, ...next } };
+            } };
+          const queue = { snapshot: { active: null, activeRuns: [], queued: [] },
+            acquireModuleRun: async () => { throw new Error('No run expected'); }, cancelQueuedRunsForNode() {} };
+          const root = createRoot(window.document.getElementById('root'));
+          const render = () => act(async () => root.render(React.createElement(CardProbe, { navigation, queue, cards: [card] })));
+          const linkButton = () => window.document.querySelector('button[aria-label^="Open "]');
+          const exhaustedText = () => [...window.document.querySelectorAll('span')]
+            .some(item => item.textContent.trim() === 'No more saved links for this job.');
+          try {
+            await render();
+            assert.ok(button(window, 'Link gone? Next source'), 'the next-source button shows while a link exists');
+            assert.equal(linkButton().getAttribute('title'), 'Open listing on jobs.lever.co');
+            assert.equal(exhaustedText(), false, 'nothing reports exhaustion before the last link is marked');
+            assert.equal(button(window, 'Restore links'), undefined);
+            await act(async () => button(window, 'Link gone? Next source').click());
+            assert.deepEqual(patches.at(-1), { deadSourceUrls: [lever] });
+            await render();
+            assert.equal(linkButton().getAttribute('title'), 'Open Google Jobs card');
+            assert.equal(exhaustedText(), false);
+            await act(async () => button(window, 'Link gone? Next source').click());
+            assert.deepEqual(patches.at(-1), { deadSourceUrls: [lever, google] });
+            await render();
+            assert.equal(linkButton(), null, 'no link button once every saved link is marked');
+            assert.equal(button(window, 'Link gone? Next source'), undefined);
+            assert.equal(exhaustedText(), true);
+            card = { ...card, data: { ...card.data, locked: true } };
+            await render();
+            const lockedRestore = button(window, 'Restore links');
+            assert.equal(lockedRestore.disabled, true, 'a locked card cannot restore');
+            const sent = patches.length;
+            await act(async () => lockedRestore.click());
+            assert.equal(patches.length, sent, 'a locked card sends no patch');
+            card = { ...card, data: { ...card.data, locked: false } };
+            await render();
+            await act(async () => button(window, 'Restore links').click());
+            assert.deepEqual(patches.at(-1), { deadSourceUrls: [] });
+            await render();
+            assert.equal(linkButton().getAttribute('title'), 'Open listing on jobs.lever.co');
+            card = { ...card, data: { ...card.data, locked: true } };
+            await render();
+            assert.equal(button(window, 'Link gone? Next source').disabled, true, 'a locked card cannot mark a link gone');
+            await act(async () => button(window, 'Link gone? Next source').click());
+            assert.equal(patches.length, sent + 1, 'a locked card sends no mark');
+          } finally { await act(async () => root.unmount()); }
+          assert.deepEqual(entries, [], 'the source-link controls emit no React warnings');
+        }));
+      } finally { await bundle.dispose(); await fs.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'real saved JobCard permits standalone Retry while generation stays protected and unresolved applications fence clicks',
     async run() {
       const { bundle, directory } = await cardBundle();

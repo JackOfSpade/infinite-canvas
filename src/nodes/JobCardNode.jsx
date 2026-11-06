@@ -14,7 +14,7 @@ import { computeJobTreeView, isCompensationRecommendationCurrent, JOB_TREE_LAYOU
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { normalizeExternalHttpUrl } from '../utils/urlSafety';
 import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
-import { normalizeJobListingExternalUrl, summarizeJobListingUrl } from '../utils/jobListingUrl';
+import { summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
 import { BOTH_APPLICATION_DOCUMENTS, applicationDocumentButtonState, applicationDocumentMustWait, canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationAfterDiscard, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup, savedApplicationDocuments, savedApplicationPointer } from '../utils/localAiApplicationLifecycle';
@@ -33,6 +33,7 @@ import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } fro
 import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
 import { officialPostingDisplay } from '../utils/officialPostingDisplay';
+import { appendDeadSourceUrl, jobCardSourceLinks, jobSourceLinkMark, pickCurrentJobSourceLink } from '../utils/jobSourceLinks';
 import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields';
 import { jobCompensationDisplay } from '../utils/jobCompensationDisplay';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation, subscribeOfficialPostingPreparation,
@@ -621,15 +622,23 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     }
   }, [addToast]);
 
+  // Every saved link for this job, most official first; the button opens the
+  // first one the user has not marked as no longer showing the job.
+  const sourceLinkState = useMemo(
+    () => pickCurrentJobSourceLink(jobCardSourceLinks(data), data.deadSourceUrls),
+    [data],
+  );
+  const currentSourceLink = sourceLinkState.current;
+
   const openJobUrl = useCallback(async () => {
-    const url = normalizeJobListingExternalUrl({ ...data, url: postingDisplay.viewUrl || data.url });
+    const url = currentSourceLink?.url || '';
     const diagnostic = summarizeJobListingUrl(data, url);
     // `summarizeJobListingUrl` deliberately redacts every non-vocabulary path
     // segment to `:segment`, so these are route SHAPES, never the URL. Naming
     // them `raw`/`target` read as the literal link and made a redacted
     // `ca.linkedin.com/jobs/view/:segment` look like a placeholder the card had
     // actually dispatched. The names now say what the value is.
-    EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} rawRoute=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} targetRoute=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
+    EventLogger.log(`[JobCard] external-link requested id=${id} source=${data.source || '?'} kind=${currentSourceLink?.kind || 'none'} rawRoute=${diagnostic.rawRoute} q=${diagnostic.rawQuery} htidocid=${diagnostic.documentId} targetRoute=${diagnostic.targetRoute} repaired=${diagnostic.repaired ? 'yes' : 'no'}`);
     await openCardExternalUrl(url, {
       onRejected: () => EventLogger.log(`[JobCard] external-link rejected id=${id} reason=${url ? 'dispatcher-unavailable' : 'invalid-or-missing-url'}`),
       onDispatched: () => EventLogger.log(`[JobCard] external-link dispatched id=${id} targetRoute=${diagnostic.targetRoute}`),
@@ -638,7 +647,29 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         EventLogger.log(`[JobCard] external-link failed id=${id} targetRoute=${diagnostic.targetRoute} reason=${reason}`);
       },
     });
-  }, [id, data, postingDisplay.viewUrl, openCardExternalUrl]);
+  }, [id, data, currentSourceLink, openCardExternalUrl]);
+
+  // A dead mark only moves the button to the next saved link. It never hides
+  // the card or touches liveness or the official-posting result.
+  const markSourceLinkGone = useCallback(() => {
+    const link = currentSourceLink;
+    if (!link || effectiveLock) return;
+    updateGlobal(id, (node) => {
+      if (!node?.data || node.data.locked) return null;
+      const live = node.data.deadSourceUrls;
+      const next = appendDeadSourceUrl(live, jobSourceLinkMark(link));
+      return next === live ? null : { deadSourceUrls: next };
+    });
+    const route = summarizeJobListingUrl(data, link.url).targetRoute;
+    EventLogger.log(`[JobCard] source-link marked gone id=${id} kind=${link.kind} targetRoute=${route} remaining=${sourceLinkState.remaining.length}`);
+  }, [id, data, currentSourceLink, sourceLinkState.remaining.length, effectiveLock, updateGlobal]);
+
+  const restoreSourceLinks = useCallback(() => {
+    if (effectiveLock) return;
+    updateGlobal(id, (node) => (node?.data && !node.data.locked && node.data.deadSourceUrls?.length
+      ? { deadSourceUrls: [] } : null));
+    EventLogger.log(`[JobCard] source-links restored id=${id}`);
+  }, [id, effectiveLock, updateGlobal]);
 
   const openResearchSource = useCallback(async (rawUrl) => {
     const opened = await openExternalUrl(rawUrl, {
@@ -1908,15 +1939,39 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         )}
         {data.posted && !postingDisplay.officialOnly && <span className="text-white/20" title={data.posted}>{formatPostedForDisplay(data.posted)}</span>}
         {postingDisplay.levelLabel && <span className="px-1.5 py-0.5 rounded-full text-[9px] font-medium bg-white/10 text-white/60 border border-white/10">{postingDisplay.levelLabel}</span>}
-        {(postingDisplay.viewUrl || data.url || data.googleCardUrl) && (
-          <button
-            onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
-            className="ml-auto -my-1 p-1 text-white/30 hover:text-white/70 transition-colors"
-            title={postingDisplay.viewLabel}
-            aria-label={postingDisplay.viewLabel}
-          >
-            <ExternalLink size={12} />
-          </button>
+        {currentSourceLink && (
+          <span className="ml-auto -my-1 flex items-center gap-1" onPointerDown={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); markSourceLinkGone(); }}
+              disabled={effectiveLock}
+              className="rounded px-1 py-0.5 text-white/35 hover:text-white/70 disabled:opacity-50 transition-colors"
+              title={sourceLinkState.remaining.length > 0
+                ? 'The link no longer shows this job: show the next most official saved link'
+                : 'The link no longer shows this job: this is the last saved link'}
+            >Link gone? Next source</button>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); openJobUrl(); }}
+              className="p-1 text-white/30 hover:text-white/70 transition-colors"
+              title={currentSourceLink.label}
+              aria-label={currentSourceLink.label}
+            >
+              <ExternalLink size={12} />
+            </button>
+          </span>
+        )}
+        {sourceLinkState.exhausted && (
+          <span className="ml-auto flex items-center gap-1" onPointerDown={(e) => e.stopPropagation()}>
+            <span className="text-white/35">No more saved links for this job.</span>
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); restoreSourceLinks(); }}
+              disabled={effectiveLock}
+              className="rounded px-1 py-0.5 text-white/50 bg-white/5 hover:bg-white/10 disabled:opacity-50"
+              title="Clear the marks and show this job's saved links again"
+            >Restore links</button>
+          </span>
         )}
       </div>
 

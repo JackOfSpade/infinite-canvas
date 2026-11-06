@@ -558,4 +558,36 @@ export default [
       return true;
     },
   },
+  {
+    name: 'consolidation: merged rows take the union of members\' dead source-link marks',
+    run: () => {
+      const jobs = brightfieldStyleFourLocation();
+      jobs[1] = { ...jobs[1], deadSourceUrls: ['https://jobs.example.com/brightfield/b'] };
+      jobs[3] = { ...jobs[3], deadSourceUrls: ['https://jobs.example.com/brightfield/d', 'https://jobs.example.com/brightfield/b'] };
+      const { jobs: out } = consolidateJobLocations(jobs);
+      assert(out.length === 1, 'the four postings still collapse');
+      assert(JSON.stringify(out[0].deadSourceUrls) === JSON.stringify(['https://jobs.example.com/brightfield/b', 'https://jobs.example.com/brightfield/d']),
+        `dead marks are unioned, got ${JSON.stringify(out[0].deadSourceUrls)}`);
+      const { jobs: clean } = consolidateJobLocations(brightfieldStyleFourLocation());
+      assert(!Object.hasOwn(clean[0], 'deadSourceUrls'), 'rows without marks gain no field');
+    },
+  },
+  {
+    name: 'migration: the surviving card keeps dead source-link marks from the cards it absorbs',
+    run: () => {
+      const base = brightfieldStyleFourLocation();
+      const boardId = 'board-dead';
+      const nodes = [
+        { id: boardId, type: 'jobboard', data: {} },
+        { id: 'card-a', type: 'jobcard', data: { ...base[0], hubId: boardId } },
+        { id: 'card-b', type: 'jobcard', data: { ...base[1], hubId: boardId, deadSourceUrls: ['https://jobs.example.com/brightfield/b'] } },
+        { id: 'card-c', type: 'jobcard', data: { ...base[2], hubId: boardId } },
+        { id: 'card-d', type: 'jobcard', data: { ...base[3], hubId: boardId, deadSourceUrls: ['https://jobs.example.com/brightfield/d'] } },
+      ];
+      const cards = consolidateBoardCascadeNodes(nodes).nodes.filter(n => n.type === 'jobcard');
+      assert(cards.length === 1, `four duplicate cards reduce to one, got ${cards.length}`);
+      assert(JSON.stringify([...cards[0].data.deadSourceUrls].sort()) === JSON.stringify(['https://jobs.example.com/brightfield/b', 'https://jobs.example.com/brightfield/d']),
+        `the survivor holds every absorbed card's marks, got ${JSON.stringify(cards[0].data.deadSourceUrls)}`);
+    },
+  },
 ];

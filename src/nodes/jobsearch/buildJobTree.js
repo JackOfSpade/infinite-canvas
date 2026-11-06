@@ -2,6 +2,7 @@ import { mostOfficialSource, normalizeOfficialPosting } from '../../../electron/
 import { structuralEdge } from '../_shared/edgeHelpers.js';
 import { isJobCardVisible } from '../../utils/jobCardFilters.js';
 import { validateJobBoardTaxonomy } from '../../utils/jobBoardAiProvider.js';
+import { mergeDeadSourceUrls } from '../../utils/jobSourceLinks.js';
 
 /**
  * Pure helpers for turning scored jobs + taxonomy metadata into the React
@@ -1125,6 +1126,11 @@ export function buildJobTreeNodes({
         preferenceAssessment: job.preferenceAssessment,
         source: job.source, sourceJobKey: job.sourceJobKey, url: job.url, googleCardUrl: job.googleCardUrl,
         applySource: job.applySource, posted: job.posted, language: job.language,
+        // Links the user marked as no longer showing the job. Combine carries
+        // them onto the rebuilt row from the live cards; a reused card's own
+        // current marks are kept alongside, never overwritten by the row.
+        ...(Array.isArray(job.deadSourceUrls) && job.deadSourceUrls.length > 0
+          ? { deadSourceUrls: mergeDeadSourceUrls(reusedData?.deadSourceUrls, job.deadSourceUrls) } : {}),
         // Consolidated multi-location rows persist their bounded variant union;
         // ordinary cards omit the field entirely.
         ...(Array.isArray(job.postingVariants) && job.postingVariants.length > 0

@@ -9,6 +9,7 @@ import { beginOfficialPostingPreparation, getOfficialPostingPreparation, project
 import { OFFICIAL_POSTING_LABELS, normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
+import { jobCardSourceLinks, pickCurrentJobSourceLink } from '../../src/utils/jobSourceLinks.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import {
   hasLinkedLocalApplicationOutput, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision,
@@ -558,7 +559,8 @@ export default [
         assert.equal(display.statusLabel, 'Outdated lookup · check again');
         const opened = [];
         const open = runInNewContext(`${source.slice(start, end)}\nopenJobUrl;`, {
-          useCallback: fn => fn, data: job, postingDisplay: display, id: 'synthetic-closed-card', normalizeJobListingExternalUrl,
+          useCallback: fn => fn, useMemo: fn => fn(), data: job, postingDisplay: display, id: 'synthetic-closed-card',
+          jobCardSourceLinks, pickCurrentJobSourceLink,
           summarizeJobListingUrl: () => ({}), EventLogger: { log() {} }, addToast: value => { throw new Error(value.description); },
           window: { electronAPI: { openExternal: async url => { opened.push(url); return { success: true }; } } },
         });
@@ -926,9 +928,11 @@ export default [
     run() {
       const source = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
       assert.ok(source.includes("from '../utils/officialPostingDisplay'"));
-      assert.ok(source.includes('normalizeJobListingExternalUrl({ ...data, url: postingDisplay.viewUrl || data.url })'));
-      assert.ok(source.includes('(postingDisplay.viewUrl || data.url || data.googleCardUrl)'));
-      assert.ok(source.includes('title={postingDisplay.viewLabel}') && source.includes('aria-label={postingDisplay.viewLabel}'));
+      // The link button opens the first saved link not marked gone; every link in
+      // that chain already passed the renderer URL policy in jobSourceLinks.
+      assert.ok(source.includes('pickCurrentJobSourceLink(jobCardSourceLinks(data), data.deadSourceUrls)'));
+      assert.ok(source.includes("const url = currentSourceLink?.url || '';"));
+      assert.ok(source.includes('title={currentSourceLink.label}') && source.includes('aria-label={currentSourceLink.label}'));
       assert.ok(source.includes('Finding posting…') && source.includes("{displayedApplicationRun.state === 'resolving' && ("));
       assert.ok(source.includes('displayedApplicationRun.cancel?.()'));
       const body = generateBody(); const prepareAt = body.indexOf('await window.electronAPI.prepareOfficialPostingForGeneration?.(');

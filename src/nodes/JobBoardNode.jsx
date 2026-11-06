@@ -21,6 +21,7 @@ import { useUnmountEffect } from '../hooks/useUnmountEffect';
 import { useEpochCancellation } from '../hooks/useEpochCancellation';
 import { useBoardOfficialPostingRefresh } from '../hooks/useBoardOfficialPostingRefresh';
 import { carryBoardOfficialPostingResults, countBoardOfficialRetries } from '../utils/jobBoardOfficialPostingRefresh';
+import { carryBoardDeadSourceUrls } from '../utils/jobSourceLinks';
 import { beginOfficialPostingPreparation, getOfficialPostingPreparation } from '../utils/officialPostingPreparation';
 import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
@@ -3587,6 +3588,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         addToast({ title: 'Combine paused', description: 'Application cards changed while Combine was running. Run Combine saved results again to keep their current application state.', type: 'info' });
         return { status: 'superseded' };
       }
+
+      // Links a card marked as no longer showing the job stay marked on the
+      // rebuilt rows. Read from the live cards right before the build: cards
+      // stay editable while Combine runs, so a mark or Restore made after the
+      // Combine snapshot must not be lost or undone.
+      const liveBoardCards = getNodes().filter(node => node?.type === 'jobcard' && node?.data?.hubId === id);
+      union = carryBoardDeadSourceUrls(union, liveBoardCards);
 
       const originalPos = getNode(id)?.position || { x: 0, y: 0 };
       const baseNodeId = `board-${id}-${Date.now()}`;

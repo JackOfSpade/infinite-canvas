@@ -22,6 +22,7 @@
  *     replaced, or orphaned.
  */
 import { listingStateRank } from '../../electron/ipc/officialPostingFields.js';
+import { mergeDeadSourceUrls } from './jobSourceLinks.js';
 
 /** Minimum normalized alphanumeric length of a full description/snippet. */
 export const MIN_DESCRIPTION_ALNUM = 500;
@@ -426,6 +427,11 @@ function buildConsolidatedRow(members, primaryMember) {
     consolidatedLocationCount: locations.size,
     consolidatedPostingCount: members.length,
   };
+  // A link the user marked gone on any member card is gone for the merged
+  // posting too; the merged row offers every member's links.
+  const deadSourceUrls = mergeDeadSourceUrls(...members.map(member => member?.deadSourceUrls));
+  if (deadSourceUrls.length > 0) row.deadSourceUrls = deadSourceUrls;
+  else delete row.deadSourceUrls;
   const reuseCardId = jobCardId(primary);
   if (reuseCardId) row.reuseCardId = reuseCardId;
   if (primary?.cardData) row.reuseCardData = primary.cardData;
@@ -816,6 +822,7 @@ export function consolidateBoardCascadeNodes(nodes) {
           postingVariants: job.postingVariants,
           consolidatedLocationCount: job.consolidatedLocationCount,
           consolidatedPostingCount: job.consolidatedPostingCount,
+          ...(job.deadSourceUrls?.length ? { deadSourceUrls: job.deadSourceUrls } : {}),
         });
       }
     }
