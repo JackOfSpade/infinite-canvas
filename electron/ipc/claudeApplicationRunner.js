@@ -75,6 +75,19 @@ const MESSAGES = Object.freeze({
   tooMany: runs => `Stopped after ${runs} Claude runs without finishing this application.`,
 });
 
+/** The one resumed turn after the editorial plan failed schema validation. */
+export function buildEditorialPlanCorrectionPrompt(reason) {
+  return [
+    'Your previous JSON was rejected by the validator.',
+    `Validator reason: ${clip(reason, 300)}`,
+    'Reply with the COMPLETE corrected JSON object only, with no other text.',
+    'It must contain exactly the keys thesis, paragraphs, omissions, qualification.',
+    'Every paragraph must contain exactly point, jobNeed, evidenceIds, editorialNote.',
+    'Every omission must contain exactly evidenceIds, editorialNote.',
+    'All text must be nonempty. Copy evidence IDs exactly from the catalog you were given.',
+  ].join('\n');
+}
+
 export class ClaudeRunnerError extends Error {
   constructor(code, message, detail, result) {
     super(message);
@@ -769,6 +782,14 @@ export function createClaudeApplicationRunner({
     return { retryModel: MODEL_FAMILIES[model]?.label || model, retryEffort: effort };
   }
 
+  // The call that actually failed. Differs from the retry profile when a
+  // failure in a side call (the editorial plan) fails the write stage.
+  function failedCallProfile(jobId, stage) {
+    if (!nonEmptyString(stage)) return {};
+    const { model, effort } = jobStageProfile(jobId, stage);
+    return { failedModel: MODEL_FAMILIES[model]?.label || model, failedEffort: effort };
+  }
+
   function laneFor(jobId, laneKey) {
     let lanes = sessions.get(jobId);
     if (!lanes) { lanes = new Map(); sessions.set(jobId, lanes); }
@@ -886,6 +907,7 @@ export function createClaudeApplicationRunner({
       ...(patch.message ? { message: patch.message } : {}),
       ...(patch.upgradeModel ? { upgradeModel: patch.upgradeModel } : {}),
       ...(patch.status === 'failed' ? retryProfile(jobId, patch.retryStage || patch.stage) : {}),
+      ...(patch.status === 'failed' ? failedCallProfile(jobId, patch.failedCallStage || patch.retryStage || patch.stage) : {}),
       updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : now(),
       startedAt: previous?.startedAt ?? drivers.get(jobId)?.startedAt ?? now(),
       ...(patch.progress !== undefined ? { progress: patch.progress } : previous?.progress ? { progress: previous.progress } : {}),
@@ -1029,6 +1051,8 @@ export function createClaudeApplicationRunner({
         ...(upgradeModel ? { upgradeModel } : {}),
         ...(typeof entry.retryModel === 'string' && typeof entry.retryEffort === 'string'
           ? { retryModel: entry.retryModel, retryEffort: entry.retryEffort } : retryProfile(jobId, entry.stage)),
+        ...(typeof entry.failedModel === 'string' && typeof entry.failedEffort === 'string'
+          ? { failedModel: entry.failedModel, failedEffort: entry.failedEffort } : {}),
         updatedAt: Number.isFinite(entry.updatedAt) ? entry.updatedAt : now(),
       });
     }
@@ -1182,7 +1206,7 @@ export function createClaudeApplicationRunner({
           } else if (!saved) {
             const planSessionId = crypto.randomUUID();
             try {
-              const planned = await invokeLoggedStage({ stage: 'editorial-plan', text: buildEditorialPlanPrompt(handoff.prompt),
+              let planned = await invokeLoggedStage({ stage: 'editorial-plan', text: buildEditorialPlanPrompt(handoff.prompt),
                 sessionId: planSessionId, handoff, matchTaskId });
               planRecord = planned.record;
               const checkPlanningCancellation = async () => {
@@ -1192,8 +1216,22 @@ export function createClaudeApplicationRunner({
                 throw error;
               };
               await checkPlanningCancellation();
+              let plan;
+              try {
+                plan = parseEditorialPlanResponse(planned.result?.text, allowedIds);
+              } catch (firstError) {
+                // One schema-correction turn in the same plan session. A thrown
+                // planner call never reaches here, so it is never retried.
+                await logRun(jobId, canvasFilePath, { version: 2, jobId, stage: 'editorial-plan', ...planned.record,
+                  event: 'editorial-plan-retry', reason: clip(firstError?.message, 300) });
+                planned = await invokeLoggedStage({ stage: 'editorial-plan', text: buildEditorialPlanCorrectionPrompt(firstError?.message),
+                  sessionId: planSessionId, resume: true, handoff, matchTaskId });
+                planRecord = planned.record;
+                await checkPlanningCancellation();
+                plan = parseEditorialPlanResponse(planned.result?.text, allowedIds);
+              }
               saved = await saveEditorialPlan({ ...archiveArgs, writerPromptSha256: binding.writerPromptSha256,
-                plan: parseEditorialPlanResponse(planned.result?.text, allowedIds), planRunId: planned.record.runId,
+                plan, planRunId: planned.record.runId,
                 planSessionId, model: planned.result?.model, createdAt: new Date(now()).toISOString() });
               await checkPlanningCancellation();
             } finally {
@@ -1213,6 +1251,7 @@ export function createClaudeApplicationRunner({
         } catch (error) {
           if (error instanceof ClaudeRunnerError) throw error;
           const failure = new ClaudeRunnerError('CLAUDE_EDITORIAL_PLAN_ERROR', 'The private editorial outline could not be validated or saved. Review the diagnostic archive before retrying.', { reason: clip(error?.message, 300) });
+          failure.failedCall = 'editorial-plan';
           await logRun(jobId, canvasFilePath, { version: 2, jobId, stage: 'editorial-plan', ...planRecord,
             event: 'editorial-plan-error', error: auditFailure(failure) });
           throw failure;
@@ -1402,9 +1441,13 @@ export function createClaudeApplicationRunner({
         const error = raw instanceof ClaudeRunnerError ? raw : applicationError(raw);
         const failedStage = error.code === 'CLAUDE_SAFEGUARD_BLOCKED' && error.failedStage ? error.failedStage : entry.stage;
         const upgradeModel = safeguardUpgrade(jobId, error.code, failedStage);
-        setState(jobId, canvasFilePath, { status: 'failed', stage: failedStage, retryStage: error.failedStage, code: error.code,
+        setState(jobId, canvasFilePath, { status: 'failed', stage: failedStage, retryStage: error.failedStage, ...(error.failedCall ? { failedCallStage: error.failedCall } : {}), code: error.code,
           message: upgradeModel ? `${error.message}${SAFEGUARD_UPGRADE_NOTE}` : error.message, ...(upgradeModel ? { upgradeModel } : {}) });
-        logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}`);
+        // The editorial-plan validator reason is fixed schema text (field
+        // labels and limits, never plan prose), so bug reports can carry it.
+        const planReason = error.code === 'CLAUDE_EDITORIAL_PLAN_ERROR' && typeof error.detail?.reason === 'string'
+          ? ` reason=${clip(error.detail.reason.replace(/\s+/g, ' '), 200)}` : '';
+        logger?.error?.(`[ClaudeRunner] job=${jobId.slice(0, 8)} stage=${entry.stage ?? 'none'} code=${error.code}${planReason}`);
         await persist();
       } finally {
         if (drivers.get(jobId) === entry) drivers.delete(jobId);

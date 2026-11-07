@@ -178,4 +178,19 @@ export default [
       assert(applicationDockItemState('blocked', normalizeClaudeRun({ status: 'running' })) === 'blocked', 'blocked stays blocked');
     },
   },
+  {
+    name: 'claude dock: the failed-on label prefers the failed call over the retry profile',
+    run() {
+      const planner = normalizeClaudeRun({ status: 'failed', retryModel: 'Opus', retryEffort: 'low', failedModel: 'Opus', failedEffort: 'xhigh' });
+      assert(planner.failedModel === 'Opus' && planner.failedEffort === 'xhigh', 'failed fields survive normalization');
+      assert(claudeFailedOnLabel(planner) === 'Failed on Opus (xhigh effort)', `failed call named: ${claudeFailedOnLabel(planner)}`);
+      assert(claudeRetryLabel(planner) === 'Retry with Opus (low effort)', 'retry label keeps the retry profile');
+      const legacy = normalizeClaudeRun({ status: 'failed', retryModel: 'Opus', retryEffort: 'low' });
+      assert(claudeFailedOnLabel(legacy) === 'Failed on Opus (low effort)', 'falls back to the retry fields');
+      const bogus = normalizeClaudeRun({ status: 'failed', retryModel: 'Sonnet', retryEffort: 'high', failedModel: 'private prose', failedEffort: 'xhigh' });
+      assert(!('failedModel' in bogus), 'an unknown failed model is dropped');
+      assert(claudeFailedOnLabel(bogus) === 'Failed on Sonnet (high effort)', 'an unknown failed model falls back to retry');
+      assert(claudeFailedOnLabel(normalizeClaudeRun({ status: 'failed' })) === '', 'neither pair gives no label');
+    },
+  },
 ];

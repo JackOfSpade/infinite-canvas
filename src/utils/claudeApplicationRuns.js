@@ -37,6 +37,8 @@ export function normalizeClaudeRun(state) {
     ...(state.upgradeModel === 'Opus' ? { upgradeModel: state.upgradeModel } : {}),
     ...(RETRY_MODELS.includes(state.retryModel) && RETRY_EFFORTS.includes(state.retryEffort)
       ? { retryModel: state.retryModel, retryEffort: state.retryEffort } : {}),
+    ...(RETRY_MODELS.includes(state.failedModel) && RETRY_EFFORTS.includes(state.failedEffort)
+      ? { failedModel: state.failedModel, failedEffort: state.failedEffort } : {}),
     updatedAt: optionalTime(state.updatedAt),
     lastActivityAt: optionalTime(state.lastActivityAt),
     ...(optionalTime(state.startedAt) !== null ? { startedAt: state.startedAt } : {}),
@@ -50,8 +52,9 @@ export function normalizeClaudeRun(state) {
   };
 }
 
-/** The model and effort that just failed; a plain retry uses the same pair. */
+/** The model and effort of the call that failed; falls back to the retry pair. */
 export function claudeFailedOnLabel(run) {
+  if (run?.failedModel && run?.failedEffort) return `Failed on ${run.failedModel} (${run.failedEffort} effort)`;
   return run?.retryModel ? `Failed on ${run.retryModel} (${run.retryEffort} effort)` : '';
 }
 

@@ -363,7 +363,7 @@ export default [
         try {
           await startAndWait(runner, harness, 'failed');
           await runner.shutdown();
-          assert.deepEqual(calls.map(call => call.stage), ['editorial-plan']);
+          assert.deepEqual(calls.map(call => call.stage), ['editorial-plan', 'editorial-plan']);
           assert.equal(api.submits.length, 0);
           assert.equal(archivedPlans(harness).length, 0);
           assert.equal(fs.existsSync(path.join(transcriptDirectory, `${calls[0].sessionId}.jsonl`)), false);
@@ -612,6 +612,119 @@ export default [
         const response = rows.find(row => row.event === 'response');
         assert.deepEqual([response.thinkingSummaryCount, response.thinkingSummaryChars, response.thinkingSummaryPresent, response.thinkingDisplay, response.summaryStatus], [0, 0, false, 'summarized', 'complete']);
         assert.equal(fs.readFileSync(harness.logFile, 'utf8').includes(prompt), false);
+      } finally { await cleanup(harness, runner); }
+    },
+  },
+  {
+    name: 'claude diagnostics: an invalid editorial plan gets one resumed correction in the same plan session',
+    async run() {
+      const fixture = writingFixture();
+      const slipped = JSON.parse(JSON.stringify(fixture.plan));
+      for (const paragraph of slipped.paragraphs) delete paragraph.editorialNote;
+      const harness = temporaryCanvas();
+      const api = sequenceApi([fixture.handoff]);
+      const calls = [];
+      const runner = runnerFor(harness, api, async call => {
+        calls.push(call);
+        const planCalls = calls.filter(item => item.stage === 'editorial-plan').length;
+        return answerFor(call, call.stage === 'editorial-plan' && planCalls === 1 ? slipped : fixture.plan);
+      });
+      try {
+        await startAndWait(runner, harness);
+        await runner.shutdown();
+        assert.deepEqual(calls.map(call => call.stage), ['editorial-plan', 'editorial-plan', 'write']);
+        assert.equal(calls[0].resume, false);
+        assert.equal(calls[1].resume, true);
+        assert.equal(calls[1].sessionId, calls[0].sessionId);
+        assert.notEqual(calls[2].sessionId, calls[0].sessionId);
+        const retries = rowsAt(harness.logFile).filter(row => row.event === 'editorial-plan-retry');
+        assert.equal(retries.length, 1);
+        assert.equal(retries[0].stage, 'editorial-plan');
+        assert.ok(retries[0].reason.includes('editorialNote'), retries[0].reason);
+        assert.ok(calls[1].text.includes(retries[0].reason), 'the correction quotes the validator reason');
+        assert.ok(calls[1].text.includes('COMPLETE corrected JSON'));
+        const archives = archivedPlans(harness);
+        assert.equal(archives.length, 1);
+        assert.deepEqual(archives[0].record.plan, fixture.plan);
+        assert.equal(api.submits.length, 1);
+      } finally { await cleanup(harness, runner); }
+    },
+  },
+  {
+    name: 'claude diagnostics: a second invalid editorial plan fails with the second reason and names the planner model',
+    async run() {
+      const fixture = writingFixture();
+      const slipped = JSON.parse(JSON.stringify(fixture.plan));
+      for (const paragraph of slipped.paragraphs) delete paragraph.editorialNote;
+      const harness = temporaryCanvas();
+      const api = sequenceApi([fixture.handoff]);
+      const calls = [];
+      const runner = runnerFor(harness, api, async call => {
+        calls.push(call);
+        return { text: calls.length === 1 ? JSON.stringify(slipped) : 'not JSON', model: OPUS };
+      });
+      let restarted;
+      try {
+        const state = await startAndWait(runner, harness, 'failed');
+        await runner.shutdown();
+        assert.equal(state.code, 'CLAUDE_EDITORIAL_PLAN_ERROR');
+        assert.deepEqual(calls.map(call => call.stage), ['editorial-plan', 'editorial-plan']);
+        assert.equal(api.submits.length, 0);
+        assert.deepEqual([state.retryModel, state.retryEffort, state.failedModel, state.failedEffort], ['Opus', 'low', 'Opus', 'xhigh']);
+        const rows = rowsAt(harness.logFile);
+        const retry = rows.find(row => row.event === 'editorial-plan-retry');
+        const failure = rows.find(row => row.event === 'editorial-plan-error');
+        assert.ok(retry.reason.includes('editorialNote'));
+        assert.equal(typeof failure.error.detail.reason, 'string');
+        assert.notEqual(failure.error.detail.reason, retry.reason, 'the final reason is the second failure');
+        assert.equal(failure.error.detail.reason.includes('editorialNote'), false);
+        assert.equal(rows.some(row => row.event === 'started' && row.stage === 'write'), false);
+        restarted = runnerFor(harness, api, async () => assert.fail('no call on restore'));
+        await restarted.load();
+        const restored = restarted.status([harness.jobId])[harness.jobId];
+        assert.deepEqual([restored.retryModel, restored.retryEffort, restored.failedModel, restored.failedEffort], ['Opus', 'low', 'Opus', 'xhigh']);
+      } finally { await cleanup(harness, runner, restarted); }
+    },
+  },
+  {
+    name: 'claude diagnostics: a thrown editorial-plan call is never retried',
+    async run() {
+      const fixture = writingFixture();
+      const harness = temporaryCanvas();
+      const api = sequenceApi([fixture.handoff]);
+      const calls = [];
+      const runner = runnerFor(harness, api, async call => {
+        calls.push(call);
+        throw new ClaudeRunnerError('CLAUDE_ERROR', 'Synthetic planner failure.');
+      });
+      try {
+        const state = await startAndWait(runner, harness, 'failed');
+        await runner.shutdown();
+        assert.equal(state.code, 'CLAUDE_ERROR');
+        assert.deepEqual(calls.map(call => call.stage), ['editorial-plan']);
+        assert.equal(rowsAt(harness.logFile).some(row => row.event === 'editorial-plan-retry'), false);
+        assert.equal(api.submits.length, 0);
+      } finally { await cleanup(harness, runner); }
+    },
+  },
+  {
+    name: 'claude diagnostics: an editorial-plan failure logs its validator reason for bug reports',
+    async run() {
+      const fixture = writingFixture();
+      const slipped = JSON.parse(JSON.stringify(fixture.plan));
+      for (const paragraph of slipped.paragraphs) delete paragraph.editorialNote;
+      const harness = temporaryCanvas();
+      const api = sequenceApi([fixture.handoff]);
+      const errors = [];
+      const runner = runnerFor(harness, api, async () => ({ text: JSON.stringify(slipped), model: OPUS }),
+        { logger: { error: line => errors.push(line), warn() {}, info() {} } });
+      try {
+        await startAndWait(runner, harness, 'failed');
+        await runner.shutdown();
+        const line = errors.find(entry => entry.includes('code=CLAUDE_EDITORIAL_PLAN_ERROR'));
+        assert.ok(line, errors.join('\n'));
+        assert.match(line, / reason=Editorial plan paragraph 1 must contain exactly point, jobNeed, evidenceIds, editorialNote\.$/);
+        assert.equal(line.includes(fixture.plan.paragraphs[0].point), false, 'no plan prose is logged');
       } finally { await cleanup(harness, runner); }
     },
   },
