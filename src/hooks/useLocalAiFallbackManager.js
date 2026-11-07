@@ -610,8 +610,11 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
       if (!canvasFilePath || !api?.findSavedApplicationLinks) return;
       const cards = allNodes.filter(node => node.type === 'jobcard' && !node.data?.localApplication);
       const jobs = cards.map(node => ({ nodeId: node.id, url: node.data?.url,
-        googleCardUrl: node.data?.googleCardUrl, postingVariants: node.data?.postingVariants }));
-      const signature = JSON.stringify([canvasFilePath, jobs.map(job => [job.nodeId, applicationListingKeys(job)])]);
+        googleCardUrl: node.data?.googleCardUrl, postingVariants: node.data?.postingVariants,
+        title: typeof node.data?.title === 'string' ? node.data.title : '',
+        company: typeof node.data?.company === 'string' ? node.data.company : '',
+        location: typeof node.data?.location === 'string' ? node.data.location : '' }));
+      const signature = JSON.stringify([canvasFilePath, jobs.map(job => [job.nodeId, applicationListingKeys(job), job.title, job.company, job.location])]);
       if (signature === restoredInventory || !jobs.length) return;
       let result;
       try { result = await api.findSavedApplicationLinks({ canvasFilePath, jobs }); }
@@ -619,22 +622,54 @@ export function useLocalAiFallbackManager({ navigation, getCurrentFile, addToast
         EventLogger.log(`[ApplicationLinks] lookup failed: ${error?.message || error}`);
         return;
       }
-      if (!result?.success || !Array.isArray(result.links)) return;
+      if (!result?.success) return;
+      // Older backends may omit either array: treat a missing one as empty.
+      const links = Array.isArray(result.links) ? result.links : [];
+      const roleMatches = Array.isArray(result.roleMatches) ? result.roleMatches : [];
       if (disposed || !isCurrentQuitGeneration(generation) || ctxRef.current.getCurrentFile?.() !== canvasFilePath) return;
       restoredInventory = signature;
       let restored = 0;
-      for (const link of result.links) {
+      let roleUpdated = 0;
+      let roleCleared = 0;
+      const listingUnchanged = (node, original) => !!original && node?.type === 'jobcard' && !node.data?.localApplication
+        && JSON.stringify(applicationListingKeys(node.data)) === JSON.stringify(applicationListingKeys(original.data));
+      const linkedIds = new Set();
+      for (const link of links) {
+        linkedIds.add(link.nodeId);
         const original = cards.find(node => node.id === link.nodeId);
         ctxRef.current.navigation?.updateNodeDataGlobally?.(link.nodeId, node => {
-          if (!original || node?.type !== 'jobcard' || node.data?.localApplication
-            || JSON.stringify(applicationListingKeys(node.data)) !== JSON.stringify(applicationListingKeys(original.data))) return null;
+          if (!listingUnchanged(node, original)) return null;
           restored++;
-          return { localApplication: link.localApplication };
+          // An exact saved bundle supersedes any earlier same-role pointer.
+          return { localApplication: link.localApplication, priorRoleApplication: null };
         });
       }
-      if (restored) {
+      const matchedIds = new Set();
+      for (const match of roleMatches) {
+        const prior = match?.priorRoleApplication;
+        if (!match || typeof match.nodeId !== 'string' || !prior || typeof prior !== 'object' || linkedIds.has(match.nodeId)) continue;
+        matchedIds.add(match.nodeId);
+        const original = cards.find(node => node.id === match.nodeId);
+        ctxRef.current.navigation?.updateNodeDataGlobally?.(match.nodeId, node => {
+          if (!listingUnchanged(node, original)) return null;
+          const stored = node.data?.priorRoleApplication;
+          if (stored && stored.id === prior.id && stored.appliedAt === prior.appliedAt) return null;
+          roleUpdated++;
+          return { priorRoleApplication: prior };
+        });
+      }
+      // The earlier bundle was deleted or the title changed: drop stale pointers.
+      for (const original of cards) {
+        if (linkedIds.has(original.id) || matchedIds.has(original.id) || !original.data?.priorRoleApplication) continue;
+        ctxRef.current.navigation?.updateNodeDataGlobally?.(original.id, node => {
+          if (!listingUnchanged(node, original) || !node.data?.priorRoleApplication) return null;
+          roleCleared++;
+          return { priorRoleApplication: null };
+        });
+      }
+      if (restored || roleUpdated || roleCleared) {
         ctxRef.current.nudgePersistence?.();
-        EventLogger.log(`[ApplicationLinks] restored saved bundle pointers cards=${restored}`);
+        if (restored || roleUpdated) EventLogger.log(`[ApplicationLinks] restored saved bundle pointers cards=${restored} role=${roleUpdated}`);
       }
     };
 

@@ -85,6 +85,8 @@ import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProvid
 import { beginJobContinuation, checkpointJobContinuationResult, claimJobContinuation, clearJobContinuations, completeJobContinuation, listJobContinuations, pauseJobContinuations, publishJobContinuationParentUpdate, readJobContinuationResult, releaseJobContinuationExecution, retireTerminalJobContinuations, validateJobContinuationAuthority } from './jobContinuation.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution, validateJobBoardRunExecution } from './jobBoardRunLease.js';
 import { loadJobsHistory, stageDisplayedJobsHistory, finalizeDisplayedJobsHistory, dedupAgainstHistory, historyPathForCanvas } from './jobsHistory.js';
+import { loadAppliedListingKeys } from './localAiApplication.js';
+import { filterAppliedListings } from '../../src/utils/applicationBundleIdentity.js';
 import { isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard } from '../../src/utils/jobCardFilters.js';
 import { filterJobsByPostedSince, parsePostedDate } from './jobDateFilter.js';
 import {
@@ -13408,6 +13410,16 @@ Return a JSON object with four arrays of search query strings:
       kept = result.kept;
       historyDropped = result.removed;
       historyDropSamples = result.samples || [];
+      try {
+        const applied = filterAppliedListings(kept, await loadAppliedListingKeys(canvasFilePath));
+        kept = applied.kept;
+        if (applied.removed > 0) {
+          historyDropped += applied.removed;
+          logger.info(`[Jobs][${nodeId}] Applied-listing filter: dropped ${applied.removed} listing(s) already applied to`);
+        }
+      } catch (error) {
+        logger.warn(`[Jobs][${nodeId}] Applied-listing filter unavailable: ${error?.message || error}`);
+      }
     }
 
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
@@ -14994,6 +15006,15 @@ Return a JSON object with four arrays of search query strings:
       const history = await loadJobsHistory(canvasFilePath);
       const result = dedupAgainstHistory(capped, history);
       kept = result.kept;
+      try {
+        const applied = filterAppliedListings(kept, await loadAppliedListingKeys(canvasFilePath));
+        kept = applied.kept;
+        if (applied.removed > 0) {
+          logger.info(`[Jobs][${sourceId}] Applied-listing filter: dropped ${applied.removed} listing(s) already applied to`);
+        }
+      } catch (error) {
+        logger.warn(`[Jobs][${sourceId}] Applied-listing filter unavailable: ${error?.message || error}`);
+      }
     }
     // Same final-set chokepoints, in the same order, as the main gather path
     // (see the commentary at the repairJobsMojibake call there): a job reaching
@@ -16902,6 +16923,15 @@ Return a JSON object with four arrays of search query strings:
             if (canvasFilePath && candidates.length > 0) {
               const history = await loadJobsHistory(canvasFilePath);
               candidates = dedupAgainstHistory(candidates, history).kept;
+              try {
+                const applied = filterAppliedListings(candidates, await loadAppliedListingKeys(canvasFilePath));
+                candidates = applied.kept;
+                if (applied.removed > 0) {
+                  logger.info(`[Jobs][${nodeId}] Applied-listing filter: dropped ${applied.removed} listing(s) already applied to`);
+                }
+              } catch (error) {
+                logger.warn(`[Jobs][${nodeId}] Applied-listing filter unavailable: ${error?.message || error}`);
+              }
             }
           }
           if (candidates.length === 0) {
@@ -17146,6 +17176,16 @@ Return a JSON object with four arrays of search query strings:
       items = deduped.kept;
       historyDropped = deduped.removed;
       historyDropSamples = deduped.samples || [];
+      try {
+        const applied = filterAppliedListings(items, await loadAppliedListingKeys(canvasFilePath));
+        items = applied.kept;
+        if (applied.removed > 0) {
+          historyDropped += applied.removed;
+          logger.info(`[Jobs][${nodeId}] Applied-listing filter: dropped ${applied.removed} listing(s) already applied to`);
+        }
+      } catch (error) {
+        logger.warn(`[Jobs][${nodeId}] Applied-listing filter unavailable: ${error?.message || error}`);
+      }
     }
     items = normalizedCollectionLimits.jobsPerPlatform == null
       ? items
@@ -17771,6 +17811,16 @@ Return a JSON object with four arrays of search query strings:
       items = deduped.kept;
       historyDropped = deduped.removed;
       historyDropSamples = deduped.samples || [];
+      try {
+        const applied = filterAppliedListings(items, await loadAppliedListingKeys(canvasFilePath));
+        items = applied.kept;
+        if (applied.removed > 0) {
+          historyDropped += applied.removed;
+          logger.info(`[Jobs][${nodeId}] Applied-listing filter: dropped ${applied.removed} listing(s) already applied to`);
+        }
+      } catch (error) {
+        logger.warn(`[Jobs][${nodeId}] Applied-listing filter unavailable: ${error?.message || error}`);
+      }
     }
     items = normalizedCollectionLimits.jobsPerPlatform == null
       ? items

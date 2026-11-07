@@ -375,6 +375,7 @@ export default [
         filterProvablyOutsideCountryScope: items => ({ jobs: items, dropped: 0 }),
         filterJobsByPostedSince: items => items,
         loadJobsHistory: async () => ({}), dedupAgainstHistory: items => ({ kept: items, removed: 0, samples: [] }),
+        loadAppliedListingKeys: async () => new Set(), filterAppliedListings: items => ({ kept: items, removed: 0, samples: [] }),
         repairJobsMojibake: () => {}, normalizeJobsMarkup: () => {},
         filterJobsByDescriptionEvidence, scoreSafeRowsWithBoardClosed, filterNonEnglishJobs, sourceHealthWarningForRows: () => null,
         settleScrapedRowsForScoring: async (rows, options) => { settleCalls.push({ rows, options }); return { jobs: rows }; },

@@ -29,6 +29,7 @@ import {
   requestApplicationHandoffRefresh,
 } from '../utils/applicationHandoffDock';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
+import { priorRoleIndicator, PRIOR_ROLE_TONE, priorRoleDocuments, bundleDeletionPatches } from '../utils/jobCardPriorRoleIndicator';
 import { resolveApplicationCareerSnapshotId, resolveSalaryCareerSnapshotId } from '../utils/jobBoardCareerOverride';
 import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { getConnectedJobSearchIds } from '../utils/jobBoardSearchSelection';
@@ -302,7 +303,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   useEffect(() => {
     const canvasKey = JSON.stringify(data.localApplication || null);
     const canvasChanged = canvasKey !== seenCanvasApplicationRef.current;
+    const previousCanvasKey = seenCanvasApplicationRef.current;
     seenCanvasApplicationRef.current = canvasKey;
+    // Another card deleted this card's saved bundle and cleared the canvas
+    // pointer. Drop the local mirror too; otherwise the write-back below would
+    // restore the deleted bundle to the canvas.
+    if (canvasChanged && !data.localApplication && localApplication?.status === 'saved' && localApplication.id) {
+      let previousId = null;
+      try { previousId = JSON.parse(previousCanvasKey)?.id ?? null; } catch { /* unreadable key: not a clear */ }
+      if (previousId === localApplication.id) {
+        setLocalApplication(null);
+        return;
+      }
+    }
     // A run begun before this card last remounted writes its new job to the
     // canvas, not to this instance's state. Without this, the write-back below
     // would replace that new job with what this instance mounted holding.
@@ -503,18 +516,25 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     priorSavedApplication: data.priorSavedApplication,
     queuedApplicationDocument: data.queuedApplicationDocument,
   }), [data.localApplication, data.priorSavedApplication, data.queuedApplicationDocument]);
+  // A reposted role's earlier bundle counts as an existing document: its
+  // generate button behaves exactly as after this card's own generation.
+  const priorRoleDocs = priorRoleDocuments(data);
   const documentButtonState = kind => {
     const own = applicationDocumentButtonState(kind, { data: documentData, runningDocument });
     const canvas = applicationDocumentButtonState(kind, { data: canvasDocumentData, runningDocument });
-    return { exists: own.exists || canvas.exists, inProgress: own.inProgress || canvas.inProgress, queued: own.queued,
-      disabled: own.disabled || canvas.disabled };
+    const prior = priorRoleDocs[kind] === true;
+    return { exists: own.exists || canvas.exists || prior, inProgress: own.inProgress || canvas.inProgress, queued: own.queued,
+      disabled: own.disabled || canvas.disabled || prior,
+      fromPriorRole: prior && !own.exists && !canvas.exists };
   };
   const savedDocuments = savedApplicationDocuments(documentData);
   const canvasSavedDocuments = savedApplicationDocuments(canvasDocumentData);
-  const everyDocumentExists = (savedDocuments.resume || canvasSavedDocuments.resume) && (savedDocuments.cover || canvasSavedDocuments.cover);
+  const everyDocumentExists = (savedDocuments.resume || canvasSavedDocuments.resume || priorRoleDocs.resume)
+    && (savedDocuments.cover || canvasSavedDocuments.cover || priorRoleDocs.cover);
   const savedPointer = savedApplicationPointer(documentData);
   const bundleIndicator = applicationBundleIndicator(savedPointer || localApplication);
   const bundleTone = bundleIndicator ? APPLICATION_BUNDLE_TONES[bundleIndicator.tone] : null;
+  const priorRole = bundleIndicator ? null : priorRoleIndicator(data);
   const listingGenerationPaused = !everyDocumentExists && !hasApplicationRun && !localLookupPending
     && Boolean(data.listingGenerationNotice?.message || data.listingHold === true);
   const listingOverrideAvailable = listingGenerationPaused && !['official-lookup', 'official-closed'].includes(data.listingGenerationNotice?.basis);
@@ -1836,6 +1856,21 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       )}
       <NodeHandles className="w-2 h-2" style={handleStyle} />
 
+      {/* A same-role (reposted listing) bundle exists, but this listing has no
+          saved bundle of its own, so there is no red X. The pill sits in its own
+          row above the header, clear of the dismiss button. */}
+      {priorRole && (
+        <div className="relative z-30 px-3 pt-1.5">
+          <span
+            data-testid="job-card-prior-role-badge"
+            title={priorRole.title}
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold leading-none ${PRIOR_ROLE_TONE.badge}`}
+          >
+            ↺ Applied before
+          </span>
+        </div>
+      )}
+
       {/* Header */}
       <div className="px-3 py-2 flex items-start gap-2 border-b border-white/5">
         <div
@@ -2455,6 +2490,77 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
         </div>
       )}
 
+      {priorRole && (
+        <div className="px-3 py-2 border-t border-white/5" onPointerDown={(e) => e.stopPropagation()}>
+          <div role="status" className="flex items-start gap-2 text-[10px] leading-snug" title={priorRole.title}>
+            <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" />
+            <div className="min-w-0 font-medium text-white/70">
+              {priorRole.label}
+              <div className="font-normal text-white/50">{priorRole.detail}</div>
+            </div>
+          </div>
+          {window.electronAPI?.openLocalApplicationOutput && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                const prior = data.priorRoleApplication;
+                window.electronAPI.openLocalApplicationOutput({ jobId: prior.id,
+                  canvasFilePath: prior.canvasFilePath || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null) })
+                  .then((result) => { if (!result?.opened && !result?.skipped) throw new Error(result?.error || 'not opened'); })
+                  .catch(() => {
+                    // A folder that no longer opens has nothing left to keep for.
+                    updateGlobal(id, (node) => node?.data?.priorRoleApplication?.id === prior.id ? { priorRoleApplication: null } : null);
+                  });
+              }}
+              className={`mt-2 rounded-md px-2 py-1 text-[10px] font-medium transition-colors hover:bg-sky-400/25 ${PRIOR_ROLE_TONE.badge}`}
+              title="Open the earlier application bundle's folder to reuse its résumé and cover letter."
+            >
+              Open previous bundle
+            </button>
+          )}
+          {window.electronAPI?.deleteLocalApplicationOutput && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                // No confirmation on purpose: an accidental delete costs one
+                // regeneration, which is cheap, and the dialog cost a click on
+                // every intended one.
+                const prior = data.priorRoleApplication;
+                const priorId = prior.id;
+                window.electronAPI.deleteLocalApplicationOutput({ jobId: priorId,
+                  canvasFilePath: prior.canvasFilePath || (nav?.getCurrentFile ? nav.getCurrentFile() : nav?.currentFile ?? null) })
+                  .then((result) => {
+                    if (!result?.success) throw new Error(result?.error || 'not deleted');
+                    localSavedProbeRef.current.delete(priorId);
+                    // Clear every card referencing the deleted bundle (this
+                    // repost, the original owner, other reposts).
+                    const nodes = nav?.enumerateAllNodes?.() || getNodes();
+                    for (const { id: nodeId, patch } of bundleDeletionPatches(nodes, priorId)) {
+                      updateGlobal(nodeId, (node) => {
+                        const live = node?.data;
+                        const matches = live?.localApplication?.id === priorId
+                          || live?.priorSavedApplication?.id === priorId
+                          || live?.priorRoleApplication?.id === priorId;
+                        if (!matches) return null;
+                        const fresh = bundleDeletionPatches([{ id: nodeId, type: 'jobcard', data: live }], priorId)[0];
+                        return fresh ? fresh.patch : patch;
+                      });
+                    }
+                    setLocalApplication(current => (current?.id === priorId ? null : current));
+                  })
+                  .catch((error) => {
+                    addToast({ title: 'Could not delete saved folder', description: error?.message || String(error), type: 'error' });
+                  });
+              }}
+              className="mt-2 ml-1.5 rounded-md border border-rose-400/20 bg-rose-400/10 px-2 py-1 text-[10px] font-medium text-rose-200 transition-colors hover:bg-rose-400/15"
+              title="Delete the earlier application bundle folder so this job can be generated again."
+            >
+              Delete saved folder
+            </button>
+          )}
+        </div>
+      )}
+
       {listingGenerationPaused && (
         <div role="status" className="mx-3 mb-2 rounded-lg border border-amber-400/20 bg-amber-400/10 px-2.5 py-2 text-[11px] text-amber-100">
           <div className="font-semibold">{data.listingGenerationNotice?.basis === 'official-closed' ? 'Generation paused · Official posting closed' : data.listingGenerationNotice?.basis === 'official-lookup' ? 'Generation paused · Official posting lookup' : 'Generation paused · Listing check'}</div>
@@ -2504,7 +2610,8 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
                     ? GENERATION_RECOVERY_BUTTON_CLASS
                     : 'bg-gradient-to-r from-emerald-500/15 to-blue-500/15 text-emerald-300 hover:from-emerald-500/25 hover:to-blue-500/25 hover:text-emerald-200'
                 }`}
-                title={state.exists ? `This job's ${noun} already exists. Delete its saved folder to generate it again.`
+                title={state.fromPriorRole ? `You already applied to this role; its ${noun} is in the earlier bundle. Delete that saved folder to generate it again.`
+                  : state.exists ? `This job's ${noun} already exists. Delete its saved folder to generate it again.`
                   : state.queued ? `Waiting for the other document to finish. The ${noun} starts automatically.`
                   : state.inProgress && !settingUp ? `The ${noun} is being generated.`
                   : lookupBusy ? 'An official posting lookup is running for this card or its Job Board.'

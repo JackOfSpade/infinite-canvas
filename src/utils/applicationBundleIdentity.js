@@ -30,6 +30,67 @@ export function applicationListingKeys(job = {}) {
   return [...new Set(keys)].sort();
 }
 
+// Drop search results whose posting is already part of a saved application.
+export function filterAppliedListings(jobs, appliedListingKeys) {
+  if (!Array.isArray(jobs)) return { kept: [], removed: 0, samples: [] };
+  const applied = appliedListingKeys instanceof Set ? appliedListingKeys
+    : new Set(Array.isArray(appliedListingKeys) ? appliedListingKeys : []);
+  if (!applied.size) return { kept: [...jobs], removed: 0, samples: [] };
+  const kept = [];
+  const samples = [];
+  let removed = 0;
+  for (const job of jobs) {
+    if (job && applicationListingKeys(job).some(key => applied.has(key))) {
+      removed++;
+      if (samples.length < 5) samples.push({ title: job.title, company: job.company, url: job.url });
+    } else kept.push(job);
+  }
+  return { kept, removed, samples };
+}
+
+function normalizeRolePart(value) {
+  return String(value ?? '')
+    .replace(/&amp;|&#38;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/[.,;:-]+$/, '')
+    .trim();
+}
+
+export function applicationRoleKey({ company, title } = {}) {
+  const c = normalizeRolePart(company);
+  const t = normalizeRolePart(title);
+  return c && t ? `${c}|${t}` : '';
+}
+
+// A repost of an applied role at a different URL: informational only, never
+// the same application. Any listing-key overlap belongs to the exact-link path.
+export function selectPriorRoleApplication(job, bundles) {
+  if (!job || !Array.isArray(bundles)) return null;
+  const keys = new Set(applicationListingKeys(job));
+  if (bundles.some(bundle => (bundle.listingKeys || []).some(key => keys.has(key)))) return null;
+  const roleKey = applicationRoleKey(job);
+  if (!roleKey) return null;
+  const matches = bundles.filter(bundle => bundle.role && applicationRoleKey(bundle.role) === roleKey);
+  if (!matches.length) return null;
+  const bundle = [...matches].sort((a, b) => String(b.importedAt || '').localeCompare(String(a.importedAt || '')))[0];
+  const app = bundle.localApplication || {};
+  return {
+    id: app.id,
+    canvasFilePath: app.canvasFilePath,
+    savedDir: app.savedDir,
+    appliedAt: bundle.importedAt,
+    company: bundle.role.company,
+    title: bundle.role.title,
+    location: bundle.role.location,
+    listingUrl: bundle.listingUrl || '',
+    ...(app.savedDocuments ? { savedDocuments: app.savedDocuments } : {}),
+  };
+}
+
 export function selectSavedApplicationBundle(job, bundles) {
   const keys = new Set(applicationListingKeys(job));
   const matches = bundles.filter(bundle => bundle.listingKeys.some(key => keys.has(key)));

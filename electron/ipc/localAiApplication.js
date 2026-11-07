@@ -1,4 +1,4 @@
-import { applicationListingKeys, selectSavedApplicationBundle } from '../../src/utils/applicationBundleIdentity.js';
+import { applicationListingKeys, selectPriorRoleApplication, selectSavedApplicationBundle } from '../../src/utils/applicationBundleIdentity.js';
 import { applicationWorkflowProgress } from './applicationWorkflowProgress.js';
 import { applicationUnitDiagnostics, bootstrapApplicationUnitState, advanceApplicationUnitState, locateGateFindings } from './applicationGateFindings.js';
 import { applicationUnitRegistry, structuredDocumentDigest, unitDigest, mergeUnitPatches, diffUnits } from './applicationUnitPatches.js';
@@ -17987,14 +17987,12 @@ let applicationLinkDiagnostics = null;
 export function savedApplicationLinkDiagnosticsMarkdown() {
   const d = applicationLinkDiagnostics;
   return '\n## Saved Application Links (APPLINK)\n'
-    + (d ? `- Last lookup: ${d.at} · cards=${d.cards} · verified bundles=${d.bundles} · matched=${d.matched} · unavailable=${d.unavailable}\n`
+    + (d ? `- Last lookup: ${d.at} · cards=${d.cards} · verified bundles=${d.bundles} · matched=${d.matched} · role matches=${d.roleMatched} · unavailable=${d.unavailable}\n`
       : '- No saved-bundle lookup recorded in this process.\n');
 }
 
 // Read-only restoration after Board Clear/rebuild, including hidden/nested cards.
-export async function findSavedApplicationLinks({ canvasFilePath, jobs = [] } = {}) {
-  const canvas = await resolveCanvasProject(canvasFilePath);
-  if (!Array.isArray(jobs) || jobs.length > 10000) throw new Error('Invalid application link lookup.');
+async function readVerifiedSavedApplicationBundles(canvas) {
   const root = localAiHandoffReceiptsRoot(canvas.canvasRoot);
   const entries = await fs.promises.readdir(root, { withFileTypes: true }).catch(error => {
     if (error.code === 'ENOENT') return [];
@@ -18024,20 +18022,45 @@ export async function findSavedApplicationLinks({ canvasFilePath, jobs = [] } = 
       // A regenerated folder must never adopt an older receipt's job id.
       const audit = JSON.parse(await readOwnedFile(dir, path.join(dir, 'Generation Audit.json'), { maxBytes: 4 * 1024 * 1024 }));
       if (audit.jobId !== jobId || audit.finalArtifacts?.resultSha256 !== receipt.resultSha256) continue;
-      bundles.push({ listingKeys, importedAt: receipt.importedAt, localApplication: {
+      const auditJob = audit.job && typeof audit.job === 'object' ? audit.job : {};
+      const str = value => (typeof value === 'string' ? value : '');
+      bundles.push({ listingKeys, importedAt: receipt.importedAt,
+        role: { company: str(auditJob.company), title: str(auditJob.title), location: str(auditJob.location) },
+        listingUrl: listingKeys.find(key => typeof key === 'string' && /^https:\/\//i.test(key)) || '',
+        localApplication: {
         id: jobId, status: 'saved', canvasFilePath: canvas.canonicalCanvasFilePath,
         savedDir: dir, receipt, message: 'Application bundle restored from its saved receipt.',
         ...(await readSavedApplicationDocuments(canvas, receipt).then(savedDocuments => savedDocuments ? { savedDocuments } : {})),
       } });
     } catch { unavailable++; }
   }
+  return { bundles, unavailable };
+}
+
+export async function loadAppliedListingKeys(canvasFilePath) {
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  const { bundles } = await readVerifiedSavedApplicationBundles(canvas);
+  return new Set(bundles.flatMap(bundle => bundle.listingKeys));
+}
+
+export async function findSavedApplicationLinks({ canvasFilePath, jobs = [] } = {}) {
+  const canvas = await resolveCanvasProject(canvasFilePath);
+  if (!Array.isArray(jobs) || jobs.length > 10000) throw new Error('Invalid application link lookup.');
+  const { bundles, unavailable } = await readVerifiedSavedApplicationBundles(canvas);
+  const exact = new Set();
   const links = jobs.flatMap(job => {
     const localApplication = selectSavedApplicationBundle(job, bundles);
+    if (localApplication) exact.add(job);
     return localApplication ? [{ nodeId: job.nodeId, localApplication }] : [];
   });
-  applicationLinkDiagnostics = { at: new Date().toISOString(), cards: jobs.length, bundles: bundles.length, matched: links.length, unavailable };
-  logger.info(`[ApplicationLinks] lookup cards=${jobs.length} verified-bundles=${bundles.length} matched=${links.length} unavailable=${unavailable}`);
-  return { links };
+  const roleMatches = jobs.flatMap(job => {
+    if (exact.has(job)) return [];
+    const prior = selectPriorRoleApplication(job, bundles);
+    return prior ? [{ nodeId: job.nodeId, priorRoleApplication: prior }] : [];
+  });
+  applicationLinkDiagnostics = { at: new Date().toISOString(), cards: jobs.length, bundles: bundles.length, matched: links.length, roleMatched: roleMatches.length, unavailable };
+  logger.info(`[ApplicationLinks] lookup cards=${jobs.length} verified-bundles=${bundles.length} matched=${links.length} role-matches=${roleMatches.length} unavailable=${unavailable}`);
+  return { links, roleMatches };
 }
 
 export function registerLocalAiApplicationHandlers() {

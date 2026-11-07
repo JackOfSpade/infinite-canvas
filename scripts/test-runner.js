@@ -211,6 +211,7 @@ import autosave_recovery from './tests/autosave-recovery.js';
 import workspace_content_pool from './tests/workspace-content-pool.js';
 import job_tree_user_arranged_layout from './tests/job-tree-user-arranged-layout.js';
 import job_card_bundle_indicator from './tests/job-card-bundle-indicator.js';
+import job_card_prior_role_indicator from './tests/job-card-prior-role-indicator.js';
 import application_authority_workflow from './tests/application-authority-workflow.js';
 import one_card_live_acceptance from './tests/one-card-live-acceptance.js';
 import pointer_occlusion_probe from './tests/pointer-occlusion-probe.js';
@@ -505,6 +506,7 @@ const testGroups = [
   ['workspace-content-pool.js', workspace_content_pool],
   ['job-tree-user-arranged-layout.js', job_tree_user_arranged_layout],
   ['job-card-bundle-indicator.js', job_card_bundle_indicator],
+  ['job-card-prior-role-indicator.js', job_card_prior_role_indicator],
   ['application-authority-workflow.js', application_authority_workflow],
   ['one-card-live-acceptance.js', one_card_live_acceptance],
   ['pointer-occlusion-probe.js', pointer_occlusion_probe],
