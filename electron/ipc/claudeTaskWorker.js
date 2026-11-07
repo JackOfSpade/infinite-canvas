@@ -80,6 +80,9 @@ function withStandaloneActivity(snapshot) {
 
 const nodeOfPauseKey = key => (typeof key === 'string' && key.startsWith('node:') ? key.slice('node:'.length) : null);
 
+/** Re-run the worker's pump now, e.g. after the system wakes from sleep. */
+export function wakeClaudeTaskWorker() { current?.pump(); }
+
 /** Hold, release and drain every Claude call, from the panel's one control. */
 export function registerClaudePauseHandlers({ ipcMain } = {}) {
   const handlers = {
@@ -95,7 +98,7 @@ export function registerClaudePauseHandlers({ ipcMain } = {}) {
   };
   // Try now instead of waiting for the reset. A limit that still stands simply reports itself again.
   ipcMain.removeHandler?.('claude-usage:resume-now');
-  ipcMain.handle('claude-usage:resume-now', () => { clearClaudeUsageLimit(); current?.resumeNow(); return { resumed: true }; });
+  ipcMain.handle('claude-usage:resume-now', () => { clearClaudeUsageLimit('resume-now'); current?.resumeNow(); return { resumed: true }; });
   for (const [channel, handler] of Object.entries(handlers)) {
     ipcMain.removeHandler?.(channel);
     ipcMain.handle(channel, (_event, args) => (isClaudePauseKey(args?.key) ? handler(args) : { error: 'Unknown pause key.' }));
@@ -157,6 +160,8 @@ export function createClaudeTaskWorker({
   const failures = new Map();
   let pausedUntil = 0;
   let pauseCode = null;
+  let pausedAt = null;
+  let pausedCode = null;
   let timer = null;
   let activityTimer = null;
   let stopped = false;
@@ -181,9 +186,14 @@ export function createClaudeTaskWorker({
     timer = setTimer(() => { timer = null; pump(); }, Math.max(0, ms));
   }
 
-  function pause(code, ms) {
+  function pause(code, ms, resetsAt = null) {
     pausedUntil = Math.max(pausedUntil, now() + ms);
-    if (pauseCode !== code) logger.warn(`[Claude tasks] Paused (${code}).`);
+    if (pauseCode !== code) {
+      const resetIso = Number.isFinite(resetsAt) && !Number.isNaN(new Date(resetsAt).getTime()) ? new Date(resetsAt).toISOString() : null;
+      logger.warn(`[Claude tasks] Paused (${code})${resetIso ? ` until ${resetIso}` : ''}.`);
+    }
+    if (pausedAt === null) pausedAt = now();
+    pausedCode = code;
     pauseCode = code;
     activity.setPause(true, code);
     wakeIn(ms);
@@ -193,8 +203,8 @@ export function createClaudeTaskWorker({
     if (error?.code === 'CLAUDE_CANCELLED') return activity.released(entry.requestId);
     if (error?.code === 'CLAUDE_USAGE_LIMIT') {
       activity.released(entry.requestId);
-      onUsageLimit({ resetsAt: error.detail?.resetsAt ?? null });
-      return pause(error.code, Number.isFinite(error.detail?.resetsAt) ? claudeUsageWaitMs(error.detail.resetsAt, now()) : USAGE_LIMIT_WAIT_MS);
+      onUsageLimit({ resetsAt: error.detail?.resetsAt ?? null, task: entry.task });
+      return pause(error.code, Number.isFinite(error.detail?.resetsAt) ? claudeUsageWaitMs(error.detail.resetsAt, now()) : USAGE_LIMIT_WAIT_MS, error.detail?.resetsAt ?? null);
     }
     if (error?.code === 'CLAUDE_NOT_SIGNED_IN' || error?.code === 'CLAUDE_CLI_MISSING') { activity.released(entry.requestId); return pause(error.code, RETRY_BASE_MS * 2); }
     if (error?.code === CLAUDE_PROMPT_TOO_LONG) {
@@ -264,6 +274,7 @@ export function createClaudeTaskWorker({
     failures.delete(entry.requestId);
     // An answer proves Claude is usable again, which is what ends a pause notice.
     pauseCode = null;
+    pausedAt = null;
     activity.setPause(false, null);
     activity.checking(entry.requestId);
     const outcome = await seam.submit({ requestId: entry.requestId, handoffCode: entry.handoffCode, response: reply.text, allowTasks });
@@ -296,6 +307,11 @@ export function createClaudeTaskWorker({
     }
     // Anything else may have replaced the wake timer, so a pause re-arms its own.
     if (now() < pausedUntil) { wakeIn(pausedUntil - now()); return; }
+    if (pausedAt !== null) {
+      const minutes = Math.max(0, Math.round((now() - pausedAt) / 60_000));
+      logger.info(`[Claude tasks] Resumed after ${pausedCode} (paused ${minutes}m).`);
+      pausedAt = null;
+    }
     activity.setPause(false, null);
     for (const entry of snapshot.handoffs) {
       if (running.size >= concurrency) return;
@@ -341,6 +357,7 @@ export function createClaudeTaskWorker({
     resumeNow() {
       pausedUntil = 0;
       pauseCode = null;
+      pausedAt = null;
       activity.setPause(false, null);
       pump();
     },

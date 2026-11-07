@@ -2,6 +2,8 @@
 // already running finishes and saves its answer, because an answer cut off or
 // rushed mid-reply is worth nothing. Keys: node:<id> for handoff tasks,
 // application:<jobId> for bundles, interview:<runId> for interview preparation.
+import { recordClaudePauseEvent } from './claudePauseDiagnostics.js';
+
 const KEY_RE = /^(node|application|interview):\S{1,300}$/u;
 const holds = new Set();
 const listeners = new Set();
@@ -92,11 +94,13 @@ function wakeUsageWaiters() {
 
 export const claudeUsageLimit = () => usageLimit;
 
-export function clearClaudeUsageLimit() {
+export function clearClaudeUsageLimit(reason = 'reset-timer') {
   if (usageTimer) clearTimeout(usageTimer);
   usageTimer = null;
   if (!usageLimit) return;
+  const pausedMs = Date.now() - usageLimit.since;
   usageLimit = null;
+  recordClaudePauseEvent({ kind: 'resumed', reason, pausedMs });
   wakeUsageWaiters();
 }
 
@@ -105,16 +109,34 @@ export function claudeUsageWaitMs(resetsAt, now = Date.now()) {
   return Number.isFinite(resetsAt) && resetsAt > now ? resetsAt - now + USAGE_RESET_GRACE_MS : USAGE_PROBE_MS;
 }
 
-export function reportClaudeUsageLimit({ resetsAt = null } = {}) {
+function armUsageTimer(ms) {
+  if (usageTimer) clearTimeout(usageTimer);
+  usageTimer = setTimeout(() => clearClaudeUsageLimit('reset-timer'), ms);
+  usageTimer.unref?.();
+}
+
+export function reportClaudeUsageLimit({ resetsAt = null, task = null } = {}) {
   const now = Date.now();
   const resumeAt = now + claudeUsageWaitMs(resetsAt, now);
   // Later failures from calls already running can only extend a known reset.
   if (usageLimit && usageLimit.resumeAt >= resumeAt) return;
   usageLimit = { since: usageLimit?.since ?? now, resumeAt, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null };
-  if (usageTimer) clearTimeout(usageTimer);
-  usageTimer = setTimeout(clearClaudeUsageLimit, resumeAt - now);
-  usageTimer.unref?.();
+  armUsageTimer(resumeAt - now);
+  recordClaudePauseEvent({ kind: 'usage-limit', code: 'CLAUDE_USAGE_LIMIT', resetsAt: usageLimit.resetsAt, resumeAt, task });
   notify();
+}
+
+/** After system sleep timers are unreliable, so the wall clock decides whether the limit is over. */
+export function recheckClaudeUsageAfterWake(now = Date.now()) {
+  if (!usageLimit) { recordClaudePauseEvent({ kind: 'wake-recheck', outcome: 'not-limited', remainingMs: 0 }); return; }
+  if (now >= usageLimit.resumeAt) {
+    clearClaudeUsageLimit('wake-recheck');
+    recordClaudePauseEvent({ kind: 'wake-recheck', outcome: 'cleared', remainingMs: 0 });
+    return;
+  }
+  const remainingMs = usageLimit.resumeAt - now;
+  armUsageTimer(remainingMs);
+  recordClaudePauseEvent({ kind: 'wake-recheck', outcome: 'rearmed', remainingMs });
 }
 
 export function waitForClaudeUsage(signal) {

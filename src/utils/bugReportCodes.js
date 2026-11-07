@@ -60,6 +60,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  CLAUDEPAUSE: {
+    label: 'Claude Usage Pauses',
+    description: 'Claude usage-limit pauses, resumes and system sleep/wake events with reset times. Included automatically in FULL. No prompts, answers, paths or error text are retained.',
+    logFilter: line => /\[Claude tasks\]|usage limit|CLAUDE_USAGE_LIMIT/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   CRASH: {
     label: 'JS Crashes',
     description: 'JavaScript errors, unhandled promise rejections, console errors',

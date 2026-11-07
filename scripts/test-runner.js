@@ -19,6 +19,7 @@ import job_scoring_cache from './tests/job-scoring-cache.js';
 import claude_prompt_limit from './tests/claude-prompt-limit.js';
 import claude_task_worker from './tests/claude-task-worker.js';
 import claude_pause_notice from './tests/claude-pause-notice.js';
+import claude_pause_diagnostics from './tests/claude-pause-diagnostics.js';
 import marketplace_extractors_auth from './tests/marketplace-extractors-auth.js';
 import jobs_location_language from './tests/jobs-location-language.js';
 import job_source_country_scope from './tests/job-source-country-scope.js';
@@ -307,6 +308,7 @@ const testGroups = [
   ['claude-prompt-limit.js', claude_prompt_limit],
   ['claude-task-worker.js', claude_task_worker],
   ['claude-pause-notice.js', claude_pause_notice],
+  ['claude-pause-diagnostics.js', claude_pause_diagnostics],
   ['marketplace-extractors-auth.js', marketplace_extractors_auth],
   ['jobs-location-language.js', jobs_location_language],
   ['job-source-country-scope.js', job_source_country_scope],

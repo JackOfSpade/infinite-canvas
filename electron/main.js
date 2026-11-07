@@ -34,7 +34,8 @@ import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } 
 import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, stopLocalApplicationJob, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
-import { reportClaudeUsageLimit, waitForClaudeUsage } from './ipc/claudePause.js';
+import { recheckClaudeUsageAfterWake, reportClaudeUsageLimit, waitForClaudeUsage } from './ipc/claudePause.js';
+import { recordClaudePauseEvent } from './ipc/claudePauseDiagnostics.js';
 import { createClaudeApplicationRunner, registerClaudeApplicationRunnerHandlers } from './ipc/claudeApplicationRunner.js';
 import { registerApplicationGenerationGateHandlers } from './ipc/applicationGenerationGate.js';
 import { registerApplicationBundleWatchHandlers } from './ipc/applicationBundleWatch.js';
@@ -49,7 +50,7 @@ import { pruneSavedBugReports } from './ipc/bugReport/reportFile.js';
 import { registerNetworkHandlers } from './ipc/network.js';
 import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
-import { registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
+import { registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker, wakeClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
 import { beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
 import { startPracticeConnector, stopPracticeConnector } from './ipc/practiceConnector/index.js';
 import fs from 'fs';
@@ -1451,6 +1452,17 @@ if (!gotTheLock) {
     registerClaudeTaskStatusHandler({ ipcMain: electronPkg.ipcMain });
     registerClaudeTaskActivityHandler({ ipcMain: electronPkg.ipcMain });
     registerClaudePauseHandlers({ ipcMain: electronPkg.ipcMain });
+    // Timers across system sleep are unreliable, so wake re-checks the wall clock.
+    try {
+      electronPkg.powerMonitor.on('suspend', () => recordClaudePauseEvent({ kind: 'system-suspend' }));
+      electronPkg.powerMonitor.on('resume', () => {
+        try {
+          recordClaudePauseEvent({ kind: 'system-resume' });
+          recheckClaudeUsageAfterWake();
+          wakeClaudeTaskWorker();
+        } catch { /* a wake re-check cannot affect the app */ }
+      });
+    } catch { /* no power monitor: timers alone still resume the work */ }
     // Startup assertion for the résumé design-system coupling surface (design
     // doc §9). Job Application Design System/ is owned by an external design source and replaced
     // wholesale from time to time; this never throws or blocks startup — its
