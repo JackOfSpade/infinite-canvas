@@ -1366,8 +1366,81 @@ const w6ReproTests = [
   } },
 ];
 
+// Four one-segment pages: page 3's Python skill merges into page 2's, so the
+// merged profile no longer holds page 3's own skill id, yet page 3's auditor
+// is shown (and correctly cites) it.
+const pagedAuditEntityTests = (() => {
+  const files = () => pagedSourceFiles([
+    'Ada Lovelace',
+    'Software Engineer Engineer Acme January 2020 Present Toronto',
+    'Built Python service used by 50 users.',
+    'Built Python report used by 60 users.',
+  ]);
+  const MERGED_AWAY_SKILL = 'p0004-skill-python-3';
+  const finding = (corpus, id, entityIds, edits) => editFinding({
+    id, segmentIds: [corpus.segments[3].id], sourceQuote: 'Built Python report', entityIds, edits,
+  });
+  const run = candidates => runEditProtocol({
+    files: files(), pageMaxSegments: 1, compile: (corpus, pageIndex) => crossPageShard(corpus, pageIndex),
+    audit: ({ lane, round, corpus, pageIndex, prompt, scopeKind }) => {
+      if (lane !== 'skills' || pageIndex !== 3 || round !== 0 || scopeKind === 'host-merged-patches') return [{ findings: [] }];
+      nodeAssert.ok(prompt.includes(MERGED_AWAY_SKILL), 'page 4 audit prompt shows its own skill id');
+      return candidates(corpus);
+    },
+  });
+  const unknownRejections = log => log.rejected.filter(item => (item.ruleIds || []).includes('AUDIT_ENTITY_UNKNOWN'));
+  return [{
+    name: 'career snapshot audit: a paged finding may cite a page-visible id that reconciliation merged away, while an id visible nowhere is still AUDIT_ENTITY_UNKNOWN',
+    run: async () => {
+      const edit = [fieldEdit('category', 'programming language', MERGED_AWAY_SKILL)];
+      const { result, log } = await run(corpus => [
+        { findings: [finding(corpus, 'fabricated', ['p0002-skill-999'], edit)] },
+        { findings: [finding(corpus, 'merged-away', [MERGED_AWAY_SKILL], edit)] },
+      ]);
+      const skillRejections = log.rejected.filter(item => item.task === 'career-profile-audit-skills');
+      assert(!result.profile.skills.some(skill => skill.id === MERGED_AWAY_SKILL), 'the page-4 skill id was merged away');
+      assert(skillRejections.length === 1 && unknownRejections(log).length === 1
+        && skillRejections[0].message.includes('p0002-skill-999') && !skillRejections[0].message.includes(MERGED_AWAY_SKILL),
+      `only the fabricated id may be rejected as unknown (rejections=${canonicalJson(skillRejections.map(item => [item.message, item.ruleIds]))})`);
+      assert(result.snapshot.status === 'approved', 'the compile succeeds with the merged-away id cited');
+    },
+  }, {
+    name: 'career snapshot audit: an id created by an add edit in the same finding is neither unknown nor out of page',
+    run: async () => {
+      const newId = 'p0004-skill-extra';
+      const added = corpusSegment => ({
+        id: newId, name: 'Extra Tooling', category: 'tool', capabilityKind: 'technology', supportMode: 'direct',
+        directEvidenceSegmentIds: [corpusSegment], indexEligible: true, roleIds: [], evidenceSegmentIds: [corpusSegment],
+      });
+      // Probe the real responseValidator directly; the finding is never
+      // returned, so no repair is needed for the added skill.
+      const probed = [];
+      const addEdit = corpus => [{ op: 'add', group: 'skills', entityId: newId, field: '', valueJson: JSON.stringify(added(corpus.segments[3].id)) }];
+      await runEditProtocol({
+        files: files(), pageMaxSegments: 1, compile: (corpus, pageIndex) => crossPageShard(corpus, pageIndex),
+        audit: ({ lane, round, corpus, pageIndex, scopeKind, options }) => {
+          if (lane !== 'skills' || pageIndex !== 3 || round !== 0 || scopeKind === 'host-merged-patches') return [{ findings: [] }];
+          for (const [label, ids] of [['own-add', [newId]], ['fabricated', ['p0004-skill-999']]]) {
+            try {
+              options.responseValidator({ findings: [finding(corpus, label, ids, addEdit(corpus))] });
+              probed.push({ label, ruleIds: [] });
+            } catch (error) { probed.push({ label, ruleIds: error.correctionRuleIds || [] }); }
+          }
+          return [{ findings: [] }];
+        },
+      });
+      const byLabel = Object.fromEntries(probed.map(item => [item.label, item.ruleIds]));
+      assert(byLabel['own-add'] && byLabel['own-add'].length === 0,
+        `an id created by the finding's own add edit must be known (rules=${canonicalJson(byLabel)})`);
+      assert(byLabel.fabricated?.includes('AUDIT_ENTITY_UNKNOWN') && !byLabel.fabricated.includes('AUDIT_ENTITY_OUT_OF_PAGE'),
+        `an id no edit creates stays unknown (rules=${canonicalJson(byLabel)})`);
+    },
+  }];
+})();
+
 export default [
   ...w6ReproTests,
+  ...pagedAuditEntityTests,
   {
     name: 'W3 career pacing: only whole-profile no-progress or pure settled-target errors select pacing',
     run: () => {

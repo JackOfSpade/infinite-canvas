@@ -3738,9 +3738,22 @@ function validateAuditResult(result, corpus, profile, category, {
       if (!segments.has(id)) add('AUDIT_SEGMENT_UNKNOWN', `${category} audit cites unknown segment ${id}.`);
       else if (allowedSegmentIds && !allowedSegmentIds.has(id)) add('AUDIT_SEGMENT_OUT_OF_PAGE', `${category} audit cites a segment outside its bounded page: ${id}.`);
     }
+    // A paged audit sees a page shard, not the merged profile: reconciliation
+    // drops page-local ids (a later page's skill merges into an earlier one),
+    // and an `add` edit may cite the id it creates. Both are legitimately
+    // known to this request. Whole-profile audits (no allowedEntityIds) keep
+    // the merged-profile set only.
+    const createdIds = new Set();
+    if (allowedEntityIds && isObject(finding)) {
+      for (const edit of arrayOrEmpty(finding.edits)) {
+        if (isObject(edit) && edit.op === 'add' && typeof edit.entityId === 'string'
+          && CAREER_PROFILE_ENTITY_GROUPS.includes(edit.group)) createdIds.add(edit.entityId);
+      }
+    }
     for (const id of finding?.entityIds || []) {
-      if (!entityIds.has(id)) add('AUDIT_ENTITY_UNKNOWN', `${category} audit cites unknown entity ${id}.`);
-      else if (allowedEntityIds && !allowedEntityIds.has(id)) add('AUDIT_ENTITY_OUT_OF_PAGE', `${category} audit cites an entity outside its bounded page: ${id}.`);
+      const pageKnown = allowedEntityIds ? (allowedEntityIds.has(id) || createdIds.has(id)) : false;
+      if (!entityIds.has(id) && !pageKnown) add('AUDIT_ENTITY_UNKNOWN', `${category} audit cites unknown entity ${id}.`);
+      else if (allowedEntityIds && !pageKnown) add('AUDIT_ENTITY_OUT_OF_PAGE', `${category} audit cites an entity outside its bounded page: ${id}.`);
     }
     if (page && shard && ledger && isObject(finding)) {
       for (const entry of auditFindingEditErrors(finding, segments, page, shard, ledger, category, pageProfiles)) {
