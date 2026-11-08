@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { AlertTriangle, Pause, Play, Trash2 } from 'lucide-react';
 import { FeedbackView } from '../components/InterviewPracticePanel.jsx';
-import { formatTime, markerTone, segmentStyles, turnAt } from './replayModel.js';
+import { bubbleLeftPx, chapterIndexAt, formatTime, markerTone, nearestMarker, positionToMs, scrubberKeyTarget, segmentFill, segmentLayout, turnAt } from './replayModel.js';
 import { describeDeliveryValue, humanizeKey } from './callModel.js';
 
 export function DeliverySection({ delivery }) {
@@ -15,32 +15,137 @@ export function DeliverySection({ delivery }) {
   </section>;
 }
 
-export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
-  const segments = segmentStyles(chapters, durationMs);
-  const percent = durationMs > 0 ? Math.min(100, Math.max(0, (positionMs / durationMs) * 100)) : 0;
-  const nudge = event => {
-    const delta = event.key === 'ArrowRight' ? 5000 : event.key === 'ArrowLeft' ? -5000 : 0;
-    if (!delta) return;
-    event.preventDefault();
-    onSeek(Math.min(Math.max(0, positionMs + delta), durationMs));
-  };
-  const pick = event => {
-    const rect = event.currentTarget.getBoundingClientRect?.();
-    if (!rect || !(rect.width > 0) || !(durationMs > 0)) return;
-    onSeek(Math.min(Math.max(0, ((event.clientX - rect.left) / rect.width) * durationMs), durationMs));
-  };
-  return <div role="slider" tabIndex={0} aria-label="Replay position" aria-valuemin={0} aria-valuemax={durationMs} aria-valuenow={Math.round(positionMs)} aria-valuetext={formatTime(positionMs)}
-    className="relative h-6 w-full cursor-pointer rounded bg-white/5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300" onKeyDown={nudge} onClick={pick}>
-    <div className="absolute inset-x-0 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded bg-white/10">
-      {segments.map(segment => <div key={segment.index} data-chapter={segment.index} title={`${segment.title} · ${formatTime(segment.startMs)}`} className="absolute top-0 h-full border-r border-black/50 bg-violet-400/25 last:border-r-0" style={{ left: `${segment.leftPct}%`, width: `${segment.widthPct}%` }} />)}
-    </div>
-    {segments.flatMap(segment => segment.markers.map((marker, markerIndex) => {
+// Width used for the hover bubble until it has been measured in the DOM.
+const BUBBLE_ESTIMATE_PX = 96;
+
+// Every moment marker on the timeline, with the pixel geometry the bar needs.
+function chapterMarkers(chapters, durationMs) {
+  const ticks = [];
+  (Array.isArray(chapters) ? chapters : []).forEach((chapter, chapterIndex) => {
+    const markers = Array.isArray(chapter?.markers) ? chapter.markers : [];
+    markers.forEach((marker, markerIndex) => {
       const raw = Number(marker?.atMs);
-      if (!(durationMs > 0) || !Number.isFinite(raw)) return [];
-      const atMs = Math.min(Math.max(0, raw), durationMs);
-      return <span key={`${segment.index}-${markerIndex}`} data-marker-kind={marker?.kind} title={`${marker?.label || marker?.kind} · ${formatTime(atMs)}`} className={`absolute top-0 h-6 w-0.5 ${markerTone(marker?.kind)}`} style={{ left: `${(atMs / durationMs) * 100}%` }} />;
-    }))}
-    <div aria-hidden="true" className="absolute top-0 h-6 w-px bg-white" style={{ left: `${percent}%` }} />
+      if (!Number.isFinite(raw)) return;
+      const atMs = durationMs > 0 ? Math.min(Math.max(0, raw), durationMs) : Math.max(0, raw);
+      ticks.push({
+        key: `${chapterIndex}-${markerIndex}`,
+        kind: marker?.kind,
+        label: String(marker?.label || marker?.kind || 'Moment'),
+        atMs,
+        leftPct: durationMs > 0 ? (atMs / durationMs) * 100 : 0,
+      });
+    });
+  });
+  return ticks;
+}
+
+// Chaptered seek bar: a 5px rail that grows under the pointer, a chapter bubble
+// that replaces native tooltips, and one committed seek per pointer gesture.
+export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
+  const total = Math.max(0, Number(durationMs) || 0);
+  const chapterList = Array.isArray(chapters) ? chapters : [];
+  const layout = segmentLayout(chapterList, total);
+  const segments = layout.length ? layout : [{ index: 0, title: '', startMs: 0, endMs: total, leftPct: 0, widthPct: 100 }];
+  const markers = chapterMarkers(chapterList, total);
+  const [pointer, setPointer] = useState(null);
+  const [dragging, setDragging] = useState(false);
+  const [dragMs, setDragMs] = useState(0);
+  const [touchMode, setTouchMode] = useState(false);
+  const [bubbleWidth, setBubbleWidth] = useState(0);
+  const bubbleRef = useRef(null);
+
+  const displayMs = dragging ? dragMs : Math.min(Math.max(0, Number(positionMs) || 0), total);
+  const percent = total > 0 ? Math.min(100, Math.max(0, (displayMs / total) * 100)) : 0;
+  const currentIndex = chapterIndexAt(chapterList, total > 0 ? Math.min(displayMs, total - 1) : displayMs);
+  const currentTitle = currentIndex >= 0 ? String(chapterList[currentIndex]?.title || `Chapter ${currentIndex + 1}`) : '';
+  const pointerMs = pointer && total > 0 ? positionToMs(pointer.x, pointer.width, total) : null;
+  const hoverMs = pointerMs === null ? null : Math.min(pointerMs, Math.max(0, total - 1));
+  const hoverIndex = hoverMs === null ? -1 : chapterIndexAt(chapterList, hoverMs);
+  const hoverTitle = hoverIndex >= 0 ? String(chapterList[hoverIndex]?.title || `Chapter ${hoverIndex + 1}`) : '';
+  const active = Boolean(pointer) || dragging;
+  const markerHint = pointerMs === null ? null : nearestMarker(markers, pointerMs, total, pointer.width);
+  const bubbleTitle = markerHint ? markerHint.label : hoverTitle;
+  const bubbleMs = markerHint ? markerHint.atMs : pointerMs;
+  const bubblePx = pointer ? Math.min(pointer.width, bubbleWidth > 0 ? bubbleWidth : BUBBLE_ESTIMATE_PX) : 0;
+  const bubbleLeft = pointer ? bubbleLeftPx(pointer.x, pointer.width, bubblePx) : 0;
+
+  const readPointer = event => {
+    const rect = event.currentTarget.getBoundingClientRect?.();
+    const width = rect && rect.width > 0 ? rect.width : 0;
+    if (!(width > 0)) return null;
+    return { x: Math.min(Math.max(0, Number(event.clientX) - rect.left), width), width };
+  };
+  const previewAt = next => positionToMs(next.x, next.width, total);
+  const onPointerDown = event => {
+    if (event.pointerType === 'touch') setTouchMode(true);
+    const next = readPointer(event);
+    if (!next || !(total > 0)) return;
+    try { event.currentTarget.setPointerCapture?.(event.pointerId); } catch { /* capture is best effort */ }
+    setPointer(next);
+    setDragMs(previewAt(next));
+    setDragging(true);
+  };
+  const onPointerMove = event => {
+    if (event.pointerType === 'touch') setTouchMode(true);
+    const next = readPointer(event);
+    if (!next) return;
+    setPointer(next);
+    if (dragging) setDragMs(previewAt(next));
+    const measured = bubbleRef.current?.offsetWidth;
+    if (measured > 0 && measured !== bubbleWidth) setBubbleWidth(measured);
+  };
+  const finishDrag = event => {
+    if (event.pointerType === 'touch') setTouchMode(true);
+    try { event.currentTarget.releasePointerCapture?.(event.pointerId); } catch { /* already released */ }
+    if (!dragging) return;
+    const next = event.type === 'pointercancel' ? null : readPointer(event);
+    const target = next ? previewAt(next) : dragMs;
+    setDragging(false);
+    setPointer(event.pointerType === 'mouse' && next ? next : null);
+    onSeek(Math.min(Math.max(0, target), total));
+  };
+  const onPointerLeave = () => { if (!dragging) setPointer(null); };
+  const onKeyDown = event => {
+    const target = scrubberKeyTarget(event.key, { altKey: event.altKey }, displayMs, total, chapterList);
+    if (target === null) return;
+    event.preventDefault();
+    onSeek(target);
+  };
+
+  return <div role="slider" tabIndex={0} aria-label="Replay position" aria-valuemin={0} aria-valuemax={total} aria-valuenow={Math.round(displayMs)}
+    aria-valuetext={`${formatTime(displayMs)} of ${formatTime(total)}${currentTitle ? `, ${currentTitle}` : ''}`} data-scrubber="true"
+    onKeyDown={onKeyDown} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finishDrag} onPointerCancel={finishDrag} onPointerLeave={onPointerLeave}
+    style={{ paddingTop: touchMode ? 17 : 6, paddingBottom: touchMode ? 17 : 6 }}
+    className="relative w-full cursor-pointer touch-none select-none rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-violet-300">
+    <div className="relative h-[5px] w-full">
+      {segments.map((segment, position) => {
+        const fill = segmentFill(segment, displayMs);
+        const reach = hoverMs === null ? fill : segmentFill(segment, hoverMs);
+        // With no chapters the single fallback segment is the whole bar, so it grows whenever the bar is active.
+        const grown = active && (layout.length === 0 || segment.index === hoverIndex);
+        const scaleY = active ? (grown ? 1.8 : 1) : 0.6;
+        const last = position === segments.length - 1;
+        return <div key={`segment-${segment.index}`} data-chapter={segment.index}
+          className="absolute bottom-0 h-[5px] origin-bottom transition-transform duration-100 ease-out"
+          style={{ left: `${segment.leftPct}%`, width: last ? `${segment.widthPct}%` : `calc(${segment.widthPct}% - 2px)`, transform: `scaleY(${scaleY})` }}>
+          <div aria-hidden="true" className="absolute inset-0 bg-white/20" />
+          <div aria-hidden="true" className="absolute inset-y-0 left-0 bg-violet-400" style={{ width: `${fill * 100}%` }} />
+          {reach > fill && <div aria-hidden="true" className="absolute inset-y-0 bg-white/40" style={{ left: `${fill * 100}%`, width: `${(reach - fill) * 100}%` }} />}
+        </div>;
+      })}
+      {markers.map(marker => <span key={`marker-${marker.key}`} aria-hidden="true" data-marker-kind={marker.kind}
+        className={`absolute bottom-[5px] h-1 w-0.5 ${markerTone(marker.kind)}`} style={{ left: `${marker.leftPct}%` }} />)}
+      <div aria-hidden="true" className="absolute inset-y-0 w-px bg-violet-200/80" style={{ left: `${percent}%` }} />
+      <div data-scrubber-knob="true" aria-hidden="true"
+        className="pointer-events-none absolute top-1/2 h-[13px] w-[13px] rounded-full bg-violet-400 ring-1 ring-violet-200/40 transition-transform duration-100 ease-out"
+        style={{ left: `${percent}%`, transform: `translate(-50%, -50%) scale(${dragging ? 1.4 : active || touchMode ? 1 : 0})` }} />
+      {pointer && bubbleMs !== null && <div ref={bubbleRef} aria-hidden="true" data-scrubber-bubble="true"
+        className="pointer-events-none absolute z-20 max-w-[160px] rounded bg-black/85 px-1.5 py-1 text-[10px] leading-tight text-white shadow-lg"
+        style={{ left: `${bubbleLeft}px`, bottom: 'calc(100% + 8px)' }}>
+        {bubbleTitle ? <p className="truncate text-white/90">{bubbleTitle}</p> : null}
+        <p className="font-mono text-[9px] text-white/60">{formatTime(bubbleMs)}</p>
+      </div>}
+    </div>
   </div>;
 }
 
@@ -75,6 +180,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
   const [deleted, setDeleted] = useState(false);
   const [deleteError, setDeleteError] = useState(null);
   const audioRef = useRef(null);
+  const chaptersRef = useRef(null);
   const pendingSeekRef = useRef(null);
   const audioUrl = !deleted && replay?.audioUrl ? replay.audioUrl : null;
   const analysis = replay?.analysis || null;
@@ -123,6 +229,9 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
     setPlaying(false);
   };
   const currentTurn = turnAt(transcript, positionMs);
+  const currentChapterIndex = chapterIndexAt(chapters, positionMs);
+  const currentChapterTitle = currentChapterIndex >= 0 ? String(chapters[currentChapterIndex]?.title || `Chapter ${currentChapterIndex + 1}`) : '';
+  const showChapters = () => chaptersRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
   return <main className="min-h-screen space-y-2 bg-[#111018] p-3 text-violet-50" aria-label="Practice call replay">
     <header className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-1.5">
       <h1 className="text-sm font-semibold text-violet-100">Practice call replay</h1>
@@ -150,9 +259,17 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
     </p>}
     {deleteError && <p role="alert" aria-label="Delete failed" className="rounded-md border border-red-400/30 bg-red-500/15 p-2 text-[11px] text-red-100">{deleteError}</p>}
     <Scrubber chapters={chapters} durationMs={durationMs} positionMs={positionMs} onSeek={seek} />
-    <div className="flex justify-between text-[10px] text-white/45"><span>{formatTime(positionMs)}</span><span>{formatTime(durationMs)}</span></div>
+    <div className="flex min-w-0 items-baseline gap-2 text-[10px] text-white/45">
+      <span className="font-mono">{formatTime(positionMs)} / {formatTime(durationMs)}</span>
+      {currentChapterTitle
+        ? <button type="button" aria-label={`Current chapter: ${currentChapterTitle}. Show chapters`} onClick={showChapters}
+          className="flex min-w-0 items-center gap-1 rounded px-1 text-left text-violet-200/80 hover:bg-white/5 hover:text-violet-100">
+          <span aria-hidden="true">·</span><span className="truncate">{currentChapterTitle}</span><span aria-hidden="true">›</span>
+        </button>
+        : null}
+    </div>
     <div className="grid gap-2 md:grid-cols-2">
-      <section aria-label="Chapters" className="rounded-md border border-white/10 bg-black/20 p-2">
+      <section aria-label="Chapters" ref={chaptersRef} className="rounded-md border border-white/10 bg-black/20 p-2">
         <p className="text-[10px] font-semibold uppercase text-white/45">Chapters</p>
         {chapters.length === 0 && <p className="text-[11px] text-white/40">No chapters yet.</p>}
         <ol className="mt-1 space-y-1">{chapters.map((chapter, index) => {

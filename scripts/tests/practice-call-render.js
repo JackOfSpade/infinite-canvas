@@ -219,13 +219,16 @@ export default [
         const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, api: { deleteRecording: async () => {} }, initialPositionMs: 140_000 }));
         for (const fragment of [
           'aria-label="Practice call replay"', '<audio', 'src="file:///tmp/practice-calls/call-dana-1.wav"', 'aria-label="Call recording"',
-          'aria-label="Play recording"', 'role="slider"', 'aria-valuemax="600000"', 'aria-valuenow="140000"', 'aria-valuetext="2:20"',
-          'data-chapter="0"', 'data-chapter="1"', 'data-chapter="2"', 'style="left:20%;width:50%"',
-          ...MARKERS_BY_KIND, 'title="Long pause · 0:30"', 'title="Talked over · 3:00"',
+          'aria-label="Play recording"', 'role="slider"', 'aria-valuemax="600000"', 'aria-valuenow="140000"', 'aria-valuetext="2:20 of 10:00, Onboarding story"',
+          'data-chapter="0"', 'data-chapter="1"', 'data-chapter="2"', 'style="left:20%;width:calc(50% - 2px);transform:scaleY(0.6)"',
+          ...MARKERS_BY_KIND,
           'aria-label="Seek to Onboarding story at 2:00"', 'aria-label="Seek to Talked over at 3:00"', 'aria-label="Seek to We rewrote the first-run flow. at 2:15"',
           'aria-label="Delete recording"', 'aria-label="Call transcript"', 'data-current-turn="true"', 'data-current-turn="false"',
           'aria-label="Feedback"', 'data-testid="practice-feedback"', 'aria-label="Delivery"', '168 words per minute', 'pause count',
         ]) assert(markup.includes(fragment), `replay view is missing ${fragment}`);
+        const bar = markup.slice(markup.indexOf('aria-label="Replay position"'), markup.indexOf('class="flex min-w-0 items-baseline'));
+        assert(bar.length > 0, 'the seek bar must render before the time row');
+        assert(!bar.includes('title='), 'the seek bar must not fall back to native title tooltips');
         const selected = markup.slice(markup.indexOf('data-current-turn="true"'));
         assert(selected.includes('We rewrote the first-run flow.'), 'the turn under the playhead must be the highlighted one');
         assert(markup.indexOf('data-current-turn="true"') > markup.indexOf('data-current-turn="false"'), 'only the turn containing the playhead is current');
@@ -364,6 +367,135 @@ export default [
         for (const fragment of ['aria-label="Delivery"', '168 words per minute', 'pause count']) {
           assert(markup.includes(fragment), `the replay delivery section is missing ${fragment}`);
         }
+      } finally { await bundle.dispose(); }
+    },
+  },
+  {
+    name: 'practice call render: scrubber helpers clamp positions, chapters, fills, bubbles, markers and keys',
+    async run() {
+      const model = await import(pathToFileURL(path.join(PRACTICE, 'replayModel.js')).href);
+      const { positionToMs, chapterIndexAt, segmentLayout, segmentFill, bubbleLeftPx, nearestMarker, prevChapterStart, nextChapterStart, scrubberKeyTarget } = model;
+      const chapters = REPLAY.chapters;
+
+      assert(positionToMs(0, 300, 600_000) === 0, 'the left edge of the bar is time zero');
+      assert(positionToMs(150, 300, 600_000) === 300_000, 'the middle of the bar is half the duration');
+      assert(positionToMs(300, 300, 600_000) === 600_000, 'the right edge of the bar is the duration');
+      assert(positionToMs(-40, 300, 600_000) === 0, 'x left of the bar clamps to zero');
+      assert(positionToMs(900, 300, 600_000) === 600_000, 'x right of the bar clamps to the duration');
+      assert(positionToMs(150, 0, 600_000) === 0, 'a bar with no width has no position');
+      assert(positionToMs(150, 300, 0) === 0, 'a recording with no duration has no position');
+
+      assert(chapterIndexAt(chapters, 0) === 0, 'time zero is in the first chapter');
+      assert(chapterIndexAt(chapters, 119_999) === 0, 'the last millisecond before a boundary stays in the earlier chapter');
+      assert(chapterIndexAt(chapters, 120_000) === 1, 'a chapter start belongs to the new chapter');
+      assert(chapterIndexAt(chapters, 419_999) === 1, 'the middle chapter owns its tail');
+      assert(chapterIndexAt(chapters, 420_000) === 2, 'the final chapter starts at its own start');
+      assert(chapterIndexAt(chapters, 599_999) === 2, 'the final millisecond of the call is in the last chapter');
+      assert(chapterIndexAt(chapters, -1) === -1, 'nothing before the call has a chapter');
+      assert(chapterIndexAt(chapters, 620_000) === -1, 'a position past the last chapter end has no chapter');
+      assert(chapterIndexAt([], 10) === -1, 'an empty chapter list has no chapter');
+      assert(chapterIndexAt([{ startMs: 0 }, { startMs: 100_000 }], 50_000) === 0, 'a chapter without an endMs runs to the next start');
+
+      const layout = segmentLayout(chapters, 600_000);
+      assert(layout.length === 3, 'every chapter becomes a segment');
+      assert(layout[0].startMs === 0 && layout[0].endMs === 120_000 && layout[0].leftPct === 0 && layout[0].widthPct === 20, 'the first segment spans 0-20%');
+      assert(layout[1].startMs === 120_000 && layout[1].endMs === 420_000 && layout[1].leftPct === 20 && layout[1].widthPct === 50, 'the middle segment spans 20-70%');
+      assert(layout[2].startMs === 420_000 && layout[2].endMs === 600_000 && layout[2].leftPct === 70 && layout[2].widthPct === 30, 'the last segment spans 70-100%');
+      assert(layout[1].title === 'Onboarding story', 'a segment keeps its chapter title');
+      assert(segmentLayout([{ title: 'Solo', startMs: 0 }], 100_000)[0].endMs === 100_000, 'a chapter without an endMs fills to the end of the recording');
+      assert(segmentLayout([], 600_000).length === 0, 'no chapters means no segments');
+      assert(segmentLayout(chapters, 0).length === 0, 'no duration means no segments');
+
+      assert(segmentFill({ startMs: 120_000, endMs: 420_000 }, 120_000) === 0, 'a segment is empty at its start');
+      assert(segmentFill({ startMs: 120_000, endMs: 420_000 }, 270_000) === 0.5, 'a segment is half filled at its midpoint');
+      assert(segmentFill({ startMs: 120_000, endMs: 420_000 }, 420_000) === 1, 'a segment is full at its end');
+      assert(segmentFill({ startMs: 120_000, endMs: 420_000 }, 600_000) === 1, 'a segment stays full past its end');
+      assert(segmentFill({ startMs: 120_000, endMs: 420_000 }, 0) === 0, 'a segment is empty before it starts');
+      assert(segmentFill({ startMs: 5_000, endMs: 5_000 }, 5_000) === 0, 'a zero-width segment never fills');
+
+      assert(bubbleLeftPx(0, 300, 80) === 0, 'a bubble at the left edge is clamped to zero');
+      assert(bubbleLeftPx(150, 300, 80) === 110, 'a centred bubble is offset by half its width');
+      assert(bubbleLeftPx(300, 300, 80) === 220, 'a bubble at the right edge stays inside the bar');
+      assert(bubbleLeftPx(-20, 300, 80) === 0, 'a bubble left of the bar clamps to zero');
+      assert(bubbleLeftPx(150, 60, 80) === 0, 'a bubble wider than the bar sits at zero');
+      assert(bubbleLeftPx(150, 0, 80) === 0, 'a bar with no width has no bubble offset');
+
+      const pause = { kind: 'pause', label: 'Long pause', atMs: 30_000 };
+      const talkOver = { kind: 'interruption', label: 'Talked over', atMs: 33_000 };
+      assert(nearestMarker([pause], 30_600, 600_000, 600).label === 'Long pause', 'a marker within a pixel under the cursor is picked');
+      assert(nearestMarker([pause], 36_000, 600_000, 600).label === 'Long pause', 'a marker exactly 6px away still counts');
+      assert(nearestMarker([pause], 37_000, 600_000, 600) === null, 'a marker 7px away does not count');
+      assert(nearestMarker([pause, talkOver], 32_000, 600_000, 600).label === 'Talked over', 'the closest of two markers wins');
+      assert(nearestMarker([pause], 30_000, 600_000, 600).atMs === 30_000, 'the returned marker carries its clamped time');
+      assert(nearestMarker([], 30_000, 600_000, 600) === null, 'no markers means no hint');
+      assert(nearestMarker([pause], 0, 0, 600) === null, 'a recording with no duration has no marker hint');
+      assert(nearestMarker([pause], 30_000, 600_000, 0) === null, 'a bar with no width has no marker hint');
+
+      assert(prevChapterStart(chapters, 122_000) === 120_000, 'past the first second a previous jump restarts the chapter');
+      assert(prevChapterStart(chapters, 120_500) === 0, 'inside the first second of a chapter a previous jump goes back one');
+      assert(prevChapterStart(chapters, 0) === 0, 'the first chapter cannot go back further than zero');
+      assert(prevChapterStart(chapters, 300_000) === 120_000, 'the middle of a chapter restarts at its own start');
+      assert(prevChapterStart([], 50_000) === 0, 'no chapters means the previous jump is zero');
+      assert(prevChapterStart(chapters, 1_000, 2_000) === 0, 'a longer grace still keeps the first chapter at zero');
+
+      assert(nextChapterStart(chapters, 0, 600_000) === 120_000, 'the next chapter starts at 2:00');
+      assert(nextChapterStart(chapters, 120_000, 600_000) === 420_000, 'the next jump from a chapter start is the following chapter');
+      assert(nextChapterStart(chapters, 420_000, 600_000) === 600_000, 'past the last chapter the next jump is the end of the call');
+      assert(nextChapterStart(chapters, 590_000, 600_000) === 600_000, 'the tail of the last chapter jumps to the end');
+      assert(nextChapterStart([], 590_000, 600_000) === 600_000, 'no chapters means the next jump is the end of the call');
+
+      assert(scrubberKeyTarget('ArrowRight', {}, 100_000, 600_000, chapters) === 105_000, 'ArrowRight moves five seconds');
+      assert(scrubberKeyTarget('ArrowLeft', {}, 100_000, 600_000, chapters) === 95_000, 'ArrowLeft moves five seconds back');
+      assert(scrubberKeyTarget('ArrowLeft', {}, 1_000, 600_000, chapters) === 0, 'ArrowLeft clamps at zero');
+      assert(scrubberKeyTarget('ArrowRight', {}, 598_000, 600_000, chapters) === 600_000, 'ArrowRight clamps at the end');
+      assert(scrubberKeyTarget('l', {}, 100_000, 600_000, chapters) === 110_000, 'L moves ten seconds forward');
+      assert(scrubberKeyTarget('L', {}, 100_000, 600_000, chapters) === 110_000, 'shift+L moves ten seconds forward');
+      assert(scrubberKeyTarget('j', {}, 100_000, 600_000, chapters) === 90_000, 'J moves ten seconds back');
+      assert(scrubberKeyTarget('J', {}, 100_000, 600_000, chapters) === 90_000, 'shift+J moves ten seconds back');
+      assert(scrubberKeyTarget('Home', {}, 300_000, 600_000, chapters) === 0, 'Home jumps to the start');
+      assert(scrubberKeyTarget('End', {}, 300_000, 600_000, chapters) === 600_000, 'End jumps to the end');
+      assert(scrubberKeyTarget('PageUp', {}, 300_000, 600_000, chapters) === 120_000, 'PageUp restarts the current chapter');
+      assert(scrubberKeyTarget('PageUp', {}, 120_800, 600_000, chapters) === 0, 'PageUp inside the first second goes back one chapter');
+      assert(scrubberKeyTarget('PageDown', {}, 120_000, 600_000, chapters) === 420_000, 'PageDown jumps to the next chapter');
+      assert(scrubberKeyTarget('PageDown', {}, 420_000, 600_000, chapters) === 600_000, 'PageDown past the last chapter jumps to the end');
+      assert(scrubberKeyTarget('ArrowRight', { altKey: true }, 300_000, 600_000, chapters) === 420_000, 'Alt+ArrowRight jumps to the next chapter');
+      assert(scrubberKeyTarget('ArrowLeft', { altKey: true }, 300_000, 600_000, chapters) === 120_000, 'Alt+ArrowLeft restarts the current chapter');
+      assert(scrubberKeyTarget('ArrowRight', {}, 0, 600_000, []) === 5_000, 'keys still work without chapters');
+      assert(scrubberKeyTarget('Enter', {}, 300_000, 600_000, chapters) === null, 'unhandled keys return null');
+      assert(scrubberKeyTarget(' ', { altKey: true }, 300_000, 600_000, chapters) === null, 'unhandled keys with Alt return null');
+    },
+  },
+  {
+    name: 'practice call render: the scrubber draws chapter segments, fill layers, a knob and a chapter readout without native tooltips',
+    async run() {
+      const bundle = await loadServerBundle();
+      try {
+        const { React, renderToStaticMarkup, Replay } = bundle.module;
+        const markup = renderToStaticMarkup(React.createElement(Replay, { replay: REPLAY, api: {}, initialPositionMs: 270_000 }));
+        const bar = markup.slice(markup.indexOf('data-scrubber="true"'), markup.indexOf('class="flex min-w-0 items-baseline'));
+        assert(bar.length > 0, 'the seek bar renders before the time row');
+        assert((bar.match(/data-chapter="/g) || []).length === 3, 'one segment element per chapter');
+        assert(bar.includes('data-chapter="1"'), 'the middle chapter has its own segment');
+        assert(bar.includes('style="left:0%;width:calc(20% - 2px);transform:scaleY(0.6)"'), 'the first segment is 2px short and idles at scaleY(0.6)');
+        assert(bar.includes('style="left:20%;width:calc(50% - 2px);transform:scaleY(0.6)"'), 'the middle segment keeps the 2px gap');
+        assert(bar.includes('style="left:70%;width:30%;transform:scaleY(0.6)"'), 'the last segment has no gap after it');
+        assert(bar.includes('transition-transform duration-100 ease-out'), 'segment growth is a 100ms transform transition');
+        assert(bar.includes('class="absolute inset-0 bg-white/20"'), 'each segment draws its unplayed track');
+        assert(bar.includes('class="absolute inset-y-0 left-0 bg-violet-400" style="width:50%"'), 'the current chapter is filled to the playhead');
+        assert(bar.includes('class="absolute inset-y-0 left-0 bg-violet-400" style="width:0%"'), 'a later chapter has no played fill');
+        assert(bar.includes('h-[13px] w-[13px]'), 'the knob is 13px round');
+        assert(bar.includes('data-scrubber-knob="true"'), 'the knob is part of the bar');
+        assert(bar.includes('transform:translate(-50%, -50%) scale(0)'), 'the knob is hidden until the bar is hovered');
+        assert(!bar.includes('title='), 'no native title tooltips anywhere in the bar');
+        assert(bar.includes('data-marker-kind="pause"') && bar.includes('data-marker-kind="interruption"'), 'moment markers stay as coloured ticks');
+        assert(markup.includes('aria-valuetext="4:30 of 10:00, Onboarding story"'), 'aria-valuetext reports the time and chapter');
+        assert(markup.includes('<span class="font-mono">4:30 / 10:00</span>'), 'the time row reads current / duration');
+        assert(markup.includes('aria-label="Current chapter: Onboarding story. Show chapters"'), 'the time row offers the current chapter');
+        const unchaptered = renderToStaticMarkup(React.createElement(Replay, { replay: { durationMs: 60_000, chapters: [], transcript: [] }, api: {} }));
+        const plainBar = unchaptered.slice(unchaptered.indexOf('data-scrubber="true"'), unchaptered.indexOf('class="flex min-w-0 items-baseline'));
+        assert((plainBar.match(/data-chapter="/g) || []).length === 1, 'a recording without chapters still has one full-width segment');
+        assert(plainBar.includes('style="left:0%;width:100%;transform:scaleY(0.6)"'), 'the fallback segment spans the whole bar');
+        assert(!unchaptered.includes('aria-label="Current chapter:'), 'no chapter readout without chapters');
       } finally { await bundle.dispose(); }
     },
   },
