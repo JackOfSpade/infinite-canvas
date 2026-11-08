@@ -89,6 +89,9 @@ export default defineConfig({
                 },
               },
               external: [
+                // Native N-API addon with per-platform binaries; loaded from
+                // node_modules (unpacked from the asar) by the practice call.
+                'onnxruntime-node',
                 'puppeteer-core',
                 'puppeteer-extra',
                 'puppeteer-extra-plugin-stealth',
@@ -117,6 +120,34 @@ export default defineConfig({
         onstart(options) {
           options.reload()
         },
+        vite: {
+          build: {
+            rollupOptions: {
+              output: {
+                format: 'cjs',
+              },
+            },
+          },
+        },
+      },
+      // Practice-call model worker thread: its own entry so the worker never loads main.cjs.
+      // onnxruntime-node stays external (native addon, unpacked from the asar).
+      {
+        entry: 'electron/practiceCall/models/inferenceWorkerThread.js',
+        vite: {
+          build: {
+            rollupOptions: {
+              external: ['onnxruntime-node'],
+              output: {
+                format: 'cjs',
+              },
+            },
+          },
+        },
+      },
+      // The practice call window gets its own narrow bridge (window.practiceCallAPI).
+      {
+        entry: 'electron/practiceCallPreload.js',
         vite: {
           build: {
             rollupOptions: {

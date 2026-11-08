@@ -14,6 +14,7 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildInterviewAudioHelper } from './build-interview-audio-helper.mjs';
+import { buildPracticeAudioHelper } from './build-practice-audio-helper.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 export const PACKAGING_LOCK_DIRECTORY = '.packaging-build.lock';
@@ -481,6 +482,7 @@ export function buildMacApplication(projectDir = process.cwd()) {
   assertMacSigningPrerequisites({ identity });
 
   buildInterviewAudioHelper({ projectDir, identity });
+  buildPracticeAudioHelper({ projectDir, identity });
   compileApplication(projectDir);
   const releaseDir = path.join(projectDir, 'release');
   const before = snapshotMacApplications(releaseDir);

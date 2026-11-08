@@ -32,6 +32,9 @@ import { registerJobsHandlers } from './ipc/jobs.js';
 import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from './ipc/interviewHelper.js';
 import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from './ipc/interviewPreparation.js';
 import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
+import { createPracticeCallController, createReplayHandler } from './practiceCall/callWindow.js';
+import { getInterviewPracticeRegistry } from './ipc/interviewPracticeRegistry.js';
+import { createInterviewClaudeTransport } from './ipc/interviewClaudeTransport.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, stopLocalApplicationJob, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
 import { recheckClaudeUsageAfterWake, reportClaudeUsageLimit, waitForClaudeUsage } from './ipc/claudePause.js';
@@ -356,6 +359,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // shared — running multiple OS processes would fight over those.
 const canvasWindows = new Set();
 let interviewWindowController = null;
+let practiceCallController = null;
 // Most-recently focused canvas window — menu actions target this so File ▸ Save
 // etc. act on the window the user is actually looking at.
 let lastFocusedCanvasWindow = null;
@@ -1081,6 +1085,11 @@ if (!gotTheLock) {
   app.quit();
 } else {
   protocol.registerSchemesAsPrivileged([
+    // Replay audio of in-app practice calls; only known call ids are served (electron/practiceCall/replayProtocol.js).
+    {
+      scheme: 'practice-call',
+      privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+    },
     {
       scheme: 'local-file',
       privileges: {
@@ -1407,6 +1416,36 @@ if (!gotTheLock) {
       devServerUrl: process.env.VITE_DEV_SERVER_URL || null,
       distHtmlPath: path.join(__dirname, '../dist/index.html'),
     });
+    try {
+      // In-app practice call (docs/interview-practice-call.md). The review runs on the
+      // same Claude CLI transport as interview preparation, stage qa-practice-review.
+      const practiceReviewTransport = createInterviewClaudeTransport();
+      const practiceCallText = ({ prompt, schema, signal } = {}) => practiceReviewTransport.callText(prompt, {
+        signal, task: 'practice-review', claudeStage: 'qa-practice-review', responseSchema: schema,
+      });
+      const ownerFromFrame = sender => {
+        try {
+          const contents = sender?.webContents ?? electronPkg.webContents?.fromFrame?.(sender) ?? sender;
+          return BrowserWindow.fromWebContents(contents) || null;
+        } catch { return null; }
+      };
+      practiceCallController = createPracticeCallController({
+        BrowserWindow,
+        ipcMain: electronPkg.ipcMain,
+        appInstance: app,
+        isAuthorizedOwner: sender => { const owner = ownerFromFrame(sender); return !!owner && canvasWindows.has(owner) && !owner.isDestroyed(); },
+        preloadPath: path.join(__dirname, 'practiceCallPreload.js'),
+        devServerUrl: process.env.VITE_DEV_SERVER_URL || null,
+        distHtmlPath: path.join(__dirname, '../dist/index.html'),
+        callText: practiceCallText,
+        registry: getInterviewPracticeRegistry(),
+        // The model worker runs from its own bundle entry (vite: electron/practiceCall/models/inferenceWorkerThread.js).
+        serviceOptions: { callText: practiceCallText, registry: getInterviewPracticeRegistry(), inferenceWorkerPath: path.join(__dirname, 'inferenceWorkerThread.js').replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`) },
+      });
+      protocol.handle('practice-call', createReplayHandler({ store: practiceCallController.store }));
+    } catch (error) {
+      logger.warn(`[PracticeCall] unavailable: ${error?.message || error}`);
+    }
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
     try {

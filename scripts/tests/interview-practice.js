@@ -68,6 +68,26 @@ export default [
     assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), planned: [{ asked: true }] }), /planned\[0\]/u);
     assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), transcript: [{ role: 'user', text: 'x' }] }), /transcript\[0\]\.role/u);
   } },
+  { name: 'practice feedback: optional callId and delivery notes validate, and bad values are rejected', async run() {
+    const base = validatePracticeFeedback(feedbackPayload('PRACTICE-X'));
+    assert.deepEqual(Object.keys(base), ['overall', 'planned', 'moments', 'communication', 'priorities', 'transcript'], 'an existing payload keeps exactly its old keys');
+    const ok = validatePracticeFeedback({ ...feedbackPayload('PRACTICE-X'), callId: 'call-3_A', delivery: {
+      summary: ' Steady at 130 words per minute. ', pace: ' 130 words per minute ', pauses: 'Two over a second', fillers: 'Four, down from nine',
+      confidence: 'Even', interruptions: 'One', typedAnswers: 'One typed number', fillerCount: 4, wordsPerMinute: 130.5,
+    } });
+    assert.equal(ok.callId, 'call-3_A');
+    assert.deepEqual(ok.delivery, { summary: 'Steady at 130 words per minute.', pace: '130 words per minute', pauses: 'Two over a second', fillers: 'Four, down from nine', confidence: 'Even', interruptions: 'One', typedAnswers: 'One typed number', fillerCount: 4, wordsPerMinute: 130.5 });
+    assert.deepEqual(validatePracticeFeedback({ ...feedbackPayload('c'), delivery: { summary: 'Fine.' } }).delivery, { summary: 'Fine.' }, 'everything but the summary is optional');
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), callId: 'bad id' }), /callId/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), callId: 'x'.repeat(65) }), /callId/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), callId: 7 }), /callId/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), delivery: {} }), /delivery\.summary/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), delivery: { summary: 's', fillerCount: -1 } }), /delivery\.fillerCount/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), delivery: { summary: 's', fillerCount: 1.5 } }), /delivery\.fillerCount/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), delivery: { summary: 's', wordsPerMinute: 'fast' } }), /delivery\.wordsPerMinute/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), delivery: { summary: 's', pace: 'x'.repeat(5000) } }), /delivery\.pace/u);
+    assert.throws(() => validatePracticeFeedback({ ...feedbackPayload('c'), delivery: 'fine' }), /delivery must be an object/u);
+  } },
   { name: 'practice store: planned order, armed session found by code hash, feedback with history', async run() {
     await userData(async dir => {
       await saveInterviewPractice({ userDataPath: dir, nodeId: 'h', practice: { order: ['Tell me about yourself.', 'Why Discord?', 'bad\u0001'] } });

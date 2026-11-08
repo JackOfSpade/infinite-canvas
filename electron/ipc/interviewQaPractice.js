@@ -138,6 +138,20 @@ export function buildPracticeInterviewPrompt({ code, company, role, roleSummary,
 
 const scoreSchema = { type: 'integer', minimum: 1, maximum: 10 };
 const str = max => ({ type: 'string', maxLength: max });
+
+// A post-call analysis names the recording it came from by its call id.
+export const PRACTICE_CALL_ID_RE = /^[A-Za-z0-9_-]{1,64}$/u;
+/** Delivery notes from a post-call review; every number cites the call metrics. */
+export const INTERVIEW_PRACTICE_DELIVERY_SCHEMA = Object.freeze({
+  type: 'object', additionalProperties: false, required: ['summary'],
+  properties: {
+    summary: { ...str(LIMITS.long), description: 'How the call was delivered: pace, pauses, fillers, confidence, interruptions and typed answers, citing the measured numbers.' },
+    pace: str(LIMITS.short), pauses: str(LIMITS.short), fillers: str(LIMITS.short), confidence: str(LIMITS.short),
+    interruptions: str(LIMITS.short), typedAnswers: str(LIMITS.short),
+    fillerCount: { type: 'integer', minimum: 0, description: 'Counted from the verbatim transcript; only non-lexical filler uses.' },
+    wordsPerMinute: { type: 'number', description: 'From the deterministic metrics, never estimated.' },
+  },
+});
 export const INTERVIEW_PRACTICE_FEEDBACK_SCHEMA = Object.freeze({
   type: 'object', additionalProperties: false, required: ['session', 'overall', 'planned', 'priorities'],
   properties: {
@@ -154,6 +168,8 @@ export const INTERVIEW_PRACTICE_FEEDBACK_SCHEMA = Object.freeze({
     communication: { type: 'object', additionalProperties: false, properties: { pace: str(LIMITS.short), clarity: str(LIMITS.short), structure: str(LIMITS.short), confidence: str(LIMITS.short), filler: str(LIMITS.short) } },
     priorities: { type: 'array', maxItems: LIMITS.priorities, items: str(LIMITS.short), description: 'The few things to work on first, most important first.' },
     transcript: { type: 'array', maxItems: LIMITS.transcript, items: { type: 'object', additionalProperties: false, required: ['role', 'text'], properties: { role: { type: 'string', enum: ['interviewer', 'candidate'] }, text: str(LIMITS.transcriptText) } } },
+    callId: { ...str(64), pattern: '^[A-Za-z0-9_-]{1,64}$', description: 'The practice call this feedback analyses, when it came from a recorded call.' },
+    delivery: INTERVIEW_PRACTICE_DELIVERY_SCHEMA,
   },
 });
 
@@ -169,6 +185,38 @@ const score = (value, field) => {
   return value;
 };
 const plain = value => !!value && typeof value === 'object' && !Array.isArray(value);
+const callIdValue = value => {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || !PRACTICE_CALL_ID_RE.test(value)) throw new Error('callId must be 1-64 letters, digits, hyphens or underscores.');
+  return value;
+};
+const count = (value, field) => {
+  if (value === undefined) return null;
+  if (!Number.isInteger(value) || value < 0) throw new Error(`${field} must be a whole number of zero or more.`);
+  return value;
+};
+const rate = (value, field) => {
+  if (value === undefined) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1000) throw new Error(`${field} must be a number from 0 to 1000.`);
+  return value;
+};
+
+/** Optional delivery notes from the post-call review; every field is bounded. */
+function deliveryNotes(input) {
+  if (input === undefined) return null;
+  if (!plain(input)) throw new Error('delivery must be an object.');
+  const out = {};
+  for (const key of ['summary', 'pace', 'pauses', 'fillers', 'confidence', 'interruptions', 'typedAnswers']) {
+    const value = bounded(input[key], key === 'summary' ? LIMITS.long : LIMITS.short, `delivery.${key}`);
+    if (key === 'summary' && !value) throw new Error('delivery.summary is required.');
+    if (value) out[key] = value;
+  }
+  const fillerCount = count(input.fillerCount, 'delivery.fillerCount');
+  if (fillerCount !== null) out.fillerCount = fillerCount;
+  const wordsPerMinute = rate(input.wordsPerMinute, 'delivery.wordsPerMinute');
+  if (wordsPerMinute !== null) out.wordsPerMinute = wordsPerMinute;
+  return out;
+}
 
 /** Normalize and bound a finish_practice_interview payload; throws with the reason. */
 export function validatePracticeFeedback(input) {
@@ -208,5 +256,7 @@ export function validatePracticeFeedback(input) {
     if (!text) throw new Error(`transcript[${index}].text is required.`);
     return { role: item.role, text };
   });
-  return { overall, planned, moments, communication, priorities, transcript };
+  const callId = callIdValue(input.callId);
+  const delivery = deliveryNotes(input.delivery);
+  return { overall, planned, moments, communication, priorities, transcript, ...(callId === null ? {} : { callId }), ...(delivery === null ? {} : { delivery }) };
 }

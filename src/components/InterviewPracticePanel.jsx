@@ -47,6 +47,9 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
   const [notice, setNotice] = useState(null);
   const [copied, setCopied] = useState(false);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [practiceBusy, setPracticeBusy] = useState(false);
+  const [pastCalls, setPastCalls] = useState([]);
+  const [pastNotice, setPastNotice] = useState(null);
   const api = typeof window !== 'undefined' ? window.electronAPI : null;
 
   const reload = useCallback(async () => {
@@ -75,6 +78,44 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); };
   }, [bridgeNotReady, reload]);
 
+  // Past practice calls are local: list them whenever the hub mounts (and after
+  // a call finishes) so a replay opens without leaving this panel.
+  const loadPastCalls = useCallback(async () => {
+    if (typeof api?.listPracticeCalls !== 'function') return;
+    try {
+      const result = await api.listPracticeCalls({ nodeId });
+      const calls = Array.isArray(result) ? result : Array.isArray(result?.calls) ? result.calls : [];
+      setPastCalls(calls);
+    } catch { /* keep the last list */ }
+  }, [api, nodeId]);
+  const pastCallsReady = typeof api?.listPracticeCalls === 'function';
+  useEffect(() => {
+    if (!pastCallsReady) return undefined;
+    const timer = setTimeout(() => { void loadPastCalls(); }, 0);
+    const unsubscribe = typeof api.onPracticeCallUpdated === 'function' ? api.onPracticeCallUpdated(event => { if (!event || !event.nodeId || event.nodeId === nodeId) void loadPastCalls(); }) : null;
+    const onFocus = () => { void loadPastCalls(); };
+    window.addEventListener('focus', onFocus);
+    return () => { clearTimeout(timer); if (typeof unsubscribe === 'function') unsubscribe(); window.removeEventListener('focus', onFocus); };
+  }, [api, nodeId, pastCallsReady, loadPastCalls]);
+  const startCall = async () => {
+    if (typeof api?.startPracticeCall !== 'function' || practiceBusy) return;
+    setPracticeBusy(true);
+    setPastNotice(null);
+    try {
+      const result = await api.startPracticeCall({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest });
+      if (result && result.success === false) setPastNotice({ tone: 'error', text: result.error || 'The practice call could not start.' });
+      else if (result?.note) setPastNotice({ tone: 'error', text: result.note });
+    } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The practice call could not start.' }); }
+    finally { setPracticeBusy(false); }
+  };
+  const openReplay = async callId => {
+    if (typeof api?.openPracticeReplay !== 'function' || !callId) return;
+    try {
+      const result = await api.openPracticeReplay({ nodeId, callId });
+      if (result && result.success === false) setPastNotice({ tone: 'error', text: result.error || 'The replay could not open.' });
+    } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The replay could not open.' }); }
+  };
+
   const start = async () => {
     if (!api?.startInterviewPractice || busy) return;
     setBusy(true); setNotice(null);
@@ -98,15 +139,41 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
   };
 
-  if (!api?.startInterviewPractice) return null;
+  // Older preloads expose only the Claude-chat path, so each path degrades on
+  // its own instead of hiding the whole panel.
+  const canChat = typeof api?.startInterviewPractice === 'function';
+  const canCallApi = typeof api?.startPracticeCall === 'function';
+  if (!canChat && !canCallApi) return null;
   const bridge = view?.bridge || null;
   const session = view?.session || null;
   const history = view?.history || [];
   const shown = historyIndex >= 0 ? history[historyIndex] : view?.feedback;
   const canStart = ready && !disabled && !busy && !!bridge?.ready && session?.status !== 'armed';
+  // Same readiness rule as the Claude-chat start: prepared interview, connector
+  // up, and no session already in progress.
+  const canCall = ready && !disabled && !practiceBusy && !!bridge?.ready && session?.status !== 'armed';
+  const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) || 0) / 1000)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; };
   return <section className="space-y-2 border-t border-white/10 pt-3" aria-label="Practice interview">
     <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
     <p className="text-[11px] text-white/60">A Claude chat plays the interviewer on a virtual call: small talk, your prepared questions reworded, follow-ups and curveballs of its own. Written feedback on the whole call comes back here.</p>
+    {canCallApi && <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
+      <p className="text-[11px] text-white/70">A local AI interviewer calls inside the app: it speaks, hears your answers, and writes up the call afterwards.</p>
+      <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Starting…' : 'Start practice call'}</button>
+      {!ready && <p className="text-[10px] text-white/45">Prepare the interview first; the call uses the prepared questions and answers.</p>}
+      <div aria-label="Past calls">
+        <p className="text-[10px] font-semibold uppercase text-white/45">Past calls</p>
+        {pastCalls.length === 0 ? <p className="text-[10px] text-white/40">No past calls yet.</p> : <ul className="mt-0.5 space-y-0.5">{pastCalls.map(call => {
+          const id = call?.callId || call?.id;
+          const label = `${when(call?.startedAt) || 'Undated call'} · ${durationLabel(call?.durationMs)} · ${call?.persona?.name || 'Interviewer'}`;
+          return <li key={id || label} className="flex items-center justify-between gap-2 text-[11px] text-white/70">
+            <span className="min-w-0 truncate">{label}</span>
+            <button type="button" className="nodrag rounded border border-white/10 px-1.5 py-0.5 text-[10px] text-violet-200 hover:bg-white/5 disabled:opacity-40" onClick={() => openReplay(id)} disabled={!id} aria-label={`Replay ${call?.persona?.name || 'practice'} call from ${when(call?.startedAt) || 'unknown date'}`}>Replay</button>
+          </li>;
+        })}</ul>}
+      </div>
+      {pastNotice && <p role={pastNotice.tone === 'error' ? 'alert' : 'status'} className={`text-[11px] ${pastNotice.tone === 'error' ? 'text-red-200' : 'text-emerald-100'}`}>{pastNotice.text}</p>}
+    </div>}
+    {canChat && <p className="text-[10px] font-semibold uppercase text-white/45">Practice in Claude chat instead</p>}
     {bridge && !bridge.ready && <p role="status" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{bridge.reason === 'no_hostname' ? 'The practice connector is not set up; feedback arrives through it.' : 'The practice connector is not running; feedback arrives through its public hostname.'}</p>}
     {bridge?.connectorUrl && <div className="rounded-md border border-white/10 bg-black/20 p-1.5 text-[10px] text-white/55">
       <p>Once, in claude.ai → Settings → Connectors → Add custom connector (no OAuth), name it “{bridge.connectorName}” with this URL:</p>

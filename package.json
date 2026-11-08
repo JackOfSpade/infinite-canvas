@@ -38,11 +38,16 @@
         {
           "from": "native/interview-audio/build/Interview Audio Helper.app",
           "to": "interview-audio/Interview Audio Helper.app"
+        },
+        {
+          "from": "native/practice-audio/build/Practice Audio Helper.app",
+          "to": "practice-audio/Practice Audio Helper.app"
         }
       ],
       "timestamp": "none",
       "extendInfo": {
         "NSAppleEventsUsageDescription": "Read the marketplace pages you are signed in to in Google Chrome.",
+        "NSMicrophoneUsageDescription": "Hear your answers during interview practice calls. Audio is transcribed on this Mac and recorded locally for your feedback.",
         "NSAudioCaptureUsageDescription": "Transcribe interview call output on this Mac without capturing your microphone or changing playback.",
         "NSScreenCaptureUsageDescription": "Read interview call system audio locally. No screen frames or microphone audio are captured by Interview Helper."
       }
@@ -54,7 +59,13 @@
     "files": [
       "dist",
       "dist-electron",
-      "!node_modules/@anthropic-ai/claude-agent-sdk-*/**/*"
+      "!node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v*/linux/**/*",
+      "!node_modules/onnxruntime-node/bin/napi-v*/win32/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**/*",
+      "dist-electron/inferenceWorkerThread.js"
     ],
     "extraResources": [
       {
@@ -88,6 +99,7 @@
     "electron-store": "^11.0.2",
     "html-to-text": "^10.0.1",
     "jsdom": "^29.0.2",
+    "onnxruntime-node": "^1.31.1",
     "parse5": "^8.0.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.3.289",

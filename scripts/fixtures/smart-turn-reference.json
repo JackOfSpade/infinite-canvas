@@ -1,0 +1,146 @@
+{
+ "generator": "x[i]=env*(0.3*sin(2pi*(180+40t)t)+0.15*sin(2pi*440t))+0.05*noise; env=0.5*(1+sin(2pi*3t)); t=i/16000; noise=(s/2^32)-0.5 with s=(1664525*s+1013904223) mod 2^32 updated before use, s0=seed; float32",
+ "model": "pipecat-ai/smart-turn-v3 smart-turn-v3.2-gpu.onnx (unquantized fp32; the int8 cpu build gives runtime-version-dependent outputs) sha256 ab8dc64b88713f90b571c15b714bd1330e6c883cad8763dacf65c9376dc539be",
+ "reference": "transformers WhisperFeatureExtractor(chunk_length=8), do_normalize=True, padding max_length 128000 after zero-padding at the START to 8 s / keeping the last 8 s; onnxruntime python",
+ "cases": [
+  {
+   "name": "short-3s",
+   "samples": 48000,
+   "seed": 7,
+   "shape": [
+    80,
+    800
+   ],
+   "mean": 0.22682297229766846,
+   "std": 0.45406150817871094,
+   "min": -0.10753500461578369,
+   "max": 1.8924649953842163,
+   "probe": [
+    [
+     0,
+     0,
+     -0.10753500461578369
+    ],
+    [
+     5,
+     100,
+     -0.10753500461578369
+    ],
+    [
+     40,
+     400,
+     -0.10753500461578369
+    ],
+    [
+     79,
+     799,
+     0.7519347071647644
+    ],
+    [
+     20,
+     650,
+     0.5089006423950195
+    ],
+    [
+     60,
+     10,
+     -0.10753500461578369
+    ]
+   ],
+   "probability": 0.2263803482055664
+  },
+  {
+   "name": "long-9s",
+   "samples": 144000,
+   "seed": 11,
+   "shape": [
+    80,
+    800
+   ],
+   "mean": 0.6773216724395752,
+   "std": 0.23077602684497833,
+   "min": -0.11850059032440186,
+   "max": 1.8087058067321777,
+   "probe": [
+    [
+     0,
+     0,
+     1.3035831451416016
+    ],
+    [
+     5,
+     100,
+     0.7868009805679321
+    ],
+    [
+     40,
+     400,
+     0.5898370146751404
+    ],
+    [
+     79,
+     799,
+     0.5880624055862427
+    ],
+    [
+     20,
+     650,
+     1.5676723718643188
+    ],
+    [
+     60,
+     10,
+     0.6286847591400146
+    ]
+   ],
+   "probability": 0.9139695167541504
+  },
+  {
+   "name": "tiny-0.5s",
+   "samples": 8000,
+   "seed": 3,
+   "shape": [
+    80,
+    800
+   ],
+   "mean": 0.06215141341090202,
+   "std": 0.24345660209655762,
+   "min": 0.0011823177337646484,
+   "max": 2.0011823177337646,
+   "probe": [
+    [
+     0,
+     0,
+     0.0011823177337646484
+    ],
+    [
+     5,
+     100,
+     0.0011823177337646484
+    ],
+    [
+     40,
+     400,
+     0.0011823177337646484
+    ],
+    [
+     79,
+     799,
+     0.8653891086578369
+    ],
+    [
+     20,
+     650,
+     0.0011823177337646484
+    ],
+    [
+     60,
+     10,
+     0.0011823177337646484
+    ]
+   ],
+   "probability": 0.8118410110473633
+  }
+ ],
+ "note": "SYNTHETIC test signals (formula in generator); reference values from the official Python pipeline. Probabilities on synthetic signals are not meaningful predictions, only parity targets."
+}

@@ -1,0 +1,28 @@
+{
+ "note": "SYNTHETIC test signals (same generator as smart-turn-reference.json); reference logits [arousal,dominance,valence] from onnxruntime python on the raw float32 signal, shape [1,N]. Parity targets only.",
+ "model": "audeering w2v2-L-robust-12 Zenodo 6221127 w2v2-L-robust-12.6bc4a7fd-1.1.0.zip md5 76fef8c090addd7fcee60c64e9536ced, model.onnx",
+ "cases": [
+  {
+   "name": "tone-2s",
+   "samples": 32000,
+   "seed": 5,
+   "logits": [
+    0.015945758670568466,
+    0.06207708641886711,
+    0.304536908864975
+   ],
+   "ms": 68
+  },
+  {
+   "name": "tone-6s",
+   "samples": 96000,
+   "seed": 9,
+   "logits": [
+    0.4313248097896576,
+    0.46912023425102234,
+    0.5616819858551025
+   ],
+   "ms": 252
+  }
+ ]
+}

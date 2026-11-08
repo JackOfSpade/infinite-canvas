@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>com.antigravity.infinitecanvas.practice-audio</string>
+  <key>CFBundleName</key><string>Practice Audio Helper</string>
+  <key>CFBundleDisplayName</key><string>Practice Audio Helper</string>
+  <key>CFBundleExecutable</key><string>practice-audio-helper</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>LSMinimumSystemVersion</key><string>26.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Hear your answers during interview practice calls. Audio is transcribed on this Mac and recorded locally for your feedback.</string>
+</dict></plist>

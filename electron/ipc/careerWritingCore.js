@@ -38,6 +38,8 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
   'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // Post-call review of an in-app practice call (judgement and writing, one call per practice): same profile as qa-brief.
+  'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   'qa-fact-check': APPLICATION_STAGE_PROFILES['fact-check'],
   'qa-fact-correction': APPLICATION_STAGE_PROFILES['fact-correction'],
   'qa-fact-recheck': APPLICATION_STAGE_PROFILES['fact-recheck'],

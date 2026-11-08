@@ -245,6 +245,17 @@ import interview_spoken_replay from './tests/interview-spoken-replay.js';
 import interview_v5_replay from './tests/interview-v5-replay.js';
 import interview_matching_regressions from './tests/interview-matching-regressions.js';
 import interview_match_benchmark from './tests/interview-match-benchmark.js';
+import interview_practice_call_prompt from './tests/interview-practice-call-prompt.js';
+import interview_practice_audio from './tests/interview-practice-audio.js';
+import interview_practice_call_engine from './tests/interview-practice-call-engine.js';
+import interview_practice_call_simulation from './tests/interview-practice-call-simulation.js';
+import practice_call_audio from './tests/practice-call-audio.js';
+import practice_call_models from './tests/practice-call-models.js';
+import practice_call_eleven from './tests/practice-call-eleven.js';
+import practice_call_service from './tests/practice-call-service.js';
+import practice_call_render from './tests/practice-call-render.js';
+import practice_call_analysis from './tests/practice-call-analysis.js';
+import interview_practice_benchmark from './tests/interview-practice-benchmark.js';
 import interview_preload from './tests/interview-preload.js';
 import interview_window from './tests/interview-window.js';
 import interview_window_render from './tests/interview-window-render.js';
@@ -543,6 +554,17 @@ const testGroups = [
   ['interview-v5-replay.js', interview_v5_replay],
   ['interview-matching-regressions.js', interview_matching_regressions],
   ['interview-match-benchmark.js', interview_match_benchmark],
+  ['interview-practice-call-prompt.js', interview_practice_call_prompt],
+  ['interview-practice-audio.js', interview_practice_audio],
+  ['interview-practice-call-engine.js', interview_practice_call_engine],
+  ['interview-practice-call-simulation.js', interview_practice_call_simulation],
+  ['practice-call-audio.js', practice_call_audio],
+  ['practice-call-models.js', practice_call_models],
+  ['practice-call-eleven.js', practice_call_eleven],
+  ['practice-call-service.js', practice_call_service],
+  ['practice-call-render.js', practice_call_render],
+  ['practice-call-analysis.js', practice_call_analysis],
+  ['interview-practice-benchmark.js', interview_practice_benchmark],
   ['interview-preload.js', interview_preload],
   ['interview-window.js', interview_window],
   ['interview-window-render.js', interview_window_render],

@@ -200,6 +200,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadInterviewPractice: ({ nodeId }) => ipcRenderer.invoke('load-interview-practice', { nodeId }),
   startInterviewPractice: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }) => ipcRenderer.invoke('start-interview-practice', { nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }),
   cancelInterviewPractice: ({ nodeId }) => ipcRenderer.invoke('cancel-interview-practice', { nodeId }),
+  startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }) => ipcRenderer.invoke('practice-call:start', { nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }),
+  openPracticeReplay: ({ nodeId, callId }) => ipcRenderer.invoke('practice-call:open-replay', { nodeId, callId }),
+  listPracticeCalls: ({ nodeId }) => ipcRenderer.invoke('practice-call:list', { nodeId }),
   onInterviewPracticeUpdated: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('Interview practice callback must be a function.');
     const listener = (_event, event) => callback(event);
