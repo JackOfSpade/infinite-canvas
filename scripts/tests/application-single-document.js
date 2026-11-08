@@ -175,7 +175,7 @@ export default [
       assert.ok(WRITE_VERIFY_BRIEF.includes('Open on a thesis'));
       assert.equal(/cover letter|thesis|paragraph/iu.test(WRITE_VERIFY_RESUME_BRIEF), false);
       assert.equal(/résumé/iu.test(WRITE_VERIFY_COVER_BRIEF), false);
-      for (const sentence of ['Open on a thesis', 'Start each body paragraph', 'Close on what this proof taught you']) {
+      for (const sentence of ['Open on a thesis', 'Start each body paragraph', 'Close in first person on what your past work taught you']) {
         const whole = WRITE_VERIFY_BRIEF.slice(WRITE_VERIFY_BRIEF.indexOf(sentence)).split('. ')[0];
         assert.ok(WRITE_VERIFY_COVER_BRIEF.includes(whole), sentence);
       }

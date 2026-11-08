@@ -61,6 +61,18 @@ Patterns below the recurrence bar are watched, not forgotten. The private `appli
 
 ## Session log
 
+### 2026-11-07 — improvement session; user-directed brief and rubric changes; brief ceiling 970 → 1025; career source reworded; counter reset by the label change
+
+Run at the user's request with the counter at 4. Coverage: all 4 pairs since the 2026-11-06 session, one model label, none superseded. Two résumés were kept unedited, one résumé carried one edit with a note, and two letters carried edits with long notes. No truth errors. A bug from the same day's bug report shipped alongside: when the posting says the hirer is a subsidiary, division, brand or affiliate of the listed employer, the salutation falls back to "Dear Hiring Team," (`postingNamesEmployerAsParent` in `coverLetterChecks.js`); it never copies the other company's name out of the posting.
+
+Patterns, in both edited letters: the closing opened on "This work taught me", which the brief's own "this proof" wording caused; a link sentence joined the need and the proof with a bare "and"; the letter credited the reader with owning the company's products; body proof never said which job it came from (the user added a light frame three times); and the two closing lessons were near-identical.
+
+Changes, chosen by the user without replay: the brief's closing now reads "Close in first person on what your past work taught you, not a verdict on yourself.", and the body sentence adds "first naming the job or project they come from". The judge rubric now counts a bare-"and" need/proof link and second-person ownership of the company's products against writing, and counts proof that never names its job or project against added information, adding that a date range or city is not needed (so the 2026-10-31 removal of time and place stands). The brief ceiling rose once from 970 to 1025 characters (brief now 1021) instead of cutting tested wording; it stays a fixed ceiling, so later changes still replace wording. The user also reworded two phrases in their career source.
+
+Test: none. No replay, panel, truth recall or frozen-set replay was run, so no quality gain is claimed. The same day's DeepSeek routing bundles (next entry) ran under the new brief, but they were not a quality comparison. Watch next: whether the job-or-project frame brings back dates or cities, and whether first-person closings still converge on one lesson.
+
+Validation: 5,241 unit tests passed and lint is clean. Watch list reviewed for all 4 pairs (five letter patterns acting, two career-data items acting). Frozen regression set: the two oldest pairs dropped, the two edited-letter pairs added (20). The counter was already 0: the model-label change in the next entry archived these pairs and reset it.
+
 ### 2026-11-06 — improvement session; no guidance change shipped; career source reworded; counter reset
 
 Run at the user's request with the counter at 8. Coverage: all 8 pairs since the 2026-10-31 sessions were retained, under one model label, none superseded. Six bundles were résumé-only, and all eight résumés were kept unedited. Two letters carried edits, both with notes. No truth errors, and no edit was source-resolved.
