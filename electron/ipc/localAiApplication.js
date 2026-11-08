@@ -11190,6 +11190,7 @@ function authorLocalCoverLetterEnvelope(coverLetter, resumeMainHtml, job = {}) {
     job,
     evidence: extractResumeEvidence(resumeMainHtml),
     today,
+    jobText: jobTextForCoverLetter(job),
   });
   return {
     ...coverLetter,

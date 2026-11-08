@@ -3029,6 +3029,27 @@ export default [
       'branding pictographs in the employer display name stay out of the salutation');
       assert(authorCoverLetterEnvelope({ job: { company: '(Stealth)' }, evidence }).salutation === 'Dear (Stealth) Hiring Team,',
         'a name that is only a parenthetical is kept rather than emptied');
+      // A posting that names the employer as a parent of the hirer must not
+      // greet the parent; the hirer is never named, so the greeting is neutral.
+      const parentPostingJob = { company: 'Alarm.com' };
+      const parentPostingEnvelope = authorCoverLetterEnvelope({
+        job: parentPostingJob, evidence,
+        jobText: 'Building36 — a subsidiary of Alarm.com — is seeking a motivated and talented Software Engineer.',
+      });
+      assert(parentPostingEnvelope.salutation === 'Dear Hiring Team,' && parentPostingJob.company === 'Alarm.com',
+        'a subsidiary posting greets neutrally and leaves the employer value untouched');
+      assert(authorCoverLetterEnvelope({ job: { company: 'Alarm.com' }, evidence, jobText: 'Join an Alarm.com company building security software.' }).salutation === 'Dear Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, jobText: 'We are an Acme company.' }).salutation === 'Dear Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme, Inc.' }, evidence, jobText: 'Orchard is a division of Acme, Inc. and hires engineers.' }).salutation === 'Dear Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme, Inc.' }, evidence, jobText: 'Orchard is a wholly-owned subsidiary of Acme.' }).salutation === 'Dear Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, jobText: 'Orchard, owned by Acme, hires engineers.' }).salutation === 'Dear Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, jobText: 'Orchard was acquired by ACME last year.' }).salutation === 'Dear Hiring Team,',
+      'each parent-position form of the employer name gives the neutral salutation');
+      assert(authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, jobText: 'Acme is seeking an engineer. Join Acme\'s platform team.' }).salutation === 'Dear Acme Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, jobText: 'Orchard is a subsidiary of Acmeco.' }).salutation === 'Dear Acme Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence }).salutation === 'Dear Acme Hiring Team,'
+        && authorCoverLetterEnvelope({ job: { company: 'Acme' }, evidence, jobText: '' }).salutation === 'Dear Acme Hiring Team,',
+      'a posting naming the employer only as the hirer, a different name, or no posting keeps the employer salutation');
       assert(envelope.signatureTitle === '' && envelope.closing === 'Best regards,', 'code-authored closing omits an implied target title');
       assert(envelope.date === 'August 2026', 'app-authored cover-letter dates use month and year only');
       assert(envelope.subtitleRole === 'Operations leader' && envelope.credential === 'B.S. Operations, Example University',

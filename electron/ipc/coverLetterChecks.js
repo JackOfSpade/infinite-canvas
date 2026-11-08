@@ -253,6 +253,35 @@ function salutationCompanyName(value = '') {
   return /[\u2014\u2013;]|\s-\s/u.test(displayName) ? '' : displayName;
 }
 
+function postingTextKey(value = '') {
+  return text(value).normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
+}
+
+const PARENT_POSITION_PREFIX = String.raw`(?:(?:an?\s+(?:wholly[- ]owned\s+)?(?:subsidiary|division|business unit|brand|affiliate|portfolio company)\s+of)|owned\s+by|acquired\s+by)\s+(?:the\s+)?`;
+// The name must end at a word boundary, so "Acme" does not match "Acmeco" or
+// "Acme.io", while "Acme." closing a sentence or "Acme's" still match.
+const NAME_END = String.raw`(?![\p{L}\p{N}_]|\.[\p{L}\p{N}])`;
+
+/**
+ * True when the posting describes another organization as subordinate to the
+ * frozen employer name ("Building36 - a subsidiary of Alarm.com - is hiring").
+ * The salutation then falls back to the neutral greeting instead of naming
+ * the subsidiary: host-authored fields never copy a string parsed out of
+ * posting text, so the hirer cannot be named here, only the parent ruled out.
+ */
+export function postingNamesEmployerAsParent(employerName = '', jobText = '') {
+  const haystack = postingTextKey(jobText);
+  if (!haystack) return false;
+  const rawName = text(employerName);
+  const names = [rawName, rawName.replace(SALUTATION_TRAILING_PARENTHETICAL_RE, ''), salutationCompanyName(rawName)]
+    .map(postingTextKey).filter(Boolean);
+  return [...new Set(names)].some(name => {
+    const escaped = escapeRegExp(name);
+    return new RegExp(`${PARENT_POSITION_PREFIX}${escaped}${NAME_END}`, 'u').test(haystack)
+      || new RegExp(`\\ban?\\s+${escaped}\\s+company\\b`, 'u').test(haystack);
+  });
+}
+
 // Cover letters identify their preparation period without implying a
 // day-specific event. Keep the presentation format shared by API and Local AI
 // authoring paths so their envelopes satisfy the same document contract.
@@ -7703,8 +7732,8 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
 }
 
 /** Authors the stable cover-letter fields without changing the document-builder contract. */
-export function authorCoverLetterEnvelope({ job = {}, evidence = {}, today = '' } = {}) {
-  const company = salutationCompanyName(job.company);
+export function authorCoverLetterEnvelope({ job = {}, evidence = {}, today = '', jobText = '' } = {}) {
+  const company = postingNamesEmployerAsParent(job.company, jobText) ? '' : salutationCompanyName(job.company);
   const identity = evidence?.identity || {};
   return {
     name: text(identity.name),
