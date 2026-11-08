@@ -7,7 +7,7 @@ import {
   loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
-import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, INTERVIEW_RESEARCH_TOOLS } from '../../electron/ipc/interviewClaudeTransport.js';
+import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, INTERVIEW_RESEARCH_TOOLS, resetInterviewOffloadBlock } from '../../electron/ipc/interviewClaudeTransport.js';
 import { attachInterviewLiveCards, cardsOf } from '../../electron/interviewWindow.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
 import { applyInterviewFactFindings, factCheckInterviewCards, interviewCardUnits, interviewFactCheckPrompt } from '../../electron/ipc/interviewQaFactCheck.js';
@@ -255,5 +255,105 @@ export default [
     assert.deepEqual(ordered, ['Tell me about yourself.', 'Why are you interested in this company?', 'Design a rate limiter.']);
     assert.match(prompts[0], /an introduction first.*closing or reflective questions last/su, 'the plan asks for a natural interview arc');
     assert.deepEqual(await planInterviewPracticeOrder({ questions: ['Only one?'], callText: async () => { throw new Error('unused'); } }), ['Only one?']);
+  } },
+  { name: 'interview Q&A offload: a routed qa-brief is answered by the offload call with the handoff messages', async run() {
+    resetInterviewOffloadBlock();
+    const runs = []; const offloads = []; const stages = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      routeFor: stage => (stage === 'qa-brief' ? { route: 'deepseek-flash', reasoning: 'medium' } : null),
+      offloadCall: async args => { offloads.push(args); return { text: '{"ok":true}', model: 'deepseek-v4-flash', provider: 'offload' }; },
+      onStage: info => stages.push(info) });
+    const value = await transport.callText('PROMPT BODY', { claudeStage: 'qa-brief' });
+    assert.deepEqual(value, { ok: true });
+    assert.equal(runs.length, 0, 'Claude must not run for a routed answer');
+    assert.equal(offloads.length, 1);
+    assert.equal(offloads[0].route, 'deepseek-flash');
+    assert.equal(offloads[0].reasoning, 'medium');
+    assert.equal(offloads[0].tag, 'qa-brief');
+    assert.deepEqual(offloads[0].messages.map(item => item.role), ['system', 'user']);
+    assert.equal(offloads[0].messages[1].content, 'PROMPT BODY');
+    assert.equal(stages[0].provider, 'offload');
+    assert.equal(stages[0].route, 'deepseek-flash');
+    await transport.callText('OTHER', { claudeStage: 'qa-write' });
+    assert.equal(runs.length, 1, 'a stage without a table entry stays on Claude');
+    assert.equal(stages[1].provider, 'claude');
+  } },
+  { name: 'interview Q&A offload: qa-research and qa-fact-* stages never route even with a table entry', async run() {
+    resetInterviewOffloadBlock();
+    const runs = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
+      offloadCall: async () => { throw new Error('offload must not be called'); } });
+    for (const stage of ['qa-research', 'qa-fact-check', 'qa-fact-verify']) await transport.callText('P', { claudeStage: stage });
+    assert.equal(runs.length, 3);
+    assert.equal(runs[0].tools, INTERVIEW_RESEARCH_TOOLS);
+    assert.equal(runs[1].tools, '');
+  } },
+  { name: 'interview Q&A offload: an OFFLOAD_ error falls back to a fresh Claude session; credit exhaustion blocks offload', async run() {
+    resetInterviewOffloadBlock();
+    try {
+      const runs = []; let offloadCalls = 0;
+      const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+        runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+        routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
+        offloadCall: async () => { offloadCalls += 1; throw Object.assign(new Error('provider'), { code: 'OFFLOAD_PROVIDER_ERROR' }); } });
+      assert.deepEqual(await transport.callText('ORIGINAL', { claudeStage: 'qa-write' }), { ok: true });
+      assert.equal(offloadCalls, 1);
+      assert.equal(runs.length, 1);
+      assert.equal(runs[0].text, 'ORIGINAL');
+      assert.equal(runs[0].resume, false);
+      const credit = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+        runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+        routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
+        offloadCall: async () => { offloadCalls += 1; throw Object.assign(new Error('credit'), { code: 'OFFLOAD_CREDIT_EXHAUSTED' }); } });
+      await credit.callText('A', { claudeStage: 'qa-write' });
+      assert.equal(offloadCalls, 2);
+      await credit.callText('B', { claudeStage: 'qa-write' });
+      assert.equal(offloadCalls, 2, 'offload is blocked after credit exhaustion');
+      assert.equal(runs.length, 3);
+      resetInterviewOffloadBlock();
+      await assert.rejects(() => createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+        runStage: async () => { throw new Error('Claude must not run after a cancel'); },
+        routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
+        offloadCall: async () => { throw Object.assign(new Error('stop'), { code: 'CLAUDE_CANCELLED' }); } }).callText('C', { claudeStage: 'qa-write' }), /stop/u);
+    } finally { resetInterviewOffloadBlock(); }
+  } },
+  { name: 'interview Q&A offload: rejected offload replies are resent statelessly, and the second rejection escalates to Claude', async run() {
+    resetInterviewOffloadBlock();
+    const runs = []; const offloads = [];
+    const replies = ['{"ok":false}', '{"ok":false}'];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
+      offloadCall: async args => { offloads.push(args.messages.map(item => ({ ...item }))); return { text: replies.shift(), model: 'd' }; } });
+    const validator = (value) => { if (value.ok !== true) throw new Error('ok must be true'); };
+    assert.deepEqual(await transport.callText('ORIGINAL', { claudeStage: 'qa-write', responseValidator: validator }), { ok: true });
+    assert.equal(offloads.length, 2);
+    assert.deepEqual(offloads[1].map(item => item.role), ['system', 'user', 'assistant', 'user']);
+    assert.equal(offloads[1][2].content, '{"ok":false}');
+    assert.match(offloads[1][3].content, /REJECTED BY THE APP[\s\S]*ok must be true/u);
+    assert.equal(runs.length, 1, 'the third attempt runs on Claude');
+    assert.equal(runs[0].resume, false);
+    assert.match(runs[0].text, /^ORIGINAL\n\nYOUR PREVIOUS REPLY WAS REJECTED BY THE APP[\s\S]*ok must be true/u);
+  } },
+  { name: 'interview Q&A shadow: only Claude-answered first attempts of qa-brief and qa-write are measured', async run() {
+    resetInterviewOffloadBlock();
+    const jobs = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async () => ({ text: '{"ok":true}', model: 'claude-x' }),
+      shadow: { enabled: true, measure: job => jobs.push(job) } });
+    const validator = (value) => { if (value.ok !== true) throw Object.assign(new Error('no'), { code: 'NOT_OK' }); };
+    await transport.callText('P', { claudeStage: 'qa-brief', responseValidator: validator });
+    await transport.callText('P', { claudeStage: 'qa-write', responseValidator: validator });
+    await transport.callText('P', { claudeStage: 'qa-fact-check', responseValidator: validator });
+    assert.deepEqual(jobs.map(job => job.id), ['qa-brief', 'qa-write']);
+    assert.equal(jobs[0].kind, 'qa');
+    assert.equal(jobs[0].claude.outcome, 'accepted');
+    assert.equal(jobs[0].messages[1].content, 'P');
+    assert.deepEqual(jobs[0].validate('{"ok":true}'), { valid: true, code: null });
+    assert.deepEqual(jobs[0].validate('{"ok":false}'), { valid: false, code: 'NOT_OK' });
+    assert.equal(jobs[0].validate('no json').valid, false);
   } },
 ];

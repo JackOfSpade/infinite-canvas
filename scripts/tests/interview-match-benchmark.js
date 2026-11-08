@@ -2,7 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { runBenchmark, scoreResults, renderMarkdown, renderCsv } from '../interview-match-benchmark.mjs';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { configurations, parseArguments, runBenchmark, scoreResults, renderMarkdown, renderCsv } from '../interview-match-benchmark.mjs';
+import { createTransport } from '../interview-match-transports.mjs';
 import { buildCaseSlots, materializeCases } from '../interview-match-cases.mjs';
 import { casePrompt, expectedTurnKind, normalizeBank, parsePrediction, validateCases } from '../interview-match-shared.mjs';
 
@@ -49,6 +52,41 @@ async function withOutput(run) {
   try { return await run(outDir); }
   finally { await fs.rm(outDir, { recursive: true, force: true }); }
 }
+
+const DEEPSEEK_COST = 0.001;
+
+// Fake `node <offload> complete`: never touches a real provider. `behave(request)` returns { line, code }.
+function fakeOffloadSpawn(captured, behave) {
+  return (command, args, spawnOptions) => {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    let input = '';
+    child.stdin.on('data', chunk => { input += chunk; });
+    child.stdin.on('end', () => {
+      const request = JSON.parse(input);
+      captured.push({ command, args, env: spawnOptions.env, request });
+      const reply = behave(request);
+      setImmediate(() => {
+        child.stdout.write(`${reply.line}\n`);
+        child.stdout.end();
+        setImmediate(() => child.emit('close', reply.code ?? 0, null));
+      });
+    });
+    return child;
+  };
+}
+
+function cannedOffload(request) {
+  const user = request.messages.at(-1).content;
+  const item = cases.find(testCase => user.includes(JSON.stringify(testCase.utterance)));
+  return { line: JSON.stringify({ ok: true, text: item ? answer(item.label, expectedTurnKind(item)) : 'READY',
+    model: 'deepseek-synthetic', usage: { inputTokens: 100, cacheHitTokens: 90, cacheMissTokens: 10, outputTokens: 20, reasoningTokens: 0 },
+    costUsd: DEEPSEEK_COST, latencyMs: 12 }) };
+}
+
+const offloadConfig = { id: 'offload-deepseek-flash-off', provider: 'offload', route: 'deepseek-flash', reasoning: 'off', model: 'deepseek-flash', effort: 'off' };
 
 export default [
   {
@@ -287,6 +325,148 @@ export default [
       const summary = scoreResults({ cases, records, configs: [config] });
       assert(summary.rows.every(row => row.accuracy === 1 && row.replayDrifts === 1 && !row.eligible));
       assert.equal(summary.recommendation, null);
+    },
+  },
+  {
+    name: 'interview AI benchmark: offload flags build named configs after Claude configs and reject bad input',
+    run() {
+      const parsed = parseArguments(['--no-claude', '--offload-routes', 'deepseek-flash', '--offload-reasoning', 'off,max', '--offload-bin', '/fake/offload']);
+      assert.deepEqual(parsed, { '--no-claude': true, '--offload-routes': 'deepseek-flash', '--offload-reasoning': 'off,max', '--offload-bin': '/fake/offload' });
+      assert.throws(() => parseArguments(['--offload-routes', 'deepseek-flash', '--offload-routes', 'deepseek-pro']), /duplicate/);
+      assert.throws(() => parseArguments(['--offload-bin']), /Missing value/);
+      const offloadOnly = configurations({ '--no-claude': true, '--offload-routes': 'deepseek-flash,deepseek-pro', '--offload-reasoning': 'off,high' }, '');
+      assert.deepEqual(offloadOnly.map(config => config.id), ['offload-deepseek-flash-off', 'offload-deepseek-flash-high', 'offload-deepseek-pro-off', 'offload-deepseek-pro-high']);
+      assert.deepEqual(offloadOnly[1], { id: 'offload-deepseek-flash-high', provider: 'offload', route: 'deepseek-flash', reasoning: 'high', model: 'deepseek-flash', effort: 'high' });
+      const claudeOnly = configurations({}, '');
+      assert.deepEqual(claudeOnly.map(config => config.id), ['haiku/default', 'sonnet/default', 'opus/default']);
+      assert(claudeOnly.every(config => config.provider === undefined), 'Claude configs keep their original shape');
+      const mixed = configurations({ '--claude-models': 'haiku', '--claude-efforts': 'low', '--offload-routes': 'deepseek-pro' }, '');
+      assert.deepEqual(mixed.map(config => config.id), ['haiku/low', 'offload-deepseek-pro-off'], 'offload configs are appended and reasoning defaults to off');
+      for (const bad of [
+        { '--offload-routes': 'deepseek-nope' }, { '--offload-routes': 'deepseek-flash', '--offload-reasoning': 'extreme' },
+        { '--offload-reasoning': 'low' }, { '--no-claude': true },
+        { '--no-claude': true, '--claude-models': 'haiku', '--offload-routes': 'deepseek-flash' },
+      ]) assert.throws(() => configurations(bad, ''), Error);
+    },
+  },
+  {
+    name: 'interview AI benchmark: offload transport sends a stateless request with an identical system message every turn',
+    async run() {
+      const captured = [];
+      const spawnImpl = fakeOffloadSpawn(captured, cannedOffload);
+      const saved = process.env.ELECTRON_RUN_AS_NODE;
+      process.env.ELECTRON_RUN_AS_NODE = '1';
+      try {
+        const transport = await createTransport(offloadConfig, { spawnImpl, offloadBin: '/fake/offload', timeoutMs: 5_000, initialization: 'BANK-TEXT-MARKER' });
+        assert.equal(captured.length, 0, 'creating the transport makes no provider call');
+        const first = await transport.request(casePrompt(cases[0], cards));
+        const second = await transport.request(casePrompt(cases[1], cards));
+        await transport.close();
+        assert.equal(captured.length, 2);
+        assert.equal(captured[0].command, process.execPath);
+        assert.deepEqual(captured[0].args, ['/fake/offload', 'complete']);
+        assert.equal(Object.hasOwn(captured[0].env, 'ELECTRON_RUN_AS_NODE'), false);
+        const [one, two] = captured.map(call => call.request);
+        assert.deepEqual({ ...one, messages: undefined }, { version: 1, route: 'deepseek-flash', messages: undefined, maxTokens: 400,
+          reasoning: { enabled: false }, timeoutMs: 5_000, caller: 'infinite-canvas-bench', tag: 'interview-match' });
+        assert.equal(one.messages.length, 2);
+        assert.equal(one.messages[0].role, 'system');
+        assert(one.messages[0].content.includes('BANK-TEXT-MARKER'));
+        assert.deepEqual(one.messages[0], two.messages[0], 'the system message is identical on every turn');
+        assert.deepEqual(one.messages[1], { role: 'user', content: casePrompt(cases[0], cards) });
+        assert.deepEqual(two.messages.map(message => message.role), ['system', 'user'], 'earlier turns are not accumulated');
+        assert.deepEqual(two.messages[1], { role: 'user', content: casePrompt(cases[1], cards) });
+        assert.equal(parsePrediction(first.text, cards).cardId, 'project');
+        assert.equal(second.costUsd, DEEPSEEK_COST);
+        assert.equal(second.resolvedModel, 'deepseek-synthetic');
+        assert.equal(second.usage.cacheHitTokens, 90);
+        assert(Number.isFinite(second.latencyMs) && second.latencyMs >= 0);
+        const reasoned = [];
+        for (const [reasoning, expected] of [['low', { enabled: true, effort: 'low' }], ['max', { enabled: true, effort: 'max' }]]) {
+          const calls = [];
+          const withReasoning = await createTransport({ ...offloadConfig, route: 'deepseek-pro', reasoning }, { spawnImpl: fakeOffloadSpawn(calls, cannedOffload), offloadBin: '/fake/offload' });
+          await withReasoning.request('{}');
+          reasoned.push([calls[0].request.route, calls[0].request.reasoning]);
+          assert.deepEqual(calls[0].request.reasoning, expected);
+        }
+        assert.deepEqual(reasoned.map(([route]) => route), ['deepseek-pro', 'deepseek-pro']);
+        await assert.rejects(createTransport({ ...offloadConfig, route: 'other' }, { spawnImpl }), { code: 'INVALID_OFFLOAD_CONFIG' });
+      } finally {
+        if (saved === undefined) delete process.env.ELECTRON_RUN_AS_NODE; else process.env.ELECTRON_RUN_AS_NODE = saved;
+      }
+    },
+  },
+  {
+    name: 'interview AI benchmark: failed offload results map to coded call errors',
+    async run() {
+      const attempt = async behave => {
+        const transport = await createTransport(offloadConfig, { spawnImpl: fakeOffloadSpawn([], behave), offloadBin: '/fake/offload' });
+        return transport.request('{}');
+      };
+      await assert.rejects(attempt(() => ({ code: 1, line: JSON.stringify({ ok: false, error: { code: 'rate_limited', message: 'slow down', retryable: true }, latencyMs: 3 }) })),
+        { code: 'OFFLOAD_RATE_LIMITED', retryable: true });
+      await assert.rejects(attempt(() => ({ code: 1, line: 'not json' })), { code: 'OFFLOAD_PROCESS_FAILED' });
+      await assert.rejects(attempt(() => ({ code: 0, line: 'not json' })), { code: 'OFFLOAD_INVALID_RESULT' });
+      await assert.rejects(attempt(() => ({ code: 0, line: JSON.stringify({ ok: true }) })), { code: 'OFFLOAD_INVALID_RESULT' });
+      await withOutput(async outDir => {
+        const factory = (config, options) => createTransport(config, { ...options, offloadBin: '/fake/offload',
+          spawnImpl: fakeOffloadSpawn([], () => ({ code: 1, line: JSON.stringify({ ok: false, error: { code: 'upstream_error', message: 'x', retryable: false } }) })) });
+        const summary = await runBenchmark({ cards, cases, configs: [offloadConfig], outDir, createTransport: factory });
+        const row = summary.rows.find(candidate => candidate.pass === 1);
+        assert.equal(row.callFailures, 1);
+        assert.equal(row.completed, 1, 'a failed call stops the configuration like the warm transports');
+        assert.equal(row.eligible, false);
+        assert.deepEqual(summary.callErrors, [{ configId: offloadConfig.id, pass: 1, caseId: cases[0].id, code: 'OFFLOAD_UPSTREAM_ERROR' }]);
+        assert.equal(row.costUsd, null, 'failed calls report no cost');
+      });
+    },
+  },
+  {
+    name: 'interview AI benchmark: offload run aggregates cost, skips warm setup and resumes without replay',
+    async run() {
+      await withOutput(async outDir => {
+        const captured = [];
+        const factory = (config, options) => createTransport(config, { ...options, spawnImpl: fakeOffloadSpawn(captured, cannedOffload) });
+        const options = { cards, cases, configs: [offloadConfig, { ...baseConfig, id: 'claude-like' }], outDir, offloadBin: '/fake/offload',
+          createTransport: (config, transportOptions) => config.provider === 'offload' ? factory(config, transportOptions) : stubFactory([])(config) };
+        const summary = await runBenchmark(options);
+        assert.equal(captured.length, cases.length * 2, 'no initialization call: only the measured turns reach the provider');
+        assert.equal(summary.warmSetups.length, 1, 'only the Claude-like config has a warm setup');
+        assert(captured.every(call => call.args[0] === '/fake/offload'));
+        assert.equal(new Set(captured.map(call => JSON.stringify(call.request.messages[0]))).size, 1);
+        for (const row of summary.rows.filter(candidate => candidate.configId === offloadConfig.id)) {
+          assert.equal(row.completed, cases.length);
+          assert.equal(row.accuracy, 1);
+          assert.equal(row.costUsd, DEEPSEEK_COST * cases.length);
+          assert.equal(row.meanCostUsd, DEEPSEEK_COST);
+          assert.deepEqual(row.resolvedModels, ['deepseek-synthetic']);
+        }
+        for (const row of summary.rows.filter(candidate => candidate.configId === 'claude-like')) {
+          assert.equal(row.costUsd, null);
+          assert.equal(row.meanCostUsd, null);
+        }
+        const markdown = renderMarkdown(summary);
+        const csvLines = renderCsv(summary).trim().split('\n');
+        assert(markdown.includes('| $0.008000/$0.001000 |'));
+        assert(markdown.includes('| no | —/— |') || markdown.includes('| yes | —/— |'), 'unknown costs render as a dash');
+        const header = csvLines[0].split(',');
+        const offloadCsv = csvLines.find(line => line.startsWith(`"${offloadConfig.id}"`)).split('","');
+        assert.equal(offloadCsv[header.indexOf('costUsd')], '0.008');
+        assert.equal(offloadCsv[header.indexOf('meanCostUsd')].replace(/"$/, ''), '0.001');
+        const journal = path.join(outDir, 'results.jsonl');
+        const lines = (await fs.readFile(journal, 'utf8')).trimEnd().split('\n');
+        const offloadSamples = lines.map(line => JSON.parse(line)).filter(record => record.configId === offloadConfig.id);
+        assert(offloadSamples.every(record => record.type === 'sample' && record.costUsd === DEEPSEEK_COST));
+        // Keep only the first three offload samples, then resume: no replay, only the remaining cases.
+        const keep = lines.filter(line => JSON.parse(line).configId !== offloadConfig.id);
+        const kept = lines.filter(line => JSON.parse(line).configId === offloadConfig.id).slice(0, 3);
+        await fs.writeFile(journal, [...kept, ...keep].join('\n') + '\n');
+        captured.length = 0;
+        const resumed = await runBenchmark(options);
+        assert.equal(captured.length, cases.length * 2 - 3);
+        assert.equal(resumed.replays, 0);
+        assert.equal(resumed.rows.find(row => row.configId === offloadConfig.id && row.pass === 1).costUsd, DEEPSEEK_COST * cases.length);
+      });
     },
   },
 ];

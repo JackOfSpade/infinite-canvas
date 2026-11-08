@@ -22,12 +22,11 @@ process.once('exit', () => {
   for (const child of ownedProcesses) signalChild(child, 'SIGKILL');
 });
 
-function managedSpawn(binary, args, cwd) {
+function managedSpawn(binary, args, cwd, { spawnImpl = spawn, unsetEnv = ['CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT'] } = {}) {
   const env = { ...process.env };
   // A benchmark launched by Claude is an independent, tool-free CLI workload.
-  delete env.CLAUDECODE;
-  delete env.CLAUDE_CODE_ENTRYPOINT;
-  const child = spawn(binary, args, {
+  for (const name of unsetEnv) delete env[name];
+  const child = spawnImpl(binary, args, {
     cwd, env, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
   });
   ownedProcesses.add(child);
@@ -230,10 +229,92 @@ function warmClaude(binary, args, options) {
   };
 }
 
+export const OFFLOAD_ROUTES = ['deepseek-flash', 'deepseek-pro'];
+export const OFFLOAD_REASONING = ['off', 'low', 'medium', 'high', 'max'];
+const DEFAULT_OFFLOAD_BIN = '/Users/jack/.local/bin/offload';
+const OFFLOAD_MAX_TOKENS = 400;
+
+export const offloadReasoning = level => level === 'off' ? { enabled: false } : { enabled: true, effort: level };
+
+function offloadFailure(error) {
+  const suffix = String(error?.code || 'FAILED').toUpperCase().replace(/[^A-Z0-9]+/g, '_');
+  return Object.assign(new Error(`OFFLOAD_${suffix}`), { code: `OFFLOAD_${suffix}`, retryable: error?.retryable === true });
+}
+
+/**
+ * Stateless: no provider call happens on creation. `options.initialization` (the bank text)
+ * is stored in an identical system message that every turn re-sends, so the provider's
+ * prefix cache sees the same prefix each call. Earlier turns are never accumulated.
+ */
+function offloadTransport(config, options, timeoutMs) {
+  if (!OFFLOAD_ROUTES.includes(config.route) || !OFFLOAD_REASONING.includes(config.reasoning)) throw failure('INVALID_OFFLOAD_CONFIG');
+  const binary = options.offloadBin || process.env.INFINITE_CANVAS_OFFLOAD_BIN || DEFAULT_OFFLOAD_BIN;
+  const systemMessage = { role: 'system', content: [options.systemPrompt || SYSTEM_PROMPT, options.initialization].filter(Boolean).join('\n\n') };
+  const requestTimeout = Math.min(1_800_000, Math.max(1_000, Math.round(timeoutMs)));
+  let closed = false;
+  let abort;
+  return {
+    async request(prompt) {
+      if (closed) throw failure('OFFLOAD_CLOSED');
+      if (abort) throw failure('OFFLOAD_CONCURRENT_REQUEST');
+      const body = { version: 1, route: config.route, messages: [systemMessage, { role: 'user', content: prompt }],
+        maxTokens: OFFLOAD_MAX_TOKENS, reasoning: offloadReasoning(config.reasoning), timeoutMs: requestTimeout,
+        caller: 'infinite-canvas-bench', tag: 'interview-match' };
+      const started = performance.now();
+      let handle;
+      try {
+        handle = managedSpawn(process.execPath, [binary, 'complete'], options.cwd, {
+          spawnImpl: options.spawnImpl || spawn, unsetEnv: ['ELECTRON_RUN_AS_NODE'] });
+      } catch { throw failure('OFFLOAD_UNAVAILABLE'); }
+      const stdout = [];
+      let bytes = 0;
+      let interrupted;
+      let interrupt;
+      const interruption = new Promise(resolve => { interrupt = resolve; });
+      const stop = code => {
+        if (interrupted) return;
+        interrupted = code;
+        interrupt(null);
+      };
+      abort = () => stop('OFFLOAD_CLOSED');
+      const timer = setTimeout(() => stop('OFFLOAD_TIMEOUT'), requestTimeout + 100);
+      for (const stream of ['stdout', 'stderr']) handle.child[stream].on('data', chunk => {
+        bytes += chunk.length;
+        if (bytes > OUTPUT_LIMIT) { stop('OFFLOAD_OUTPUT_LIMIT'); return; }
+        if (stream === 'stdout') stdout.push(chunk);
+      });
+      handle.child.stdin.end(JSON.stringify(body));
+      try {
+        const status = await Promise.race([handle.closed, interruption]);
+        const latencyMs = performance.now() - started;
+        if (interrupted) throw failure(interrupted);
+        if (status.error) throw failure('OFFLOAD_UNAVAILABLE');
+        const lines = Buffer.concat(stdout).toString('utf8').split('\n').map(line => line.trim()).filter(Boolean);
+        let result;
+        try { result = JSON.parse(lines.at(-1)); } catch { /* Handled as an invalid result below. */ }
+        if (result && result.ok === false) throw offloadFailure(result.error);
+        if (status.code !== 0) throw failure('OFFLOAD_PROCESS_FAILED');
+        if (!result || result.ok !== true || typeof result.text !== 'string') throw failure('OFFLOAD_INVALID_RESULT');
+        return { text: result.text, latencyMs, ttftMs: null, model: result.model, resolvedModel: result.model || config.route,
+          usage: result.usage || null, costUsd: Number.isFinite(result.costUsd) ? result.costUsd : null };
+      } finally {
+        clearTimeout(timer);
+        abort = undefined;
+        await handle.terminate();
+      }
+    },
+    async close() {
+      closed = true;
+      abort?.();
+    },
+  };
+}
+
 /** The caller owns an isolated cwd and must await each request before the next. */
 export async function createTransport(config, options = {}) {
   const timeoutMs = options.timeoutMs ?? 30_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw failure('INVALID_TIMEOUT');
+  if (config.provider === 'offload') return offloadTransport(config, options, timeoutMs);
   const binary = options.claudeBin || 'claude';
   let help = options.claudeHelp;
   if (!help) {

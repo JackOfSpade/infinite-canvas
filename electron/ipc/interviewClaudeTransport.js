@@ -7,6 +7,12 @@
  * bundle generation (careerWritingCore.js). Each call is one Claude session;
  * a reply the caller's validator rejects is retried in that same session with
  * the rejection text, like the application correction rounds.
+ *
+ * A stage with a `qa:<stage>` entry in AI_CALL_PROVIDERS is answered through
+ * the offload CLI instead (stateless: the messages are resent each attempt).
+ * Any OFFLOAD_* error, or a second rejected offload reply, moves the rest of
+ * that call to a fresh Claude session. Research and fact-check stages never
+ * route: tool use and truth checks stay on Claude.
  */
 import crypto from 'node:crypto';
 import os from 'node:os';
@@ -15,11 +21,28 @@ import { claudeChildEnv, resolveClaudeBinary, runClaudeStage } from './claudeApp
 import { reportClaudeUsageLimit, trackClaudeCall, waitForClaudeRelease, waitForClaudeUsage } from './claudePause.js';
 import { standaloneClaudeActivity } from './claudeTaskActivity.js';
 import { careerWritingStageProfile } from './careerWritingCore.js';
+import { routedCall } from './aiCallProviders.js';
+import { createShadowMeasure } from './aiShadowMeasure.js';
+import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 
 // Research is the only stage allowed tools, and only these read-only web tools.
 export const INTERVIEW_RESEARCH_TOOLS = 'WebSearch,WebFetch';
 export const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
 const MAX_REJECTION_CHARS = 6000;
+const OFFLOAD_BLOCK_MS = 30 * 60_000;
+const OFFLOAD_REJECTION_LIMIT = 2;
+const SHADOW_STAGES = Object.freeze(['qa-brief', 'qa-write']);
+
+// Credit exhaustion blocks Q&A offload for every call in this process.
+let offloadBlockedUntil = 0;
+
+/** Clears the Q&A offload credit block (used by tests). */
+export function resetInterviewOffloadBlock() { offloadBlockedUntil = 0; }
+
+/** Research and fact-check stages stay on Claude even if a table entry exists. */
+export function interviewStageMayOffload(stage) {
+  return typeof stage === 'string' && stage !== 'qa-research' && !stage.startsWith('qa-fact-');
+}
 
 /** The Claude stage for an interview task. `stage` from the caller wins. */
 export function interviewClaudeStage(task, explicitStage) {
@@ -64,6 +87,8 @@ function stepLabel(task) {
   return `${words[0].toUpperCase()}${words.slice(1)}`;
 }
 
+const isOffloadError = error => typeof error?.code === 'string' && error.code.startsWith('OFFLOAD_');
+
 export function createInterviewClaudeTransport({
   runStage = runClaudeStage,
   resolveBinary = () => resolveClaudeBinary({ env: process.env, homedir: os.homedir() }),
@@ -71,6 +96,10 @@ export function createInterviewClaudeTransport({
   cwd = os.tmpdir(),
   maxAttempts = INTERVIEW_CLAUDE_MAX_ATTEMPTS,
   onStage = () => {},
+  routeFor = stage => routedCall(`qa:${stage}`),
+  offloadCall = offloadTextCall,
+  shadow = createShadowMeasure(),
+  now = () => Date.now(),
 } = {}) {
   let bound = null;
   const binding = () => {
@@ -87,42 +116,99 @@ export function createInterviewClaudeTransport({
     const profile = careerWritingStageProfile(stage);
     const tools = stage === 'qa-research' ? INTERVIEW_RESEARCH_TOOLS : '';
     let sessionId = crypto.randomUUID();
-    let text = `${prompt}${json ? schemaInstruction(responseSchema) : ''}`;
+    const originalText = `${prompt}${json ? schemaInstruction(responseSchema) : ''}`;
+    // The text the next Claude attempt sends; a resumed session gets only the rejection.
+    let text = originalText;
     let lastError = null;
+    let lastRejection = null;
+    let claudeStarted = false;
+    const route = interviewStageMayOffload(stage) && !tools ? routeFor(stage) : null;
+    let mode = route && now() >= offloadBlockedUntil ? 'offload' : 'claude';
+    const messages = handoffMessages({ text: originalText });
+    let offloadRejections = 0;
+    const toFreshClaude = () => {
+      mode = 'claude';
+      sessionId = crypto.randomUUID();
+      claudeStarted = false;
+      text = lastRejection ? `${originalText}\n\n${lastRejection}` : originalText;
+    };
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const started = Date.now();
-      if (scope) {
-        await waitForClaudeUsage(signal);
-        await waitForClaudeRelease(scope.key, signal);
-        standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: profile.model, effort: profile.effort, countRound: false });
-        standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+      let reply = null;
+      let provider = 'claude';
+      if (mode === 'offload') {
+        if (scope) {
+          standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: route.route, effort: route.reasoning, countRound: false });
+          standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+        }
+        try {
+          reply = await offloadCall({ messages, route: route.route, reasoning: route.reasoning, tag: stage, signal });
+          provider = 'offload';
+        } catch (error) {
+          if (!isOffloadError(error)) throw error;
+          if (error.code === 'OFFLOAD_CREDIT_EXHAUSTED') offloadBlockedUntil = now() + OFFLOAD_BLOCK_MS;
+          toFreshClaude();
+        }
       }
-      let reply;
-      const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
-      try {
-        reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: attempt > 0, tools,
-          ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
-      } catch (error) {
-        if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;
-        // Earlier stages are saved; this one waits for the reset and asks again.
-        reportClaudeUsageLimit({ resetsAt: standaloneClaudeActivity.view(scope.key)?.rateLimitResetsAt ?? null });
-        standaloneClaudeActivity.note(scope.key, 'Claude usage limit reached');
-        standaloneClaudeActivity.released(scope.key);
-        if (attempt === 0) sessionId = crypto.randomUUID();
-        attempt -= 1;
-        continue;
-      } finally { callEnded(); }
+      if (!reply) {
+        if (scope) {
+          await waitForClaudeUsage(signal);
+          await waitForClaudeRelease(scope.key, signal);
+          standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: profile.model, effort: profile.effort, countRound: false });
+          standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
+        }
+        const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
+        try {
+          reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools,
+            ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
+        } catch (error) {
+          if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;
+          // Earlier stages are saved; this one waits for the reset and asks again.
+          reportClaudeUsageLimit({ resetsAt: standaloneClaudeActivity.view(scope.key)?.rateLimitResetsAt ?? null });
+          standaloneClaudeActivity.note(scope.key, 'Claude usage limit reached');
+          standaloneClaudeActivity.released(scope.key);
+          if (!claudeStarted) sessionId = crypto.randomUUID();
+          attempt -= 1;
+          continue;
+        } finally { callEnded(); }
+        claudeStarted = true;
+      }
       if (scope) standaloneClaudeActivity.checking(scope.key);
-      onStage({ task, stage, attempt, model: reply?.model, durationMs: Date.now() - started });
+      onStage({ task, stage, attempt, model: reply?.model, durationMs: Date.now() - started, provider,
+        ...(provider === 'offload' ? { route: route.route } : {}) });
+      let value;
+      let failure = null;
       try {
-        const value = json ? firstJsonObject(reply?.text) : String(reply?.text ?? '');
+        value = json ? firstJsonObject(reply?.text) : String(reply?.text ?? '');
         if (typeof responseValidator === 'function') responseValidator(value);
-        return value;
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        lastError = error;
-        text = rejectionPrompt(error);
+      } catch (error) { failure = error; }
+      if (attempt === 0 && provider === 'claude' && shadow.enabled && SHADOW_STAGES.includes(stage)) {
+        try {
+          shadow.measure({
+            kind: 'qa', id: stage, messages: handoffMessages({ text: originalText }),
+            validate: (shadowText) => {
+              try {
+                const shadowValue = json ? firstJsonObject(shadowText) : String(shadowText ?? '');
+                if (typeof responseValidator === 'function') responseValidator(shadowValue);
+                return { valid: true, code: null };
+              } catch (error) { return { valid: false, code: error?.code || 'invalid' }; }
+            },
+            claude: { model: reply?.model ?? null, effort: profile.effort, costUsd: reply?.costUsd ?? null, durationMs: Date.now() - started,
+              outcome: failure ? 'rejected' : 'accepted', validationCode: failure ? (failure.code || 'invalid') : null },
+            texts: { claude: String(reply?.text ?? '') },
+          });
+        } catch { /* shadow measurement never affects the real call */ }
       }
+      if (!failure) return value;
+      if (signal?.aborted) throw failure;
+      lastError = failure;
+      lastRejection = rejectionPrompt(failure);
+      if (provider === 'offload') {
+        // The CLI is stateless: the next turn replays the conversation.
+        messages.push({ role: 'assistant', content: String(reply.text ?? '') }, { role: 'user', content: lastRejection });
+        offloadRejections += 1;
+        if (offloadRejections >= OFFLOAD_REJECTION_LIMIT) toFreshClaude();
+      } else text = lastRejection;
     }
     // Every attempt was a reply rejection (unparseable or invalid), not a
     // transport failure: callers treat it like any exhausted validation.

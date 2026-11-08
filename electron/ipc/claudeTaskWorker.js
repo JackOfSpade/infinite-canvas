@@ -21,7 +21,11 @@ import {
   failWorkerHandoff,
   returnHandoffToPerson,
   submitWorkerResponse,
+  workerShadowValidator,
 } from './nonApiAi.js';
+import { routedCall } from './aiCallProviders.js';
+import { createShadowMeasure } from './aiShadowMeasure.js';
+import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 
 export const CLAUDE_TASK_CONCURRENCY = 4;
 export const CLAUDE_TASK_USAGE_FILE = 'claude-task-usage.jsonl';
@@ -33,6 +37,10 @@ const USAGE_LIMIT_WAIT_MS = 10 * 60_000;
 const RESEARCH_MAX_TURNS = 16;
 const IMAGE_MAX_EDGE = 1568;
 const ACTIVITY_NOTIFY_MS = 500;
+const OFFLOAD_BLOCK_MS = 30 * 60_000;
+const OFFLOAD_REJECTION_LIMIT = 2;
+const WEB_TOOLS = new Set(['WebSearch', 'WebFetch']);
+export const OFFLOAD_CREDIT_NOTICE = 'DeepSeek credit is exhausted; AI tasks continue on Claude. Top up DeepSeek to resume savings.';
 
 const SEAM = Object.freeze({
   list: listWorkerHandoffs,
@@ -56,7 +64,8 @@ let current = null;
 /** What the dock may show: whether the worker is held up, and why. No task or prompt data. */
 export function claudeTaskStatusView(workerStatus) {
   const pauseCode = CLAUDE_TASK_PAUSE_CODES.includes(workerStatus?.pauseCode) ? workerStatus.pauseCode : null;
-  return Object.freeze({ paused: Boolean(pauseCode), pauseCode });
+  const providerNotice = typeof workerStatus?.providerNotice === 'string' && workerStatus.providerNotice ? workerStatus.providerNotice : null;
+  return Object.freeze({ paused: Boolean(pauseCode), pauseCode, ...(providerNotice ? { providerNotice } : {}) });
 }
 
 export function claudeTaskWorkerStatus() {
@@ -154,8 +163,15 @@ export function createClaudeTaskWorker({
   onActivityChange = null,
   isHeld = nodeId => isClaudeHeld(`node:${nodeId}`),
   onUsageLimit = () => {},
+  routeFor = task => routedCall(`task:${task}`),
+  offloadCall = offloadTextCall,
+  shadow = createShadowMeasure(),
+  shadowValidator = workerShadowValidator,
 } = {}) {
   const allowTasks = new Set(taskIds);
+  let offloadBlockedUntil = 0;
+  const offloadRejections = new Map();
+  const escalated = new Set();
   const running = new Map();
   const failures = new Map();
   let pausedUntil = 0;
@@ -260,24 +276,74 @@ export function createClaudeTaskWorker({
     seam.assigned({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks });
     const profile = profileFor(entry.task);
     activity.begin(entry.requestId, { task: entry.task, model: profile.model, effort: profile.effort, maxTurns: profile.tools ? RESEARCH_MAX_TURNS : null, rejections: entry.rejections, nodeId: entry.nodeId });
-    const pageImages = await imagesFor(entry);
-    const stage = binding();
     const cached = cachedPromptParts(handoff.prompt, handoff.cachedPrefix);
-    const reply = await runStage({
-      ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
-      pageImages, signal: controller.signal,
-      onActivity: event => activity.event(entry.requestId, event),
-      model: profile.model, effort: profile.effort, persistSession: false,
-      ...(profile.tools ? { tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS } : {}),
-    });
-    recordUsage({ at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: profile.effort, usage: reply.usage, costUsd: reply.costUsd });
+    // A task with a table entry and no photos may be answered off Claude when it has no tools, or
+    // when its only tools are web search and fetch and the entry carries a webTools budget.
+    const webOnly = Boolean(profile.tools) && profile.tools.split(',').every(tool => WEB_TOOLS.has(tool));
+    let route = (!profile.tools || webOnly) && !entry.hasAttachments && !escalated.has(entry.requestId) && now() >= offloadBlockedUntil
+      ? routeFor(entry.task) : null;
+    if (route && profile.tools && !(route.webTools && typeof route.webTools === 'object')) route = null;
+    let reply = null;
+    let provider = 'claude';
+    if (route) {
+      try {
+        reply = await offloadCall({
+          messages: handoffMessages(cached), route: route.route, reasoning: route.reasoning, tag: entry.task, signal: controller.signal,
+          ...(profile.tools ? { webTools: route.webTools } : {}),
+        });
+        provider = 'offload';
+      } catch (error) {
+        if (typeof error?.code !== 'string' || !error.code.startsWith('OFFLOAD_')) throw error;
+        logger.warn(`[Claude tasks] '${entry.task}' offload failed (${error.code}); answering on Claude.`);
+        if (error.code === 'OFFLOAD_CREDIT_EXHAUSTED') offloadBlockedUntil = now() + OFFLOAD_BLOCK_MS;
+      }
+    }
+    if (!reply) {
+      const pageImages = await imagesFor(entry);
+      const stage = binding();
+      reply = await runStage({
+        ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
+        pageImages, signal: controller.signal,
+        onActivity: event => activity.event(entry.requestId, event),
+        model: profile.model, effort: profile.effort, persistSession: false,
+        ...(profile.tools ? { tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS } : {}),
+      });
+    }
+    recordUsage(provider === 'offload'
+      ? { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: route.reasoning, usage: reply.usage, costUsd: reply.costUsd, provider, route: route.route, reasoning: route.reasoning, ...(reply.webTools ? { webTools: reply.webTools } : {}) }
+      : { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: profile.effort, usage: reply.usage, costUsd: reply.costUsd, provider });
     failures.delete(entry.requestId);
-    // An answer proves Claude is usable again, which is what ends a pause notice.
-    pauseCode = null;
-    pausedAt = null;
-    activity.setPause(false, null);
+    if (provider === 'claude') {
+      // An answer proves Claude is usable again, which is what ends a pause notice.
+      pauseCode = null;
+      pausedAt = null;
+      activity.setPause(false, null);
+    }
     activity.checking(entry.requestId);
+    // The validator is taken before the submit, which may settle the request.
+    let shadowValidate = null;
+    if (provider === 'claude' && shadow.enabled && !profile.tools && !entry.hasAttachments) {
+      try { shadowValidate = shadowValidator({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks }); } catch { shadowValidate = null; }
+    }
     const outcome = await seam.submit({ requestId: entry.requestId, handoffCode: entry.handoffCode, response: reply.text, allowTasks });
+    if (provider === 'offload') {
+      if (outcome?.outcome === 'rejected') {
+        const count = (offloadRejections.get(entry.requestId) || 0) + 1;
+        offloadRejections.set(entry.requestId, count);
+        const limit = Number.isInteger(route.maxRejections) && route.maxRejections >= 1 && route.maxRejections <= 5 ? route.maxRejections : OFFLOAD_REJECTION_LIMIT;
+        if (count >= limit) escalated.add(entry.requestId);
+      } else offloadRejections.delete(entry.requestId);
+    }
+    if (shadowValidate) {
+      try {
+        shadow.measure({
+          kind: 'task', id: entry.task, messages: handoffMessages(cached), validate: shadowValidate,
+          claude: { model: reply.model, effort: profile.effort, costUsd: reply.costUsd ?? null, durationMs: reply.durationMs ?? null,
+            outcome: outcome?.outcome ?? null, validationCode: outcome?.validationCode ?? null },
+          texts: { claude: reply.text },
+        });
+      } catch { /* shadow measurement never affects the task */ }
+    }
     if (outcome?.outcome === 'rejected') activity.rejected(entry.requestId);
     else activity.released(entry.requestId);
     if (outcome?.retryAfterMs > 0) wakeIn(outcome.retryAfterMs);
@@ -297,6 +363,8 @@ export function createClaudeTaskWorker({
     const live = new Set([...snapshot.handoffs.map(entry => entry.requestId), ...snapshot.settlingRequestIds]);
     for (const [requestId, run] of running) if (!live.has(requestId)) run.controller.abort();
     for (const requestId of failures.keys()) if (!live.has(requestId)) failures.delete(requestId);
+    for (const requestId of [...offloadRejections.keys()]) if (!live.has(requestId)) offloadRejections.delete(requestId);
+    for (const requestId of [...escalated]) if (!live.has(requestId)) escalated.delete(requestId);
     activity.prune(live);
     if (snapshot.retryAfterMs > 0) wakeIn(snapshot.retryAfterMs);
     // A handoff past its backoff, or past a slot limit, is waiting for a turn.
@@ -346,7 +414,8 @@ export function createClaudeTaskWorker({
       activityTimer = null;
       for (const run of running.values()) run.controller.abort();
     },
-    status: () => Object.freeze({ running: running.size, retrying: failures.size, paused: now() < pausedUntil, pauseCode }),
+    status: () => Object.freeze({ running: running.size, retrying: failures.size, paused: now() < pausedUntil, pauseCode,
+      providerNotice: now() < offloadBlockedUntil ? OFFLOAD_CREDIT_NOTICE : null }),
     activity: () => activity.snapshot(),
     // Resolves when this node's running calls have ended and their answers are in.
     drain: nodeId => new Promise((resolve) => {

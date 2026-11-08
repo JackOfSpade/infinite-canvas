@@ -2323,11 +2323,14 @@ function relinkListingQuoteToExactSlice(pageText, quote) {
   // partial word or repeated text. The unambiguous rule below applies only to
   // the new normalization recovery path.
   if (source.includes(quote)) return quote;
-  // Never forgive authored padding at either edge. The source slice we retain
-  // must contain exactly the evidence the response attempted to cite.
-  if (quote.trim() !== quote) return null;
+  // Whitespace at either edge of the quote is the only padding forgiven: the
+  // quote is trimmed first and relinked to the exact, unpadded source slice.
+  // Words, punctuation, case, and compatibility differences are never forgiven.
+  const core = quote.trim();
+  if (!core) return null;
+  if (source.includes(core)) return core;
   const sourceProjection = listingQuoteRelinkProjection(source);
-  const quoteProjection = listingQuoteRelinkProjection(quote);
+  const quoteProjection = listingQuoteRelinkProjection(core);
   if (!sourceProjection || !quoteProjection?.normalized || quoteProjection.normalized !== quoteProjection.normalized.trim()) return null;
   const starts = new Map(sourceProjection.parts.filter(part => !part.whitespace).map(part => [part.start, part]));
   const ends = new Map(sourceProjection.parts.filter(part => !part.whitespace).map(part => [part.end, part]));

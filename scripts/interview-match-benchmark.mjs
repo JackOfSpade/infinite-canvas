@@ -4,7 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { performance } from 'node:perf_hooks';
-import { createTransport as defaultCreateTransport, inspectCli } from './interview-match-transports.mjs';
+import {
+  OFFLOAD_REASONING, OFFLOAD_ROUTES, createTransport as defaultCreateTransport, inspectCli,
+} from './interview-match-transports.mjs';
 import {
   PROMPT_VERSION, assertExternalOutput, bankDigest, casePrompt, digest, expectedTurnKind, matchInstructions,
   normalizeBank, parsePrediction, validateCases, writePrivateJson,
@@ -12,15 +14,22 @@ import {
 
 const USAGE = `Usage: node scripts/interview-match-benchmark.mjs --bank <file> --cases <file> --out <dir>
   [--claude-models haiku,sonnet,opus] [--claude-efforts default,low,high] [--claude-ultracode on,off]
+  [--offload-routes deepseek-flash,deepseek-pro] [--offload-reasoning off,low,medium,high,max]
+  [--offload-bin /path/to/offload] [--no-claude]
   [--timeout-ms 30000] [--claude-bin claude] [--report-only]
 
-Run outside the agent sandbox. Concurrency is always 1. Each configuration is
-one warm Claude session and runs two passes. Reusing --out resumes the identical run. --report-only
+Run outside the agent sandbox. Concurrency is always 1. Each Claude configuration is
+one warm Claude session and runs two passes. --offload-routes x --offload-reasoning (default
+off) add stateless DeepSeek configurations named offload-<route>-<reasoning>, appended after the
+Claude ones; each turn is one independent offload CLI call with the same system message, and the
+summary reports total and mean costUsd. Use --no-claude to run only offload configurations (it
+requires --offload-routes and skips the Claude CLI probe). Reusing --out resumes the identical run. --report-only
 rebuilds reports with no CLI inspection or AI calls. Private output must be
 outside the repository. --help never makes an AI call.`;
 
 const sampleKey = record => `${record.configId}\0${record.pass}\0${record.caseId}`;
 const PASSES = [1, 2];
+const isOffload = config => config.provider === 'offload';
 const ratio = (numerator, denominator) => denominator ? numerator / denominator : null;
 const milliseconds = values => values.filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
 function percentile(values, quantile) {
@@ -65,6 +74,8 @@ export function scoreResults({ cases, records, configs, confidenceThreshold = 0.
     const leadIns = samples.filter(({ item }) => item.kind === 'lead-in');
     const followUpFalsePositives = valid.filter(({ item, record }) => item.kind !== 'follow-up' && record.prediction.kind === 'follow-up').length;
     const replayDrifts = records.filter(record => record.type === 'replay' && record.configId === config.id && record.drift).length;
+    const costs = samples.flatMap(({ record }) => Number.isFinite(record?.costUsd) ? [record.costUsd] : []);
+    const costUsd = costs.length ? Math.round(costs.reduce((sum, value) => sum + value, 0) * 1e9) / 1e9 : null;
     const row = {
       configId: config.id, model: config.model, effort: config.effort, pass,
       total: cases.length, completed, correct, accuracy: ratio(correct, cases.length),
@@ -83,6 +94,7 @@ export function scoreResults({ cases, records, configs, confidenceThreshold = 0.
       p50Ms: percentile(latencies, 0.5), p95Ms: percentile(latencies, 0.95),
       ttftP50Ms: percentile(ttfts, 0.5), ttftP95Ms: percentile(ttfts, 0.95),
       replayDrifts,
+      costUsd, meanCostUsd: costUsd === null ? null : costUsd / costs.length,
       resolvedModels: [...new Set(valid.flatMap(({ record }) => record.resolvedModel ? [record.resolvedModel] : []))],
       eligible: completed === cases.length && clear.length > 0 && none.length > 0
         && clearCorrect / clear.length >= 0.95 && kindCorrect / cases.length >= 0.95
@@ -109,15 +121,16 @@ export function scoreResults({ cases, records, configs, confidenceThreshold = 0.
 
 const percent = value => value === null ? '—' : `${(value * 100).toFixed(1)}%`;
 const ms = value => value === null ? '—' : `${Math.round(value)}`;
+const usd = value => Number.isFinite(value) ? `$${value.toFixed(6)}` : '—';
 const cell = value => String(value).replace(/\|/g, '\\|').replace(/[\r\n]/g, ' ');
 
 export function renderMarkdown(summary) {
   const lines = [
     '# Interview AI matching benchmark', '',
-    '| Configuration | Pass | Complete | p50 ms | p95 ms | TTFT p50/p95 ms | Selection | Kind | Lead-in | Not-question P/R | Clear | Multi | Noisy | None P/R | Confident false card | Follow-up | Follow-up FP | JSON failures | Call failures | Eligible |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |',
+    '| Configuration | Pass | Complete | p50 ms | p95 ms | TTFT p50/p95 ms | Selection | Kind | Lead-in | Not-question P/R | Clear | Multi | Noisy | None P/R | Confident false card | Follow-up | Follow-up FP | JSON failures | Call failures | Eligible | Cost USD total/mean |',
+    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: |',
   ];
-  for (const row of summary.rows) lines.push(`| ${cell(row.configId)} | ${row.pass} | ${row.completed}/${row.total} | ${ms(row.p50Ms)} | ${ms(row.p95Ms)} | ${ms(row.ttftP50Ms)}/${ms(row.ttftP95Ms)} | ${percent(row.accuracy)} | ${percent(row.kindAccuracy)} | ${percent(row.leadInAccuracy)} | ${percent(row.notQuestionPrecision)}/${percent(row.notQuestionRecall)} | ${percent(row.clearAccuracy)} | ${percent(row.multiPartAccuracy)} | ${percent(row.noisyAccuracy)} | ${percent(row.nonePrecision)}/${percent(row.noneRecall)} | ${row.falseConfidentNone} | ${percent(row.followUpAccuracy)} | ${row.followUpFalsePositives} | ${percent(row.parseFailureRate)} | ${row.callFailures} | ${row.eligible ? 'yes' : 'no'} |`);
+  for (const row of summary.rows) lines.push(`| ${cell(row.configId)} | ${row.pass} | ${row.completed}/${row.total} | ${ms(row.p50Ms)} | ${ms(row.p95Ms)} | ${ms(row.ttftP50Ms)}/${ms(row.ttftP95Ms)} | ${percent(row.accuracy)} | ${percent(row.kindAccuracy)} | ${percent(row.leadInAccuracy)} | ${percent(row.notQuestionPrecision)}/${percent(row.notQuestionRecall)} | ${percent(row.clearAccuracy)} | ${percent(row.multiPartAccuracy)} | ${percent(row.noisyAccuracy)} | ${percent(row.nonePrecision)}/${percent(row.noneRecall)} | ${row.falseConfidentNone} | ${percent(row.followUpAccuracy)} | ${row.followUpFalsePositives} | ${percent(row.parseFailureRate)} | ${row.callFailures} | ${row.eligible ? 'yes' : 'no'} | ${usd(row.costUsd)}/${usd(row.meanCostUsd)} |`);
   lines.push('', `Confident means confidence ≥ ${summary.confidenceThreshold}. Selection = correct turn kind and card together. Kind = question/follow-up/not-question accuracy. Lead-in = acknowledgement-prefixed question selection. Clear = standalone paraphrases. Missing/failed attempts remain in accuracy denominators. Latency percentiles use valid parsed responses only; no-response timeouts are call failures.`, '');
   if (summary.recommendation) {
     const result = summary.recommendation;
@@ -140,7 +153,7 @@ export function renderCsv(summary) {
     'kindCorrect', 'kindAccuracy', 'leadInTotal', 'leadInAccuracy', 'notQuestionTotal', 'notQuestionCorrect', 'notQuestionPrecision', 'notQuestionRecall',
     'clearTotal', 'clearCorrect', 'clearAccuracy', 'multiPartAccuracy', 'noisyAccuracy', 'noneTotal', 'nonePredicted', 'noneTruePositive',
     'nonePrecision', 'noneRecall', 'falseConfidentNone', 'followUpTotal', 'followUpCorrect', 'followUpAccuracy', 'followUpFalsePositives',
-    'parseFailures', 'parseFailureRate', 'callFailures', 'p50Ms', 'p95Ms', 'ttftP50Ms', 'ttftP95Ms', 'replayDrifts', 'eligible'];
+    'parseFailures', 'parseFailureRate', 'callFailures', 'p50Ms', 'p95Ms', 'ttftP50Ms', 'ttftP95Ms', 'replayDrifts', 'eligible', 'costUsd', 'meanCostUsd'];
   const escape = value => `"${String(Array.isArray(value) ? value.join(';') : value ?? '').replace(/"/g, '""')}"`;
   return [columns.join(','), ...summary.rows.map(row => columns.map(column => escape(row[column])).join(','))].join('\n') + '\n';
 }
@@ -219,7 +232,9 @@ export async function runBenchmark(options) {
   let workDir;
   try {
     const identity = { version: 1, promptVersion: PROMPT_VERSION, bankDigest: bankDigest(cards), casesDigest: digest(cases),
-      configs, timeoutMs, confidenceThreshold, claudeBin: options.claudeBin || 'claude' };
+      configs, timeoutMs, confidenceThreshold, claudeBin: options.claudeBin || 'claude',
+      // Only recorded when set, so Claude-only run identities are unchanged.
+      ...(options.offloadBin && configs.some(isOffload) ? { offloadBin: options.offloadBin } : {}) };
     const manifestPath = path.join(outDir, 'manifest.json');
     let previous;
     try { previous = JSON.parse(await fs.readFile(manifestPath, 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -239,21 +254,28 @@ export async function runBenchmark(options) {
     if (!reportOnly) {
       workDir = await fs.mkdtemp(path.join(os.tmpdir(), 'interview-match-cli-'));
       for (const config of configs) {
+        const offload = isOffload(config);
         const sequence = PASSES.flatMap(pass => cases.map(item => ({ pass, item })));
         if (sequence.every(({ pass, item }) => samples.has(sampleKey({ configId: config.id, pass, caseId: item.id })))) continue;
         if (interrupted) throw new Error('Benchmark interrupted; resume with the same command.');
         try {
-          if (cliMetadata.claude?.available === false) throw Object.assign(new Error('CLI unavailable'),
+          if (!offload && cliMetadata.claude?.available === false) throw Object.assign(new Error('CLI unavailable'),
             { code: cliMetadata.claude.error || 'CLAUDE_UNAVAILABLE' });
-          active = await createTransport(config, { timeoutMs, claudeBin: identity.claudeBin, cwd: workDir, claudeHelp: cliMetadata.claude?.help });
+          active = await createTransport(config, { timeoutMs, claudeBin: identity.claudeBin, cwd: workDir, claudeHelp: cliMetadata.claude?.help,
+            ...(offload ? { offloadBin: options.offloadBin, initialization: matchInstructions(cards) } : {}) });
           if (interrupted) throw Object.assign(new Error('MATCH_INTERRUPTED'), { code: 'MATCH_INTERRUPTED' });
-          const setup = await boundedRequest(active, matchInstructions(cards) + '\nRemember these cards. Reply READY. Later messages are independent classifications.', timeoutMs);
-          if (setup.text.trim() !== 'READY') throw Object.assign(new Error('MATCH_INIT_INVALID'), { code: 'MATCH_INIT_INVALID' });
-          await append({ type: 'warm-setup', configId: config.id, latencyMs: setup.latencyMs, resolvedModel: setup.resolvedModel, usage: setup.usage });
+          // The stateless offload transport has no session to warm: the bank travels in every request's system message.
+          if (!offload) {
+            const setup = await boundedRequest(active, matchInstructions(cards) + '\nRemember these cards. Reply READY. Later messages are independent classifications.', timeoutMs);
+            if (setup.text.trim() !== 'READY') throw Object.assign(new Error('MATCH_INIT_INVALID'), { code: 'MATCH_INIT_INVALID' });
+            await append({ type: 'warm-setup', configId: config.id, latencyMs: setup.latencyMs, resolvedModel: setup.resolvedModel, usage: setup.usage });
+          }
           for (const { pass, item } of sequence) {
             if (interrupted) throw Object.assign(new Error('MATCH_INTERRUPTED'), { code: 'MATCH_INTERRUPTED' });
             const key = sampleKey({ configId: config.id, pass, caseId: item.id });
             const prompt = casePrompt(item, cards);
+            // No warm context to rebuild: a resumed offload config just continues with the remaining cases.
+            if (offload && samples.has(key)) continue;
             if (samples.has(key)) {
               const replay = await boundedRequest(active, prompt, timeoutMs);
               let prediction;
@@ -278,6 +300,7 @@ export async function runBenchmark(options) {
               record.ttftMs = Number.isFinite(result.ttftMs) ? result.ttftMs : null;
               if (result.resolvedModel) record.resolvedModel = result.resolvedModel;
               if (result.usage) record.usage = result.usage;
+              if (Number.isFinite(result.costUsd)) record.costUsd = result.costUsd;
             } catch (error) {
               record.status = 'call-error'; record.code = error.code || 'MATCH_CALL_FAILED';
               record.latencyMs = Math.round(performance.now() - started); record.ttftMs = null;
@@ -307,9 +330,10 @@ export async function runBenchmark(options) {
   }
 }
 
-function parseArguments(argv) {
-  const boolean = new Set(['--help', '--report-only']);
-  const values = new Set(['--bank', '--cases', '--out', '--claude-models', '--claude-efforts', '--claude-ultracode', '--timeout-ms', '--claude-bin']);
+export function parseArguments(argv) {
+  const boolean = new Set(['--help', '--report-only', '--no-claude']);
+  const values = new Set(['--bank', '--cases', '--out', '--claude-models', '--claude-efforts', '--claude-ultracode', '--timeout-ms', '--claude-bin',
+    '--offload-routes', '--offload-reasoning', '--offload-bin']);
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -325,7 +349,27 @@ function parseArguments(argv) {
 }
 
 const list = value => [...new Set(value.split(',').map(item => item.trim()).filter(Boolean))];
-function configurations(args, claudeHelp) {
+export function offloadConfigurations(args) {
+  const routes = args['--offload-routes'] ? list(args['--offload-routes']) : [];
+  if (!routes.length && args['--offload-reasoning']) throw new Error('--offload-reasoning requires --offload-routes.');
+  const levels = list(args['--offload-reasoning'] || 'off');
+  if (routes.some(route => !OFFLOAD_ROUTES.includes(route))) throw new Error(`Invalid --offload-routes list (use ${OFFLOAD_ROUTES.join(',')}).`);
+  if (!levels.length || levels.some(level => !OFFLOAD_REASONING.includes(level))) throw new Error(`Invalid --offload-reasoning list (use ${OFFLOAD_REASONING.join(',')}).`);
+  return routes.flatMap(route => levels.map(reasoning => ({
+    id: `offload-${route}-${reasoning}`, provider: 'offload', route, reasoning, model: route, effort: reasoning })));
+}
+
+export function configurations(args, claudeHelp) {
+  if (args['--no-claude']) {
+    if (args['--claude-models'] || args['--claude-efforts'] || args['--claude-ultracode']) throw new Error('--no-claude conflicts with the --claude-* options.');
+    const offload = offloadConfigurations(args);
+    if (!offload.length) throw new Error('--no-claude requires --offload-routes.');
+    return offload;
+  }
+  return [...claudeConfigurations(args, claudeHelp), ...offloadConfigurations(args)];
+}
+
+function claudeConfigurations(args, claudeHelp) {
   const models = list(args['--claude-models'] || 'haiku,sonnet,opus');
   const efforts = list(args['--claude-efforts'] || (claudeHelp.includes('--effort') ? 'default,low,high' : 'default'));
   if (!models.length || !efforts.length || efforts.some(value => !['default', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(value))) throw new Error('Invalid model/effort list.');
@@ -350,11 +394,14 @@ export async function main(argv = process.argv.slice(2)) {
   const reportOnly = !!args['--report-only'];
   const claudeBin = args['--claude-bin'] || manifest?.identity.claudeBin || 'claude';
   let cliMetadata = manifest?.cliMetadata || {};
-  // This is a help/version probe only, before the sequential paid run.
-  if (!reportOnly) cliMetadata = { claude: await inspectCli(claudeBin) };
-  const hasConfigArgs = ['--claude-models', '--claude-efforts', '--claude-ultracode'].some(key => args[key]);
-  const configs = manifest && !hasConfigArgs ? manifest.identity.configs : configurations(args, cliMetadata.claude?.help || '');
-  const summary = await runBenchmark({ cards, cases, configs, outDir, reportOnly, claudeBin, cliMetadata,
+  const offloadBin = args['--offload-bin'] || manifest?.identity.offloadBin;
+  const hasConfigArgs = ['--claude-models', '--claude-efforts', '--claude-ultracode', '--no-claude', '--offload-routes', '--offload-reasoning'].some(key => args[key]);
+  const resumedConfigs = manifest && !hasConfigArgs ? manifest.identity.configs : null;
+  const needsClaude = resumedConfigs ? resumedConfigs.some(config => !isOffload(config)) : !args['--no-claude'];
+  // This is a help/version probe only, before the sequential paid run. Offload-only runs never probe Claude.
+  if (!reportOnly) cliMetadata = needsClaude ? { claude: await inspectCli(claudeBin) } : {};
+  const configs = resumedConfigs || configurations(args, cliMetadata.claude?.help || '');
+  const summary = await runBenchmark({ cards, cases, configs, outDir, reportOnly, claudeBin, offloadBin, cliMetadata,
     timeoutMs: Number(args['--timeout-ms'] || manifest?.identity.timeoutMs || 30_000),
     onProgress: ({ configId, pass, caseId }) => console.log(`${configId} pass=${pass} case=${caseId}`),
   });

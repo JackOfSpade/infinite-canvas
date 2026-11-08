@@ -154,12 +154,14 @@ explicit choice in `CAREER_WRITING_STAGE_PROFILES`:
 
 | Stage | Model / effort | Why |
 |---|---|---|
-| `qa-research` (web research for the brief) | Opus / high | Judgement over sources; web tools allowed only here. |
-| `qa-brief` (brief, disclosure mapping, practice order) | Opus / high | The application `pick` profile: choosing and structuring, not drafting. Order planning measured: effort makes no difference, Opus fastest. |
-| `qa-write` (spoken answers) | Opus / xhigh | The writing quality stage. Set apart from the application `write` stage until tested. |
-| `qa-fact-check` / `qa-fact-correction` / `qa-fact-recheck` | Sonnet / high | Rule-following verification with shared code and prompts. The application stages moved to Opus high; these stay until tested. |
-| Live matcher (Listen) | Opus / default, warm, pool of 4 | Measured in docs/interview-live-ai-matching.md: fastest configuration whose quality stops improving, also under load. |
+| `qa-research` (web research for the brief) | Opus / xhigh | Judgement over sources; web tools allowed only here. |
+| `qa-brief` (brief, disclosure mapping, practice order) | Opus / medium | Choosing and structuring, not drafting. Order planning measured: effort makes no difference, Opus fastest. |
+| `qa-write` (spoken answers) | Opus / medium | The writing quality stage. Set apart from the application `write` stage until tested. |
+| `qa-fact-check` / `qa-fact-correction` / `qa-fact-recheck` | Opus / high | Rule-following verification with shared code and prompts. The application stages use Opus high too. |
+| Live matcher (Listen) | Opus / medium, warm, pool of 4 | Measured in docs/interview-live-ai-matching.md: fastest configuration whose quality stops improving, also under load. DeepSeek measured 2026-11-07 on the same 81 cases × 2 passes: Flash with reasoning off selected 96.3% correctly (2 of 10 lead-in questions classified as not-a-question) at p50 1.39 s, p95 1.73 s vs Opus medium 100% at p50 0.98 s; every reasoning setting was slower (p50 1.7–2.7 s) and its replies overran the 400-token cap; stays on Opus. |
 | Practice interviewer | Chosen by the person in claude.ai | The starter is placed in the composer; the model picker is theirs. |
+
+DeepSeek routing (2026-11-07): `qa-research` (tools) and `qa-fact-*` (truth checks) never route; `qa-brief` and `qa-write` stay on Claude until shadow measurement has data (see docs/application-improvement-sessions.md, Hard rules).
 
 ## Files
 

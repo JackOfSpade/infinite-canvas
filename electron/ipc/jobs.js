@@ -4397,6 +4397,7 @@ async function scoreRowsOnCareerRecord({ jobs, careerSnapshotId, nodeId, signal,
   await runGapReviewPass(scored, { postingJob, candidateText: candidate.candidateText, signal, runGapReview });
   return { scored, sources: updates.map(({ job }) => job), failed };
 }
+export { scoreRowsOnCareerRecord as __scoreRowsOnCareerRecordForReplay };
 
 async function rescoreMaterialOfficialText({ rows, indexes, counts, nodeId, signal, callScore, runGapReview, readPinned }) {
   const targets = indexes.filter(index => {

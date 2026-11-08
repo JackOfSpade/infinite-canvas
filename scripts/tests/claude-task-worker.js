@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import {
   CLAUDE_TASK_IDS,
   CLAUDE_TASK_PROFILES,
 } from '../../electron/ipc/claudeTaskProfiles.js';
-import { cachedPromptParts, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
+import { cachedPromptParts, claudeTaskStatusView, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
+import { createShadowMeasure } from '../../electron/ipc/aiShadowMeasure.js';
 import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { answeringModel, buildClaudeInputMessage } from '../../electron/ipc/claudeApplicationRunner.js';
 
@@ -42,6 +45,14 @@ function harness({ entries, runStage, submit, ...options }) {
 
 const entry = (requestId, extra = {}) => ({ requestId, handoffCode: `code-${requestId}`, task: 'job-scoring', hasAttachments: false, ...extra });
 const answer = { text: 'answer', model: 'claude-sonnet-5-5', usage: {}, costUsd: 0 };
+const OFFLOAD_ROUTE = Object.freeze({ provider: 'offload', route: 'deepseek-flash', reasoning: 'high' });
+async function until(check) {
+  for (let i = 0; i < 200; i += 1) {
+    if (check()) return;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.fail('condition was not reached in time');
+}
 const failing = code => () => { throw Object.assign(new Error(code), { code }); };
 
 export default [
@@ -261,6 +272,350 @@ export default [
       assert.equal(message.message.content[1].text, 'Photo 1');
       assert.equal(message.message.content[2].source.data, 'AAAA');
       assert.equal(answeringModel('haiku', ['claude-haiku-5-5']), 'claude-haiku-5-5');
+    },
+  },
+  {
+    name: 'claude task worker offload: a routed task is answered by the offload call and its usage row names provider, route and reasoning',
+    async run() {
+      const rows = []; const offloads = [];
+      const { worker, state } = harness({
+        entries: [entry('a')],
+        runStage: () => { throw new Error('Claude must not run'); },
+        recordUsage: row => rows.push(row),
+        routeFor: task => (task === 'job-scoring' ? OFFLOAD_ROUTE : null),
+        offloadCall: async (args) => { offloads.push(args); return { text: 'ds answer', model: 'deepseek-v4-flash', usage: { input_tokens: 3 }, costUsd: 0.01 }; },
+      });
+      worker.start();
+      await settle();
+      assert.equal(offloads.length, 1);
+      assert.equal(offloads[0].route, 'deepseek-flash');
+      assert.equal(offloads[0].reasoning, 'high');
+      assert.equal(offloads[0].tag, 'job-scoring');
+      assert.deepEqual(offloads[0].messages.map(item => item.role), ['system', 'user']);
+      assert.equal(offloads[0].messages[1].content, 'prompt a');
+      assert.equal(state.stages.length, 0);
+      assert.equal(state.submits[0].response, 'ds answer');
+      assert.equal(state.pending.size, 0);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].provider, 'offload');
+      assert.equal(rows[0].route, 'deepseek-flash');
+      assert.equal(rows[0].reasoning, 'high');
+      assert.equal(rows[0].model, 'deepseek-v4-flash');
+      assert.equal(rows[0].costUsd, 0.01);
+    },
+  },
+  {
+    name: 'claude task worker offload: a task without a table entry runs on Claude and logs provider claude',
+    async run() {
+      const rows = [];
+      const { worker } = harness({
+        entries: [entry('a')], runStage: () => answer, recordUsage: row => rows.push(row),
+        routeFor: () => null, offloadCall: async () => { throw new Error('offload must not run'); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(rows[0].provider, 'claude');
+      assert.equal(rows[0].route, undefined);
+      assert.equal(rows[0].reasoning, undefined);
+    },
+  },
+  {
+    name: 'claude task worker offload: an OFFLOAD_ error is answered on Claude in the same serve, with no backoff',
+    async run() {
+      const rows = []; let calls = 0;
+      const { worker, state } = harness({
+        entries: [entry('a')], runStage: () => answer, recordUsage: row => rows.push(row),
+        routeFor: () => OFFLOAD_ROUTE,
+        offloadCall: async () => { calls += 1; throw Object.assign(new Error('boom'), { code: 'OFFLOAD_PROVIDER_ERROR' }); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(calls, 1);
+      assert.equal(state.stages.length, 1);
+      assert.equal(state.submits.length, 1);
+      assert.equal(state.submits[0].response, 'answer');
+      assert.equal(state.timers.length, 0, 'no retry timer was armed');
+      assert.equal(rows[0].provider, 'claude');
+      assert.equal(worker.status().providerNotice, null, 'an ordinary offload error shows no notice');
+    },
+  },
+  {
+    name: 'claude task worker offload: credit exhaustion falls back, blocks offload for 30 minutes and exposes providerNotice',
+    async run() {
+      let calls = 0;
+      const { worker, state } = harness({
+        entries: [entry('a')], runStage: () => answer,
+        routeFor: () => OFFLOAD_ROUTE,
+        offloadCall: async () => { calls += 1; throw Object.assign(new Error('credit'), { code: 'OFFLOAD_CREDIT_EXHAUSTED' }); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(calls, 1);
+      assert.equal(state.stages.length, 1);
+      const notice = 'DeepSeek credit is exhausted; AI tasks continue on Claude. Top up DeepSeek to resume savings.';
+      assert.equal(worker.status().providerNotice, notice);
+      const view = claudeTaskStatusView(worker.status());
+      assert.equal(view.providerNotice, notice);
+      assert.equal(view.paused, false);
+      assert.equal(view.pauseCode, null);
+      assert.equal(Object.hasOwn(claudeTaskStatusView({ paused: false }), 'providerNotice'), false, 'no notice field without a notice');
+      state.pending.set('b', entry('b', { task: 'job-scoring' }));
+      worker.pump();
+      await settle();
+      assert.equal(calls, 1, 'a later task does not try offload while blocked');
+      assert.equal(state.stages.length, 2);
+      state.clock += 29 * 60_000;
+      assert.equal(worker.status().providerNotice, notice);
+      state.clock += 2 * 60_000;
+      assert.equal(worker.status().providerNotice, null, 'the block ends after 30 minutes');
+      state.pending.set('c', entry('c'));
+      worker.pump();
+      await settle();
+      assert.equal(calls, 2, 'offload is tried again once the block has ended');
+    },
+  },
+  {
+    name: 'claude task worker offload: tasks with tools or photos never route',
+    async run() {
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch' }), entry('b', { task: 'vision-product-analysis', hasAttachments: true })],
+        prepareImage: () => ({ mimeType: 'image/jpeg', data: 'AAAA' }),
+        runStage: () => answer,
+        routeFor: () => OFFLOAD_ROUTE,
+        offloadCall: async () => { throw new Error('offload must not run'); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 2);
+      assert.equal(state.submits.length, 2);
+    },
+  },
+  {
+    name: 'claude task worker offload: two rejected offload answers escalate the request to Claude',
+    async run() {
+      let calls = 0;
+      const { worker, state } = harness({
+        entries: [entry('a')], runStage: () => answer,
+        routeFor: () => OFFLOAD_ROUTE,
+        offloadCall: async () => { calls += 1; return { text: `ds ${calls}`, model: 'deepseek-v4-flash', usage: {} }; },
+        submit: args => (args.response.startsWith('ds') ? { outcome: 'rejected' } : { outcome: 'accepted' }),
+      });
+      worker.start();
+      await settle();
+      assert.equal(calls, 2);
+      assert.deepEqual(state.submits.map(item => item.response), ['ds 1', 'ds 2', 'answer']);
+      assert.equal(state.stages.length, 1);
+      assert.equal(state.pending.size, 0);
+    },
+  },
+  {
+    name: 'claude task worker shadow: off by default, so no offload call and no files',
+    async run() {
+      const dir = path.join(await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-shadow-off-')), 'shadow');
+      try {
+        let offloadCalls = 0;
+        for (const env of [{}, { INFINITE_CANVAS_SHADOW_OFFLOAD: 'flash:high' }, { INFINITE_CANVAS_SHADOW_DIR: dir }, { INFINITE_CANVAS_SHADOW_OFFLOAD: 'flash:high', INFINITE_CANVAS_SHADOW_DIR: 'relative/dir' }, { INFINITE_CANVAS_SHADOW_OFFLOAD: 'ultra:high,flash:turbo', INFINITE_CANVAS_SHADOW_DIR: dir }]) {
+          const shadow = createShadowMeasure({ env, offloadCall: async () => { offloadCalls += 1; return { text: 'x' }; } });
+          assert.equal(shadow.enabled, false);
+          const { worker, state } = harness({ entries: [entry('a')], runStage: () => answer, shadow, shadowValidator: () => () => ({ valid: true, code: null }) });
+          worker.start();
+          await settle();
+          assert.equal(state.submits.length, 1);
+        }
+        await settle();
+        assert.equal(offloadCalls, 0);
+        assert.equal(fs.existsSync(dir), false);
+      } finally { await fs.promises.rm(path.dirname(dir), { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'claude task worker shadow: an enabled run writes a 0600 row without text, and texts only with SHADOW_TEXTS=1',
+    async run() {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-shadow-on-'));
+      try {
+        const claudeAnswer = { text: 'CLAUDE-ANSWER-7', model: 'claude-sonnet-5-5', usage: {}, costUsd: 0.5, durationMs: 40 };
+        const run = async (dir, extraEnv, id) => {
+          const offloads = [];
+          const shadow = createShadowMeasure({
+            env: { INFINITE_CANVAS_SHADOW_OFFLOAD: 'flash:high,bogus,pro:low', INFINITE_CANVAS_SHADOW_DIR: dir, ...extraEnv },
+            offloadCall: async (args) => { offloads.push(args); return { text: 'SHADOW-ANSWER-9', model: 'deepseek-v4', durationMs: 12, costUsd: 0.001, usage: { output_tokens: 2 } }; },
+          });
+          const validated = [];
+          const { worker, state } = harness({
+            entries: [entry(id)], runStage: () => claudeAnswer, shadow,
+            shadowValidator: (args) => {
+              assert.equal(args.requestId, id);
+              return (response) => { validated.push(response); return response === 'SHADOW-ANSWER-9' ? { valid: false, code: 'SCHEMA_BAD' } : { valid: true, code: null }; };
+            },
+          });
+          worker.start();
+          await settle();
+          assert.equal(state.submits[0].response, 'CLAUDE-ANSWER-7', 'the real answer is submitted regardless');
+          await until(() => fs.existsSync(path.join(dir, 'shadow.jsonl')) && fs.readFileSync(path.join(dir, 'shadow.jsonl'), 'utf8').trim().split('\n').length >= 2);
+          return { offloads };
+        };
+        const plain = path.join(root, 'plain');
+        const { offloads } = await run(plain, {}, 'a');
+        assert.deepEqual(offloads.map(item => [item.route, item.reasoning, item.tag, item.caller]),
+          [['deepseek-flash', 'high', 'shadow-job-scoring', 'infinite-canvas-shadow'], ['deepseek-pro', 'low', 'shadow-job-scoring', 'infinite-canvas-shadow']]);
+        const raw = fs.readFileSync(path.join(plain, 'shadow.jsonl'), 'utf8');
+        const rows = raw.trim().split('\n').map(line => JSON.parse(line));
+        assert.equal(rows.length, 2);
+        assert.equal(rows[0].kind, 'task');
+        assert.equal(rows[0].id, 'job-scoring');
+        assert.equal(rows[0].valid, false);
+        assert.equal(rows[0].code, 'SCHEMA_BAD');
+        assert.equal(rows[0].ok, true);
+        assert.equal(rows[0].claude.outcome, 'accepted');
+        assert.equal(typeof rows[0].sampleId, 'string');
+        for (const secret of ['CLAUDE-ANSWER-7', 'SHADOW-ANSWER-9', 'prompt a']) assert(!raw.includes(secret), `shadow.jsonl must not contain ${secret}`);
+        assert.equal(fs.statSync(path.join(plain, 'shadow.jsonl')).mode & 0o777, 0o600);
+        assert.equal(fs.statSync(plain).mode & 0o777, 0o700);
+        assert.equal(fs.existsSync(path.join(plain, 'texts')), false, 'texts are off unless SHADOW_TEXTS=1');
+        const withTexts = path.join(root, 'texts');
+        await run(withTexts, { INFINITE_CANVAS_SHADOW_TEXTS: '1' }, 'b');
+        const textsDir = path.join(withTexts, 'texts');
+        await until(() => {
+          if (!fs.existsSync(textsDir) || fs.readdirSync(textsDir).length !== 1) return false;
+          try { JSON.parse(fs.readFileSync(path.join(textsDir, fs.readdirSync(textsDir)[0]), 'utf8')); return true; } catch { return false; }
+        });
+        const [file] = fs.readdirSync(textsDir);
+        const sampleId = JSON.parse(fs.readFileSync(path.join(withTexts, 'shadow.jsonl'), 'utf8').split('\n')[0]).sampleId;
+        assert.equal(file, `${sampleId}.json`);
+        assert.equal(fs.statSync(path.join(textsDir, file)).mode & 0o777, 0o600);
+        const texts = JSON.parse(fs.readFileSync(path.join(textsDir, file), 'utf8'));
+        assert.equal(texts.claudeText, 'CLAUDE-ANSWER-7');
+        assert.equal(texts.messages[1].content, 'prompt b');
+        assert.deepEqual(texts.shadow.map(item => [item.route, item.reasoning, item.text]), [['deepseek-flash', 'high', 'SHADOW-ANSWER-9'], ['deepseek-pro', 'low', 'SHADOW-ANSWER-9']]);
+        assert(!fs.readFileSync(path.join(withTexts, 'shadow.jsonl'), 'utf8').includes('SHADOW-ANSWER-9'));
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'claude task worker shadow: a failing offload or validator never fails the real task',
+    async run() {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-shadow-fail-'));
+      try {
+        const shadow = createShadowMeasure({
+          env: { INFINITE_CANVAS_SHADOW_OFFLOAD: 'flash:off', INFINITE_CANVAS_SHADOW_DIR: root },
+          offloadCall: async () => { throw Object.assign(new Error('down'), { code: 'OFFLOAD_UNAVAILABLE' }); },
+        });
+        const broken = harness({ entries: [entry('a')], runStage: () => answer, shadow, shadowValidator: () => { throw new Error('validator seam broke'); } });
+        broken.worker.start();
+        await settle();
+        assert.equal(broken.state.submits.length, 1);
+        const { worker, state } = harness({ entries: [entry('b')], runStage: () => answer, shadow, shadowValidator: () => () => ({ valid: true, code: null }) });
+        worker.start();
+        await settle();
+        assert.equal(state.submits.length, 1, 'a failing shadow offload leaves the real task answered');
+        await until(() => fs.existsSync(path.join(root, 'shadow.jsonl')) && fs.readFileSync(path.join(root, 'shadow.jsonl'), 'utf8').includes('OFFLOAD_UNAVAILABLE'));
+        const direct = createShadowMeasure({
+          env: { INFINITE_CANVAS_SHADOW_OFFLOAD: 'flash:off', INFINITE_CANVAS_SHADOW_DIR: root },
+          offloadCall: async () => ({ text: 'x', model: 'm' }),
+        });
+        assert.equal(direct.measure({ kind: 'task', id: 't', messages: [], validate: () => { throw new Error('nope'); }, claude: {} }), undefined);
+        await until(() => fs.existsSync(path.join(root, 'shadow.jsonl')) && fs.readFileSync(path.join(root, 'shadow.jsonl'), 'utf8').includes('VALIDATOR_THREW'));
+        const rows = fs.readFileSync(path.join(root, 'shadow.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        assert(rows.some(row => row.ok === false && row.valid === false && row.code === 'OFFLOAD_UNAVAILABLE'));
+        assert(rows.some(row => row.code === 'VALIDATOR_THREW' && row.valid === false));
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'claude task worker web offload: a WebSearch,WebFetch task with a webTools entry routes to offload with its budget and logs counts',
+    async run() {
+      const rows = []; const offloads = [];
+      const webTools = { searchCount: 3, maxUsd: 0.2 };
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch' })], runStage: () => { throw new Error('claude must not run'); },
+        recordUsage: row => rows.push(row),
+        routeFor: () => ({ ...OFFLOAD_ROUTE, webTools }),
+        offloadCall: async (args) => { offloads.push(args); return { text: 'web answer', model: 'deepseek-v4-flash', usage: {}, costUsd: 0.02, webTools: { turns: 2, toolCalls: 3 } }; },
+      });
+      worker.start();
+      await settle();
+      assert.equal(offloads.length, 1);
+      assert.deepEqual(offloads[0].webTools, webTools);
+      assert.equal(offloads[0].tag, 'job-compensation-research-batch');
+      assert.equal(state.stages.length, 0);
+      assert.equal(state.submits[0].response, 'web answer');
+      assert.equal(rows[0].provider, 'offload');
+      assert.deepEqual(rows[0].webTools, { turns: 2, toolCalls: 3 });
+    },
+  },
+  {
+    name: 'claude task worker web offload: a web task whose entry has no webTools stays on Claude with its tools',
+    async run() {
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch' })], runStage: () => answer,
+        routeFor: () => OFFLOAD_ROUTE,
+        offloadCall: async () => { throw new Error('offload must not run'); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1);
+      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
+      assert(state.stages[0].maxTurns > 1);
+    },
+  },
+  {
+    name: 'claude task worker web offload: an OFFLOAD_ failure on the web route falls back to Claude with tools and maxTurns',
+    async run() {
+      const rows = []; let calls = 0;
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch' })], runStage: () => answer, recordUsage: row => rows.push(row),
+        routeFor: () => ({ ...OFFLOAD_ROUTE, webTools: { maxUsd: 0.1 } }),
+        offloadCall: async () => { calls += 1; throw Object.assign(new Error('cap'), { code: 'OFFLOAD_BUDGET_CAP' }); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(calls, 1);
+      assert.equal(state.stages.length, 1);
+      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
+      assert(state.stages[0].maxTurns > 1);
+      assert.equal(state.submits[0].response, 'answer');
+      assert.equal(rows[0].provider, 'claude');
+      assert.equal(rows[0].webTools, undefined);
+    },
+  },
+  {
+    name: 'claude task worker web offload: a task with any tool besides WebSearch/WebFetch never routes, even with webTools',
+    async run() {
+      const profileFor = task => ({ model: 'opus', effort: 'low', tools: task === 'job-scoring' ? 'WebSearch,Bash' : 'WebSearch,WebFetch' });
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-scoring' })], profileFor, runStage: () => answer,
+        routeFor: () => ({ ...OFFLOAD_ROUTE, webTools: {} }),
+        offloadCall: async () => { throw new Error('offload must not run'); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1);
+      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'Bash']);
+    },
+  },
+  {
+    name: 'claude task worker web offload: a web task with photos never routes, and an entry maxRejections sets the escalation limit',
+    async run() {
+      const photo = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch', hasAttachments: true })],
+        prepareImage: () => ({ mimeType: 'image/jpeg', data: 'AAAA' }), runStage: () => answer,
+        routeFor: () => ({ ...OFFLOAD_ROUTE, webTools: {} }),
+        offloadCall: async () => { throw new Error('offload must not run'); },
+      });
+      photo.worker.start();
+      await settle();
+      assert.equal(photo.state.stages.length, 1);
+      let calls = 0;
+      const { worker, state } = harness({
+        entries: [entry('b')], runStage: () => answer,
+        routeFor: () => ({ ...OFFLOAD_ROUTE, maxRejections: 3 }),
+        offloadCall: async () => { calls += 1; return { text: `ds ${calls}`, model: 'deepseek-v4-flash', usage: {} }; },
+        submit: args => (args.response.startsWith('ds') ? { outcome: 'rejected' } : { outcome: 'accepted' }),
+      });
+      worker.start();
+      await settle();
+      assert.equal(calls, 3);
+      assert.deepEqual(state.submits.map(item => item.response), ['ds 1', 'ds 2', 'ds 3', 'answer']);
     },
   },
 ];

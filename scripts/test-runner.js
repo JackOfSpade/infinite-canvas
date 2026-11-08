@@ -127,6 +127,9 @@ import official_posting_closing from './tests/official-posting-closing.js';
 import official_posting_closing_assembly from './tests/official-posting-closing-assembly.js';
 import cover_letter_hedged_diagnosis from './tests/cover-letter-hedged-diagnosis.js';
 import claude_application_runner from './tests/claude-application-runner.js';
+import offload_complete_stage from './tests/offload-complete-stage.js';
+import ai_shadow_report from './tests/ai-shadow-report.js';
+import ai_task_replay from './tests/ai-task-replay.js';
 import claude_application_sdk_stage from './tests/claude-application-sdk-stage.js';
 import application_editorial_plan from './tests/application-editorial-plan.js';
 import application_editorial_plan_archive from './tests/application-editorial-plan-archive.js';
@@ -421,6 +424,9 @@ const testGroups = [
   ['application-v2-render-reuse.js', application_v2_render_reuse],
   ['cover-letter-hedged-diagnosis.js', cover_letter_hedged_diagnosis],
   ['claude-application-runner.js', claude_application_runner],
+  ['offload-complete-stage.js', offload_complete_stage],
+  ['ai-shadow-report.js', ai_shadow_report],
+  ['ai-task-replay.js', ai_task_replay],
   ['claude-application-sdk-stage.js', claude_application_sdk_stage],
   ['application-editorial-plan.js', application_editorial_plan],
   ['application-editorial-plan-archive.js', application_editorial_plan_archive],

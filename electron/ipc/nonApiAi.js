@@ -3542,6 +3542,25 @@ export function readWorkerHandoff({ requestId, handoffCode, allowTasks, allowNod
   });
 }
 
+/**
+ * A validator for shadow measurement: the same check submitWorkerResponse runs,
+ * without touching the record. Null when the request is not pending or excluded.
+ */
+export function workerShadowValidator({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {
+  const record = typeof requestId === 'string' ? pendingRequests.get(requestId) : undefined;
+  if (!record || record.handoffCode !== handoffCode) return null;
+  if (workerExclusionReason(record, { allowTasks, allowNodeIds, allowWindowNodePairs })) return null;
+  const { responseSchema, responseValidator, task, handoffCode: expectedHandoffCode } = record;
+  return (response) => {
+    try {
+      validateNonApiAiSubmission({ response, responseSchema, responseValidator, task, expectedHandoffCode, requireHandoffCode: false });
+      return { valid: true, code: null };
+    } catch (error) {
+      return { valid: false, code: error?.code || error?.validationCode || 'invalid' };
+    }
+  };
+}
+
 // Trusted main-process seam. A prompt read can still be abandoned by a stale
 // source, so notify the caller only after push installs actual worker ownership.
 export function markWorkerHandoffAssigned({ requestId, handoffCode, allowTasks, allowNodeIds = null, allowWindowNodePairs = null } = {}) {

@@ -421,9 +421,15 @@ export default [
         'two normalized source candidates must not choose a quote by source order');
       assert(__relinkListingQuoteToExactSliceForTests('“cafe\u0301” platform.', '"café" platform.') === null,
         'Unicode composition recovery must not fold curly punctuation into ASCII punctuation');
-      assert(__relinkListingQuoteToExactSliceForTests(source, ' Required: café platform engineering.') === null,
-        'edge whitespace is authored quote-boundary data, not a recoverable interior reflow');
-      return { relinkedChars: relinked.length, rejected: 3 };
+      assert(__relinkListingQuoteToExactSliceForTests(source, ' Required: café platform engineering.\n') === source,
+        'edge whitespace padding relinks to the unpadded source slice');
+      assert(__relinkListingQuoteToExactSliceForTests(source, '  Absent: café platform.\n') === null,
+        'a padded quote whose core does not occur in the source is still refused');
+      assert(__relinkListingQuoteToExactSliceForTests(source, '* Required: café platform engineering.') === null,
+        'an edge that differs by punctuation is never forgiven');
+      assert(__relinkListingQuoteToExactSliceForTests(source, ' \n\t ') === null,
+        'an all-whitespace quote is refused');
+      return { relinkedChars: relinked.length, rejected: 5 };
     },
   },
   {

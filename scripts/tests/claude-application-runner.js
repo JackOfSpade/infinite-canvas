@@ -2206,4 +2206,280 @@ export default [
       await runner.shutdown();
     },
   },
+  {
+    name: 'offload routing: a routed stage goes to offload and logs provider/route; an unrouted stage stays on Claude',
+    async run() {
+      const script = scriptedApi([
+        { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' },
+        { revision: 2, handoffCode: 'w1', stage: 'write', prompt: 'Write prompt.' },
+      ]);
+      const h = offloadHarness({ api: script.api });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.deepEqual(h.calls.offload.map(call => [call.stage, call.route, call.text, call.resume]), [['convert', 'deepseek-flash', 'Convert prompt.', false]]);
+      assert.deepEqual(h.calls.claude.map(call => call.stage), ['write']);
+      const events = h.log().filter(event => ['started', 'response'].includes(event.event));
+      assert.deepEqual(events.map(event => [event.stage, event.event, event.provider, event.route]), [
+        ['convert', 'started', 'offload', 'deepseek-flash'],
+        ['convert', 'response', 'offload', 'deepseek-flash'],
+        ['write', 'started', 'claude', undefined],
+        ['write', 'response', 'claude', undefined],
+      ]);
+      assert.equal(events[0].requestedModel, 'deepseek-flash');
+      assert.equal(h.notes.some(state => state.providerNotice), false);
+    },
+  },
+  {
+    name: 'offload routing: credit exhaustion re-runs the handoff on Claude in a fresh session, sets the notice and routes later stages to Claude',
+    async run() {
+      const script = scriptedApi([
+        { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'FULL convert prompt.' },
+        { revision: 2, handoffCode: 'f1', stage: 'fit-correction', prompt: 'Fit prompt.' },
+      ]);
+      const h = offloadHarness({
+        api: script.api,
+        offload: async () => { throw new ClaudeRunnerError('OFFLOAD_CREDIT_EXHAUSTED', 'credit gone', { retryable: false }); },
+      });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.equal(h.calls.offload.length, 1, 'offload is not tried again after credit exhaustion');
+      assert.deepEqual(h.calls.claude.map(call => [call.stage, call.text, call.resume]), [
+        ['convert', 'FULL convert prompt.', false],
+        // Same lane and provider now, so the Claude session started by the fallback is resumed.
+        ['fit-correction', 'Fit prompt.', true],
+      ]);
+      assert.equal(h.calls.claude[1].sessionId, h.calls.claude[0].sessionId);
+      assert.notEqual(h.calls.claude[0].sessionId, h.calls.offload[0].sessionId, 'Claude gets a fresh session');
+      const notice = 'DeepSeek credit is exhausted; this bundle continues on Claude. Top up DeepSeek to resume savings.';
+      assert.equal(h.runner.status([h.jobId])[h.jobId].providerNotice, notice);
+      assert.equal(h.notes.some(state => state.providerNotice === notice && state.status === 'running'), true, 'the notice reaches the running state');
+      const fallback = h.log().filter(event => event.event === 'offload-fallback');
+      assert.equal(fallback.length, 1);
+      assert.equal(fallback[0].stage, 'convert');
+      assert.equal(fallback[0].code, 'OFFLOAD_CREDIT_EXHAUSTED');
+      assert.equal(fallback[0].retryable, false);
+      const failedEvents = h.log().filter(event => event.event === 'failed');
+      assert.deepEqual(failedEvents.map(event => [event.provider, event.error.code]), [['offload', 'OFFLOAD_CREDIT_EXHAUSTED']]);
+    },
+  },
+  {
+    name: 'offload routing: a non-credit offload failure falls back for that stage only',
+    async run() {
+      const script = scriptedApi([
+        { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' },
+        { revision: 2, handoffCode: 'f1', stage: 'fit-correction', prompt: 'Fit prompt.' },
+      ]);
+      const h = offloadHarness({
+        api: script.api,
+        offload: async ({ stage, route }) => {
+          if (stage === 'convert') throw new ClaudeRunnerError('OFFLOAD_UNAVAILABLE', 'no cli');
+          return { text: '{}', model: 'deepseek-test', provider: 'offload', route };
+        },
+      });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.deepEqual(h.calls.claude.map(call => call.stage), ['convert']);
+      assert.deepEqual(h.calls.offload.map(call => call.stage), ['convert', 'fit-correction']);
+      assert.equal(h.runner.status([h.jobId])[h.jobId].providerNotice, undefined);
+    },
+  },
+  {
+    name: 'offload routing: a cancelled offload call does not fall back to Claude',
+    async run() {
+      const script = scriptedApi([{ revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' }]);
+      const h = offloadHarness({
+        api: script.api,
+        offload: async () => { throw new ClaudeRunnerError('CLAUDE_CANCELLED', 'cancelled'); },
+      });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'failed', 'failed');
+      await h.runner.shutdown();
+      assert.equal(h.calls.claude.length, 0);
+      assert.equal(h.log().some(event => event.event === 'offload-fallback'), false);
+    },
+  },
+  {
+    name: 'offload routing: two consecutive rejected submissions move the lane to Claude in a fresh self-contained session',
+    async run() {
+      const api = rejectingApi([false, false, true]);
+      const h = offloadHarness({ api: api.api });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.deepEqual(h.calls.offload.map(call => call.resume), [false, true]);
+      assert.equal(h.calls.offload[0].sessionId, h.calls.offload[1].sessionId);
+      assert.equal(h.calls.offload[1].text, `fix it${REJECTED_INTRO(1)}1. bad`);
+      assert.equal(h.calls.claude.length, 1);
+      assert.equal(h.calls.claude[0].resume, false);
+      assert.notEqual(h.calls.claude[0].sessionId, h.calls.offload[0].sessionId);
+      assert.equal(h.calls.claude[0].text, `Convert prompt.${REJECTED_INTRO(1)}1. bad`, 'self-contained: the full prompt plus the corrections, not the bare correction prompt');
+      const fallback = h.log().filter(event => event.event === 'offload-fallback');
+      assert.deepEqual(fallback.map(event => [event.stage, event.code]), [['convert', 'validation-streak']]);
+      assert.equal(h.runner.status([h.jobId])[h.jobId].providerNotice, undefined);
+    },
+  },
+  {
+    name: 'offload routing: a stage maxRejections of 3 keeps the lane on offload for two rejections and escalates on the third',
+    async run() {
+      const api = rejectingApi([false, false, false, true]);
+      const h = offloadHarness({ api: api.api, providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'off', maxRejections: 3 } } });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.equal(h.calls.offload.length, 3, 'three offload turns run before the lane escalates');
+      assert.equal(h.calls.claude.length, 1, 'only the turn after the third rejection runs on Claude');
+      const fallback = h.log().filter(event => event.event === 'offload-fallback');
+      assert.deepEqual(fallback.map(event => [event.stage, event.code]), [['convert', 'validation-streak']]);
+    },
+  },
+  {
+    name: 'offload routing: an invalid maxRejections falls back to the default of two',
+    async run() {
+      const api = rejectingApi([false, false, true]);
+      const h = offloadHarness({ api: api.api, providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'off', maxRejections: 9 } } });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.equal(h.calls.offload.length, 2);
+      assert.equal(h.calls.claude.length, 1);
+    },
+  },
+  {
+    name: 'offload routing: an accepted submission resets the rejection streak',
+    async run() {
+      const api = rejectingApi([false, true, false, true], { completeAt: 4 });
+      const h = offloadHarness({ api: api.api });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.equal(h.calls.offload.length, 4);
+      assert.equal(h.calls.claude.length, 0);
+      assert.equal(h.log().some(event => event.event === 'offload-fallback'), false);
+    },
+  },
+  {
+    name: 'offload routing: with no routed stages every stage runs on Claude and logs provider claude',
+    async run() {
+      const script = scriptedApi([
+        { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' },
+        { revision: 2, handoffCode: 'w1', stage: 'write', prompt: 'Write prompt.' },
+      ]);
+      const h = offloadHarness({ api: script.api, providers: {} });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.equal(h.calls.offload.length, 0);
+      assert.deepEqual(h.calls.claude.map(call => call.stage), ['convert', 'write']);
+      assert.deepEqual(h.log().filter(event => event.event === 'started').map(event => [event.provider, 'route' in event]), [['claude', false], ['claude', false]]);
+    },
+  },
+  {
+    name: 'offload routing: a routed stage stays on Claude when no offload runner is available',
+    async run() {
+      const script = scriptedApi([{ revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' }]);
+      const claudeCalls = [];
+      const runner = createClaudeApplicationRunner({
+        api: script.api, stateFile: tempStateFile(), logger: quietLogger(), homedir: '',
+        runStage: async args => { claudeCalls.push(args.stage); return { text: '{}' }; },
+      });
+      const jobId = `job-nooffload-${Math.random().toString(36).slice(2)}`;
+      runner.ensure({ jobId, canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status([jobId])[jobId]?.status === 'done', 'done');
+      await runner.shutdown();
+      assert.deepEqual(claudeCalls, ['convert']);
+    },
+  },
+  {
+    name: 'offload routing: a provider entry reasoning level reaches the run log, live effort and the offload stage; the default is high',
+    async run() {
+      const script = scriptedApi([
+        { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' },
+        { revision: 2, handoffCode: 'f1', stage: 'fit-correction', prompt: 'Fit prompt.' },
+        { revision: 3, handoffCode: 'w1', stage: 'write', prompt: 'Write prompt.' },
+      ]);
+      const h = offloadHarness({
+        api: script.api,
+        providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'medium' }, 'fit-correction': { provider: 'offload', route: 'deepseek-flash' } },
+      });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+      await h.runner.shutdown();
+      assert.deepEqual(h.calls.offload.map(call => [call.stage, call.reasoning, call.effort]), [['convert', 'medium', 'medium'], ['fit-correction', 'high', 'high']]);
+      assert.equal('reasoning' in h.calls.claude[0], false, 'a Claude call carries no offload reasoning');
+      const started = h.log().filter(event => event.event === 'started');
+      assert.deepEqual(started.map(event => [event.stage, event.requestedEffort, event.reasoning]), [
+        ['convert', 'medium', 'medium'], ['fit-correction', 'high', 'high'], ['write', 'low', undefined],
+      ]);
+      assert.equal('reasoning' in started[2], false);
+    },
+  },
+  {
+    name: 'offload routing: INFINITE_CANVAS_OFFLOAD_REASONING overrides an entry level, and an invalid value is ignored',
+    async run() {
+      const saved = process.env.INFINITE_CANVAS_OFFLOAD_REASONING;
+      try {
+        for (const [envValue, expected] of [['low', 'low'], ['bogus', 'medium']]) {
+          process.env.INFINITE_CANVAS_OFFLOAD_REASONING = envValue;
+          const script = scriptedApi([{ revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' }]);
+          const h = offloadHarness({ api: script.api, providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'medium' } } });
+          h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+          await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
+          await h.runner.shutdown();
+          assert.equal(h.calls.offload[0].reasoning, expected);
+          const started = h.log().find(event => event.event === 'started');
+          assert.deepEqual([started.requestedEffort, started.reasoning], [expected, expected]);
+        }
+      } finally {
+        if (saved === undefined) delete process.env.INFINITE_CANVAS_OFFLOAD_REASONING;
+        else process.env.INFINITE_CANVAS_OFFLOAD_REASONING = saved;
+      }
+    },
+  },
 ];
+
+// A runner wired with a fake Claude stageRunner and a fake offloadRunStage, with
+// its run log written for real so events can be asserted.
+function offloadHarness({ api, providers, offload, claude }) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runner-offload-'));
+  const jobId = `job-offload-${Math.random().toString(36).slice(2)}`;
+  const calls = { offload: [], claude: [] };
+  const notes = [];
+  const runner = createRunner({
+    api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: '', capturePrompts: false,
+    notify: state => notes.push(state),
+    runStage: async args => { calls.claude.push(args); return claude ? claude(args) : { text: '{}', model: 'claude-sonnet-5-5' }; },
+    offloadRunStage: async args => {
+      calls.offload.push(args);
+      return offload ? offload(args) : { text: '{}', model: 'deepseek-test', durationMs: 5, provider: 'offload', route: args.route, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'omitted' };
+    },
+    stageProviders: providers ?? { convert: { provider: 'offload', route: 'deepseek-flash' }, 'fit-correction': { provider: 'offload', route: 'deepseek-flash' } },
+  });
+  return { runner, jobId, calls, notes, canvas: path.join(dir, 'c.canvas'),
+    log: () => readRunLog(path.join(dir, '.local-ai', 'claude-runs', `${jobId}.jsonl`)) };
+}
+
+// One 'convert' handoff answered repeatedly. results[i] is whether submit i is
+// accepted; after a rejection the host offers corrections and a correction prompt.
+function rejectingApi(results, { completeAt = results.length } = {}) {
+  let submits = 0;
+  let rejected = false;
+  const base = { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' };
+  return {
+    api: {
+      async getHandoff() {
+        if (submits >= completeAt) return { completed: true, handoff: null };
+        return { handoff: rejected ? { ...base, corrections: ['bad'], correctionPrompt: 'fix it' } : base };
+      },
+      async submitHandoff() {
+        const accepted = results[submits];
+        submits += 1;
+        rejected = !accepted;
+        return accepted ? { accepted: true, completed: submits >= completeAt } : { accepted: false, validationErrors: ['bad'] };
+      },
+      subscribeDiscards: () => () => {},
+    },
+  };
+}
