@@ -28,7 +28,10 @@ export function collectJobCompensationReport(nodes, { flat = false } = {}) {
       const job = node.data || {};
       const assessment = normalizeCompensationAssessment(job.compensationAssessment);
       const display = jobCompensationDisplay(job, assessment);
-      const reachesFloor = assessment.offered.max >= assessment.competitiveRange.min;
+      // Typical researched pay when the saved assessment carries it; saved
+      // assessments that predate the field keep the old lowest-low floor.
+      const threshold = assessment.competitiveFloor > 0 ? assessment.competitiveFloor : assessment.competitiveRange.min;
+      const reachesFloor = assessment.offered.max >= threshold;
       const personal = assessment.personalRecommendation;
       const rawPersonal = job.compensationAssessment?.personalRecommendation;
       rows.push({

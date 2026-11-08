@@ -2,6 +2,10 @@ import { assert } from '../test-dependencies.js';
 import { buildJobTreeNodes, isCompensationRecommendationCurrent, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { estimateCompensationExperienceYearsFromDescription, selectCompensationExperienceYears } from '../../electron/ipc/jobCompensation.js';
 import { compensationAssessment, parseGuaranteedCashOffer } from '../../electron/ipc/jobCompensation.js';
+import {
+  compensationLocationMismatch, competitiveFloor, isValidCompensationExperienceBandLadder,
+  retainConsistentCompetitiveRanges, selectCompensationExperienceBand, typicalPayPercentile,
+} from '../../electron/ipc/jobCompensation.js';
 import { jobCompensationDisplay } from '../../src/utils/jobCompensationDisplay.js';
 import { advertisedSalaryForJob } from '../../src/utils/jobAdvertisedSalary.js';
 import { collectJobCompensationReport } from '../../src/utils/jobCompensationReport.js';
@@ -301,7 +305,7 @@ export default [
         [],
         { ...personalRecommendation, schemaVersion: 2 },
         { ...personalRecommendation, schemaVersion: '1' },
-        { ...personalRecommendation, methodologyVersion: 3 },
+        { ...personalRecommendation, methodologyVersion: 4 },
         { ...personalRecommendation, status: 'invented' },
         { ...personalRecommendation, confidence: 'certain' },
         { ...personalRecommendation, explanation: '' },
@@ -446,6 +450,253 @@ export default [
         && unsupportedCategory.years === null && unsupportedCandidateYears.years === null,
       'an unrelated full-page role, grounded quote without its claimed number, or ungrounded candidate years must not upgrade this listing’s salary band');
       return { explicitMinimum: explicitMinimum.years, explicitRange: explicitRange.years };
+    },
+  },
+  {
+    name: 'Salary verdict compares the offer against typical researched pay, excluding outlying sources',
+    run() {
+      const offer = { usable: true, min: 70000, max: 90000, currency: 'CAD', period: 'annual' };
+      const cadSources = [
+        { min: 62400, max: 145059, currency: 'CAD' },
+        { min: 66000, max: 102000, currency: 'CAD' },
+        { min: 77000, max: 117000, currency: 'CAD' },
+        { min: 71000, max: 125000, currency: 'CAD' },
+      ];
+      const cad = compensationAssessment({ offer, competitiveRanges: cadSources, marketCurrency: 'CAD' });
+      assert(cad.status === 'below_market',
+        'a CAD 70-90k offer must not be called competitive against a 62.4k source low when typical pay is 97.5k');
+      assert(cad.competitiveFloor === 97500, 'typical researched pay must be the median midpoint of the comparable sources');
+      assert(cad.reasonCode === 'offered_max_below_typical_market', 'the below-market verdict must use the typical-market reason code');
+      assert(cad.excludedSourceCount === 0 && cad.competitiveRange.min === 62400 && cad.competitiveRange.max === 145059,
+        'four consistent sources stay in one union without exclusions');
+      assert(cad.justification.includes('is below typical researched pay (CAD 97,500, the median midpoint of 4 comparable sources).'),
+        'the decision sentence must name typical researched pay and the comparable-source count');
+
+      const outlier = compensationAssessment({
+        offer,
+        competitiveRanges: [
+          { min: 100000, max: 120000, currency: 'CAD' },
+          { min: 105000, max: 125000, currency: 'CAD' },
+          { min: 20000, max: 30000, currency: 'CAD' },
+        ],
+        marketCurrency: 'CAD',
+      });
+      assert(outlier.excludedSourceCount === 1 && outlier.competitiveFloor === 112500,
+        'a source whose midpoint sits far below the others must be excluded from typical researched pay');
+      assert(outlier.competitiveRange.min === 100000 && outlier.competitiveRange.max === 125000,
+        'the merged range must cover only the retained sources');
+      assert(outlier.justification.includes('1 source(s) whose range sat far from the others were left out of this comparison.'),
+        'an excluded source must be disclosed in the justification');
+
+      const pair = compensationAssessment({
+        offer,
+        competitiveRanges: [{ min: 60000, max: 80000, currency: 'CAD' }, { min: 90000, max: 110000, currency: 'CAD' }],
+        marketCurrency: 'CAD',
+      });
+      assert(pair.excludedSourceCount === 0 && pair.competitiveFloor === 85000,
+        'two sources are never filtered, and their typical pay is the mean of both midpoints');
+
+      const atFloor = compensationAssessment({ offer: { ...offer, max: 97500 }, competitiveRanges: cadSources, marketCurrency: 'CAD' });
+      assert(atFloor.status === 'competitive' && atFloor.reasonCode === 'offered_reaches_typical_market',
+        'an offer maximum exactly equal to typical researched pay must count as competitive');
+
+      assert(competitiveFloor(cadSources, 'CAD') === 97500
+        && retainConsistentCompetitiveRanges([
+          { min: 60000, max: 80000, currency: 'CAD' }, { min: 90000, max: 110000, currency: 'CAD' },
+        ], 'CAD').excluded.length === 0,
+      'the exported helpers must report the same floor and keep every source when fewer than three exist');
+    },
+  },
+  {
+    name: 'A card whose own country differs from the compared market withholds the verdict',
+    run() {
+      const offer = { usable: true, min: 70000, max: 90000, currency: 'CAD', period: 'annual' };
+      const sources = [{ min: 77000, max: 117000, currency: 'CAD' }];
+      const berlin = compensationAssessment({
+        offer,
+        competitiveRanges: sources,
+        marketCurrency: 'CAD',
+        cardLocation: 'Ontario',
+        comparisonLocation: { display: 'Berlin, Germany', country: 'Germany' },
+      });
+      assert(berlin.locationMismatch?.cardLocation === 'Ontario'
+        && berlin.locationMismatch?.cardCountry === 'Canada'
+        && berlin.locationMismatch?.comparedCountry === 'Germany',
+      'a Canadian card compared against a German market must record both countries');
+      assert(berlin.status === 'uncertain' && berlin.reasonCode === 'location_conflict',
+        `a country conflict must not colour the card green or red, got ${berlin.status}/${berlin.reasonCode}`);
+      assert(berlin.competitiveRange?.min === 77000 && berlin.competitiveFloor === 97000,
+        'the researched range and typical pay stay available as context');
+      assert(berlin.justification.includes('Pay was not judged: the card lists Canada but the location found for this job is in Germany'),
+        'the withheld verdict must be explained in the justification');
+      const normalized = normalizeCompensationAssessment(berlin);
+      assert(normalized.status === 'uncertain' && normalized.reasonCode === 'location_conflict' && normalized.locationMismatch?.comparedCountry === 'Germany',
+        'the renderer keeps the withheld verdict and the mismatch record');
+      const display = jobCompensationDisplay({}, normalized);
+      assert(display.determined === false && display.label === 'Cannot determine pay competitiveness'
+        && display.explanation.includes('in different countries, so pay was not judged'),
+      `the card must say why pay was not judged, got ${JSON.stringify(display.explanation)}`);
+      const sameCountry = compensationAssessment({
+        offer,
+        competitiveRanges: sources,
+        marketCurrency: 'CAD',
+        cardLocation: 'Toronto, ON',
+        comparisonLocation: { display: 'Toronto, Ontario, Canada', country: 'Canada' },
+      });
+      assert(sameCountry.locationMismatch === null && sameCountry.status === 'below_market'
+        && !sameCountry.justification.includes('Pay was not judged'),
+      'a card in the same country as the compared market keeps its verdict');
+      assert(compensationLocationMismatch('Toronto, ON', { display: 'Toronto, Ontario, Canada', country: 'Canada' }) === null,
+        'matching countries must produce no mismatch record');
+    },
+  },
+  {
+    name: 'A description-unspecified salary estimate uses a middle band instead of the entry band',
+    run() {
+      const ladder = [
+        { label: 'Entry', minYears: 0, maxYears: 3 },
+        { label: 'Developing', minYears: 4, maxYears: 6 },
+        { label: 'Senior', minYears: 7, maxYears: 9 },
+        { label: 'Lead', minYears: 10, maxYears: 99 },
+      ];
+      assert(isValidCompensationExperienceBandLadder(ladder), 'the four-band ladder under test must itself be a valid ladder');
+      assert(selectCompensationExperienceBand(ladder, 3).label === 'Entry',
+        'a literal three-year ask must still use the band that contains three years');
+      assert(selectCompensationExperienceBand(ladder, 3, { basis: 'description-unspecified-estimate' }).label === 'Developing',
+        'a placeholder estimate must use the middle non-entry band instead of its entry band');
+      assert(selectCompensationExperienceBand(ladder, 8, { basis: 'description-stated-minimum' }).label === 'Senior',
+        'a stated basis must keep selecting the band that contains the years');
+    },
+  },
+  {
+    name: 'Saved verdicts fall back to the union low only when typical researched pay is absent',
+    run() {
+      const saved = {
+        schemaVersion: 1,
+        status: 'competitive',
+        reasonCode: 'offered_reaches_typical_market',
+        offered: { min: 70000, max: 90000, currency: 'CAD', period: 'annual' },
+        competitiveRange: { min: 62400, max: 145059, currency: 'CAD', period: 'annual' },
+        comparisonLocation: { display: 'Toronto, Ontario, Canada', country: 'Canada' },
+        justification: 'Saved verdict.',
+        researchedAt: '2026-09-01T12:00:00.000Z',
+        sourceLinks: [],
+      };
+      const legacy = normalizeCompensationAssessment(saved);
+      assert(legacy.status === 'competitive' && legacy.competitiveFloor === 0,
+        'a saved competitive verdict without typical researched pay must stay competitive and report no floor');
+      const contradictory = normalizeCompensationAssessment({ ...saved, competitiveFloor: 97500 });
+      assert(contradictory.status === 'uncertain' && contradictory.reasonCode === 'inconsistent_comparison_verdict',
+        'a saved competitive verdict whose maximum sits below a valid typical researched pay must be flagged inconsistent');
+      const accepted = normalizeCompensationAssessment({
+        ...saved, offered: { ...saved.offered, max: 97500 }, competitiveFloor: 97500,
+      });
+      assert(accepted.status === 'competitive' && accepted.competitiveFloor === 97500,
+        'a saved verdict that reaches the stored typical researched pay must stay competitive');
+      const invalidFloor = normalizeCompensationAssessment({ ...saved, competitiveFloor: 5000 });
+      assert(invalidFloor.status === 'uncertain' && invalidFloor.reasonCode === 'incomplete_comparison_data',
+        'a typical-pay value outside the saved range is incomplete data rather than a verdict');
+      const report = collectJobCompensationReport([{
+        data: {
+          canvasData: {
+            nodes: [
+              { id: 'legacy', type: 'jobcard', data: { compensationAssessment: saved } },
+              { id: 'contradictory', type: 'jobcard', data: { compensationAssessment: { ...saved, competitiveFloor: 97500 } } },
+            ],
+          },
+        },
+      }]);
+      assert(report.rows[0].thresholdCheck === 'consistent',
+        'the saved legacy verdict falls back to the union low and reads as consistent');
+      assert(report.rows[1].thresholdCheck === 'inconsistent',
+        'the saved verdict below typical researched pay is reported as inconsistent');
+    },
+  },
+  {
+    name: 'Review regressions: bimodal sources, rounding, remote residences and multi-place cards',
+    run() {
+      const offer = { usable: true, min: 60000, max: 90000, currency: 'USD', period: 'annual' };
+      // Two far-apart clusters: the even-count median sits where no source is.
+      const bimodal = [
+        { min: 10000, max: 20000, currency: 'USD' }, { min: 10000, max: 20000, currency: 'USD' },
+        { min: 200000, max: 300000, currency: 'USD' }, { min: 200000, max: 300000, currency: 'USD' },
+      ];
+      const split = retainConsistentCompetitiveRanges(bimodal, 'USD');
+      assert(split.disagreement === true && split.retained.length === 4 && split.excluded.length === 0,
+        'an all-excluded split is reported as a disagreement, not silently kept');
+      assert(competitiveFloor(bimodal, 'USD') === null, 'no typical pay exists between two disagreeing clusters');
+      const disagree = compensationAssessment({ offer, competitiveRanges: bimodal, marketCurrency: 'USD' });
+      assert(disagree.status === 'uncertain' && disagree.reasonCode === 'market_sources_disagree'
+        && disagree.competitiveFloor === null && disagree.competitiveRange?.max === 300000,
+      `disagreeing sources withhold the verdict but keep the range, got ${disagree.status}/${disagree.reasonCode}`);
+      assert(jobCompensationDisplay({}, normalizeCompensationAssessment(disagree)).explanation.includes('disagree too much'),
+        'the card explains the withheld verdict');
+      const threeWithOutlier = compensationAssessment({ offer, competitiveRanges: bimodal.slice(0, 3), marketCurrency: 'USD' });
+      assert(threeWithOutlier.reasonCode !== 'market_sources_disagree' && threeWithOutlier.excludedSourceCount === 1,
+        'an odd count still excludes the outlier normally');
+
+      // Rounding never leaves the band, so the renderer accepts the saved result.
+      const narrow = compensationAssessment({ offer: { ...offer, min: 100000, max: 100000 }, competitiveRanges: [{ min: 100000.4, max: 100000.4, currency: 'USD' }], marketCurrency: 'USD' });
+      assert(narrow.competitiveFloor === 100000.4 && narrow.status === 'below_market', `the floor is clamped into the band, got ${narrow.competitiveFloor}`);
+      assert(normalizeCompensationAssessment(narrow).status === 'below_market', 'the clamped floor passes the renderer re-check');
+
+      // A remote job priced at the saved residence is not a location conflict.
+      const remote = compensationAssessment({
+        offer, competitiveRanges: [{ min: 70000, max: 110000, currency: 'USD' }], marketCurrency: 'USD', cardLocation: 'New York, NY',
+        comparisonLocation: { kind: 'remote_other_residence', display: 'Toronto, Ontario, Canada', country: 'Canada' },
+      });
+      assert(remote.locationMismatch === null && remote.reasonCode !== 'location_conflict', 'remote residence pricing keeps its verdict');
+
+      // A multi-place card conflicts only when no listed place is the compared country.
+      const toronto = { display: 'Toronto, Ontario, Canada', country: 'Canada' };
+      const newYork = { display: 'New York, New York, United States', country: 'United States' };
+      for (const card of ['Toronto, ON | New York, NY', 'Toronto, ON; New York, NY', 'Toronto, ON / New York, NY', 'Vancouver, BC & Seattle, WA']) {
+        assert(compensationLocationMismatch(card, toronto) === null, `${card} lists a Canadian place`);
+      }
+      assert(compensationLocationMismatch('Toronto, ON | New York, NY', newYork) === null, 'it also lists a US place');
+      assert(compensationLocationMismatch('Toronto, ON | Somewhere', newYork) === null, 'an unparseable place could be anywhere');
+      const both = compensationLocationMismatch('Toronto, ON | Vancouver, BC', { display: 'Helsinki, Finland', country: 'Finland' });
+      assert(both?.cardCountry === 'Canada' && both.comparedCountry === 'Finland', 'every place elsewhere is a real conflict');
+      assert(compensationLocationMismatch({ city: 'Toronto' }, toronto) === null, 'a non-string card location is ignored');
+    },
+  },
+  {
+    name: 'Typical-band sources place the posted maximum on a log-normal percentile; full ranges never do',
+    run() {
+      const typical = { min: 50000, max: 72000, currency: 'CAD', note: 'typical band (25th–75th percentile)' };
+      // A typical band's ends are its 25th and 75th percentiles; the geometric
+      // mean of the two is the log-normal median.
+      assert(typicalPayPercentile([typical], 50000, 'CAD')?.percentile === 25, 'the band low is the 25th percentile');
+      assert(typicalPayPercentile([typical], 72000, 'CAD')?.percentile === 75, 'the band high is the 75th percentile');
+      assert(typicalPayPercentile([typical], Math.sqrt(50000 * 72000), 'CAD')?.percentile === 50, 'the geometric mean is the median');
+      assert(typicalPayPercentile([typical], 1000, 'CAD')?.percentile === 1 && typicalPayPercentile([typical], 10_000_000, 'CAD')?.percentile === 99,
+        'extreme amounts clamp to 1–99 rather than claim certainty');
+      const fullRange = { min: 40000, max: 120000, currency: 'CAD', note: 'full range' };
+      const unlabelled = { min: 40000, max: 120000, currency: 'CAD' };
+      assert(typicalPayPercentile([fullRange, unlabelled], 80000, 'CAD') === null,
+        'a full min–max spread or an unlabelled range carries no percentile meaning');
+      assert(typicalPayPercentile([{ ...typical, currency: 'USD' }], 60000, 'CAD') === null, 'another currency is ignored');
+      for (const note of ['typical band, not full range', 'Typical band (IQR), not the full range']) {
+        assert(typicalPayPercentile([{ ...typical, note }], 72000, 'CAD')?.percentile === 75, `"${note}" is still a typical band`);
+      }
+      assert(typicalPayPercentile([{ ...typical, note: 'typical band unavailable; full range' }], 72000, 'CAD') === null,
+        'a note that reports the full range is not a typical band');
+      const mixed = typicalPayPercentile([typical, fullRange, { min: 60000, max: 90000, currency: 'CAD', note: 'Typical band' }], 72000, 'CAD');
+      assert(mixed?.sourceCount === 2, `only typical-band sources count, got ${JSON.stringify(mixed)}`);
+
+      const offer = { usable: true, min: 60000, max: 72000, currency: 'CAD', period: 'annual' };
+      const assessed = compensationAssessment({ offer, competitiveRanges: [typical], marketCurrency: 'CAD' });
+      assert(assessed.offerPercentile?.percentile === 75 && assessed.offerPercentile.sourceCount === 1,
+        `the assessment stores the posted maximum's percentile, got ${JSON.stringify(assessed.offerPercentile)}`);
+      assert(assessed.status === 'competitive', 'the verdict still uses typical researched pay, not the percentile');
+      assert(compensationAssessment({ offer, competitiveRanges: [fullRange], marketCurrency: 'CAD' }).offerPercentile === undefined,
+        'no typical band means no percentile is stored');
+      const normalized = normalizeCompensationAssessment(assessed);
+      assert(normalized.offerPercentile?.percentile === 75 && normalized.offerPercentile.sourceCount === 1, 'the renderer keeps a valid percentile');
+      for (const bad of [{ percentile: 0, sourceCount: 1 }, { percentile: 100, sourceCount: 1 }, { percentile: 40.5, sourceCount: 1 }, { percentile: 40, sourceCount: 0 }, '40']) {
+        assert(normalizeCompensationAssessment({ ...assessed, offerPercentile: bad }).offerPercentile === null,
+          `the renderer drops a malformed percentile ${JSON.stringify(bad)}`);
+      }
     },
   },
 ];

@@ -10,7 +10,7 @@ import { isCompensationRecommendationCurrent, normalizeCompensationAssessment } 
 
 const SNAPSHOT = 'a'.repeat(64);
 const PACKET = {
-  methodologyVersion: 2, careerSnapshotId: SNAPSHOT, experience: [],
+  methodologyVersion: 3, careerSnapshotId: SNAPSHOT, experience: [],
   evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built web applications.', jobQuote: 'Familiarity with web applications.' }],
 };
 // The saved Baseten case that prompted this rule: one Montreal junior survey
@@ -35,8 +35,17 @@ export default [
       assert.deepEqual(salaryRecommendationBounds(market, null), { min: 100000, max: 150000, basis: 'market' });
       assert.deepEqual(salaryRecommendationBounds(market, band(60000, 90000)), { min: 100000, max: 150000, basis: 'market_above_posted' });
       assert.deepEqual(salaryRecommendationBounds(market, band(165000, 330000)), { min: 165000, max: 330000, basis: 'posted_above_market' });
-      assert.deepEqual(salaryRecommendationBounds(market, band(120000, 200000)), { min: 120000, max: 150000, basis: 'market_with_posted_floor' });
+      assert.deepEqual(salaryRecommendationBounds(market, band(120000, 200000)), { min: 120000, max: 160000, basis: 'market_with_posted_floor', postedMidpointCeiling: true });
       assert.deepEqual(salaryRecommendationBounds(market, band(90000, 140000)), { min: 100000, max: 150000, basis: 'market' });
+      // An overlapping advertisement never caps the answer below its own
+      // midpoint: the raised ceiling is the advertised midpoint when the
+      // research stops short of it, and the market maximum otherwise.
+      const eur = (min, max) => ({ min, max, currency: 'EUR', period: 'annual' });
+      assert.deepEqual(salaryRecommendationBounds(eur(25000, 61200), band(48000, 72000, { currency: 'EUR' })), { min: 48000, max: 61200, basis: 'market_with_posted_floor' });
+      assert.deepEqual(salaryRecommendationBounds(eur(25000, 55000), band(48000, 72000, { currency: 'EUR' })), { min: 48000, max: 60000, basis: 'market_with_posted_floor', postedMidpointCeiling: true });
+      assert.deepEqual(salaryRecommendationBounds(eur(50000, 60000), band(40000, 90000, { currency: 'EUR' })), { min: 50000, max: 65000, basis: 'market', postedMidpointCeiling: true });
+      assert.equal(salaryRecommendationBounds(market, band(60000, 90000)).postedMidpointCeiling, undefined, 'a band entirely below the market keeps the market ceiling');
+      assert.equal(salaryRecommendationBounds(market, band(165000, 330000)).postedMidpointCeiling, undefined, 'an advertised band above the market is unchanged');
       // A band that cannot be compared never moves the bounds.
       for (const unusable of [
         band(165000, 330000, { currency: 'USD' }), band(165000, 330000, { period: 'hourly' }),
@@ -84,7 +93,7 @@ export default [
         offer: { ...POSTED, min: 60000, max: 90000 }, marketCurrency: 'CAD',
         competitiveRanges: [{ min: 57000, max: 91000, currency: 'CAD' }, { min: 60000, max: 85000, currency: 'CAD' }],
       });
-      assert.equal(twoSources.reasonCode, 'offered_reaches_competitive_floor');
+      assert.equal(twoSources.reasonCode, 'offered_reaches_typical_market');
       assert.doesNotMatch(twoSources.justification, /Only one comparable salary source/);
       assert.equal(twoSources.currencyAmbiguous, undefined);
       const verbose = compensationAssessment({
@@ -96,7 +105,8 @@ export default [
       // The renderer keeps a valid verdict for the new reason code.
       const rendered = normalizeCompensationAssessment(assessment);
       assert.equal(rendered.status, 'competitive');
-      assert.equal(rendered.personalRecommendation.status, 'market_estimate');
+      assert.equal(rendered.personalRecommendation.status, 'market_estimate',
+        'the renderer must preserve the market estimate, which requires buildJobTree.normalizedPersonalRecommendation to accept PERSONAL_SALARY_METHODOLOGY_VERSION 3 instead of its current [1, 2] gate (src/nodes/jobsearch/buildJobTree.js:191)');
       assert.equal(rendered.personalRecommendation.desiredSalary, 250000);
     },
   },
@@ -141,6 +151,30 @@ export default [
     },
   },
   {
+    name: 'A saved v2 market estimate under the old ceiling is outdated, not unreadable',
+    run: () => {
+      const market = { min: 80000, max: 100000, currency: 'CAD', period: 'annual' };
+      const posted = { usable: true, min: 90000, max: 130000, currency: 'CAD', period: 'annual' };
+      assert.deepEqual(salaryRecommendationBounds(market, posted, { midpointCeiling: false }), { min: 90000, max: 100000, basis: 'market_with_posted_floor' });
+      const save = (methodologyVersion, range, desiredSalary) => normalizeCompensationAssessment({
+        schemaVersion: 1, status: 'competitive', reasonCode: 'offered_reaches_typical_market', offered: posted, competitiveRange: market,
+        justification: 'Saved.', researchedAt: '2026-11-05T00:00:00.000Z',
+        personalRecommendation: {
+          schemaVersion: 1, methodologyVersion, status: 'market_estimate', confidence: 'low', explanation: 'Saved estimate.', limitations: [],
+          careerSnapshotId: '', range: { ...range, currency: 'CAD', period: 'annual' }, desiredSalary,
+        },
+      }).personalRecommendation;
+      const v2 = save(2, { min: 90000, max: 100000 }, 95000);
+      assert.equal(v2.status, 'market_estimate', 'a v2 estimate produced under its own rule stays readable');
+      assert.equal(v2.isInvalid, undefined);
+      assert.equal(v2.superseded, true, 'today the ceiling reaches the posted midpoint, so it is shown as outdated');
+      const v3 = save(3, { min: 90000, max: 110000 }, 100000);
+      assert.equal(v3.status, 'market_estimate');
+      assert.equal(v3.superseded, undefined, 'a v3 estimate at the current bounds is current');
+      assert.equal(save(3, { min: 90000, max: 100000 }, 95000).isInvalid, true, 'a v3 estimate must match the v3 bounds');
+    },
+  },
+  {
     name: 'Saved v1 answers keep their market-only rule while v2 answers use the shared bounds',
     run: () => {
       const base = {
@@ -172,7 +206,9 @@ export default [
       assert.equal(saved(2, { min: 70000, max: 90000 }, 85000).status, 'unavailable', 'a v2 answer below the posted floor is invalid');
       assert.equal(saved(2, { min: 165000, max: 330000 }, 250000, 'market_estimate').status, 'market_estimate');
       assert.equal(saved(2, { min: 57000, max: 91000 }, 75000, 'market_estimate').status, 'unavailable');
-      assert.equal(saved(3, { min: 165000, max: 200000 }, 175000).status, 'unavailable', 'an unknown methodology fails closed');
+      // Version 3 is current now, so an older-than-v3 gate must not be what
+      // proves the failure: an actually unknown version still fails closed.
+      assert.equal(saved(4, { min: 165000, max: 200000 }, 175000).status, 'unavailable', 'an unknown methodology fails closed');
     },
   },
 ];

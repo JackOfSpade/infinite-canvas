@@ -188,7 +188,7 @@ function normalizedPersonalRecommendation(value, marketRange, offered) {
   if (value === undefined) return null;
   const unavailable = unavailablePersonalRecommendation();
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || value.schemaVersion !== 1 || ![1, 2].includes(value.methodologyVersion)
+    || value.schemaVersion !== 1 || ![1, 2, 3].includes(value.methodologyVersion)
     || !PERSONAL_RECOMMENDATION_STATUSES.has(value.status)
     || !PERSONAL_RECOMMENDATION_CONFIDENCES.has(value.confidence)
     || typeof value.explanation !== 'string' || !value.explanation.trim()
@@ -210,11 +210,12 @@ function normalizedPersonalRecommendation(value, marketRange, offered) {
     return value.range === null && value.desiredSalary === null ? normalized : unavailable;
   }
   const range = value.range;
-  // v1 answers were bounded by the market range alone; v2 answers by the
-  // shared market-plus-advertised-band rule the backend validated them with.
+  // Validate each answer against the rule it was produced under: v1 by the
+  // market range alone, v2 by the market range with the posted floor, v3 also
+  // with the posted-midpoint ceiling.
   const bounds = value.methodologyVersion === 1
     ? { min: marketRange.min, max: marketRange.max }
-    : salaryRecommendationBounds(marketRange, offered) || { min: NaN, max: NaN };
+    : salaryRecommendationBounds(marketRange, offered, { midpointCeiling: value.methodologyVersion >= 3 }) || { min: NaN, max: NaN };
   const isPositiveCash = (amount) => typeof amount === 'number' && Number.isFinite(amount)
     && amount > 0 && amount <= MAX_CREDIBLE_ANNUAL_CASH;
   if (!range || typeof range !== 'object' || Array.isArray(range)
@@ -229,10 +230,11 @@ function normalizedPersonalRecommendation(value, marketRange, offered) {
       || range.min !== bounds.min || range.max !== bounds.max))) return unavailable;
   normalized.range = { min: range.min, max: range.max, currency: range.currency, period: 'annual' };
   normalized.desiredSalary = value.desiredSalary;
-  // A v1 answer stays readable, but when today's rule would not allow it
-  // (typically: below an employer's posted floor that sits above the market)
-  // it is shown as outdated rather than as a number to enter.
-  if (value.methodologyVersion === 1) {
+  // An older answer stays readable, but when today's rule would not produce it
+  // (v1: below a posted floor above the market; v2: stopping below a posted
+  // midpoint the market does not reach) it is shown as outdated rather than as
+  // a number to enter.
+  if (value.methodologyVersion < 3) {
     const current = salaryRecommendationBounds(marketRange, offered);
     if (current && (range.min < current.min || range.max > current.max
       || (value.status === 'market_estimate' && (range.min !== current.min || range.max !== current.max)))) {
@@ -343,6 +345,24 @@ function normalizedCompensationStatus(value) {
   return '';
 }
 
+function normalizedLocationMismatch(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const cardLocation = textValue(value.cardLocation).slice(0, 240);
+  const cardCountry = textValue(value.cardCountry).slice(0, 240);
+  const comparedCountry = textValue(value.comparedCountry).slice(0, 240);
+  if (!cardLocation || !comparedCountry) return null;
+  return { cardLocation, cardCountry, comparedCountry };
+}
+
+// Display-only context: a whole percentile 1–99 from at least one source.
+function normalizedOfferPercentile(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const { percentile, sourceCount } = value;
+  if (!Number.isInteger(percentile) || percentile < 1 || percentile > 99) return null;
+  if (!Number.isInteger(sourceCount) || sourceCount < 1) return null;
+  return { percentile, sourceCount };
+}
+
 /**
  * Coerce current and older salary-research payloads into a render-safe shape.
  * This must fail open: only an explicit, recognized verdict can colour a card.
@@ -355,7 +375,8 @@ export function normalizeCompensationAssessment(value) {
       status: 'not_evaluated',
       reasonCode: 'legacy_unresearched',
       justification: 'Compensation research was not run for this saved result. Combine jobs again on the Job Board to evaluate the advertised cash salary.',
-      offered: normalizedRange(), competitiveRange: normalizedRange(), comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, currencyAmbiguous: false, sourceLinks: [],
+      offered: normalizedRange(), competitiveRange: normalizedRange(), competitiveFloor: 0, excludedSourceCount: 0, locationMismatch: null, offerPercentile: null,
+      comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, currencyAmbiguous: false, sourceLinks: [],
       personalRecommendation: null,
       isLegacy: true,
     };
@@ -363,12 +384,30 @@ export function normalizeCompensationAssessment(value) {
 
   const schemaVersion = Number.isFinite(Number(source.schemaVersion)) ? Number(source.schemaVersion) : 0;
   const status = normalizedCompensationStatus(source.status ?? source.verdict ?? source.result);
+  const competitiveRange = normalizedRange(source.competitiveRange ?? source.marketRange ?? source.researchedMarketRange, source);
+  // Typical researched pay is kept beside the union band, never folded into it.
+  // A saved value that is not a positive number inside that band is incomplete
+  // data, while an absent value is legacy data that falls back to the band low.
+  const rawFloor = source.competitiveFloor;
+  const floorPresent = rawFloor !== null && rawFloor !== undefined && rawFloor !== '';
+  const floorValue = Number(rawFloor);
+  const competitiveFloor = floorPresent && Number.isFinite(floorValue) && floorValue > 0
+    && floorValue >= competitiveRange.min && floorValue <= competitiveRange.max
+    ? floorValue
+    : 0;
+  const excludedSourceCount = Number.isFinite(Number(source.excludedSourceCount)) && Number(source.excludedSourceCount) > 0
+    ? Math.floor(Number(source.excludedSourceCount))
+    : 0;
   const normalized = {
     schemaVersion,
     status: status || 'not_evaluated',
     reasonCode: textValue(source.reasonCode ?? source.reason),
     offered: normalizedRange(source.offered ?? source.advertisedCash ?? source.advertisedSalary ?? source.offer, source),
-    competitiveRange: normalizedRange(source.competitiveRange ?? source.marketRange ?? source.researchedMarketRange, source),
+    competitiveRange,
+    competitiveFloor,
+    excludedSourceCount,
+    locationMismatch: normalizedLocationMismatch(source.locationMismatch),
+    offerPercentile: normalizedOfferPercentile(source.offerPercentile),
     comparisonLocation: normalizedLocation(source.comparisonLocation ?? source.marketLocation ?? source.evaluatedLocation),
     justification: textValue(source.justification ?? source.reasoning ?? source.explanation ?? source.summary).slice(0, MAX_COMPENSATION_TEXT_LENGTH),
     researchedAt: textValue(source.researchedAt ?? source.researchDate ?? source.researchedOn).slice(0, 100),
@@ -389,7 +428,8 @@ export function normalizeCompensationAssessment(value) {
     normalized.justification = normalized.justification || 'Compensation research could not be read safely, so no cash-pay conclusion is shown.';
   } else if (['competitive', 'below_market'].includes(normalized.status)
     && (!(normalized.offered.min > 0) || !(normalized.offered.max > 0)
-      || !(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0))) {
+      || !(normalized.competitiveRange.min > 0) || !(normalized.competitiveRange.max > 0)
+      || (floorPresent && !(normalized.competitiveFloor > 0)))) {
     normalized.status = 'uncertain';
     normalized.reasonCode = 'incomplete_comparison_data';
     normalized.justification = 'Compensation research did not retain a complete cash-pay comparison, so no green or red conclusion is shown.';
@@ -408,7 +448,8 @@ export function normalizeCompensationAssessment(value) {
     normalized.reasonCode = 'incompatible_comparison_period';
     normalized.justification = 'Compensation research did not retain reliably annualized cash figures, so no green or red conclusion is shown.';
   } else if (['competitive', 'below_market'].includes(normalized.status)
-    && (normalized.status === 'competitive') !== (normalized.offered.max >= normalized.competitiveRange.min)) {
+    && (normalized.status === 'competitive')
+      !== (normalized.offered.max >= (normalized.competitiveFloor > 0 ? normalized.competitiveFloor : normalized.competitiveRange.min))) {
     normalized.status = 'uncertain';
     normalized.reasonCode = 'inconsistent_comparison_verdict';
     normalized.justification = 'The saved cash-pay conclusion conflicts with its salary ranges. Re-combine saved results on the Job Board to refresh the comparison.';
@@ -420,7 +461,7 @@ export function normalizeCompensationAssessment(value) {
     normalized.justification = 'Compensation research did not retain a complete annual market range and currency, so no salary recommendation is shown.';
   } else if (!normalized.justification) {
     normalized.justification = normalized.status === 'competitive'
-      ? 'The advertised guaranteed cash salary reaches the researched competitive range for this role and location.'
+      ? 'The advertised guaranteed cash salary reaches typical researched pay for this role and location.'
       : normalized.status === 'below_market'
         ? 'The advertised guaranteed cash salary is below the researched competitive range for this role and location.'
         : normalized.status === 'market_recommendation'

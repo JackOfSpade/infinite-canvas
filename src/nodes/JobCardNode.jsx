@@ -55,6 +55,13 @@ const COMPENSATION_BORDER_COLORS = {
 };
 const COMPENSATION_NEUTRAL_BORDER = 'rgba(255,255,255,0.12)';
 
+function ordinalNumber(value) {
+  const n = Math.round(Number(value));
+  const tens = n % 100;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th');
+  return `${n}${suffix}`;
+}
+
 function cashRangeLabel(range, maximumFractionDigits = 0) {
   const min = typeof range?.min === 'number' && Number.isFinite(range.min) ? range.min : null;
   const max = typeof range?.max === 'number' && Number.isFinite(range.max) ? range.max : null;
@@ -2125,6 +2132,15 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             )}
             {compensationDisplay.marketGuidanceAvailable && (
               <div><span className="text-white/35">Researched market range:</span> {cashRangeLabel(compensationAssessment.competitiveRange)}</div>
+            )}
+            {compensationAssessment.competitiveFloor > 0 && (
+              <div><span className="text-white/35">Typical researched pay:</span> {cashRangeLabel({ ...compensationAssessment.competitiveRange, min: compensationAssessment.competitiveFloor, max: compensationAssessment.competitiveFloor })}</div>
+            )}
+            {compensationAssessment.offerPercentile && (
+              <div><span className="text-white/35">Posted maximum:</span> about the {ordinalNumber(compensationAssessment.offerPercentile.percentile)} percentile of typical pay <span className="text-white/35">(estimated from {compensationAssessment.offerPercentile.sourceCount} source{compensationAssessment.offerPercentile.sourceCount === 1 ? '' : 's'} publishing a typical band)</span></div>
+            )}
+            {compensationAssessment.locationMismatch && (
+              <div className="text-amber-300/70">Location mismatch: the card lists {compensationAssessment.locationMismatch.cardLocation}{compensationAssessment.locationMismatch.cardCountry ? ` (${compensationAssessment.locationMismatch.cardCountry})` : ''}, but pay was compared for {compensationAssessment.locationMismatch.comparedCountry}. Check where this job is actually based.</div>
             )}
             {compensationAssessment.status === 'market_recommendation' && compensationAssessment.competitiveRange.currency && (
               <div><span className="text-white/35">Currency:</span> {compensationAssessment.competitiveRange.currency}{compensationAssessment.currencyInferredFromLocation ? ' (inferred from job location)' : ''}</div>

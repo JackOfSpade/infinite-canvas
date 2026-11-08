@@ -1719,8 +1719,11 @@ export const JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA = {
                     type: 'object',
                     required: ['min', 'max', 'currency', 'comparable', 'sourceName', 'sourceUrl', 'evidenceQuote', 'sourceDate'],
                     properties: {
-                      min: { type: 'number' }, max: { type: 'number' }, currency: { type: 'string' }, comparable: { type: 'boolean' },
-                      sourceName: { type: 'string' }, sourceUrl: { type: 'string' }, note: { type: 'string' },
+                      min: { type: 'number', description: 'Lower bound of the source\'s typical annual cash band — its published interquartile (25th percentile) or typical/most-common range. Only when the source publishes no typical band, the lower bound of its stated full range. Never a computed or invented percentile.' },
+                      max: { type: 'number', description: 'Upper bound of the source\'s typical annual cash band — its published interquartile (75th percentile) or typical/most-common range. Only when the source publishes no typical band, the upper bound of its stated full range. Never a computed or invented percentile.' },
+                      currency: { type: 'string' }, comparable: { type: 'boolean' },
+                      sourceName: { type: 'string' }, sourceUrl: { type: 'string' },
+                      note: { type: 'string', description: 'Say "typical band" when min/max are the source\'s published interquartile or typical range; say "full range" when the source publishes no typical band and min/max are its stated full range.' },
                       evidenceQuote: { type: 'string' }, sourceDate: { type: 'string' },
                     },
                   },

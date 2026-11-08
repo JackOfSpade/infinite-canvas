@@ -3,6 +3,7 @@ import {
   buildPersonalSalaryEvidence,
   normalizePersonalSalaryRecommendation,
   personalSalaryEvidenceFingerprint,
+  PERSONAL_SALARY_GUIDANCE_PROMPT,
   validatePersonalSalaryRecommendation,
 } from '../../electron/ipc/personalSalaryRecommendation.js';
 
@@ -157,7 +158,7 @@ export default [
       assert.deepEqual(normalized.range, { min: 110000, max: 130000, currency: 'CAD', period: 'annual' });
       assert.equal(normalized.desiredSalary, 125000);
       assert.equal(normalized.careerSnapshotId, SNAPSHOT);
-      assert.equal(normalized.methodologyVersion, 2);
+      assert.equal(normalized.methodologyVersion, 3, 'the advertised-midpoint ceiling is a new methodology version');
       assert.equal(normalized.researchedAt, options.researchedAt);
       assert.equal(normalizePersonalSalaryRecommendation(answer({ evidenceIds: ['experience-1'] }), options).status, 'personalized', 'host-recomputed category tenure can independently support positioning');
       for (const invalid of [
@@ -229,6 +230,47 @@ export default [
       assert.equal(personalSalaryEvidenceFingerprint(current), personalSalaryEvidenceFingerprint(packet()));
       assert.notEqual(personalSalaryEvidenceFingerprint(current), personalSalaryEvidenceFingerprint({ ...current, careerSnapshotId: 'b'.repeat(64) }));
       assert.notEqual(personalSalaryEvidenceFingerprint(current), personalSalaryEvidenceFingerprint({ ...current, evidence: [] }));
+    },
+  },
+  {
+    name: 'Personal salary answers cannot stop below the midpoint of the employer’s own advertised band',
+    run: () => {
+      assert.match(PERSONAL_SALARY_GUIDANCE_PROMPT, /the upper bound is at least the advertised midpoint/,
+        'the model must be told the advertised midpoint raises the ceiling');
+      assert.match(PERSONAL_SALARY_GUIDANCE_PROMPT, /below the employer's advertised midpoint needs a stated evidence-based reason/,
+        'the model must justify an ask under the advertised midpoint');
+      const market = { min: 25000, max: 55000, currency: 'CAD', period: 'annual' };
+      const options = { marketRange: market, evidence: packet(), offered: { usable: true, min: 48000, max: 72000, currency: 'CAD', period: 'annual' } };
+      // The advertised midpoint (CAD 60,000) is above the researched maximum
+      // (CAD 55,000), so the ceiling rises to the advertisement.
+      assert.throws(() => validatePersonalSalaryRecommendation(answer({ min: 50000, max: 64000, desiredSalary: 62000 }), options),
+        /recommendation bounds \(48000–60000 CAD/, 'the raised ceiling stops at the advertised midpoint');
+      assert.throws(() => validatePersonalSalaryRecommendation(answer({ min: 40000, max: 54000, desiredSalary: 54000 }), options),
+        /recommendation bounds/, 'the advertised minimum still raises the floor');
+      const belowMidpoint = normalizePersonalSalaryRecommendation(answer({ min: 48000, max: 54000, desiredSalary: 54000 }), options);
+      assert.equal(belowMidpoint.status, 'personalized');
+      assert.equal(belowMidpoint.desiredSalary, 54000);
+      assert.ok(belowMidpoint.limitations.includes('The desired amount is below the employer’s advertised midpoint (CAD 60,000).'),
+        'an ask under the employer’s own midpoint must be disclosed');
+      const capped = normalizePersonalSalaryRecommendation(answer({ min: 48000, max: 54000, desiredSalary: 54000, limitations: ['One', 'Two', 'Three'] }), options);
+      assert.equal(capped.limitations.length, 3, 'the below-midpoint note still respects the three-note cap');
+      assert.equal(capped.limitations.at(-1), 'The desired amount is below the employer’s advertised midpoint (CAD 60,000).');
+      // A higher advertisement raises the ceiling further: CAD 62,000 is then
+      // valid, and an ask at that midpoint needs no warning.
+      const higher = { ...options, offered: { ...options.offered, max: 76000 } };
+      const atMidpoint = normalizePersonalSalaryRecommendation(answer({ min: 50000, max: 62000, desiredSalary: 62000 }), higher);
+      assert.equal(atMidpoint.status, 'personalized');
+      assert.equal(atMidpoint.range.max, 62000, 'the ceiling is the advertised midpoint when it exceeds the research');
+      assert.equal(atMidpoint.limitations.some(value => /advertised midpoint/.test(value)), false, 'an ask at the advertised midpoint needs no warning');
+      // The host's own market estimate sits mid-bounds by definition, so it
+      // does not warn about itself.
+      const estimate = normalizePersonalSalaryRecommendation(undefined, { marketRange: { min: 80000, max: 120000, currency: 'CAD', period: 'annual' }, offered: { usable: true, min: 100000, max: 160000, currency: 'CAD', period: 'annual' } });
+      assert.equal(estimate.status, 'market_estimate');
+      assert.equal(estimate.limitations.some(value => /advertised midpoint/.test(value)), false, 'a host market estimate is not flagged against its own midpoint');
+      // Without a comparable band nothing is raised.
+      const marketOnly = normalizePersonalSalaryRecommendation(answer({ min: 30000, max: 40000, desiredSalary: 35000 }), { marketRange: market, evidence: packet() });
+      assert.equal(marketOnly.status, 'personalized');
+      assert.equal(marketOnly.limitations.some(value => /advertised midpoint/.test(value)), false);
     },
   },
 ];

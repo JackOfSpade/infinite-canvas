@@ -1,5 +1,5 @@
 import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, englishShare, explicitSalaryCurrency, filterNonEnglishJobs, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeJobLanguages, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
-import { normalizeLocationInput } from '../../src/utils/jobLocation.js';
+import { normalizeCountry, normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 // Synthetic sections long enough to stand alone as a language-detection chunk.
 const FRENCH_JOB_SECTION = "Nous recherchons une personne expérimentée pour rejoindre notre équipe et développer des applications fiables en collaboration avec les responsables du produit et les autres collègues tout en améliorant la qualité des logiciels et en accompagnant les nouveaux membres de notre entreprise.";
@@ -1057,6 +1057,77 @@ export default [
       assert(detectLanguage(ar) === 'ar', `Arabic-script JD → ar, got ${detectLanguage(ar)}`);
       // Title-only French (the authwalled fr.glassdoor.ca case) leans on diacritics.
       assert(detectLanguage('Développeur Logiciel Sénior') === 'fr', 'title-only French via diacritic fallback');
+      return { ok: true };
+    },
+  },
+  {
+    // Country recognition used to know ten countries, so "Finland" parsed as a
+    // CITY with no country and the salary comparison then had nothing to compare
+    // against. The alias table now covers the UN member states plus Hong Kong,
+    // Taiwan and Puerto Rico — without stealing a US state, a Canadian province
+    // or their postal codes, because that same table drives location parsing.
+    name: 'normalizeLocationInput: sovereign countries parse as countries; US/CA subdivisions still win',
+    run: () => {
+      // A country name on its own is a country target, never a city.
+      const finland = normalizeLocationInput('Finland');
+      assert(finland.country === 'Finland', `Finland is a country, got ${JSON.stringify(finland.country)}`);
+      assert(finland.city === '', `Finland is not a city, got ${JSON.stringify(finland.city)}`);
+      assert(finland.scope === 'country' && finland.boardReady === 'Finland',
+        `Finland is board-ready as a country, got ${JSON.stringify(finland.boardReady)}`);
+
+      const helsinki = normalizeLocationInput('Helsinki, Finland');
+      assert(helsinki.city === 'Helsinki' && helsinki.country === 'Finland',
+        `Helsinki, Finland keeps both city and country, got ${JSON.stringify(helsinki)}`);
+      assert(helsinki.boardReady === 'Helsinki, Finland',
+        `a non-US city keeps its country in the filter, got ${JSON.stringify(helsinki.boardReady)}`);
+
+      // Canonical short forms and codes.
+      const netherlands = normalizeLocationInput('The Netherlands');
+      assert(netherlands.country === 'Netherlands' && netherlands.city === '',
+        `'The Netherlands' is the Netherlands, got ${JSON.stringify(netherlands)}`);
+      assert(normalizeCountry('fin') === 'Finland', `alpha-3 FIN canonicalizes, got ${normalizeCountry('fin')}`);
+      assert(normalizeCountry('fi') === 'Finland', `alpha-2 FI canonicalizes, got ${normalizeCountry('fi')}`);
+      assert(normalizeCountry('nld') === 'Netherlands', `alpha-3 NLD canonicalizes, got ${normalizeCountry('nld')}`);
+      assert(normalizeCountry('czech republic') === 'Czechia', 'Czech Republic canonicalizes to Czechia');
+      assert(normalizeCountry('uae') === 'United Arab Emirates', 'UAE canonicalizes');
+      assert(normalizeCountry('south korea') === 'South Korea', 'South Korea canonicalizes');
+
+      // The territories called out in the brief.
+      assert(normalizeCountry('hong kong') === 'Hong Kong', 'Hong Kong is recognized');
+      assert(normalizeCountry('taiwan') === 'Taiwan', 'Taiwan is recognized');
+      const sanJuan = normalizeLocationInput('San Juan, Puerto Rico');
+      assert(sanJuan.city === 'San Juan' && sanJuan.country === 'United States',
+        `Puerto Rico stays a US territory, got ${JSON.stringify(sanJuan)}`);
+
+      // Pre-existing aliases are untouched.
+      assert(normalizeCountry('uk') === 'United Kingdom', 'the pre-existing UK alias is unchanged');
+      assert(normalizeCountry('aus') === 'Australia', 'the pre-existing AUS alias is unchanged');
+
+      // Collision guards: these keys would have hijacked a subdivision, which
+      // outranks nothing — a country match wins wherever it appears.
+      const atlanta = normalizeLocationInput('Atlanta, Georgia');
+      assert(atlanta.city === 'Atlanta' && atlanta.subdivisionCode === 'GA' && atlanta.country === 'United States',
+        `Atlanta, Georgia is still the US state, got ${JSON.stringify(atlanta)}`);
+      const georgia = normalizeLocationInput('Georgia');
+      assert(georgia.subdivisionCode === 'GA' && georgia.country === 'United States' && georgia.city === '',
+        `bare Georgia is still the US state, got ${JSON.stringify(georgia)}`);
+      const ontario = normalizeLocationInput('Ontario');
+      assert(ontario.subdivisionCode === 'ON' && ontario.country === 'Canada',
+        `bare Ontario still infers Canada, got ${JSON.stringify(ontario)}`);
+      assert(normalizeCountry('nl') === 'nl', 'NL still means Newfoundland and Labrador, not the Netherlands');
+      assert(normalizeCountry('pr') === 'pr', 'PR still means the Puerto Rico US territory code, not a country');
+      assert(normalizeLocationInput('San Juan, PR').country === 'United States',
+        'San Juan, PR still resolves to the United States');
+      // A US place named like a country keeps its state: an extended country
+      // counts only as the final comma slot.
+      for (const [input, city, code] of [['Lebanon, PA', 'Lebanon', 'PA'], ['Jordan, MN', 'Jordan', 'MN'], ['Mexico, MO', 'Mexico', 'MO']]) {
+        const parsed = normalizeLocationInput(input);
+        assert(parsed.city === city && parsed.subdivisionCode === code && parsed.country === 'United States',
+          `${input} stays a US city, got ${JSON.stringify(parsed)}`);
+      }
+      const mexicoCity = normalizeLocationInput('Mexico City, Mexico');
+      assert(mexicoCity.city === 'Mexico City' && mexicoCity.country === 'Mexico',
+        `a trailing extended country still counts, got ${JSON.stringify(mexicoCity)}`);
       return { ok: true };
     },
   }

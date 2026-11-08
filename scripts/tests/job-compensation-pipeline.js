@@ -1,7 +1,7 @@
 import { runInNewContext } from 'node:vm';
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, RESEARCH_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
-import { buildCompensationAssessmentListings, buildCompensationPersonalSalaryEvidence, compensationContextForSalary, compensationPersonalizationSignature, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
+import { buildCompensationAssessmentListings, buildCompensationPersonalSalaryEvidence, buildCompensationResearchPrompt, compensationContextForSalary, compensationPersonalizationSignature, compensationResearchCacheKey, COMPENSATION_RESEARCH_PROMPT_VERSION, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import {
   classifyCompensationFitEligibility,
@@ -934,7 +934,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   run: () => {
     const researchId = 'e'.repeat(24);
     const evidence = {
-      methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64), experience: [],
+      methodologyVersion: 3, careerSnapshotId: 'a'.repeat(64), experience: [],
       evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built APIs.', jobQuote: 'Build APIs.' }],
     };
     const requests = [{ researchId, group: { jobs: [{ marketCurrency: 'CAD', personalSalaryEvidence: evidence }] } }];
@@ -968,10 +968,44 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     return { accepted: true, invalidPersonalResultsRejected: diagnostics.length };
   },
 }, {
+  name: 'Salary research reports each source typical band and labels a full-range fallback',
+  run: () => {
+    const prompt = buildCompensationResearchPrompt([{ researchId: 'market-id', researchParameters: { roleFamily: 'Software Engineering' } }]);
+    assert(/interquartile range \(25th–75th percentile\)/u.test(prompt)
+      && /presents as typical or most common/u.test(prompt)
+      && /Only when a source publishes no typical band, report its full range and state “full range” for that source/u.test(prompt),
+    'the research prompt asks for each source published interquartile or typical band and labels a per-source full-range fallback');
+    assert(/Do not substitute the source's extreme low-to-high spread/u.test(prompt)
+      && /Employer-advertised pay bands are always reported as published/u.test(prompt)
+      && /Never compute, average, or invent percentiles/u.test(prompt),
+    'the research prompt forbids extreme spreads, rewriting advertised bands and invented percentiles');
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const extractionStart = source.indexOf('Extract comparable cash-salary evidence for every independent cohort below.');
+    const extractionEnd = source.indexOf('${PERSONAL_SALARY_GUIDANCE_PROMPT}', extractionStart);
+    const extractionPrompt = source.slice(extractionStart, extractionEnd);
+    assert(extractionStart >= 0 && extractionEnd > extractionStart
+      && /min and max must be that band/u.test(extractionPrompt)
+      && /note must say “typical band”/u.test(extractionPrompt)
+      && /note say “full range”/u.test(extractionPrompt),
+    'the extraction prompt tells the model min/max are the reported typical band and requires a typical-band or full-range note');
+    const comparableRange = JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA.properties.cohorts.items.properties.assessments.items.properties.comparableRanges.items.properties;
+    assert(/typical band/u.test(comparableRange.min.description)
+      && /interquartile \(25th percentile\)/u.test(comparableRange.min.description)
+      && /full range/u.test(comparableRange.min.description)
+      && /never a computed or invented percentile/iu.test(comparableRange.min.description)
+      && /typical band/u.test(comparableRange.note.description)
+      && /full range/u.test(comparableRange.note.description),
+    'the extraction schema describes min/max as the typical band with a typical-band or full-range note, without reshaping the schema');
+    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 2
+      && compensationResearchCacheKey('shared-market') === 'shared-market|research-prompt-v2',
+    'the compensation research cache key is namespaced by the prompt version so old-prompt research is never reused');
+    return { promptVersion: COMPENSATION_RESEARCH_PROMPT_VERSION };
+  },
+}, {
   name: 'Personal salary assessment identity tracks career and listing evidence while market research stays shared',
   run: () => {
     const packet = {
-      methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64),
+      methodologyVersion: 3, careerSnapshotId: 'a'.repeat(64),
       evidence: [{ id: 'requirement-1', status: 'direct', requirement: 'Build APIs', candidateQuote: 'Built production APIs.', jobQuote: 'Build production APIs.' }],
       experience: [],
     };
@@ -1024,7 +1058,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
 }, {
   name: 'Compensation assessment listings carry indexed host career packets without raw career records',
   run: () => {
-    const packet = { methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64), evidence: [], experience: [] };
+    const packet = { methodologyVersion: 3, careerSnapshotId: 'a'.repeat(64), evidence: [], experience: [] };
     const listings = buildCompensationAssessmentListings({ jobs: [{
       job: { title: 'Engineer', company: 'Example', careerData: 'PRIVATE RAW CAREER', profile: { private: true } },
       offer: { usable: false, raw: '' }, marketCurrency: 'CAD', personalSalaryEvidence: packet,
@@ -1049,7 +1083,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
   name: 'Applying personal salary guidance preserves market audits for advertised, unadvertised and legacy rows',
   run: () => {
     const packet = {
-      methodologyVersion: 2, careerSnapshotId: 'a'.repeat(64), experience: [],
+      methodologyVersion: 3, careerSnapshotId: 'a'.repeat(64), experience: [],
       evidence: [{ id: 'requirement-1', status: 'direct', candidateQuote: 'Built APIs.', jobQuote: 'Build APIs.' }],
     };
     const personal = {
@@ -1211,14 +1245,18 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     ], 5, 'USD');
     assert(canonicalDuplicateEvidence.length === 1,
       'canonical-equivalent source URLs must not occupy multiple evidence slots');
-    assert(compensationAssessment({ offer: canadian, competitiveRanges: [merged] }).status === 'competitive', 'offer maximum reaching floor is competitive');
-    assert(compensationAssessment({ offer: { ...canadian, max: 84999 }, competitiveRanges: [merged] }).status === 'below_market', 'no hidden buffer below floor');
+    // One merged CAD 85,000–130,000 source: typical researched pay is its
+    // midpoint, CAD 107,500, not the CAD 85,000 low.
+    const atTypical = { ...canadian, max: 107500 };
+    assert(compensationAssessment({ offer: atTypical, competitiveRanges: [merged] }).status === 'competitive', 'offer maximum reaching typical researched pay is competitive');
+    assert(compensationAssessment({ offer: { ...canadian, max: 107499 }, competitiveRanges: [merged] }).status === 'below_market', 'no hidden buffer below typical researched pay');
+    assert(compensationAssessment({ offer: canadian, competitiveRanges: [merged] }).status === 'below_market', 'reaching only the lowest source low is no longer competitive');
     const withEvidence = compensationAssessment({
-      offer: canadian,
+      offer: atTypical,
       competitiveRanges: [merged],
       sourceLinks: [{ title: 'Salary survey', url: 'https://example.test/pay', min: 85000, max: 130000, currency: 'CAD', note: 'Senior role in Toronto.' }],
     });
-    assert(withEvidence.sourceLinks[0]?.note === 'Senior role in Toronto.' && withEvidence.justification.includes('reaches or exceeds'), 'auditable source details and deterministic verdict must be retained');
+    assert(withEvidence.sourceLinks[0]?.note === 'Senior role in Toronto.' && withEvidence.justification.includes('reaches typical researched pay'), 'auditable source details and deterministic verdict must be retained');
     const unsafeEvidence = compensationAssessment({
       offer: canadian, competitiveRanges: [merged],
       sourceLinks: ['https://secret-token@example.test/pay', 'https://example.test/pay'],
