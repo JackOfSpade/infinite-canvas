@@ -263,4 +263,119 @@ export default [
       assert(source.includes('[JobBoard] combine superseded before commit id=${id} signature=${sigAtCombine} reason=${mismatchReason}'), 'supersede log must append reason=');
     },
   },
+  {
+    name: 'Board Combine treats a dock cancellation as its own cancellation and never offers the cancelled run as a saved handoff',
+    run: async () => {
+      const source = readNodeSource();
+
+      // (1) The saved-handoff notice effect must return before it sets the
+      // notice whenever the Board already carries a cancellation receipt or a
+      // cancellation is still in flight.
+      const effectStart = source.indexOf('    const resume = data.manualAiResume;');
+      const effectEnd = source.indexOf('\n  }, [', effectStart);
+      assert(effectStart > 0 && effectEnd > effectStart, 'the manual-AI marker effect must be locatable');
+      const noticeEffect = new Function(
+        'data', 'getNode', 'id', 'updateGlobal', 'canvasFilePath', 'isBoardCombineManualAiRunId',
+        'boardRecoveryTouchesPendingDeletion', 'autoResumedManualAiRunRef', 'retiredCombineManualAiRunIdsRef',
+        'isLiveCombineOwnedMarker', 'activeCombineManualAiRunRef', 'cancellationInFlightRef', 'recoveryError',
+        'setRecoveryError', 'SAVED_HANDOFF_READY_MESSAGE', 'combineRunRef', 'EventLogger',
+        source.slice(effectStart, effectEnd),
+      );
+      const runNoticeEffect = ({ boardCancellation, cancellationInFlight } = {}) => {
+        const notices = [];
+        const ref = value => ({ current: value });
+        noticeEffect(
+          { boardCancellation, manualAiResume: { runId: 'job-board:board-1:combine', retirementPending: false } },
+          () => ({ data: {} }), 'board-1', () => {}, '/canvas.json', isBoardCombineManualAiRunId,
+          () => false, ref(null), ref(new Set()), isLiveCombineOwnedMarker, ref(null),
+          ref(cancellationInFlight), null, value => notices.push(value), SAVED_HANDOFF_READY_MESSAGE, ref(null),
+          { log: () => {} },
+        );
+        return notices;
+      };
+      assert.deepStrictEqual(runNoticeEffect(), [SAVED_HANDOFF_READY_MESSAGE],
+        'an interrupted handoff with no cancellation still offers Continue');
+      assert.deepStrictEqual(runNoticeEffect({ boardCancellation: { operationId: 'op-1' } }), [],
+        'a cancelled run must never be advertised as a saved, resumable handoff');
+      assert.deepStrictEqual(runNoticeEffect({ cancellationInFlight: Symbol('job-board-cancel') }), [],
+        'a cancellation that is still in flight must not advertise the run either');
+      const guardAt = source.indexOf('if (data.boardCancellation || cancellationInFlightRef.current) return;', effectStart);
+      const noticeAt = source.indexOf('setRecoveryError(message)', effectStart);
+      assert(guardAt > 0 && noticeAt > guardAt, 'the cancellation guard must run before the notice is set');
+
+      // (2) A dock "Cancel task" aborts a stage before its DOM event lands, so
+      // every user-cancellation exit must start the Board's own exact
+      // cancellation through one shared helper.
+      const combineStart = source.indexOf('const handleCombine = useCallback(');
+      const depsStart = source.indexOf('\n  }, [', combineStart);
+      assert(combineStart > 0 && depsStart > combineStart, 'handleCombine must be locatable');
+      const combineBody = source.slice(combineStart, depsStart);
+      const pausedForQuitCheck = combineBody.indexOf("if (err?.pausedForQuit === true) return { status: 'paused', reason: 'awaiting-explicit-ai-continue' };");
+      assert(pausedForQuitCheck > 0, 'a quit-paused refresh must be reported as paused, not cancelled');
+      assert(pausedForQuitCheck < combineBody.indexOf("return cancelledOutsideBoard('pipeline');"),
+        'the quit pause must be classified before the pipeline cancellation exit');
+      const exits = [
+        "if (isJobBoardUserCancellation(res)) return cancelledOutsideBoard('taxonomy');",
+        "if (isJobBoardUserCancellation(err)) return cancelledOutsideBoard('taxonomy');",
+        "if (isJobBoardUserCancellation(confirmation)) return cancelledOutsideBoard('location-consolidation');",
+        "if (boardResearch.cancelled) return cancelledOutsideBoard('official-postings');",
+        "if (isJobBoardUserCancellation(compensationResult)) return cancelledOutsideBoard('compensation');",
+        "if (isJobBoardUserCancellation(err)) return cancelledOutsideBoard('compensation');",
+        "if (isJobBoardUserCancellation(err)) return cancelledOutsideBoard('pipeline');",
+      ];
+      for (const exit of exits) {
+        assert(combineBody.includes(exit), `every user cancellation must start the Board cancellation: ${exit}`);
+      }
+      assert((combineBody.match(/return cancelledOutsideBoard\(/gu) || []).length === exits.length,
+        'no user-cancellation exit may bypass the shared helper');
+      const depsEnd = source.indexOf(']);', depsStart);
+      assert(depsEnd > depsStart, 'handleCombine dependencies must be locatable');
+      assert(/\bhandleCancelRun\b/.test(source.slice(depsStart, depsEnd)),
+        'handleCombine must depend on handleCancelRun');
+
+      // The helper must start a cancellation only when this Board did not start
+      // it, and it must keep the stage in the log line.
+      const helperStart = source.indexOf('    const cancelledOutsideBoard = (stage) => {', combineStart);
+      const helperEnd = source.indexOf('\n    };', helperStart);
+      assert(helperStart > combineStart && helperEnd > helperStart, 'the shared cancellation helper must be locatable');
+      const helperArrow = source.slice(helperStart, helperEnd + '\n    };'.length)
+        .replace(/^\s*const cancelledOutsideBoard = /u, '').replace(/;\s*$/u, '');
+      const buildHelper = new Function('cancelled', 'handleCancelRun', 'EventLogger', 'id', `return (${helperArrow});`);
+      const runHelper = alreadyCancelled => {
+        const started = []; const lines = [];
+        const helper = buildHelper(() => alreadyCancelled, () => { started.push('cancel'); },
+          { log: line => lines.push(line) }, 'board-1');
+        return { result: helper('pipeline'), started, lines };
+      };
+      const externalCancel = runHelper(false);
+      assert.deepStrictEqual(externalCancel.result, { status: 'cancelled' },
+        'a cancellation from the dock must still report cancelled');
+      assert.equal(externalCancel.started.length, 1,
+        'a cancellation the Board did not start must start the Board cancellation now');
+      assert(externalCancel.lines.length === 1 && externalCancel.lines[0].includes('stage=pipeline'),
+        'the helper must keep the stage in its log line');
+      const internalCancel = runHelper(true);
+      assert.deepStrictEqual(internalCancel.result, { status: 'cancelled' });
+      assert.equal(internalCancel.started.length, 0,
+        'a cancellation this Board already started must not be restarted');
+
+      // (3) Keeping the retired operation id remembered stops the stale-render
+      // retry from replaying a cancellation that already finished.
+      const sliceCallback = name => {
+        const start = source.indexOf(`  const ${name} = useCallback(`);
+        const end = source.indexOf('\n  }, [', start);
+        assert(start > 0 && end > start, `${name} must be locatable`);
+        return source.slice(start, end);
+      };
+      for (const name of ['handleCancelRun', 'handleClear']) {
+        assert(!sliceCallback(name).includes('autoRetriedBoardCancellationRef.current = null'),
+          `${name} must keep the retired operation id remembered after a successful cancellation`);
+      }
+      const cancelRunBody = sliceCallback('handleCancelRun');
+      assert(cancelRunBody.includes('autoRetriedBoardCancellationRef.current = cancellationIntent.operationId;'),
+        'the success path must still remember which operation it retired');
+      assert(cancelRunBody.includes("setRecoveryError('The active Job Search could not be cancelled safely. Retry this cancellation.');"),
+        'the cancellation failure path must stay unchanged');
+    },
+  },
 ];

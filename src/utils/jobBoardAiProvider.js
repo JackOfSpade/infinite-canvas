@@ -39,7 +39,10 @@ export function isJobBoardUserCancellation(value) {
   if (!value) return false;
   if (value?.cancelled === true || value?.errorCode === 'JOB_TASK_CANCELLED') return true;
   const message = typeof value === 'string' ? value : value?.error || value?.message;
-  return message === 'Manual AI job cancelled';
+  if (message === 'Manual AI job cancelled') return true;
+  // An official-posting refresh aborts for the user exactly like a manual-AI
+  // cancellation, unless the abort was the app quitting (a saved pause).
+  return value?.code === 'JOB_OFFICIAL_REFRESH_CANCELLED' && value?.pausedForQuit !== true;
 }
 
 /**

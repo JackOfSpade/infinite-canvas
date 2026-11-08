@@ -168,13 +168,20 @@ export async function refreshBoardOfficialPostingJobs(jobs, {
     catch (error) {
       active();
       if (error?.name === 'AbortError' || ['worker-aborted', 'APP_QUIT_PAUSED', 'JOB_OFFICIAL_REFRESH_CANCELLED'].includes(error?.code)) {
-        throw failure('Official posting refresh was cancelled.', 'JOB_OFFICIAL_REFRESH_CANCELLED');
+        // An app quit aborts the refresh too, but it is a saved pause rather
+        // than a user cancellation, so the caller must be able to tell them
+        // apart while the code stays the same for every cancellation.
+        const quitPause = error?.code === 'APP_QUIT_PAUSED' || error?.pausedForQuit === true;
+        throw Object.assign(failure('Official posting refresh was cancelled.', 'JOB_OFFICIAL_REFRESH_CANCELLED'),
+          quitPause ? { pausedForQuit: true } : {});
       }
       throw error;
     }
     active();
     if (response?.cancelled || response?.pausedForQuit || response?.errorCode === 'APP_QUIT_PAUSED') {
-      throw failure('Official posting refresh was cancelled.', 'JOB_OFFICIAL_REFRESH_CANCELLED');
+      const quitPause = response?.pausedForQuit === true || response?.errorCode === 'APP_QUIT_PAUSED';
+      throw Object.assign(failure('Official posting refresh was cancelled.', 'JOB_OFFICIAL_REFRESH_CANCELLED'),
+        quitPause ? { pausedForQuit: true } : {});
     }
     if (response?.success !== true) throw failure(response?.error || 'Official posting refresh failed.',
       response?.errorCode || 'JOB_OFFICIAL_REFRESH_FAILED');

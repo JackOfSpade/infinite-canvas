@@ -818,6 +818,37 @@ function BoardProbe({ navigation, capture, addToast }) {
       await assert.rejects(refreshBoardOfficialPostingJobs([job()], { refresh: async () => {
         throw Object.assign(new Error('Synthetic abort.'), { name: 'AbortError' });
       } }), { code: 'JOB_OFFICIAL_REFRESH_CANCELLED' });
+      // A user cancellation and an app-quit pause share one code, so callers can
+      // only tell them apart by pausedForQuit on the rejected error.
+      const rejectedCancellation = async responder => {
+        try { await refreshBoardOfficialPostingJobs([job()], { refresh: responder }); }
+        catch (error) { return error; }
+        throw new Error('the refresh must reject when it is cancelled');
+      };
+      const userResponse = await rejectedCancellation(async () => ({ success: false, cancelled: true }));
+      assert.equal(userResponse.code, 'JOB_OFFICIAL_REFRESH_CANCELLED');
+      assert.equal(userResponse.message, 'Official posting refresh was cancelled.');
+      assert.equal('pausedForQuit' in userResponse, false,
+        'a plain cancelled envelope is a user cancellation, never a quit pause');
+      const quitResponse = await rejectedCancellation(async () => ({ success: false, pausedForQuit: true }));
+      assert.equal(quitResponse.code, 'JOB_OFFICIAL_REFRESH_CANCELLED');
+      assert.equal(quitResponse.pausedForQuit, true,
+        'a host quit pause must stay distinguishable from a user cancellation');
+      const quitEnvelope = await rejectedCancellation(async () => ({ success: false, errorCode: 'APP_QUIT_PAUSED' }));
+      assert.equal(quitEnvelope.code, 'JOB_OFFICIAL_REFRESH_CANCELLED');
+      assert.equal(quitEnvelope.pausedForQuit, true,
+        'an APP_QUIT_PAUSED envelope means the app is quitting, not the user cancelling');
+      const abortError = await rejectedCancellation(async () => {
+        throw Object.assign(new Error('Synthetic abort.'), { name: 'AbortError' });
+      });
+      assert.equal(abortError.code, 'JOB_OFFICIAL_REFRESH_CANCELLED');
+      assert.equal('pausedForQuit' in abortError, false,
+        'an AbortError is the user cancelling, never a quit pause');
+      const quitThrown = await rejectedCancellation(async () => {
+        throw Object.assign(new Error('Synthetic quit.'), { code: 'APP_QUIT_PAUSED' });
+      });
+      assert.equal(quitThrown.code, 'JOB_OFFICIAL_REFRESH_CANCELLED');
+      assert.equal(quitThrown.pausedForQuit, true, 'a thrown APP_QUIT_PAUSED must survive as a quit pause');
     },
   },
   {

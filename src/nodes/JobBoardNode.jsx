@@ -2582,9 +2582,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       manualAiCleanupReceipts: null,
       queuedModuleRun: null,
     });
-    if (autoRetriedBoardCancellationRef.current === cancellationIntent?.operationId) {
-      autoRetriedBoardCancellationRef.current = null;
-    }
     EventLogger.log(`[JobBoard] cleared id=${id}`);
   }, [addToast, id, data, getNode, cancelActiveSearchModule, cancelBoardTaskAndRetireManualAi, clearBoardChildren, updateGlobal, epoch, moduleRunQueue, persistBoardCancellationIntent, officialPostingRefreshRunRef, canvasFilePath]);
 
@@ -2718,9 +2715,6 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           : null,
       };
     });
-    if (autoRetriedBoardCancellationRef.current === cancellationIntent?.operationId) {
-      autoRetriedBoardCancellationRef.current = null;
-    }
     if (committedResultAlreadyVisible) {
       EventLogger.log(`[JobBoard] committed-run cleanup completed without rollback id=${id}`);
       if (reason === 'node-deleted') {
@@ -3035,6 +3029,24 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     combineTraceRef.current = initialTrace;
     setCombineTrace(initialTrace);
     const cancelled = epoch.start();
+    // A dock "Cancel task" aborts the in-flight request before its DOM event
+    // reaches this Board. Every user-cancellation exit therefore starts this
+    // Board's own exact cancellation while combineRunRef still owns this run,
+    // so the finally block cannot leave a cancelled Board ownerless and let it
+    // be offered as a resumable "Saved AI handoff".
+    const cancelledOutsideBoard = (stage) => {
+      if (!cancelled()) void handleCancelRun();
+      // Each stage keeps a literal log line so diagnostics stay greppable.
+      const stageLog = {
+        taxonomy: `[JobBoard] combine cancelled by user id=${id} stage=taxonomy`,
+        compensation: `[JobBoard] combine cancelled by user id=${id} stage=compensation`,
+        'location-consolidation': `[JobBoard] combine cancelled by user id=${id} stage=location-consolidation`,
+        'official-postings': `[JobBoard] combine cancelled by user id=${id} stage=official-postings`,
+        pipeline: `[JobBoard] combine cancelled by user id=${id} stage=pipeline`,
+      };
+      EventLogger.log(stageLog[stage] || `[JobBoard] combine cancelled by user id=${id} stage=${stage}`);
+      return { status: 'cancelled' };
+    };
     let lease = null;
     let postingClaim = null;
     try {
@@ -3267,6 +3279,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           EventLogger.log(`[JobBoard] combine cancelled during location confirmation id=${id}`);
           return { status: 'cancelled' };
         }
+        // A cancelled confirmation used to be rethrown as a generic error and
+        // shown as "Combine failed".
+        if (isJobBoardUserCancellation(confirmation)) return cancelledOutsideBoard('location-consolidation');
         if (!confirmation?.success) {
           throw new Error(confirmation?.error || 'Job-location consolidation confirmation failed.');
         }
@@ -3304,7 +3319,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         settle: args => window.electronAPI.settleBoardResearch(args),
         onProgress: progress => { if (!cancelled()) setCombineResearchProgress(progress); },
       });
-      if (boardResearch.cancelled) return { status: 'cancelled' };
+      if (boardResearch.cancelled) return cancelledOutsideBoard('official-postings');
       union = boardResearch.jobs;
       const researchRemovedLookups = boardResearch.removedLookups?.length
         ? { sourceRuns: sourceRunsAtCombine, entries: boardResearch.removedLookups } : null;
@@ -3383,10 +3398,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           return { status: 'cancelled' };
         }
         if (!res?.success) {
-          if (isJobBoardUserCancellation(res)) {
-            EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=taxonomy`);
-            return { status: 'cancelled' };
-          }
+          if (isJobBoardUserCancellation(res)) return cancelledOutsideBoard('taxonomy');
           const error = new Error(res?.error || 'Job Board taxonomy generation failed.');
           error.code = res?.errorCode;
           throw error;
@@ -3400,10 +3412,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!taxonomyCheck.valid) throw new Error(`Job Board taxonomy was invalid: ${taxonomyCheck.reason}`);
       } catch (err) {
         if (cancelled() || !getNode(id)) return { status: 'cancelled' };
-        if (isJobBoardUserCancellation(err)) {
-          EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=taxonomy`);
-          return { status: 'cancelled' };
-        }
+        if (isJobBoardUserCancellation(err)) return cancelledOutsideBoard('taxonomy');
         // Do not replace the existing board when its required taxonomy could
         // not be generated. Clearing only happens after this whole try block.
         EventLogger.error('[JobBoard] Bucketing failed; preserving prior board:', err);
@@ -3436,10 +3445,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           return { status: 'cancelled' };
         }
         if (!compensationResult?.success || !Array.isArray(compensationResult.jobs)) {
-          if (isJobBoardUserCancellation(compensationResult)) {
-            EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=compensation`);
-            return { status: 'cancelled' };
-          }
+          if (isJobBoardUserCancellation(compensationResult)) return cancelledOutsideBoard('compensation');
           const error = new Error(compensationResult?.error || 'Job Board compensation research failed.');
           error.code = compensationResult?.errorCode;
           throw error;
@@ -3448,10 +3454,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         recordCombineStage('card-build', 'running', { compensationInput: union.length });
       } catch (err) {
         if (cancelled() || !getNode(id)) return { status: 'cancelled' };
-        if (isJobBoardUserCancellation(err)) {
-          EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=compensation`);
-          return { status: 'cancelled' };
-        }
+        if (isJobBoardUserCancellation(err)) return cancelledOutsideBoard('compensation');
         // Like failed taxonomy, a failed research invocation must leave the
         // previously displayed board intact rather than replacing it with a
         // partial set of cards.
@@ -3748,16 +3751,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       if (err?.code === 'APP_QUIT_PAUSED' || err?.message === 'App paused for quit') {
         return { status: 'paused', reason: 'awaiting-explicit-ai-continue' };
       }
+      if (err?.pausedForQuit === true) return { status: 'paused', reason: 'awaiting-explicit-ai-continue' };
       if (
         cancelled()
         || !getNode(id)
         || isJobWorkflowDeletionPending(id)
         || err?.code === 'JOB_WORKFLOW_DELETION_PENDING'
       ) return { status: 'cancelled' };
-      if (isJobBoardUserCancellation(err)) {
-        EventLogger.log(`[JobBoard] combine cancelled by user id=${id} stage=pipeline`);
-        return { status: 'cancelled' };
-      }
+      if (isJobBoardUserCancellation(err)) return cancelledOutsideBoard('pipeline');
       EventLogger.error('[JobBoard] Combine failed:', err);
       recordCombineStage(combineTraceRef.current?.phase || 'unknown', 'failed');
       addToast({ title: 'Combine failed', description: err?.message || String(err), type: 'error' });
@@ -3788,7 +3789,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         if (!cancelled() && getNode(id)) setCombining(false);
       }
     }
-  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, setNodes, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage, officialPostingRefreshRunRef]);
+  }, [readyModules, allConnectedModulesDone, canReplaceWithEmpty, getNodes, getEdges, getNode, id, clearBoardChildren, hideBoardChildren, requestEmptyReplacement, addElementsGlobally, addNodes, addEdges, fitView, updateGlobal, setNodes, addToast, epoch, canvasFilePath, completeManualAiRun, moduleRunQueue, keepCompletedSnapshotDuringActiveSearch, recordCombineStage, officialPostingRefreshRunRef, handleCancelRun]);
 
   // ── Single-stage reruns ─────────────────────────────────────────────────
   // Combine stays the do-everything action. These redo ONE of its stages on
@@ -6899,6 +6900,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     // running; only a marker restored from disk (no live owner) is an
     // interruption that needs the resume notice. Do not flag or claim it here.
     if (isLiveCombineOwnedMarker(resume.runId, activeCombineManualAiRunRef.current?.runId)) return;
+    // A cancellation is in progress for this exact run. Offering "Saved AI
+    // handoff ready … Continue" here would present the run the user just
+    // cancelled as resumable half-done work.
+    if (data.boardCancellation || cancellationInFlightRef.current) return;
     if (resume.retirementPending !== true) {
       const message = SAVED_HANDOFF_READY_MESSAGE;
       autoResumedManualAiRunRef.current = null;

@@ -5702,6 +5702,12 @@ export default [
         && isJobBoardUserCancellation({ errorCode: 'JOB_TASK_CANCELLED' })
         && !isJobBoardUserCancellation({ success: false, error: 'Taxonomy response was invalid' }),
       'only explicit user-cancellation envelopes/errors may bypass board failure handling');
+      assert(isJobBoardUserCancellation(Object.assign(new Error('Official posting refresh was cancelled.'),
+        { code: 'JOB_OFFICIAL_REFRESH_CANCELLED' })),
+      'a user-cancelled official-posting refresh is control flow, not a combine failure');
+      assert(!isJobBoardUserCancellation(Object.assign(new Error('Official posting refresh was cancelled.'),
+        { code: 'JOB_OFFICIAL_REFRESH_CANCELLED', pausedForQuit: true })),
+      'an official-posting refresh aborted by an app quit is a saved pause, not a user cancellation');
 
       const board = readFileSync(new URL('../../src/nodes/JobBoardNode.jsx', import.meta.url), 'utf8');
       const taxonomyCancellation = board.indexOf('stage=taxonomy');
