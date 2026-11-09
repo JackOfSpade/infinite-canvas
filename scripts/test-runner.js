@@ -41,6 +41,7 @@ import renderer_content_security from './tests/renderer-content-security.js';
 import local_ai_application from './tests/local-ai-application.js';
 import application_authority_ledger_store from './tests/application-authority-ledger-store.js';
 import current_authority_parallel_match from './tests/current-authority-parallel-match.js';
+import application_run_2026_11_08_fixes from './tests/application-run-2026-11-08-fixes.js';
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
 import application_single_document from './tests/application-single-document.js';
@@ -345,6 +346,7 @@ const testGroups = [
   ['local-ai-application.js', local_ai_application],
   ['application-authority-ledger-store.js', application_authority_ledger_store],
   ['current-authority-parallel-match.js', current_authority_parallel_match],
+  ['application-run-2026-11-08-fixes.js', application_run_2026_11_08_fixes],
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
   ['application-single-document.js', application_single_document],
