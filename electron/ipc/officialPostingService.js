@@ -19,6 +19,7 @@ import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse } from './officialPostingBridge.js';
 import { CLAUDE_TASK_CONCURRENCY } from './claudeTaskWorker.js';
 import { createOfficialPostingReadMonitor } from './officialPostingReadHealth.js';
+import { readTavilyKey, tavilyExtract } from './tavily.js';
 import { snapshotOfficialPostingLeads, trimOfficialPostingSnapshots } from './officialPostingSnapshot.js';
 import { createOfficialPostingRenderSession, renderOfficialPostingPage } from './officialPostingRenderedPage.js';
 import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS, UNREADABLE_PAGE_TEXT_CHARS } from './officialPostingJudge.js';
@@ -401,7 +402,7 @@ export async function resolveOfficialPostings(jobs, {
   // Injected downloads mean a test or offline replay, which must never open a browser unless it supplies one.
   snapshotRender = snapshotFetch === fetchOfficialPosting ? renderOfficialPostingPage : null, bypassCache = false, bypassCacheByRow = [], candidateUrls = [], candidateUrlsByRow = [],
   priorOfficialRecords = [], timeoutMs = OFFICIAL_POSTING_HANDOFF_TIMEOUT_MS,
-  timeoutStartsOnAssignment,
+  timeoutStartsOnAssignment, readPage,
 } = {}) {
   const rows = Array.isArray(jobs) ? jobs : [];
   const members = officialPostingChunks(rows).flat();
@@ -530,6 +531,7 @@ export async function resolveOfficialPostings(jobs, {
     ...(snapshot.renderFailed ? { renderFailed: snapshot.renderFailed } : {}),
     ...(typeof snapshot.listedInBoardData === 'boolean' ? { listed: snapshot.listedInBoardData } : {}),
     ...(snapshot.httpStatus ? { httpStatus: snapshot.httpStatus } : {}), ...(snapshot.notFound ? { notFound: true } : {}),
+    ...(snapshot.reader ? { reader: snapshot.reader } : {}),
     descriptionChars: String(snapshot.description || '').length, pageTextChars: String(snapshot.pageText || '').length,
     boardLinks: snapshot.jobBoardLinks?.length || 0 }));
   const judgePair = async (member, leads, round, snapshots) => {
@@ -596,7 +598,7 @@ export async function resolveOfficialPostings(jobs, {
     let { leads } = initial; const { total } = initial;
     if (!leads.length) return unresolved(member, ['worker-research', 'research-miss']);
     // One download of every lead, shared by both rounds: it is the judges' main input, since WebFetch cannot run JavaScript.
-    let snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe });
+    let snapshots = signal?.aborted ? [] : await snapshotOfficialPostingLeads(leads, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe, readPage: pageReader });
     const counts = discovery.get(member);
     counts.snapshotReads = snapshots.filter(snapshot => snapshot.read === true).length;
     counts.snapshotFailures = snapshots.filter(snapshot => snapshot.read !== true).length;
@@ -642,7 +644,7 @@ export async function resolveOfficialPostings(jobs, {
     }
     if (added.length) {
       leads = [...leads, ...added];
-      snapshots = trimOfficialPostingSnapshots([...snapshots, ...await snapshotOfficialPostingLeads(added, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe })]);
+      snapshots = trimOfficialPostingSnapshots([...snapshots, ...await snapshotOfficialPostingLeads(added, { fetch: snapshotSession.fetch, render: renderSession, signal, observe: readHealth.observe, readPage: pageReader })]);
     }
     const second = await judgePair(member, leads, 2, snapshots);
     answers.push(...Object.values(second.answers));
@@ -692,6 +694,17 @@ export async function resolveOfficialPostings(jobs, {
   const snapshotSession = createOfficialPostingFetchSession({ fetch: snapshotFetch, signal, cacheFailures: false, hostBreaker: false });
   // Injected downloads are a test or replay, which must not raise alarms about the real network.
   const readHealth = snapshotFetch === fetchOfficialPosting ? createOfficialPostingReadMonitor({ signal }) : { observe: undefined, flush() {} };
+  // A page a site blocks the app from downloading may still be readable through Tavily's extract API (no AI). Only the
+  // real network path uses it: an injected download is a test or replay and must never reach Tavily. The key is read
+  // once, on the first page that needs it, and a missing key simply means no reader.
+  const pageReader = readPage || (snapshotFetch === fetchOfficialPosting ? (() => {
+    let key = null;
+    return async (url, options = {}) => {
+      key ||= readTavilyKey();
+      const stored = await key;
+      return stored ? tavilyExtract({ key: stored, url, signal: options.signal || signal }) : '';
+    };
+  })() : null);
   // One job is someone waiting on this card (Generate or its own lookup), so it goes ahead of a Board's queue.
   const renderSession = snapshotRender ? createOfficialPostingRenderSession(
     (url, options) => snapshotRender(url, { ...options, priority: members.length === 1 })) : null;

@@ -4,7 +4,8 @@ import { estimateCompensationExperienceYearsFromDescription, selectCompensationE
 import { compensationAssessment, parseGuaranteedCashOffer } from '../../electron/ipc/jobCompensation.js';
 import {
   compensationLocationMismatch, competitiveFloor, isValidCompensationExperienceBandLadder,
-  retainConsistentCompetitiveRanges, selectCompensationExperienceBand, typicalPayPercentile,
+  mergeCompetitiveRanges, retainConsistentCompetitiveRanges, selectCompensationExperienceBand,
+  typicalCompetitiveBand, typicalPayPercentile,
 } from '../../electron/ipc/jobCompensation.js';
 import { jobCompensationDisplay } from '../../src/utils/jobCompensationDisplay.js';
 import { advertisedSalaryForJob } from '../../src/utils/jobAdvertisedSalary.js';
@@ -467,8 +468,8 @@ export default [
         'a CAD 70-90k offer must not be called competitive against a 62.4k source low when typical pay is 97.5k');
       assert(cad.competitiveFloor === 97500, 'typical researched pay must be the median midpoint of the comparable sources');
       assert(cad.reasonCode === 'offered_max_below_typical_market', 'the below-market verdict must use the typical-market reason code');
-      assert(cad.excludedSourceCount === 0 && cad.competitiveRange.min === 62400 && cad.competitiveRange.max === 145059,
-        'four consistent sources stay in one union without exclusions');
+      assert(cad.excludedSourceCount === 0 && cad.competitiveRange.min === 68500 && cad.competitiveRange.max === 121000,
+        'four consistent sources give the median low to the median high, not the 62.4k–145k union');
       assert(cad.justification.includes('is below typical researched pay (CAD 97,500, the median midpoint of 4 comparable sources).'),
         'the decision sentence must name typical researched pay and the comparable-source count');
 
@@ -483,8 +484,8 @@ export default [
       });
       assert(outlier.excludedSourceCount === 1 && outlier.competitiveFloor === 112500,
         'a source whose midpoint sits far below the others must be excluded from typical researched pay');
-      assert(outlier.competitiveRange.min === 100000 && outlier.competitiveRange.max === 125000,
-        'the merged range must cover only the retained sources');
+      assert(outlier.competitiveRange.min === 102500 && outlier.competitiveRange.max === 122500,
+        'the typical band must cover only the retained sources');
       assert(outlier.justification.includes('1 source(s) whose range sat far from the others were left out of this comparison.'),
         'an excluded source must be disclosed in the justification');
 
@@ -627,8 +628,9 @@ export default [
       assert(competitiveFloor(bimodal, 'USD') === null, 'no typical pay exists between two disagreeing clusters');
       const disagree = compensationAssessment({ offer, competitiveRanges: bimodal, marketCurrency: 'USD' });
       assert(disagree.status === 'uncertain' && disagree.reasonCode === 'market_sources_disagree'
-        && disagree.competitiveFloor === null && disagree.competitiveRange?.max === 300000,
-      `disagreeing sources withhold the verdict but keep the range, got ${disagree.status}/${disagree.reasonCode}`);
+        && disagree.competitiveFloor === null && disagree.competitiveRange?.max === 160000
+        && disagree.reportedSpan?.max === 300000,
+      `disagreeing sources withhold the verdict but keep the typical band and the diagnostic union, got ${disagree.status}/${disagree.reasonCode}`);
       assert(jobCompensationDisplay({}, normalizeCompensationAssessment(disagree)).explanation.includes('disagree too much'),
         'the card explains the withheld verdict');
       const threeWithOutlier = compensationAssessment({ offer, competitiveRanges: bimodal.slice(0, 3), marketCurrency: 'USD' });
@@ -637,8 +639,11 @@ export default [
 
       // Rounding never leaves the band, so the renderer accepts the saved result.
       const narrow = compensationAssessment({ offer: { ...offer, min: 100000, max: 100000 }, competitiveRanges: [{ min: 100000.4, max: 100000.4, currency: 'USD' }], marketCurrency: 'USD' });
-      assert(narrow.competitiveFloor === 100000.4 && narrow.status === 'below_market', `the floor is clamped into the band, got ${narrow.competitiveFloor}`);
-      assert(normalizeCompensationAssessment(narrow).status === 'below_market', 'the clamped floor passes the renderer re-check');
+      assert(narrow.competitiveRange.min === 100000 && narrow.competitiveRange.max === 100000,
+        `the band rounds to whole currency units, got ${JSON.stringify(narrow.competitiveRange)}`);
+      assert(narrow.competitiveFloor === 100000 && narrow.status === 'competitive',
+        `typical pay is rounded into the whole-unit band, got ${narrow.competitiveFloor}/${narrow.status}`);
+      assert(normalizeCompensationAssessment(narrow).status === 'competitive', 'the clamped floor passes the renderer re-check');
 
       // A remote job priced at the saved residence is not a location conflict.
       const remote = compensationAssessment({
@@ -730,6 +735,79 @@ export default [
         assert(result.years === 5 && result.basis === 'description-seniority-estimate',
           `"${title}" must not read as entry level, got ${JSON.stringify(result)}`);
       }
+    },
+  },
+  {
+    name: 'typicalCompetitiveBand reports the median of source lows to the median of source highs',
+    run: () => {
+      const cad = (min, max, extra = {}) => ({ min, max, currency: 'CAD', period: 'annual', ...extra });
+      const sameRange = (actual, expected) => Boolean(actual)
+        && actual.min === expected.min && actual.max === expected.max
+        && actual.currency === expected.currency && actual.period === expected.period;
+      assert(sameRange(typicalCompetitiveBand([cad(100000, 140000)], 'CAD'),
+        { min: 100000, max: 140000, currency: 'CAD', period: 'annual' }),
+      'one source is its own typical band');
+      assert(sameRange(typicalCompetitiveBand([cad(60000, 80000), cad(90000, 110000)], 'CAD'),
+        { min: 75000, max: 95000, currency: 'CAD', period: 'annual' }),
+      'two sources average their ends instead of spanning the union');
+      assert(sameRange(typicalCompetitiveBand([cad(10000, 20000), cad(30000, 50000), cad(20000, 40000)], 'CAD'),
+        { min: 20000, max: 40000, currency: 'CAD', period: 'annual' }),
+      'an odd count takes the middle low and the middle high');
+      assert(sameRange(typicalCompetitiveBand([cad(10000, 21000), cad(20000, 41000), cad(30000, 61000), cad(40000, 81000)], 'CAD'),
+        { min: 25000, max: 51000, currency: 'CAD', period: 'annual' }),
+      'an even count averages the two middle lows and the two middle highs');
+      assert(sameRange(typicalCompetitiveBand([cad(10000.4, 20000.6), cad(20000.4, 40000.6)], 'CAD'),
+        { min: 15000, max: 30001, currency: 'CAD', period: 'annual' }),
+      'a half-unit median rounds to whole currency units');
+      assert(typicalCompetitiveBand([cad(100000, 120000, { currency: 'USD' })], 'CAD') === null,
+        'another currency is not a comparable source');
+      assert(sameRange(typicalCompetitiveBand([
+        null, { min: 0, max: 10000, currency: 'CAD' }, { min: 30000, max: 20000, currency: 'CAD' }, cad(90000, 110000),
+      ], 'CAD'),
+      { min: 90000, max: 110000, currency: 'CAD', period: 'annual' }),
+      'invalid ranges are ignored exactly as mergeCompetitiveRanges ignores them');
+      assert(typicalCompetitiveBand([], 'CAD') === null, 'no sources means no typical band');
+      assert(typicalCompetitiveBand(undefined, 'CAD') === null, 'missing sources means no typical band');
+    },
+  },
+  {
+    name: 'One wide source sets only reportedSpan, never the displayed competitive range',
+    run: () => {
+      const sources = [
+        { min: 60000, max: 140000, currency: 'CAD' },
+        { min: 90000, max: 110000, currency: 'CAD' },
+        { min: 95000, max: 105000, currency: 'CAD' },
+      ];
+      const sameRange = (actual, expected) => Boolean(actual) && Boolean(expected)
+        && actual.min === expected.min && actual.max === expected.max
+        && actual.currency === expected.currency && actual.period === expected.period;
+      const band = typicalCompetitiveBand(sources, 'CAD');
+      assert(sameRange(band, { min: 90000, max: 110000, currency: 'CAD', period: 'annual' }),
+        'the typical band ignores how wide a single source is');
+      const offer = { usable: true, min: 95000, max: 108000, currency: 'CAD', period: 'annual' };
+      const result = compensationAssessment({ offer, competitiveRanges: sources, marketCurrency: 'CAD' });
+      assert(sameRange(result.competitiveRange, band), 'the saved market range is the typical band');
+      assert(sameRange(result.reportedSpan, mergeCompetitiveRanges(sources, 'CAD')),
+        'the union survives only as the diagnostic reportedSpan');
+      assert(result.reportedSpan.min === 60000 && result.reportedSpan.max === 140000,
+        `reportedSpan must keep the union the old rule displayed, got ${JSON.stringify(result.reportedSpan)}`);
+      assert(result.competitiveRange.max === 110000,
+        'the wide 60,000–140,000 source must not stretch the displayed range the way the union did');
+      assert(result.competitiveFloor === 100000, 'typical pay stays the median of the source midpoints');
+      assert(result.competitiveFloor >= result.competitiveRange.min && result.competitiveFloor <= result.competitiveRange.max,
+        'typical pay is clamped into the typical band');
+      assert(result.status === 'competitive');
+      const rendered = normalizeCompensationAssessment(result);
+      assert(rendered.status === result.status, 'a clamped typical pay must survive renderer re-validation');
+      assert(sameRange(rendered.competitiveRange, band), 'the renderer keeps the typical band');
+      assert(sameRange(rendered.reportedSpan, result.reportedSpan), 'the renderer keeps the diagnostic union');
+      assert(rendered.competitiveFloor >= rendered.competitiveRange.min
+        && rendered.competitiveFloor <= rendered.competitiveRange.max,
+      'typical pay survives normalization inside the band');
+      const noBand = compensationAssessment({ offer, competitiveRanges: [], marketCurrency: 'CAD' });
+      assert(noBand.competitiveRange === null && noBand.reportedSpan === null,
+        'an assessment without a competitive range has no reported span either');
+      assert(normalizeCompensationAssessment(noBand).reportedSpan === null, 'the renderer never requires a reported span');
     },
   },
 ];

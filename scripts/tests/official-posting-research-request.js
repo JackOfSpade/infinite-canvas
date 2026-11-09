@@ -6,8 +6,8 @@ import {
 } from '../../electron/ipc/officialPostingBridge.js';
 import { officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
 import {
-  TAVILY_KEYCHAIN_SERVICE, TAVILY_RESEARCH_TOOLS, TAVILY_SEARCH_URL,
-  isMirrorHost, readTavilyKey, tavilyMcpServers, tavilyPlainLeads,
+  TAVILY_KEYCHAIN_SERVICE, TAVILY_RESEARCH_TOOLS, TAVILY_SEARCH_URL, TAVILY_EXTRACT_URL,
+  isMirrorHost, readTavilyKey, tavilyExtract, tavilyMcpServers, tavilyPlainLeads,
 } from '../../electron/ipc/tavily.js';
 
 const A = 'a'.repeat(24); const B = 'b'.repeat(24);
@@ -330,6 +330,70 @@ export default [
       assert.deepEqual(rows.map(row => [row.id, row.candidates.length]), [[B, 0], [A, 1]]);
       assert.equal(merged.indexOf(section(B, 'NOT FOUND')), 0);
       assert.ok(merged.indexOf(`BEGIN OFFICIAL POSTING RESEARCH ${A}`) > 0);
+    },
+  },
+  {
+    name: 'tavilyExtract posts one https page to the extract API and returns its own text',
+    async run() {
+      const calls = [];
+      const reply = { results: [{ url: 'https://careers.ibm.test/job/123', raw_content: '  Dispatch Engineer\nApply now  ' }], failed_results: [] };
+      const text = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://careers.ibm.test/job/123',
+        fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, json: async () => reply }; } });
+      assert.equal(text, 'Dispatch Engineer\nApply now');
+      assert.equal(TAVILY_EXTRACT_URL, 'https://api.tavily.com/extract');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, TAVILY_EXTRACT_URL);
+      assert.equal(calls[0].options.method, 'POST');
+      assert.equal(calls[0].options.headers['content-type'], 'application/json');
+      assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-tavily-key');
+      assert.deepEqual(JSON.parse(calls[0].options.body), {
+        urls: ['https://careers.ibm.test/job/123'], extract_depth: 'advanced', format: 'markdown' });
+      assert.ok(!calls[0].options.body.includes('synthetic-tavily-key'));
+    },
+  },
+  {
+    name: 'tavilyExtract returns empty text for a non-ok response or a page it could not read',
+    async run() {
+      const failedPage = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://www.wellfound.test/jobs/1',
+        fetch: async () => ({ ok: false, status: 403, json: async () => ({ detail: 'synthetic-tavily-key rejected' }) }) });
+      assert.equal(failedPage, '');
+      const unreadable = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://www.wellfound.test/jobs/1',
+        fetch: async () => ({ ok: true, status: 200, json: async () => ({ results: [],
+          failed_results: [{ url: 'https://www.wellfound.test/jobs/1', error: 'blocked' }] }) }) });
+      assert.equal(unreadable, '');
+      assert.ok(!String(unreadable).includes('synthetic-tavily-key'));
+      const empty = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://www.wellfound.test/jobs/1',
+        fetch: async () => ({ ok: true, status: 200, json: async () => ({ results: [{ url: 'https://www.wellfound.test/jobs/1', raw_content: '   ' }] }) }) });
+      assert.equal(empty, '');
+    },
+  },
+  {
+    name: 'tavilyExtract never calls the API without a key or for an http url',
+    async run() {
+      const calls = [];
+      const fetch = async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, json: async () => ({ results: [] }) }; };
+      assert.equal(await tavilyExtract({ key: '', url: 'https://careers.ibm.test/job/123', fetch }), '');
+      assert.equal(await tavilyExtract({ url: 'https://careers.ibm.test/job/123', fetch }), '');
+      assert.equal(await tavilyExtract({ key: 'synthetic-tavily-key', url: 'http://careers.ibm.test/job/123', fetch }), '');
+      assert.equal(await tavilyExtract({ key: 'synthetic-tavily-key', url: 'not a url', fetch }), '');
+      assert.equal(calls.length, 0);
+    },
+  },
+  {
+    name: 'tavilyExtract returns empty text when the request is aborted',
+    async run() {
+      const controller = new AbortController();
+      let seen;
+      const pending = tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://careers.ibm.test/job/123', signal: controller.signal,
+        fetch: (url, options) => {
+          seen = options;
+          return new Promise((resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true });
+          });
+        } });
+      controller.abort();
+      assert.equal(await pending, '');
+      assert.equal(seen.signal.aborted, true);
     },
   },
 ];

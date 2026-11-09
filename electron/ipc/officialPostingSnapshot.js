@@ -211,14 +211,39 @@ async function withRenderedPages(leads, snapshots, { render, signal }) {
   }));
 }
 
+/** A page the site blocked the app from downloading may still serve its text to a reader. Only pages the app could not
+ * read, and that did not answer not found, are offered: a real 404 is the answer, not a failed download. */
+const readerWants = (lead, snapshot) => Boolean(lead?.url?.startsWith('https://')) && snapshot?.read !== true && !snapshot?.notFound;
+
+/** The reader's text for one page, or null when it returned none. A failing reader is just another unread page. */
+async function readPageSnapshot(readPage, url, { signal }) {
+  let raw;
+  try { raw = String(await readPage(url, { signal }) ?? '').replace(/\s+\n/gu, '\n').trim(); } catch { return null; }
+  if (!raw) return null;
+  return { pageText: raw.slice(0, SNAPSHOT_PAGE_TEXT_CHARS), ...(raw.length > SNAPSHOT_PAGE_TEXT_CHARS ? { pageTextTruncated: true } : {}) };
+}
+
+/** Fills in the unread pages a reader read. It never marks a page rendered: what it returns is text, not what a person sees. */
+async function withReadPages(leads, snapshots, { readPage, signal }) {
+  await Promise.all(leads.map(async (lead, index) => {
+    if (!readerWants(lead, snapshots[index])) return;
+    const read = await readPageSnapshot(readPage, lead.url, { signal });
+    // httpStatus stays: the judge's explanation of the block still holds for diagnosis.
+    if (read) snapshots[index] = { ...snapshots[index], ...read, read: true, reader: 'page-reader' };
+  }));
+}
+
 /** Snapshots for every lead, trimmed so the judgment prompt stays within its bound. */
-export async function snapshotOfficialPostingLeads(leads, { fetch, render, signal, observe } = {}) {
+export async function snapshotOfficialPostingLeads(leads, { fetch, render, signal, observe, readPage } = {}) {
   const snapshots = await Promise.all(leads.map(lead => snapshotOfficialPostingLead(lead, { fetch, signal })
     .catch(() => ({ id: lead.id, at: new Date().toISOString(), read: false }))));
   // A rendered snapshot replaces the plain download's outcome, so read health needs the plain ones kept.
   const plain = observe ? [...snapshots] : null;
   if (render) await withRenderedPages(leads, snapshots, { render, signal });
   try { observe?.({ leads, plain, final: snapshots }); } catch { /* Watching the reads never changes them. */ }
+  // The reader runs only after read health has seen the app's own downloads, so a page the app could not read still
+  // counts as unread there, and only for those pages.
+  if (readPage) await withReadPages(leads, snapshots, { readPage, signal });
   return trimOfficialPostingSnapshots(snapshots);
 }
 

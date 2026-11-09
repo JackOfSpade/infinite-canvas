@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeSectionReplies, extractSectionUrls, moneyFiguresNear, pageHasFigure, compensationParameters, cohortKey } from './web-research-ab.mjs';
+import { mergeSectionReplies, extractSectionUrls, moneyFiguresNear, pageHasFigure, compensationParameters, cohortKey,
+  roleFamilyResearchId, quotesNear, pageHasQuote, normalizeSourceText, hasYearBands, locationMatches, decideMergedLocation,
+  cliOptions, DEFAULT_ULTRACODE } from './web-research-ab.mjs';
 
 const begin = id => `BEGIN COMPENSATION RESEARCH ${id}`;
 const end = id => `END COMPENSATION RESEARCH ${id}`;
@@ -141,4 +143,103 @@ test('a numbered source keeps its indented URL, figures and quote together', () 
   ].join('\n');
   assert.deepEqual(moneyFiguresNear(body, url), [100651, 207859]);
   assert.deepEqual(moneyFiguresNear(body, 'https://www.payscale.com/x'), [92000, 155000]);
+});
+
+test('roleFamilyResearchId is deterministic and shaped as 24 lowercase hex', () => {
+  const first = roleFamilyResearchId('Data Engineering');
+  assert.equal(first, roleFamilyResearchId('Data Engineering'));
+  assert.match(first, /^[a-f0-9]{24}$/u);
+  assert.notEqual(first, roleFamilyResearchId('Data Science'));
+  assert.notEqual(first, roleFamilyResearchId('Data Engineering '));
+});
+
+test('quotesNear keeps only quotes of 20+ characters written in the same block as the URL', () => {
+  const url = 'https://example.com/ladder';
+  const other = 'https://other.test/bands';
+  const long = 'Engineers move from band 1 to band 2 after two years on the ladder.';
+  const body = [
+    `- Ladder source: ${url}`,
+    `  Quote: “${long}”`,
+    '  Short one: “too short to count”',
+    '',
+    `- Unrelated source: ${other}`,
+    '  Quote: ‘A different ladder statement that belongs to the other source only.’',
+  ].join('\n');
+  assert.deepEqual(quotesNear(body, url), [long]);
+  assert.deepEqual(quotesNear(body, other), ['A different ladder statement that belongs to the other source only.']);
+  assert.deepEqual(quotesNear(body, 'https://missing.test/none'), []);
+  assert.deepEqual(quotesNear('', url), []);
+});
+
+test('pageHasQuote matches after normalizing curly quotes, whitespace, dash variants and link targets', () => {
+  const quote = 'Engineers move from band 1 to band 2 after two years - not before.';
+  assert.equal(pageHasQuote('ENGINEERS   move from band 1 to band 2 after two years — not before.', quote), true);
+  assert.equal(pageHasQuote('See [the ladder](https://x.test/a) Engineers move from band 1 to band 2 after two years – not before.', quote), true);
+  assert.equal(pageHasQuote('Engineers move from band 1 to band 3 after two years — not before.', quote), false);
+  assert.equal(pageHasQuote('', quote), false);
+  // Curly quotes on the page and straight quotes in the quote (and the reverse) are the same text.
+  const spoke = 'The team says "2-4 years" for band 2 here.';
+  assert.equal(pageHasQuote('the team says “2-4 years” for band 2 here.', spoke), true);
+  assert.equal(normalizeSourceText('“A” – B\n\tC'), '"a" - b c');
+});
+
+test('hasYearBands accepts numeric bands and rejects a bare number of years', () => {
+  for (const text of ['0-2 years', '3 to 5 years', '1–3 years', '2—4 years', '5+ years', '12+ years', 'Band 1: 0 - 2 years']) {
+    assert.equal(hasYearBands(text), true, text);
+  }
+  for (const text of ['5 years of experience', 'years on the ladder', '120+ years of history', '3-5 yrs', 'four years', '']) {
+    assert.equal(hasYearBands(text), false, text);
+  }
+});
+
+test('locationMatches compares the first place segment and the country word for a remote truth', () => {
+  assert.equal(locationMatches('San Francisco, CA', 'New York, NY | San Francisco, CA'), true);
+  assert.equal(locationMatches('toronto, on', 'Toronto, Canada'), true);
+  assert.equal(locationMatches('Vancouver, BC', 'Toronto, ON'), false);
+  assert.equal(locationMatches('Remote, Canada', 'Remote, Canada', { remote: true }), true);
+  assert.equal(locationMatches('Canada', 'Remote, Canada', { remote: true }), true);
+  assert.equal(locationMatches('Remote, United States', 'Remote, Canada', { remote: true }), false);
+  assert.equal(locationMatches('Toronto, ON', 'Remote, Canada', { remote: true }), false);
+  assert.equal(locationMatches('', 'Toronto, ON'), false);
+});
+
+test('decideMergedLocation follows the decision table with the app acceptance gate injected', () => {
+  const job = { title: 'Engineer', company: 'Acme' };
+  const evaluate = row => (row.accepted
+    ? { ok: true, found: { display: row.location, remote: false, remoteCountry: '', sourceUrl: row.sourceUrl } }
+    : { ok: false, reason: 'REJECTED' });
+  const row = (accepted, location) => ({ found: true, accepted, location, sourceUrl: 'https://acme.test/careers/1' });
+
+  const tavilyOnly = decideMergedLocation({ job, evaluate, rows: { native: row(false, 'Toronto, ON'), tavily: row(true, 'Austin, TX') } });
+  assert.equal(tavilyOnly.kind, 'tavily');
+  assert.equal(tavilyOnly.found.display, 'Austin, TX');
+
+  const nativeOnly = decideMergedLocation({ job, evaluate, rows: { native: row(true, 'Toronto, ON'), tavily: { found: false, reason: 'no posting' } } });
+  assert.equal(nativeOnly.kind, 'native');
+  assert.equal(nativeOnly.found.display, 'Toronto, ON');
+
+  const agree = decideMergedLocation({ job, evaluate, rows: { native: row(true, 'Toronto, ON'), tavily: row(true, 'toronto, on') } });
+  assert.equal(agree.kind, 'native');
+  assert.equal(agree.agree, true);
+  assert.equal(agree.found.display, 'Toronto, ON');
+
+  const disagree = decideMergedLocation({ job, evaluate, rows: { native: row(true, 'Toronto, ON'), tavily: row(true, 'Vancouver, BC') } });
+  assert.equal(disagree.kind, 'conflict');
+  assert.equal(disagree.agree, false);
+  assert.equal(disagree.found.display, 'Toronto, ON');
+
+  const none = decideMergedLocation({ job, evaluate, rows: { native: null, tavily: row(false, 'Vancouver, BC') } });
+  assert.equal(none.kind, 'none');
+  assert.equal(none.found, null);
+});
+
+test('--ultracode defaults to off for every task while the flag still works', () => {
+  assert.equal(DEFAULT_ULTRACODE, 'off');
+  const base = ['--canvas', 'canvas.json', '--out', 'out'];
+  for (const task of ['preference', 'compensation', 'role-family', 'location']) {
+    assert.equal(cliOptions(['--task', task, ...base]).ultracode, false, task);
+    assert.equal(cliOptions(['--task', task, ...base, '--ultracode', 'on']).ultracode, true, task);
+  }
+  assert.throws(() => cliOptions(['--task', 'compensation', ...base, '--ultracode', 'yes']), /--ultracode must be on or off/u);
+  assert.throws(() => cliOptions(['--task', 'role-families', ...base]), /--task must be one of/u);
 });

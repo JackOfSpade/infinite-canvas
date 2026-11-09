@@ -398,6 +398,18 @@ function normalizedOfferPercentile(value) {
   return { percentile, sourceCount };
 }
 
+// The union of the researched sources (lowest low to highest high) is
+// diagnosis-only context now that the displayed market range is the typical
+// band. Keep it when it is a complete, ordered, annual range in an explicit
+// currency and drop it otherwise; unlike competitiveRange it is never
+// required and never feeds a verdict.
+function normalizedReportedSpan(value) {
+  const range = normalizedRange(value);
+  if (!(range.min > 0) || !(range.max > 0)) return null;
+  if (!/^[A-Z]{3}$/.test(range.currency) || range.period !== 'annual') return null;
+  return range;
+}
+
 /**
  * Coerce current and older salary-research payloads into a render-safe shape.
  * This must fail open: only an explicit, recognized verdict can colour a card.
@@ -410,7 +422,7 @@ export function normalizeCompensationAssessment(value) {
       status: 'not_evaluated',
       reasonCode: 'legacy_unresearched',
       justification: 'Compensation research was not run for this saved result. Combine jobs again on the Job Board to evaluate the advertised cash salary.',
-      offered: normalizedRange(), competitiveRange: normalizedRange(), competitiveFloor: 0, excludedSourceCount: 0, locationMismatch: null, offerPercentile: null,
+      offered: normalizedRange(), competitiveRange: normalizedRange(), reportedSpan: null, competitiveFloor: 0, excludedSourceCount: 0, locationMismatch: null, offerPercentile: null,
       comparisonLocation: '', researchedAt: '', currencyInferredFromLocation: false, currencyAmbiguous: false, sourceLinks: [],
       personalRecommendation: null,
       isLegacy: true,
@@ -439,6 +451,7 @@ export function normalizeCompensationAssessment(value) {
     reasonCode: textValue(source.reasonCode ?? source.reason),
     offered: normalizedRange(source.offered ?? source.advertisedCash ?? source.advertisedSalary ?? source.offer, source),
     competitiveRange,
+    reportedSpan: normalizedReportedSpan(source.reportedSpan),
     competitiveFloor,
     excludedSourceCount,
     locationMismatch: normalizedLocationMismatch(source.locationMismatch),

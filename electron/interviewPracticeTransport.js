@@ -15,10 +15,15 @@ const owned = new Set();
 const error = code => Object.assign(new Error(code), { code });
 const cancelled = () => Object.assign(error('CANCELLED'), { name: 'AbortError' });
 
-/** Throws CONFIG_REJECTED for an unknown alias (never fable) or effort max. Unsupported efforts fail at the CLI. */
+/**
+ * Throws CONFIG_REJECTED for an unknown alias (never fable), effort max or a non-boolean
+ * ultracode. Ultracode is opt-in measurement only: production callers never set it.
+ * Unsupported efforts fail at the CLI.
+ */
 export function assertInterviewerConfig(config = {}) {
   if (!MODELS.includes(config.model)) throw error('CONFIG_REJECTED');
   if (config.effort !== undefined && (typeof config.effort !== 'string' || !config.effort || config.effort === 'max')) throw error('CONFIG_REJECTED');
+  if (config.ultracode !== undefined && typeof config.ultracode !== 'boolean') throw error('CONFIG_REJECTED');
 }
 
 function signalProcess(child, signal) {
@@ -85,16 +90,23 @@ async function capture(binary, args, { cwd, spawn, signal, handles }) {
 function requireFlags(help, flags) {
   if (flags.some(flag => !help.includes(flag))) throw error('TRANSPORT_CAPABILITY_UNSUPPORTED');
 }
-// Ultracode is deliberately never passed: it stays off for every practice session.
+// Ultracode is a Claude Code setting ({"ultracode":true}) that only acts through the Workflow tool,
+// so it stays off for every practice session unless a config asks for it explicitly (measurement only):
+// then Workflow is the one offered tool and the setting is merged into the same --settings object.
 function cliArguments(config, help) {
   requireFlags(help, ['--print', '--output-format', '--tools', '--system-prompt', '--no-session-persistence', '--strict-mcp-config', '--mcp-config', '--model']);
-  const args = ['-p', '--tools', '', '--system-prompt', SYSTEM, '--no-session-persistence',
+  const ultracode = config.ultracode === true;
+  const args = ['-p', '--tools', ultracode ? 'Workflow' : '', '--system-prompt', SYSTEM, '--no-session-persistence',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'stream-json', '--model', config.model];
+  if (ultracode && help.includes('--allowedTools')) args.push('--allowedTools', 'Workflow');
   if (config.effort && config.effort !== 'default') { requireFlags(help, ['--effort']); args.push('--effort', config.effort); }
-  if (help.includes('--safe-mode')) args.push('--safe-mode');
-  else {
+  if (help.includes('--safe-mode')) {
+    args.push('--safe-mode');
+    if (ultracode && help.includes('--settings')) args.push('--settings', '{"ultracode":true}');
+  } else {
     requireFlags(help, ['--settings', '--setting-sources', '--disable-slash-commands']);
-    args.push('--settings', '{"disableAllHooks":true}', '--setting-sources', '', '--disable-slash-commands');
+    args.push('--settings', ultracode ? '{"disableAllHooks":true,"ultracode":true}' : '{"disableAllHooks":true}',
+      '--setting-sources', '', '--disable-slash-commands');
   }
   if (help.includes('--permission-mode') && help.includes('dontAsk')) args.push('--permission-mode', 'dontAsk');
   if (help.includes('--no-chrome')) args.push('--no-chrome');

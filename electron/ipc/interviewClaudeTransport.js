@@ -115,8 +115,8 @@ export function createInterviewClaudeTransport({
     const stage = interviewClaudeStage(task, claudeStage);
     const profile = careerWritingStageProfile(stage);
     const tools = stage === 'qa-research' ? INTERVIEW_RESEARCH_TOOLS : '';
-    // Ultracode stays on by default: only an explicit opt-out is forwarded.
-    const ultracode = opts.ultracode === false || profile.ultracode === false ? false : true;
+    // Ultracode is off by default: only an explicit opt-in (call or stage profile) is forwarded.
+    const ultracode = opts.ultracode === true || (opts.ultracode !== false && profile.ultracode === true);
     let sessionId = crypto.randomUUID();
     const originalText = `${prompt}${json ? schemaInstruction(responseSchema) : ''}`;
     // The text the next Claude attempt sends; a resumed session gets only the rejection.
@@ -162,7 +162,7 @@ export function createInterviewClaudeTransport({
         const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
         try {
           reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools,
-            ...(ultracode === false ? { ultracode: false } : {}),
+            ...(ultracode ? { ultracode: true } : {}),
             ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
         } catch (error) {
           if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;

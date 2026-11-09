@@ -4,7 +4,10 @@ import {
   normalizePersonalSalaryRecommendation,
   validatePersonalSalaryRecommendation,
 } from '../../electron/ipc/personalSalaryRecommendation.js';
-import { compensationAssessment, parseGuaranteedCashOffer } from '../../electron/ipc/jobCompensation.js';
+import {
+  compensationAssessment, mergeCompetitiveRanges, parseGuaranteedCashOffer,
+  retainConsistentCompetitiveRanges, typicalCompetitiveBand,
+} from '../../electron/ipc/jobCompensation.js';
 import { formatSalaryCurrencyLabel, inferSalaryCurrency, salaryCurrencyAmbiguousAcrossLocations } from '../../src/utils/salaryCurrency.js';
 import { isCompensationRecommendationCurrent, normalizeCompensationAssessment } from '../../src/nodes/jobsearch/buildJobTree.js';
 
@@ -209,6 +212,42 @@ export default [
       // Version 3 is current now, so an older-than-v3 gate must not be what
       // proves the failure: an actually unknown version still fails closed.
       assert.equal(saved(4, { min: 165000, max: 200000 }, 175000).status, 'unavailable', 'an unknown methodology fails closed');
+    },
+  },
+  {
+    name: 'Personal-recommendation validation uses the typical band the assessment saves',
+    run: () => {
+      // One wide survey sits in the same midpoint cluster, so it is retained:
+      // the union spans 60–140K while the typical band is 90–110K.
+      const sources = [
+        { min: 60000, max: 140000, currency: 'CAD' },
+        { min: 90000, max: 110000, currency: 'CAD' },
+        { min: 95000, max: 105000, currency: 'CAD' },
+      ];
+      const { retained } = retainConsistentCompetitiveRanges(sources, 'CAD');
+      const band = typicalCompetitiveBand(retained, 'CAD');
+      const union = mergeCompetitiveRanges(retained, 'CAD');
+      assert.deepEqual(band, { min: 90000, max: 110000, currency: 'CAD', period: 'annual' });
+      assert.deepEqual(union, { min: 60000, max: 140000, currency: 'CAD', period: 'annual' },
+        'the union is still available for diagnosis, just not for the market range');
+      const offer = { usable: true, min: 95000, max: 108000, currency: 'CAD', period: 'annual' };
+      const assessment = compensationAssessment({ offer, competitiveRanges: sources, marketCurrency: 'CAD' });
+      assert.deepEqual(assessment.competitiveRange, band, 'the assessment saves the typical band');
+      assert.deepEqual(assessment.reportedSpan, union);
+      // A target only the old union would allow must fail against exactly the
+      // band the assessment saved, not a second wider definition.
+      const aboveBand = personal({ min: 120000, max: 130000, desiredSalary: 125000 });
+      assert.throws(() => validatePersonalSalaryRecommendation(aboveBand, {
+        marketRange: assessment.competitiveRange, evidence: PACKET, offered: offer,
+      }), /recommendation bounds/,
+      'a desired salary above the saved typical band must be rejected');
+      assert.doesNotThrow(() => validatePersonalSalaryRecommendation(aboveBand, {
+        marketRange: union, evidence: PACKET, offered: offer,
+      }), 'the union alone would have accepted it, so the saved band is what bounds the answer');
+      const inside = personal({ min: 95000, max: 108000, desiredSalary: 101500 });
+      assert.doesNotThrow(() => validatePersonalSalaryRecommendation(inside, {
+        marketRange: assessment.competitiveRange, evidence: PACKET, offered: offer,
+      }), 'an answer inside the saved typical band stays valid');
     },
   },
 ];

@@ -1246,6 +1246,51 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     ], 5, 'USD');
     assert(canonicalDuplicateEvidence.length === 1,
       'canonical-equivalent source URLs must not occupy multiple evidence slots');
+    const eightSources = [
+      { comparable: true, min: 100000, max: 110000, currency: 'USD', sourceName: 's1', sourceUrl: 'https://example.test/s1' },
+      { comparable: true, min: 110000, max: 120000, currency: 'USD', sourceName: 's2', sourceUrl: 'https://example.test/s2' },
+      { comparable: true, min: 120000, max: 130000, currency: 'USD', sourceName: 's3', sourceUrl: 'https://example.test/s3' },
+      { comparable: true, min: 90000, max: 100000, currency: 'USD', sourceName: 'floor', sourceUrl: 'https://example.test/s4' },
+      { comparable: true, min: 180000, max: 200000, currency: 'USD', sourceName: 'ceiling', sourceUrl: 'https://example.test/s5' },
+      { comparable: true, min: 130000, max: 150000, currency: 'USD', sourceName: 's6', sourceUrl: 'https://example.test/s6' },
+      { comparable: true, min: 140000, max: 160000, currency: 'USD', sourceName: 's7', sourceUrl: 'https://example.test/s7' },
+      { comparable: true, min: 150000, max: 170000, currency: 'USD', sourceName: 's8', sourceUrl: 'https://example.test/s8' },
+    ];
+    const allEight = selectComparableEvidence(eightSources, undefined, 'USD');
+    assert(allEight.length === 8 && allEight.map(source => source.sourceName).join(',') === 's1,s2,s3,floor,ceiling,s6,s7,s8'
+      && selectComparableEvidence(eightSources, null, 'USD').length === 8
+      && selectComparableEvidence(eightSources, NaN, 'USD').length === 8
+      && selectComparableEvidence(eightSources, Infinity, 'USD').length === 8,
+    'a missing or non-finite cap must retain every filtered source in original research order');
+    const cappedEight = selectComparableEvidence(eightSources, 5, 'USD');
+    assert(cappedEight.length === 5 && cappedEight.some(source => source.sourceName === 'floor')
+      && cappedEight.some(source => source.sourceName === 'ceiling'),
+    'a finite cap must keep the old floor/ceiling-first five-source selection');
+    const offerAt120k = parseGuaranteedCashOffer({ salary: '$120,000 per year', location: 'Austin, Texas, USA' });
+    const uncappedVerdict = compensationAssessment({ offer: offerAt120k, competitiveRanges: allEight });
+    const cappedVerdict = compensationAssessment({ offer: offerAt120k, competitiveRanges: cappedEight });
+    assert(uncappedVerdict.status === 'below_market' && cappedVerdict.status === 'competitive'
+      && uncappedVerdict.competitiveRange.max === 140000 && uncappedVerdict.reportedSpan.max === 200000,
+    `the verdict median must use all eight sources while the displayed band stays typical, got ${uncappedVerdict.status} versus capped ${cappedVerdict.status} and ${JSON.stringify(uncappedVerdict.competitiveRange)}/${JSON.stringify(uncappedVerdict.reportedSpan)}`);
+    const eightLinked = compensationAssessment({
+      offer: offerAt120k,
+      competitiveRanges: allEight,
+      sourceLinks: allEight.map((source, index) => ({
+        title: `Source ${index}`, url: source.sourceUrl,
+        range: { min: source.min, max: source.max, currency: 'USD' },
+      })),
+    });
+    assert(eightLinked.sourceLinks.length === 8,
+      'every selected source must remain in the saved sourceLinks for diagnosis');
+    const filteredUncapped = selectComparableEvidence([
+      ...eightSources,
+      { comparable: true, min: 90000, max: 110000, currency: 'USD', sourceName: 'duplicate', sourceUrl: 'HTTPS://EXAMPLE.TEST/s1' },
+      { comparable: true, min: 1, max: 999999, currency: 'EUR', sourceName: 'foreign currency', sourceUrl: 'https://example.test/eur' },
+      { comparable: false, min: 90000, max: 110000, currency: 'USD', sourceName: 'not comparable', sourceUrl: 'https://example.test/not-comparable' },
+    ], undefined, 'USD');
+    assert(filteredUncapped.length === 8
+      && !filteredUncapped.some(source => ['duplicate', 'foreign currency', 'not comparable'].includes(source.sourceName)),
+    'an uncapped selection must still drop URL duplicates, other currencies and non-comparable ranges');
     // One merged CAD 85,000–130,000 source: typical researched pay is its
     // midpoint, CAD 107,500, not the CAD 85,000 low.
     const atTypical = { ...canadian, max: 107500 };
@@ -1515,6 +1560,21 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     return { unionFloor: merged.min };
   },
 }, {
+  name: 'Personal recommendation validation and the saved verdict share one uncapped evidence set',
+  run: () => {
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const uncappedSelections = source.match(/const comparable = selectComparableEvidence\(\s*sourcesPresentInGroundedResearch\((?:assessment|answer)\??\.comparableRanges \|\| \[\], (?:section|research)\),\s*undefined,\s*item\.marketCurrency,?\s*\);/g) || [];
+    assert(uncappedSelections.length === 2 && !source.includes('item.locationSource ? 4 : 5'),
+      `both the personal-recommendation validation and the verdict must select the same uncapped evidence set, got ${uncappedSelections.length}`);
+    const eightSources = Array.from({ length: 8 }, (_unused, index) => ({
+      comparable: true, min: 90000 + index * 5000, max: 100000 + index * 5000,
+      currency: 'USD', sourceName: `shared-${index}`, sourceUrl: `https://example.test/shared-${index}`,
+    }));
+    const sharedSelection = selectComparableEvidence(eightSources, undefined, 'USD');
+    assert(sharedSelection.length === 8,
+      `the set shared by validation and the verdict must contain every comparable source, got ${sharedSelection.length}`);
+  },
+}, {
   name: 'Competitive-salary report labels the fit gate separately from nested pre-research skips',
   run: () => {
     const snapshotSource = readFileSync(new URL('../../electron/ipc/bugReport/jobsSnapshot.js', import.meta.url), 'utf8');
@@ -1679,7 +1739,7 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       && /that range's note must state the original figures, the original currency, the rate used, and the rate source date/u.test(extractionPrompt)
       && /Without such a rate, mark that range comparable=false/u.test(extractionPrompt),
     'the assessment prompt must allow cross-currency conversion only from a rate quoted in the same cohort grounded section');
-    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 3 && JOB_COMPENSATION_METHOD_VERSION === 5,
-      `the target-currency round must bump both prompt and method versions, got ${COMPENSATION_RESEARCH_PROMPT_VERSION} and ${JOB_COMPENSATION_METHOD_VERSION}`);
+    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 3 && JOB_COMPENSATION_METHOD_VERSION === 7,
+      `the typical-band market range must bump the method version, got ${COMPENSATION_RESEARCH_PROMPT_VERSION} and ${JOB_COMPENSATION_METHOD_VERSION}`);
   },
 }];

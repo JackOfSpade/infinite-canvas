@@ -6,8 +6,10 @@
 // read from the Keychain and never printed or written.
 //
 //   node --import ./scripts/test-stubs/register.mjs scripts/web-research-ab.mjs \
-//     --task preference|compensation --canvas "<canvas.json>" --out <private dir> \
+//     --task preference|compensation|role-family|location --canvas "<canvas.json>" --out <private dir> \
 //     [--count N] [--seed 1] [--concurrency 3] [--ultracode on|off] [--dry-run]
+//
+// --ultracode defaults to off for every task; pass --ultracode on to compare with it.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,21 +35,28 @@ const preferenceBegin = id => `BEGIN RESEARCH ${id}`;
 const preferenceEnd = id => `END RESEARCH ${id}`;
 const compensationBegin = id => `BEGIN COMPENSATION RESEARCH ${id}`;
 const compensationEnd = id => `END COMPENSATION RESEARCH ${id}`;
+const locationBegin = id => `BEGIN JOB LOCATION LOOKUP ${id}`;
+const locationEnd = id => `END JOB LOCATION LOOKUP ${id}`;
 
-function options(argv) {
+const TASKS = Object.freeze(['preference', 'compensation', 'role-family', 'location']);
+const DEFAULT_COUNTS = Object.freeze({ preference: '20', compensation: '8', 'role-family': '12', location: '24' });
+/** Experience-band and location research never opt into ultracode on their own. */
+export const DEFAULT_ULTRACODE = 'off';
+
+export function cliOptions(argv) {
   const { values } = parseNodeArgs({ args: argv, options: {
     task: { type: 'string' }, canvas: { type: 'string' }, out: { type: 'string' }, count: { type: 'string' },
     seed: { type: 'string', default: '1' }, concurrency: { type: 'string', default: '3' }, 'dry-run': { type: 'boolean', default: false },
-    ultracode: { type: 'string', default: 'on' },
+    ultracode: { type: 'string', default: DEFAULT_ULTRACODE },
   } });
   const task = String(values.task ?? '');
-  if (task !== 'preference' && task !== 'compensation') throw new Error('--task must be preference or compensation.');
-  const ultracode = String(values.ultracode ?? 'on');
+  if (!TASKS.includes(task)) throw new Error(`--task must be one of ${TASKS.join(', ')}.`);
+  const ultracode = String(values.ultracode ?? DEFAULT_ULTRACODE);
   if (ultracode !== 'on' && ultracode !== 'off') throw new Error('--ultracode must be on or off.');
   if (!values.canvas || !values.out) throw new Error('--canvas and --out are required.');
   const int = (name, raw, min) => { const n = Number(raw); if (!Number.isInteger(n) || n < min) throw new Error(`--${name} must be an integer >= ${min}`); return n; };
   return {
-    task, canvas: values.canvas, out: path.resolve(values.out), count: int('count', values.count ?? (task === 'preference' ? '20' : '8'), 1),
+    task, canvas: values.canvas, out: path.resolve(values.out), count: int('count', values.count ?? DEFAULT_COUNTS[task], 1),
     seed: int('seed', values.seed, 0), concurrency: int('concurrency', values.concurrency, 1), dryRun: values['dry-run'] === true,
     ultracode: ultracode === 'on',
   };
@@ -187,6 +196,50 @@ export function pageHasFigure(pageText, figure) {
   }
   for (const spelling of spellings) if (new RegExp(`(?<![\\d.,])${escapeRegExp(spelling)}(?![\\d]|[.,]\\d)`, 'u').test(text)) return true;
   return false;
+}
+
+/** Lowercased, whitespace-collapsed text with curly quotes/dashes unified and link targets blanked. */
+export function normalizeSourceText(text) {
+  return withoutLinks(text).toLowerCase()
+    .replace(/[\u2018\u2019\u201a\u201b\u2032]/gu, "'")
+    .replace(/[\u201c\u201d\u201e\u201f\u2033]/gu, '"')
+    .replace(/[\u2010-\u2015\u2212]/gu, '-')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+// A quote is text inside “…”, "…" or ‘…’ of at least 20 characters.
+const QUOTE_TOKEN = /“([^”]{20,})”|"([^"\n]{20,})"|‘([^’]{20,})’/gu;
+
+/** Quoted phrases (20+ characters) written in the same block as `url`. */
+export function quotesNear(body, url) {
+  const quotes = [];
+  if (!url) return quotes;
+  for (const block of blocksOf(body)) {
+    if (!block.includes(String(url))) continue;
+    for (const match of block.matchAll(QUOTE_TOKEN)) {
+      const quote = String(match[1] ?? match[2] ?? match[3] ?? '').trim();
+      if (quote.length >= 20 && !quotes.includes(quote)) quotes.push(quote);
+    }
+  }
+  return quotes;
+}
+
+/** True when `quote` appears in the fetched page after normalizing both sides. */
+export function pageHasQuote(pageText, quote) {
+  const page = normalizeSourceText(pageText);
+  const needle = normalizeSourceText(quote);
+  return Boolean(needle) && Boolean(page) && page.includes(needle);
+}
+
+const YEAR_BANDS = /\b\d{1,2}\s*(?:[-–—]|to)\s*\d{1,2}\s*\+?\s*years?\b|\b\d{1,2}\s*\+\s*years?\b/iu;
+
+/** True when the text states at least one numeric experience band ("2-4 years", "5+ years"). */
+export const hasYearBands = text => YEAR_BANDS.test(String(text ?? ''));
+
+/** Lowercased host of an http(s) URL, or '' when it has none. */
+export function hostOf(url) {
+  try { return new URL(String(url ?? '')).hostname.toLowerCase().replace(/^www\./u, ''); } catch { return ''; }
 }
 
 /** The research-parameters object the app sends for a board row's compensation cohort. */
@@ -561,6 +614,308 @@ async function runCompensation({ opts, rows, researcher, output, log, extract, b
   log(`${JSON.stringify(summary, null, 2)}\ndetails: ${output.resultsPath}`);
 }
 
+// ---- Role-family experience-band task --------------------------------------
+
+// Deterministic and 24 lowercase hex: parseCompensationResearchSections accepts
+// only `[a-f0-9]{24}` markers, and a role must keep its id across runs.
+export const roleFamilyResearchId = role => crypto.createHash('sha256').update(`web-research-ab:role-family-v1:${role}`, 'utf8').digest('hex').slice(0, 24);
+
+function roleFamilyBatches(rows, opts) {
+  const roles = [];
+  const seen = new Set();
+  for (const row of rows) {
+    const role = row?.compensationContext?.roleFamily;
+    if (typeof role !== 'string') continue;
+    const value = role.trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    roles.push(value);
+  }
+  const picked = sample(roles, opts.count, mulberry32(opts.seed));
+  const batches = [];
+  for (let i = 0; i < picked.length; i += 2) {
+    const entries = picked.slice(i, i + 2).map(role => ({ researchId: roleFamilyResearchId(role), role }));
+    batches.push({ roles: entries.map(entry => entry.role), entries });
+  }
+  return { roles, picked, batches };
+}
+
+/**
+ * Score every arm's sections without an AI call: a source is verified when its
+ * page was fetched AND a quote written beside it in the same block occurs in the
+ * page text. The quote is the only evidence that the source was really read.
+ */
+async function runRoleFamily({ opts, rows, researcher, output, log, extract, buildPrompt }) {
+  const board = roleFamilyBatches(rows, opts);
+  log(`distinct role families ${board.roles.length} · sampled ${board.picked.length} · batches ${board.batches.length}`);
+  const texts = Object.fromEntries(ARMS.map(arm => [arm, []]));
+  for (const [index, batch] of board.batches.entries()) {
+    const prompt = buildPrompt(batch.entries);
+    const ids = batch.entries.map(entry => entry.researchId);
+    await Promise.all(ARMS.map(async arm => { texts[arm][index] = await researcher(arm, prompt, ids); }));
+    log(`batch ${index + 1}/${board.batches.length} · prompt ${prompt.length} chars · ${ARMS.map(arm => `${arm} ${texts[arm][index] ? 'ok' : 'missing'}`).join(' · ')}`);
+  }
+
+  const sections = [];
+  for (const [index, batch] of board.batches.entries()) for (const entry of batch.entries) for (const arm of ARMS) {
+    const body = sectionBody(texts[arm][index], entry.researchId, compensationBegin, compensationEnd);
+    sections.push({ arm, batch: index + 1, role: entry.role, researchId: entry.researchId, answered: Boolean(body),
+      urls: extractSectionUrls(body), body });
+  }
+  const urls = [...new Set(sections.flatMap(section => section.urls))];
+  log(`sections ${sections.length} · distinct source urls ${urls.length}`);
+  const pages = await extract(urls);
+  // Kept so the scoring can be redone without paying for the research again.
+  output.json('sections.json', sections.map(({ arm, batch, role, researchId, answered, urls: ownUrls, body }) => ({ arm, batch, role, researchId, answered, urls: ownUrls, body })));
+  output.json('pages.json', Object.fromEntries([...pages.entries()]));
+
+  const sources = [];
+  for (const section of sections) {
+    section.verifiedUrls = [];
+    for (const url of section.urls) {
+      const page = pages.get(url) ?? null;
+      const quotes = quotesNear(section.body, url);
+      const verified = Boolean(page) && quotes.some(quote => pageHasQuote(page, quote));
+      if (verified) section.verifiedUrls.push(url);
+      const record = { kind: 'source', arm: section.arm, batch: section.batch, role: section.role, researchId: section.researchId,
+        url, quotes, verified, pageChars: page ? page.length : 0, pageError: page ? null : 'unavailable' };
+      sources.push(record);
+      output.row(record);
+    }
+    section.verifiedHosts = [...new Set(section.verifiedUrls.map(hostOf).filter(Boolean))];
+    section.yearBands = hasYearBands(section.body);
+    output.row({ kind: 'section', arm: section.arm, batch: section.batch, role: section.role, researchId: section.researchId,
+      urls: section.urls.length, verifiedSources: section.verifiedUrls.length, verifiedHosts: section.verifiedHosts.length,
+      yearBands: section.yearBands });
+  }
+
+  const summary = { task: 'role-family', ultracode: opts.ultracode, roleFamilies: board.roles.length,
+    sampledRoleFamilies: board.picked.length, batches: board.batches.length, distinctSourceUrls: urls.length, arms: {}, researchCalls: {} };
+  for (const arm of ARMS) {
+    const mine = sections.filter(section => section.arm === arm);
+    const mineSources = sources.filter(source => source.arm === arm);
+    const research = researcher.calls.filter(call => call.arm === arm);
+    summary.arms[arm] = { sections: mine.length, sectionsAnswered: mine.filter(section => section.answered).length,
+      sectionsWithVerifiedSource: mine.filter(section => section.verifiedUrls.length > 0).length,
+      sectionsWithTwoVerifiedHosts: mine.filter(section => section.verifiedHosts.length >= 2).length,
+      sourceUrls: mineSources.length, verifiedSources: mineSources.filter(source => source.verified).length,
+      sectionsWithYearBands: mine.filter(section => section.yearBands).length,
+      researchCostUsd: Number(sum(research, call => call.costUsd).toFixed(4)),
+      avgSeconds: average(research, call => call.durationMs), researchCalls: research.length,
+      invalidResearchReplies: research.filter(call => call.valid === false).length, toolCalls: toolTotals(research) };
+    summary.researchCalls[arm] = research;
+  }
+  output.json('summary.json', summary);
+  log(`${JSON.stringify(summary, null, 2)}\ndetails: ${output.resultsPath}`);
+}
+
+// ---- Location lookup task --------------------------------------------------
+
+const LOCATION_ARMS = Object.freeze(['native', 'tavily']);
+const LOCATION_CATEGORIES = Object.freeze(['correct', 'wrong', 'not-found', 'invalid']);
+const REMOTE_SEGMENTS = new Set(['remote', 'worldwide', 'anywhere', 'hybrid']);
+const stripLocationPunctuation = text => String(text ?? '').toLowerCase().replace(/[^\p{L}\p{N}\s]+/gu, ' ').replace(/\s+/gu, ' ').trim();
+
+/** Each ' | ' place as its comma-separated segments, lowercased and stripped of punctuation. */
+function locationSegments(text) {
+  return String(text ?? '').split('|')
+    .map(place => place.split(',').map(part => stripLocationPunctuation(part)).filter(Boolean))
+    .filter(parts => parts.length);
+}
+
+/**
+ * True when one reported place shares its first segment (the city) with one
+ * truth place, or — for a remote truth that names no city — its country word.
+ */
+export function locationMatches(reported, truth, { remote = false } = {}) {
+  const reportedPlaces = locationSegments(reported);
+  const truthPlaces = locationSegments(truth);
+  if (!reportedPlaces.length || !truthPlaces.length) return false;
+  for (const mine of reportedPlaces) for (const theirs of truthPlaces) {
+    if (REMOTE_SEGMENTS.has(theirs[0])) continue;
+    if (mine[0] === theirs[0]) return true;
+  }
+  if (!remote) return false;
+  const countryOf = parts => (parts.length > 1 ? parts.at(-1) : (REMOTE_SEGMENTS.has(parts[0]) ? '' : parts[0]));
+  const countries = truthPlaces.map(countryOf).filter(word => word && !REMOTE_SEGMENTS.has(word));
+  // A truth that names no country ("Remote", "Worldwide") accepts any remote report.
+  if (!countries.length) return reportedPlaces.some(mine => REMOTE_SEGMENTS.has(mine[0]));
+  return reportedPlaces.some(mine => mine.some(part => countries.includes(part)));
+}
+
+const normalizedLocationOf = found => stripLocationPunctuation(found?.remote ? `remote ${found.remoteCountry || ''}` : String(found?.display || ''));
+
+/**
+ * The merged answer for one id, with no research call of its own. Each arm's row
+ * passes through the app's own acceptance gate; the built-in row wins every tie,
+ * and a disagreement is recorded rather than resolved silently.
+ */
+export function decideMergedLocation({ rows = {}, job, evaluate = () => ({ ok: false }) } = {}) {
+  const accepted = {};
+  for (const arm of LOCATION_ARMS) {
+    const row = rows?.[arm];
+    if (!row || row.found !== true) continue;
+    let verdict = null;
+    try { verdict = evaluate(row, job); } catch { verdict = null; }
+    if (verdict?.ok && verdict.found) accepted[arm] = { row, found: verdict.found };
+  }
+  const native = accepted.native;
+  const tavily = accepted.tavily;
+  if (native && tavily) {
+    const agree = normalizedLocationOf(native.found) === normalizedLocationOf(tavily.found);
+    return { kind: agree ? 'native' : 'conflict', row: native.row, found: native.found, agree };
+  }
+  if (native) return { kind: 'native', row: native.row, found: native.found, agree: true };
+  if (tavily) return { kind: 'tavily', row: tavily.row, found: tavily.found, agree: true };
+  return { kind: 'none', row: null, found: null, agree: false };
+}
+
+const LOCATION_FIELD_LABELS = [
+  ['RESULT', 'result'], ['SOURCE URL', 'sourceUrl'], ['POSTING TITLE', 'postingTitle'], ['COMPANY', 'company'],
+  ['LOCATION', 'location'], ['WORK MODE', 'workMode'], ['REMOTE COUNTRY RESTRICTION', 'remoteCountry'],
+  ['EVIDENCE QUOTE', 'evidenceQuote'], ['REASON', 'reason'],
+];
+
+/**
+ * One reply section as the row evaluateLookupRow scores. parseJobLocationLookupSections
+ * only validates the markers, so the labeled fields are read here; null means the
+ * section could not be read at all (an invalid reply for that id).
+ */
+export function locationRowOf(section) {
+  if (typeof section !== 'string' || !section.trim()) return null;
+  const fields = {};
+  for (const line of section.split('\n')) {
+    const stripped = line.replace(/^[\s>*•\-–—]+/u, '');
+    for (const [label, key] of LOCATION_FIELD_LABELS) {
+      const match = stripped.match(new RegExp(`^\\**\\s*${label}\\s*\\**\\s*:\\s*\\**\\s*(.*)$`, 'iu'));
+      if (!match) continue;
+      if (fields[key] === undefined) fields[key] = match[1].replace(/\*+\s*$/u, '').replace(/^["“]|["”]$/gu, '').trim();
+      break;
+    }
+  }
+  const result = String(fields.result ?? '').toLowerCase().replace(/[^a-z\s]/gu, ' ').replace(/\s+/gu, ' ').trim();
+  if (result === 'not found') return { found: false, reason: fields.reason || '', section };
+  if (result !== 'found') return null;
+  // Same contract as the app's own row parser: a FOUND row that omits a field it
+  // needs is unreadable (invalid), not merely a wrong answer.
+  const required = ['sourceUrl', 'postingTitle', 'company', 'location', 'workMode', 'evidenceQuote'];
+  if (required.some(key => !String(fields[key] ?? '').trim())) return null;
+  return { found: true, sourceUrl: fields.sourceUrl, postingTitle: fields.postingTitle,
+    company: fields.company, location: fields.location, workMode: String(fields.workMode).toLowerCase(),
+    remoteCountry: fields.remoteCountry || '', evidenceQuote: fields.evidenceQuote, section };
+}
+
+/** Rows with a confirmed official location, minus the fields that would leak the answer. */
+function locationCases(rows, opts, buildRequest) {
+  const eligible = [];
+  for (const row of rows) {
+    const posting = row?.officialPosting;
+    if (posting?.outcome !== 'found') continue;
+    const display = posting?.location?.display;
+    if (typeof display !== 'string' || !display.trim()) continue;
+    eligible.push(row);
+  }
+  const picked = sample(eligible, opts.count, mulberry32(opts.seed));
+  const cases = [];
+  let skipped = 0;
+  for (const row of picked) {
+    // The answer must not leak: neither the confirmed posting nor its provenance is shown.
+    const job = { ...row };
+    delete job.officialPosting;
+    delete job.postedBy;
+    const request = buildRequest(job);
+    if (!request) { skipped += 1; continue; }
+    cases.push({ job, request, truth: { display: row.officialPosting.location.display.trim(),
+      remote: row.officialPosting.location.remote === true, sourceUrl: String(row.officialPosting.sourceUrl || '') } });
+  }
+  const batches = [];
+  for (let i = 0; i < cases.length; i += 4) batches.push(cases.slice(i, i + 4));
+  return { eligible: eligible.length, picked: picked.length, skipped, cases, batches };
+}
+
+function locationVerdict({ row, accepted, truth }) {
+  if (!row) return { category: 'invalid', accepted: false, sourceUrl: '', reason: 'REPLY_UNPARSEABLE' };
+  if (row.found !== true) return { category: 'not-found', accepted: false, sourceUrl: '', reason: row.reason || 'NOT_FOUND' };
+  if (!accepted?.ok || !accepted.found) return { category: 'not-found', accepted: false, sourceUrl: row.sourceUrl || '', reason: accepted?.reason || 'REJECTED' };
+  const matched = locationMatches(row.location, truth.display, { remote: truth.remote === true });
+  return { category: matched ? 'correct' : 'wrong', accepted: true, sourceUrl: accepted.found.sourceUrl || row.sourceUrl || '', reason: null };
+}
+
+async function runLocation({ opts, rows, researcher, output, log, location }) {
+  const board = locationCases(rows, opts, location.buildJobLocationLookupRequest);
+  log(`rows with a confirmed official location ${board.eligible} · sampled ${board.picked.length} · skipped ${board.skipped} · requests ${board.cases.length} · batches ${board.batches.length}`);
+  const texts = Object.fromEntries(LOCATION_ARMS.map(arm => [arm, []]));
+  for (const [index, batch] of board.batches.entries()) {
+    const requests = batch.map(entry => entry.request);
+    const prompt = location.buildJobLocationLookupPrompt(requests);
+    const ids = requests.map(request => request.id);
+    await Promise.all(LOCATION_ARMS.map(async arm => { texts[arm][index] = await researcher(arm, prompt, ids); }));
+    log(`batch ${index + 1}/${board.batches.length} · prompt ${prompt.length} chars · ${LOCATION_ARMS.map(arm => `${arm} ${texts[arm][index] ? 'ok' : 'missing'}`).join(' · ')}`);
+  }
+
+  const results = [];
+  for (const [index, batch] of board.batches.entries()) {
+    const ids = batch.map(entry => entry.request.id);
+    const parsed = {};
+    for (const arm of LOCATION_ARMS) {
+      const text = texts[arm][index];
+      if (!text) { parsed[arm] = null; continue; }
+      try { parsed[arm] = location.parseJobLocationLookupSections(text, ids); } catch { parsed[arm] = null; }
+    }
+    for (const entry of batch) {
+      const id = entry.request.id;
+      const rowsFor = Object.fromEntries(LOCATION_ARMS.map(arm => [arm, parsed[arm] ? locationRowOf(parsed[arm].get(id)) : null]));
+      const verdicts = {};
+      for (const arm of LOCATION_ARMS) {
+        const row = rowsFor[arm];
+        let accepted = null;
+        if (row?.found === true) {
+          try { accepted = location.evaluateLookupRow(row, entry.job); } catch { accepted = { ok: false, reason: 'EVALUATION_FAILED' }; }
+        }
+        verdicts[arm] = locationVerdict({ row, accepted, truth: entry.truth });
+        verdicts[arm].row = row;
+      }
+      const merged = decideMergedLocation({ rows: rowsFor, job: entry.job, evaluate: location.evaluateLookupRow });
+      const mergedVerdict = merged.row
+        ? { ...locationVerdict({ row: merged.row, accepted: { ok: true, found: merged.found }, truth: entry.truth }), row: merged.row }
+        : { category: 'not-found', accepted: false, sourceUrl: '', reason: 'NO_ACCEPTED_ROW', row: null };
+      const truthHost = hostOf(entry.truth.sourceUrl);
+      for (const arm of [...LOCATION_ARMS, 'merged']) {
+        const verdict = arm === 'merged' ? mergedVerdict : verdicts[arm];
+        const sourceHost = hostOf(verdict.sourceUrl);
+        const record = { kind: 'id', arm, id, title: entry.request.title, company: entry.request.company,
+          truth: entry.truth.display, truthRemote: entry.truth.remote, truthHost,
+          category: verdict.category, accepted: verdict.accepted === true, reason: verdict.reason || null,
+          conflict: arm === 'merged' && merged.kind === 'conflict', mergedFrom: arm === 'merged' ? merged.kind : null,
+          reported: verdict.row?.location || '', reportedRemoteCountry: verdict.row?.remoteCountry || '',
+          sourceUrl: verdict.sourceUrl || null, sourceHost: sourceHost || null,
+          sourceHostMatchesTruth: Boolean(sourceHost) && sourceHost === truthHost };
+        results.push(record);
+        output.row(record);
+      }
+    }
+  }
+
+  const summary = { task: 'location', ultracode: opts.ultracode, eligibleRows: board.eligible, sampled: board.picked.length,
+    skippedWithoutIdentity: board.skipped, requests: board.cases.length, batches: board.batches.length, arms: {}, researchCalls: {} };
+  for (const arm of [...LOCATION_ARMS, 'merged']) {
+    const mine = results.filter(record => record.arm === arm);
+    const research = researcher.calls.filter(call => call.arm === arm);
+    // The merged answer waits on both research calls, so it is timed by both.
+    const timed = arm === 'merged' ? researcher.calls.filter(call => LOCATION_ARMS.includes(call.arm)) : research;
+    const counts = Object.fromEntries(LOCATION_CATEGORIES.map(category => [category, mine.filter(record => record.category === category).length]));
+    summary.arms[arm] = { cases: mine.length, ...counts,
+      conflicts: mine.filter(record => record.conflict).length,
+      sourceHostMatches: mine.filter(record => record.sourceHostMatchesTruth).length,
+      researchCostUsd: Number(sum(research, call => call.costUsd).toFixed(4)),
+      avgSeconds: average(timed, call => call.durationMs), researchCalls: research.length,
+      invalidResearchReplies: research.filter(call => call.valid === false).length, toolCalls: toolTotals(research) };
+    summary.researchCalls[arm] = research;
+  }
+  output.json('summary.json', summary);
+  log(`${JSON.stringify(summary, null, 2)}\ndetails: ${output.resultsPath}`);
+}
+
 // ---- Dry run ---------------------------------------------------------------
 
 async function dryPreference({ opts, rows, replay }) {
@@ -591,10 +946,32 @@ function dryCompensation({ opts, rows, buildPrompt }) {
   return 0;
 }
 
+function dryRoleFamily({ opts, rows, buildPrompt }) {
+  const board = roleFamilyBatches(rows, opts);
+  console.log(`dry run: role-family · distinct role families ${board.roles.length} · sampled ${board.picked.length} · batches ${board.batches.length}`);
+  board.batches.forEach((batch, index) => {
+    const prompt = buildPrompt(batch.entries);
+    console.log(`batch ${index + 1}/${board.batches.length} · ${batch.entries.map(entry => `${entry.role} (${entry.researchId})`).join(' | ')} · prompt ${prompt.length} chars`);
+  });
+  console.log(`arms ${ARMS.join(', ')} · no AI or Tavily call made, Keychain not read`);
+  return 0;
+}
+
+function dryLocation({ opts, rows, location }) {
+  const board = locationCases(rows, opts, location.buildJobLocationLookupRequest);
+  console.log(`dry run: location · rows with a confirmed official location ${board.eligible} · sampled ${board.picked.length} · skipped without title/company ${board.skipped} · requests ${board.cases.length} · batches ${board.batches.length}`);
+  board.batches.forEach((batch, index) => {
+    const prompt = location.buildJobLocationLookupPrompt(batch.map(entry => entry.request));
+    console.log(`batch ${index + 1}/${board.batches.length} · ids ${batch.map(entry => entry.request.id).join(', ')} · prompt ${prompt.length} chars`);
+  });
+  console.log(`arms ${ARMS.join(', ')} · merged is derived per id · no AI or Tavily call made, Keychain not read`);
+  return 0;
+}
+
 let redactOutput = text => String(text ?? '');
 
 async function main(argv) {
-  const opts = options(argv);
+  const opts = cliOptions(argv);
   const [{ parseWorkspaceText, restoreWorkspaceContent }, tavily, nonApi, worker, profiles, sdk, runner, replay] = await Promise.all([
     ipc('workspaceContentPool.js'), ipc('tavily.js'), ipc('nonApiAi.js'), ipc('claudeTaskWorker.js'),
     ipc('claudeTaskProfiles.js'), ipc('claudeApplicationSdkStage.js'), ipc('claudeApplicationRunner.js'),
@@ -606,8 +983,14 @@ async function main(argv) {
   if (!node) throw new Error('No Job Board node with rows was found in the canvas.');
   const rows = [node.data.scoredJobs, node.data.rows, node.data.jobs].find(Array.isArray) || [];
   const prefs = await ipc('jobPreferences.js');
-  const jobsModule = opts.task === 'compensation' ? await ipc('jobs.js') : null;
-  if (opts.dryRun) return opts.task === 'preference' ? dryPreference({ opts, rows, replay }) : dryCompensation({ opts, rows, buildPrompt: jobsModule.buildCompensationResearchPrompt });
+  const jobsModule = opts.task === 'compensation' || opts.task === 'role-family' ? await ipc('jobs.js') : null;
+  const location = opts.task === 'location' ? await ipc('jobLocationLookup.js') : null;
+  if (opts.dryRun) {
+    if (opts.task === 'preference') return dryPreference({ opts, rows, replay });
+    if (opts.task === 'compensation') return dryCompensation({ opts, rows, buildPrompt: jobsModule.buildCompensationResearchPrompt });
+    if (opts.task === 'role-family') return dryRoleFamily({ opts, rows, buildPrompt: jobsModule.buildRoleFamilyBatchResearchPrompt });
+    return dryLocation({ opts, rows, location });
+  }
 
   const key = await tavily.readTavilyKey();
   if (!key) throw new Error(`No Tavily key in the Keychain. Run: security add-generic-password -s ${tavily.TAVILY_KEYCHAIN_SERVICE} -a tavily -w`);
@@ -630,6 +1013,18 @@ async function main(argv) {
     const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: PREFERENCE_TASK,
       begin: preferenceBegin, end: preferenceEnd, parse: (raw, ids) => prefs.parseJobPreferenceResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
     await runPreference({ opts, rows, replay, app, researcher, output, log });
+  } else if (opts.task === 'role-family') {
+    const profile = profiles.claudeTaskProfile(COMPENSATION_TASK);
+    if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
+    const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: COMPENSATION_TASK,
+      begin: compensationBegin, end: compensationEnd, parse: (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
+    await runRoleFamily({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildRoleFamilyBatchResearchPrompt });
+  } else if (opts.task === 'location') {
+    const profile = profiles.claudeTaskProfile(COMPENSATION_TASK);
+    if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
+    const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: COMPENSATION_TASK,
+      begin: locationBegin, end: locationEnd, parse: (raw, ids) => location.parseJobLocationLookupSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
+    await runLocation({ opts, rows, researcher, output, log, location });
   } else {
     const profile = profiles.claudeTaskProfile(COMPENSATION_TASK);
     if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);

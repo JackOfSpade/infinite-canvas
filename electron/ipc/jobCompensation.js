@@ -339,6 +339,32 @@ export function mergeCompetitiveRanges(ranges, currency = '') {
   };
 }
 
+/**
+ * The typical competitive band: the median of the retained sources' lows to
+ * the median of their highs. The union (lowest low to highest high) is still
+ * reported as reportedSpan for diagnosis, but one wide survey must not stretch
+ * the market range a card shows. One source yields that range; two yield the
+ * averages of their endpoints. Returns null when no valid range is available.
+ */
+export function typicalCompetitiveBand(ranges, currency = '') {
+  const expectedCurrency = String(currency || '').trim().toUpperCase();
+  const valid = validCompetitiveRanges(ranges, currency);
+  if (!valid.length) return null;
+  const low = medianOf(valid.map(range => Number(range.min)));
+  const high = medianOf(valid.map(range => Number(range.max)));
+  if (low === null || high === null) return null;
+  const min = Math.round(low);
+  const max = Math.round(high);
+  return {
+    // Rounding is monotone, so the band cannot invert; keep the guarantee
+    // explicit because a saved assessment is re-checked when rendered.
+    min: Math.min(min, max),
+    max: Math.max(min, max),
+    currency: expectedCurrency || String(valid[0].currency || '').trim().toUpperCase(),
+    period: 'annual',
+  };
+}
+
 // A source whose midpoint sits this far from the median midpoint is describing
 // a different level or specialty, not the same market. 1.6x is deliberately
 // loose: it removes the wild outlier without narrowing the band for mere
@@ -396,11 +422,12 @@ export function competitiveFloor(ranges, currency = '') {
   if (disagreement) return null;
   const center = medianOf(retained.map(rangeMidpoint));
   if (center === null) return null;
-  // Rounding must not push the figure outside the researched band: the saved
-  // assessment is re-checked against that band when it is rendered.
-  const low = Math.min(...retained.map(range => Number(range.min)));
-  const high = Math.max(...retained.map(range => Number(range.max)));
-  return Math.min(high, Math.max(low, Math.round(center)));
+  // Rounding must not push the figure outside the band the card shows, which
+  // is now the typical band rather than the union: the saved assessment is
+  // re-checked against that band when it is rendered.
+  const band = typicalCompetitiveBand(retained, currency);
+  if (!band) return null;
+  return Math.min(band.max, Math.max(band.min, Math.round(center)));
 }
 
 // z-score of the 75th percentile of a standard normal distribution.
@@ -552,6 +579,10 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     offerReasonCode: offer?.usable ? 'usable_cash_salary' : offer?.reasonCode || 'no_cash_salary',
     offered: offer?.usable ? offer : null,
     competitiveRange: null,
+    // The union of the same sources (lowest low to highest high), kept for
+    // diagnosis only. It is never displayed; competitiveRange is the typical
+    // band the card shows and the personal recommendation is validated against.
+    reportedSpan: null,
     // Set only when a merged range exists. The renderer treats an absent value
     // as legacy saved data and falls back to competitiveRange.min.
     competitiveFloor: null,
@@ -576,22 +607,23 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     ? retainConsistentCompetitiveRanges(competitiveRanges, currency)
     : { retained: [], excluded: [] };
   const merged = currency ? mergeCompetitiveRanges(retained, currency) : null;
-  const floor = merged ? competitiveFloor(retained, currency) : null;
+  const band = merged ? typicalCompetitiveBand(retained, currency) : null;
+  const floor = band ? competitiveFloor(retained, currency) : null;
   const excludedNote = excluded.length
     ? `${excluded.length} source(s) whose range sat far from the others were left out of this comparison.`
     : disagreement
       ? 'The salary sources split into groups far apart from each other, so no single typical pay could be established.'
       : '';
-  if (merged) {
+  if (band) {
     base.personalRecommendation = normalizePersonalSalaryRecommendation(personalRecommendation, {
-      marketRange: merged, evidence: personalSalaryEvidence, offered: offer, researchedAt,
+      marketRange: band, evidence: personalSalaryEvidence, offered: offer, researchedAt,
     });
   }
   if (!offer?.usable) {
-    if (merged) {
+    if (band) {
       const explanation = withReservedNotes(base.justification, [
-        `The listing does not state a usable guaranteed cash salary, so no listing comparison was made. This researched ${merged.currency} market range provides context for the separate desired-salary guidance.`,
-        sourceCountNote(retained, merged.currency),
+        `The listing does not state a usable guaranteed cash salary, so no listing comparison was made. This researched ${band.currency} market range provides context for the separate desired-salary guidance.`,
+        sourceCountNote(retained, band.currency),
         excludedNote,
         mismatchNote,
       ]);
@@ -599,7 +631,8 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
         ...base,
         status: 'market_recommendation',
         reasonCode: 'market_range_recommended',
-        competitiveRange: merged,
+        competitiveRange: band,
+        reportedSpan: merged,
         competitiveFloor: floor,
         excludedSourceCount: excluded.length,
         justification: explanation,
@@ -613,7 +646,7 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     if (researchAttempted && !reasonCode) return { ...base, reasonCode: 'market_range_unavailable' };
     return base;
   }
-  if (!merged) {
+  if (!band) {
     // A deliberate admission skip is unresearched even when the posting has
     // usable pay. Reserve uncertain for an attempted or unavailable market
     // comparison, retaining the stated offer and the exact skip reason.
@@ -637,11 +670,12 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
       ...base,
       status: 'uncertain',
       reasonCode: 'market_sources_disagree',
-      competitiveRange: merged,
+      competitiveRange: band,
+      reportedSpan: merged,
       competitiveFloor: null,
       excludedSourceCount: 0,
       ...offerPercentile,
-      justification: withReservedNotes(base.justification, [excludedNote, sourceCountNote(retained, merged.currency), mismatchNote]),
+      justification: withReservedNotes(base.justification, [excludedNote, sourceCountNote(retained, band.currency), mismatchNote]),
     };
   }
   // The card says one country and the location found for this job says
@@ -652,13 +686,14 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
       ...base,
       status: 'uncertain',
       reasonCode: 'location_conflict',
-      competitiveRange: merged,
+      competitiveRange: band,
+      reportedSpan: merged,
       competitiveFloor: floor,
       excludedSourceCount: excluded.length,
       ...offerPercentile,
       justification: withReservedNotes(base.justification, [
-        `Pay was not judged: the card lists ${mismatch.cardCountry} but the location found for this job is in ${mismatch.comparedCountry}, so the researched ${merged.currency} range may describe the wrong market.`,
-        sourceCountNote(retained, merged.currency),
+        `Pay was not judged: the card lists ${mismatch.cardCountry} but the location found for this job is in ${mismatch.comparedCountry}, so the researched ${band.currency} range may describe the wrong market.`,
+        sourceCountNote(retained, band.currency),
         excludedNote,
       ]),
     };
@@ -668,20 +703,20 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
   // sources — not the single lowest low any one source published. No buffer
   // is applied.
   const status = offer.max < floor ? 'below_market' : 'competitive';
-  // A posted floor above the entire researched range is still competitive pay,
+  // A posted floor above the entire displayed band is still competitive pay,
   // but it also proves the benchmark does not describe this job. Say so, so
   // nobody reads the market range as what this employer pays.
-  const aboveCeiling = offer.min > merged.max;
+  const aboveCeiling = offer.min > band.max;
   const money = (value) => `${offer.currency ? `${offer.currency} ` : ''}${Math.round(value).toLocaleString('en-US')}`;
   const typicalMarket = `${money(floor)}, the median midpoint of ${retained.length} comparable sources`;
   const decision = status === 'below_market'
     ? `The listing's highest stated guaranteed cash salary (${money(offer.max)}) is below typical researched pay (${typicalMarket}).`
     : aboveCeiling
-      ? `The listing's lowest stated guaranteed cash salary (${money(offer.min)}) is above the top of the researched market range (${money(merged.max)}), so that benchmark likely reflects a different level, employer tier or specialty than this job. Desired-salary guidance uses the employer's posted band instead.`
+      ? `The listing's lowest stated guaranteed cash salary (${money(offer.min)}) is above the top of the researched market range (${money(band.max)}), so that benchmark likely reflects a different level, employer tier or specialty than this job. Desired-salary guidance uses the employer's posted band instead.`
       : `The listing's highest stated guaranteed cash salary (${money(offer.max)}) reaches typical researched pay (${typicalMarket}).`;
   const explanation = withReservedNotes(base.justification, [
     decision,
-    sourceCountNote(retained, merged.currency),
+    sourceCountNote(retained, band.currency),
     ambiguousCurrencyNote(offer),
     excludedNote,
     mismatchNote,
@@ -691,7 +726,8 @@ export function compensationAssessment({ offer, competitiveRanges, marketCurrenc
     status,
     reasonCode: status === 'below_market' ? 'offered_max_below_typical_market'
       : aboveCeiling ? 'offered_min_above_competitive_ceiling' : 'offered_reaches_typical_market',
-    competitiveRange: merged,
+    competitiveRange: band,
+    reportedSpan: merged,
     competitiveFloor: floor,
     excludedSourceCount: excluded.length,
     ...offerPercentile,
@@ -1213,14 +1249,15 @@ export function sourcesPresentInGroundedResearch(sources, groundedResearch) {
 }
 
 /**
- * Keep the exact same bounded evidence set for the mathematical union and the
- * card disclosure. When a cohort has many sources, preserve the source that
- * sets the merged floor and the one that sets its ceiling first, then fill in
- * original research order. That avoids a hidden sixth range changing a card's
- * verdict or displayed market band.
+ * Keep every auditable, comparable, target-currency source unless the caller
+ * passes a finite cap. The verdict and its saved sourceLinks use the uncapped
+ * selection; a finite maxSources preserves the older bounded behaviour by
+ * retaining the source that sets the merged floor and the one that sets its
+ * ceiling first, then filling in original research order.
  */
-export function selectComparableEvidence(ranges, maxSources = 5, expectedCurrency = '') {
-  const limit = Math.max(1, Math.floor(Number(maxSources) || 5));
+export function selectComparableEvidence(ranges, maxSources, expectedCurrency = '') {
+  const requestedCap = maxSources === undefined || maxSources === null ? NaN : Number(maxSources);
+  const limit = Number.isFinite(requestedCap) ? Math.max(1, Math.floor(requestedCap || 5)) : null;
   const currency = String(expectedCurrency || '').trim().toUpperCase();
   const seenUrls = new Set();
   const candidates = (Array.isArray(ranges) ? ranges : []).filter((range) => {
@@ -1228,16 +1265,16 @@ export function selectComparableEvidence(ranges, maxSources = 5, expectedCurrenc
     const min = Number(range.min);
     const max = Number(range.max);
     if (!(Number.isFinite(min) && min > 0 && Number.isFinite(max) && max >= min)) return false;
-    // Never let an unconverted foreign-currency source consume one of the
-    // bounded display/verdict slots. The assessment code does not convert
-    // currencies, so source evidence must already be in the offer currency.
+    // Never let an unconverted foreign-currency source enter the verdict or
+    // its saved sourceLinks. The assessment code does not convert currencies,
+    // so source evidence must already be in the offer currency.
     if (currency && String(range.currency || '').trim().toUpperCase() !== currency) return false;
     const url = canonicalHttpUrl(range.sourceUrl || range.url);
     if (seenUrls.has(url)) return false;
     seenUrls.add(url);
     return true;
   });
-  if (candidates.length <= limit) return candidates;
+  if (limit === null || candidates.length <= limit) return candidates;
   const floor = candidates.reduce((best, range) => Number(range.min) < Number(best.min) ? range : best, candidates[0]);
   const ceiling = candidates.reduce((best, range) => Number(range.max) > Number(best.max) ? range : best, candidates[0]);
   const selected = [];
@@ -1264,7 +1301,7 @@ function sanitizeLinks(links) {
       currency: String(source.currency || '').trim().toUpperCase(),
       note: String(source.note || '').trim().slice(0, 500),
     };
-  }).filter(Boolean).slice(0, 5);
+  }).filter(Boolean);
 }
 
 export function diagnoseCompensationExperienceBandLadder(bands) {

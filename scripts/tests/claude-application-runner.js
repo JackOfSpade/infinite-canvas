@@ -551,24 +551,35 @@ export default [
   },
 
   {
-    name: 'claude runner: CLI args are exactly the headless, Workflow-only, ultracode latest-Sonnet invocation',
+    name: 'claude runner: CLI args are exactly the headless latest-Sonnet invocation with ultracode off by default',
     run() {
       assert.deepEqual(claudeCliArgs(), [
+        '-p', '--model', 'sonnet', '--effort', 'high', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
+        '--tools', '', '--allowedTools', '', '--input-format', 'stream-json',
+        '--output-format', 'stream-json', '--verbose',
+      ]);
+      assert.equal(claudeCliArgs().includes('--settings'), false, 'no ultracode setting by default');
+      assert.equal(claudeCliArgs().includes('Workflow'), false, 'no Workflow tool by default');
+      assert.equal(claudeCliArgs().includes('--no-session-persistence'), false);
+      // Only an explicit opt-in restores the Workflow-only ultracode invocation.
+      assert.deepEqual(claudeCliArgs({ ultracode: true }), [
         '-p', '--model', 'sonnet', '--effort', 'high', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
         '--settings', '{"ultracode":true}', '--tools', 'Workflow', '--allowedTools', 'Workflow', '--input-format', 'stream-json',
         '--output-format', 'stream-json', '--verbose',
       ]);
-      assert.equal(claudeCliArgs().includes('--no-session-persistence'), false);
     },
   },
   {
-    name: 'claude runner: CLI args start a session with --session-id or continue it with --resume right after -p',
+    name: 'claude runner: CLI args start a session with --session-id or continue it with --resume right after -p, with ultracode off unless opted in',
     run() {
       const tail = ['--model', 'opus', '--effort', 'xhigh', '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config',
-        '--settings', '{"ultracode":true}', '--tools', 'Workflow', '--allowedTools', 'Workflow', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+        '--tools', '', '--allowedTools', '', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: false }), ['-p', '--session-id', 'S', ...tail]);
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: true }), ['-p', '--resume', 'S', ...tail]);
       assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', resume: true }), ['-p', ...tail]);
+      const optInTail = [...tail.slice(0, 8), '--settings', '{"ultracode":true}', '--tools', 'Workflow', '--allowedTools', 'Workflow', ...tail.slice(12)];
+      assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: false, ultracode: true }), ['-p', '--session-id', 'S', ...optInTail]);
+      assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 'S', resume: true, ultracode: true }), ['-p', '--resume', 'S', ...optInTail]);
     },
   },
   {
@@ -888,13 +899,18 @@ export default [
     },
   },
   {
-    name: 'claude runner: research tools are offered and allowed together with Workflow; effort is never ultracode',
+    name: 'claude runner: research tools are offered and allowed without Workflow by default and with it only on an explicit opt-in; effort is never ultracode',
     run() {
       const args = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
       const at = args.indexOf('--tools');
-      assert.deepEqual(args.slice(at, at + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow']);
+      assert.deepEqual(args.slice(at, at + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch']);
       assert.equal(args[args.indexOf('--effort') + 1], 'high');
       assert.equal(args.includes('ultracode'), false);
+      const optedIn = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', ultracode: true });
+      const onAt = optedIn.indexOf('--tools');
+      assert.deepEqual(optedIn.slice(onAt, onAt + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow']);
+      assert.equal(optedIn[optedIn.indexOf('--effort') + 1], 'high', 'ultracode is a setting; the stage effort is unchanged');
+      assert.deepEqual(optedIn.slice(optedIn.indexOf('--settings'), optedIn.indexOf('--settings') + 2), ['--settings', '{"ultracode":true}']);
       assert.deepEqual(withWorkflowTool('Workflow'), ['Workflow']);
       assert.deepEqual(withWorkflowTool(['WebSearch']), ['WebSearch', 'Workflow']);
     },

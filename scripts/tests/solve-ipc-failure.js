@@ -255,9 +255,8 @@ export default [
         && compSource.includes('name: error?.name, error: error?.message || String(error)')
         && compSource.includes('progressRevisionRef.current !== progressRevision'),
       'comp-source Solve has a synchronous click latch, preserves rejected AbortError cancellation, and cannot overwrite newer progress');
-      assert(jobCard.includes('const opened = await openExternalUrl(rawUrl, {')
-        && jobCard.includes('dedupeKey: `job-research-open-external:${id}`'),
-      'research links use the safe external dispatcher instead of leaking rejected invokes');
+      assert(!jobCard.includes('Research sources') && !jobCard.includes('job-research-open-external'),
+      'the job card no longer lists or opens salary research links (method v6 keeps them only in saved data for diagnosis)');
       return { jobSolveRejected: true, compFreshnessGuard: true, researchLinkSafe: true };
     },
   },

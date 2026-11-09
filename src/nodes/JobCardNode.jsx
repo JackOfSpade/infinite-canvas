@@ -12,8 +12,6 @@ import { useIsMountedRef } from '../hooks/useIsMountedRef';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView, isCompensationRecommendationCurrent, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
-import { normalizeExternalHttpUrl } from '../utils/urlSafety';
-import { openExternalFailureMessage, openExternalUrl } from '../utils/openExternal';
 import { summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
 import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
@@ -557,9 +555,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     () => normalizeCompensationAssessment(data.compensationAssessment),
     [data.compensationAssessment]
   );
-  const compensationSourceLinks = useMemo(() => compensationAssessment.sourceLinks
-    .map((source) => ({ ...source, safeUrl: normalizeExternalHttpUrl(source.url) }))
-    .filter((source) => source.safeUrl), [compensationAssessment]);
   const compensationDisplay = useMemo(() => jobCompensationDisplay(data, compensationAssessment), [data, compensationAssessment]);
   const personalRecommendation = compensationAssessment.personalRecommendation;
   const liveSalaryCareerKey = useStore(useCallback(store => {
@@ -699,21 +694,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       ? { deadSourceUrls: [] } : null));
     EventLogger.log(`[JobCard] source-links restored id=${id}`);
   }, [id, effectiveLock, updateGlobal]);
-
-  const openResearchSource = useCallback(async (rawUrl) => {
-    const opened = await openExternalUrl(rawUrl, {
-      dispatcher: window.electronAPI?.openExternal,
-      fallback: window.open,
-    });
-    if (!opened.ok) {
-      addToast({
-        title: 'Cannot Open Link',
-        description: openExternalFailureMessage(opened),
-        type: 'error',
-        dedupeKey: `job-research-open-external:${id}`,
-      });
-    }
-  }, [addToast, id]);
 
   // Dismiss = cancel this card's own waiting lease, then delete it. The tree
   // reflow (column tightens, the role leaf's pagination window backfills the
@@ -2150,32 +2130,6 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             )}
             {researchedDateLabel(compensationAssessment.researchedAt) && (
               <div><span className="text-white/35">Researched:</span> {researchedDateLabel(compensationAssessment.researchedAt)}</div>
-            )}
-            {compensationSourceLinks.length > 0 && (
-              <div className="mt-2 border-t border-white/5 pt-1.5">
-                <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-white/35">Research sources</div>
-                <div className="space-y-1">
-                  {compensationSourceLinks.map((source, index) => {
-                    const sourceRange = cashRangeLabel(source.range);
-                    return (
-                      <div key={`${source.url}-${index}`} className="min-w-0">
-                        <button
-                          type="button"
-                          className="nodrag flex max-w-full items-center gap-1 text-left text-[11px] text-blue-300/80 hover:text-blue-200"
-                          onClick={(e) => { e.stopPropagation(); openResearchSource(source.safeUrl); }}
-                          title={`Open research source: ${source.label}`}
-                        >
-                          <ExternalLink size={11} className="shrink-0" aria-hidden="true" />
-                          <span className="truncate">{source.label}{sourceRange ? ` · ${sourceRange}` : ''}</span>
-                        </button>
-                        {source.details && (
-                          <p className="mt-0.5 pl-4 text-[10px] leading-snug text-white/35">{source.details}</p>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
             )}
           </div>
         )}

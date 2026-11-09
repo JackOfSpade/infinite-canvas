@@ -11,14 +11,16 @@ import {
 } from './fixtures/interview-practice-scenarios.mjs';
 
 const USAGE = `Usage: node scripts/interview-practice-benchmark.mjs --out <private dir outside the repo>
-  [--models opus,sonnet,haiku] [--efforts low,medium,high]
+  [--models opus,sonnet,haiku] [--efforts low,medium,high] [--ultracode on,off]
   [--classifier-models haiku,sonnet] [--classifier-efforts low,medium]
   [--claude-bin claude] [--timeout-ms 30000] [--runs 2]
   [--only interviewer|classifier] [--report-only]
 
 Concurrency is always 1. Any failure stops that configuration and is recorded; nothing is retried or substituted.
 Reusing --out resumes from results.jsonl. --report-only rebuilds reports and judge packets with no CLI calls.
-Scenarios are synthetic. Models: opus, sonnet, haiku. Effort max is rejected.`;
+Scenarios are synthetic. Models: opus, sonnet, haiku. Effort max is rejected.
+Ultracode (default off) is the interviewer's Workflow-tool setting; it runs as its own configurations so that on and
+off results of the same model/effort sit side by side. Classifier configurations never use it.`;
 
 export const FIRST_SENTENCE_GATE_MS = 1500;
 export const CLASSIFIER_GATE_MS = 600;
@@ -34,17 +36,32 @@ const RUBRIC = [
 ];
 const configError = () => Object.assign(new Error('CONFIG_REJECTED'), { code: 'CONFIG_REJECTED' });
 
-export const configId = config => `${config.model}/${config.effort}`;
+const ULTRACODE_SUFFIX = '+ultracode';
+export const configId = config => `${config.model}/${config.effort}${config.ultracode === true ? ULTRACODE_SUFFIX : ''}`;
 const safeName = value => String(value).replace(/[^A-Za-z0-9._-]+/g, '-');
 const list = value => [...new Set(String(value).split(',').map(item => item.trim()).filter(Boolean))];
 
-/** Build model x effort configurations; rejects fable/unknown aliases and effort max before anything runs. */
-export function buildConfigs(models, efforts) {
-  const configs = list(models).flatMap(model => list(efforts).map(effort => ({ model, effort })));
+/** 'on'/'off' tokens become the interviewer's optional boolean; 'off' is the default and the app's own value. */
+export function parseUltracode(value = 'off') {
+  return list(value).map(token => {
+    if (token === 'on') return true;
+    if (token === 'off') return false;
+    throw configError();
+  });
+}
+
+/** Build model x effort x ultracode configurations; rejects fable/unknown aliases, effort max and bad ultracode tokens. */
+export function buildConfigs(models, efforts, ultracode = 'off') {
+  const modes = parseUltracode(ultracode);
+  const configs = list(models).flatMap(model => list(efforts)
+    .flatMap(effort => modes.map(mode => ({ model, effort, ultracode: mode }))));
   if (!configs.length) throw configError();
   for (const config of configs) assertInterviewerConfig(config);
   return configs;
 }
+
+/** Classifier configurations stay model x effort: the classifier never offers Workflow. */
+export const classifierConfigsOf = configs => configs.map(({ model, effort }) => ({ model, effort }));
 
 export function percentile(values, quantile) {
   const sorted = values.filter(value => Number.isFinite(value) && value >= 0).sort((a, b) => a - b);
@@ -92,7 +109,7 @@ export function summarize({ records, interviewerConfigs = [], classifierConfigs 
     const p95FirstSentenceMs = percentile(spoken.map(record => record.firstSentenceMs), 0.95);
     const failed = failures.filter(record => record.kind === 'interviewer' && record.config === id);
     return {
-      config: id, turns: turns.length, spokenTurns: spoken.length, listenTurns: listens.length,
+      config: id, ultracode: id.endsWith(ULTRACODE_SUFFIX), turns: turns.length, spokenTurns: spoken.length, listenTurns: listens.length,
       p50FirstSentenceMs: percentile(spoken.map(record => record.firstSentenceMs), 0.5), p95FirstSentenceMs,
       p50ListenMs: percentile(listens.map(record => record.totalMs), 0.5), p95ListenMs: percentile(listens.map(record => record.totalMs), 0.95),
       keepListeningCorrect: pauseCorrect.length, keepListeningTotal: pause.length,
@@ -117,9 +134,28 @@ export function summarize({ records, interviewerConfigs = [], classifierConfigs 
   return {
     version: 1, synthetic: true,
     gates: { firstSentenceP95Ms: FIRST_SENTENCE_GATE_MS, classifierP95Ms: CLASSIFIER_GATE_MS },
-    interviewer, classifier,
+    interviewer, classifier, ultracode: ultracodeComparison(interviewer),
     ranking: interviewer.filter(row => row.eligible).sort((a, b) => a.p95FirstSentenceMs - b.p95FirstSentenceMs || a.config.localeCompare(b.config)).map(row => row.config),
   };
+}
+
+/** Pair every ultracode-on interviewer row with the same model/effort ultracode-off row for a side-by-side delta. */
+export function ultracodeComparison(rows = []) {
+  const byId = new Map(rows.map(row => [row.config, row]));
+  const delta = (on, off) => on === null || on === undefined || off === null || off === undefined ? null : on - off;
+  return rows.filter(row => row.ultracode === true).map(onRow => {
+    const base = onRow.config.slice(0, -ULTRACODE_SUFFIX.length);
+    const offRow = byId.get(base) ?? null;
+    return {
+      config: base,
+      offP95FirstSentenceMs: offRow?.p95FirstSentenceMs ?? null, onP95FirstSentenceMs: onRow.p95FirstSentenceMs,
+      p95FirstSentenceDeltaMs: delta(onRow.p95FirstSentenceMs, offRow?.p95FirstSentenceMs),
+      offMeanCostPerTurnUsd: offRow?.meanCostPerTurnUsd ?? null, onMeanCostPerTurnUsd: onRow.meanCostPerTurnUsd,
+      meanCostPerTurnDeltaUsd: delta(onRow.meanCostPerTurnUsd, offRow?.meanCostPerTurnUsd),
+      offEligible: offRow?.eligible ?? null, onEligible: onRow.eligible,
+      offFailures: offRow?.failures.length ?? null, onFailures: onRow.failures.length,
+    };
+  });
 }
 
 const ms = value => value === null || value === undefined ? '—' : String(Math.round(value));
@@ -130,9 +166,19 @@ const cell = value => String(value).replace(/\|/g, '\\|').replace(/[\r\n]/g, ' '
 export function renderSummaryMarkdown(summary) {
   const lines = ['# Practice interview call benchmark (synthetic scenarios)', '',
     '## Interviewer', '',
-    '| Config | Spoken turns | p50 first sentence ms | p95 first sentence ms | Listen turns | p50 / p95 listen ms | Keep-listening (d) | Mean cost / turn | Cost / 50-min call (×60) | Failures | Gate p95 ≤ 1500 | Judge score |',
-    '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |'];
-  for (const row of summary.interviewer) lines.push(`| ${cell(row.config)} | ${row.spokenTurns} | ${ms(row.p50FirstSentenceMs)} | ${ms(row.p95FirstSentenceMs)} | ${row.listenTurns} | ${ms(row.p50ListenMs)} / ${ms(row.p95ListenMs)} | ${row.keepListeningTotal ? `${row.keepListeningCorrect}/${row.keepListeningTotal}` : '—'} | ${usd(row.meanCostPerTurnUsd)} | ${usd(row.projectedCostPerCallUsd)} | ${row.failures.length ? row.failures.map(item => `${cell(item.scenario)}#${item.turnIndex} ${cell(item.code)}`).join('; ') : 'none'} | ${row.eligible ? 'pass' : 'fail'} | (to be filled) |`);
+    '| Config | Ultracode | Spoken turns | p50 first sentence ms | p95 first sentence ms | Listen turns | p50 / p95 listen ms | Keep-listening (d) | Mean cost / turn | Cost / 50-min call (×60) | Failures | Gate p95 ≤ 1500 | Judge score |',
+    '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |'];
+  for (const row of summary.interviewer) lines.push(`| ${cell(row.config)} | ${row.ultracode ? 'on' : 'off'} | ${row.spokenTurns} | ${ms(row.p50FirstSentenceMs)} | ${ms(row.p95FirstSentenceMs)} | ${row.listenTurns} | ${ms(row.p50ListenMs)} / ${ms(row.p95ListenMs)} | ${row.keepListeningTotal ? `${row.keepListeningCorrect}/${row.keepListeningTotal}` : '—'} | ${usd(row.meanCostPerTurnUsd)} | ${usd(row.projectedCostPerCallUsd)} | ${row.failures.length ? row.failures.map(item => `${cell(item.scenario)}#${item.turnIndex} ${cell(item.code)}`).join('; ') : 'none'} | ${row.eligible ? 'pass' : 'fail'} | (to be filled) |`);
+  const pairs = summary.ultracode ?? ultracodeComparison(summary.interviewer);
+  if (pairs.length) {
+    lines.push('', '## Ultracode on vs off (same model/effort)', '',
+      '| Config | p95 off ms | p95 on ms | Δ p95 ms | Cost/turn off | Cost/turn on | Δ cost | Gate off | Gate on | Failures off / on |',
+      '| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- | --- |');
+    const signed = (value, unit = '') => value === null || value === undefined ? '—' : `${value > 0 ? '+' : ''}${Math.round(value * 10000) / 10000}${unit}`;
+    for (const pair of pairs) {
+      lines.push(`| ${cell(pair.config)} | ${ms(pair.offP95FirstSentenceMs)} | ${ms(pair.onP95FirstSentenceMs)} | ${signed(pair.p95FirstSentenceDeltaMs)} | ${usd(pair.offMeanCostPerTurnUsd)} | ${usd(pair.onMeanCostPerTurnUsd)} | ${signed(pair.meanCostPerTurnDeltaUsd)} | ${pair.offEligible === null ? '—' : pair.offEligible ? 'pass' : 'fail'} | ${pair.onEligible ? 'pass' : 'fail'} | ${pair.offFailures ?? '—'} / ${pair.onFailures} |`);
+    }
+  }
   lines.push('', '## Classifier', '',
     '| Config | Cases | Accuracy | p50 ms | p95 ms | Failures | Gate p95 ≤ 600 |', '| --- | ---: | ---: | ---: | ---: | --- | --- |');
   for (const row of summary.classifier) lines.push(`| ${cell(row.config)} | ${row.cases} | ${pct(row.accuracy)} | ${ms(row.p50Ms)} | ${ms(row.p95Ms)} | ${row.failures.length ? row.failures.map(item => `${cell(item.caseId)} ${cell(item.code)}`).join('; ') : 'none'} | ${row.passesGate ? 'pass' : 'fail'} |`);
@@ -311,7 +357,7 @@ export async function runBenchmark(options) {
               firstDeltaMs: Number.isFinite(result.firstDeltaMs) ? result.firstDeltaMs : null,
               totalMs: Number.isFinite(result.totalMs) ? result.totalMs : Math.round(performance.now() - started),
               usage: result.usage ?? null, costUsd: Number.isFinite(result.costUsd) ? result.costUsd : null, model: result.model ?? null,
-              expectControl: item.expectControl ?? null,
+              ultracode: config.ultracode === true, expectControl: item.expectControl ?? null,
             }) });
         }
         await append(batch);
@@ -357,7 +403,7 @@ export async function runBenchmark(options) {
 // ---------- CLI ----------
 function parseArguments(argv) {
   const booleans = new Set(['--help', '--report-only']);
-  const values = new Set(['--out', '--models', '--efforts', '--classifier-models', '--classifier-efforts', '--claude-bin', '--timeout-ms', '--runs', '--only']);
+  const values = new Set(['--out', '--models', '--efforts', '--ultracode', '--classifier-models', '--classifier-efforts', '--claude-bin', '--timeout-ms', '--runs', '--only']);
   const result = {};
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
@@ -382,8 +428,9 @@ export async function main(argv = process.argv.slice(2)) {
   const { summary } = await runBenchmark({
     outDir, only, reportOnly: !!args['--report-only'], claudeBin: args['--claude-bin'] || 'claude',
     timeoutMs: Number(args['--timeout-ms'] || 30_000), runs: Number(args['--runs'] || 2),
-    interviewerConfigs: only === 'classifier' ? [] : buildConfigs(args['--models'] || MODELS.join(','), args['--efforts'] || 'low,medium,high'),
-    classifierConfigs: only === 'interviewer' ? [] : buildConfigs(args['--classifier-models'] || 'haiku,sonnet', args['--classifier-efforts'] || 'low,medium'),
+    interviewerConfigs: only === 'classifier' ? [] : buildConfigs(args['--models'] || MODELS.join(','), args['--efforts'] || 'low,medium,high',
+      args['--ultracode'] || 'off'),
+    classifierConfigs: only === 'interviewer' ? [] : classifierConfigsOf(buildConfigs(args['--classifier-models'] || 'haiku,sonnet', args['--classifier-efforts'] || 'low,medium')),
     onProgress: ({ kind, config, run, scenario, caseId }) => console.log(`${kind} ${config} run=${run} ${scenario ?? caseId}`),
   });
   console.log(renderSummaryMarkdown(summary));

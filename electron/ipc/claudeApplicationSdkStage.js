@@ -53,8 +53,9 @@ export async function runClaudeSdkStage({
   resume = false,
   tools = [],
   // Ultracode is a settings flag that only does anything through the Workflow
-  // tool. Stages opt out to measure it, or when it adds nothing.
-  ultracode = true,
+  // tool. Off unless a stage asks for it: measured 2026-11-09, it added no
+  // quality to any app call and cost 3-5x on the research tasks where it acted.
+  ultracode = false,
   // Explicit MCP servers only (never the user's own connectors or settings). Empty for
   // every app task today; a server's tools are named mcp__<server>__<tool> in `tools`.
   mcpServers = {},
@@ -92,9 +93,9 @@ export async function runClaudeSdkStage({
   const mcpToolNames = toolNames.filter(name => name.startsWith('mcp__'));
   const builtInToolNames = toolNames.filter(name => !name.startsWith('mcp__'));
   // Ultracode does nothing without Workflow, so the tool is only offered with it.
-  const offeredTools = ultracode === false
-    ? builtInToolNames.filter(name => name !== CLAUDE_WORKFLOW_TOOL)
-    : withWorkflowTool(builtInToolNames);
+  const offeredTools = ultracode === true
+    ? withWorkflowTool(builtInToolNames)
+    : builtInToolNames.filter(name => name !== CLAUDE_WORKFLOW_TOOL);
   const servers = mcpServers && typeof mcpServers === 'object' && !Array.isArray(mcpServers) ? mcpServers : {};
   let summaryCount = 0;
   let summaryChars = 0;
@@ -172,7 +173,7 @@ export async function runClaudeSdkStage({
         allowedTools: [...offeredTools, ...mcpToolNames],
         permissionMode: 'dontAsk',
         // An empty settings overlay is the same as none, so every other option stays.
-        settings: ultracode === false ? {} : { ...CLAUDE_ULTRACODE_SETTINGS },
+        settings: ultracode === true ? { ...CLAUDE_ULTRACODE_SETTINGS } : {},
         strictMcpConfig: true,
         mcpServers: servers,
         settingSources: [],

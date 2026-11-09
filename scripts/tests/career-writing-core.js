@@ -29,12 +29,29 @@ export default [
     assert.deepEqual(writeVerify.writeVerifyChangedFindingErrors([{ id: 'b-1', claim: 'Built reliable services.' }, { id: 'b-1', claim: 'gone' }, { id: 'nope', claim: 'x' }], docs), golden.changedErrors);
     assert.deepEqual([[0, false, 0, 2], [0, true, 0, 2], [2, true, 0, 2], [2, true, 1, 2], [1, true, 0, 3]].map(([priorRound, failed, factIndex, rankedCount]) => writeVerify.factCorrectionTransition({ priorRound, failed, factIndex, rankedCount })), golden.transitions);
   } },
-  { name: 'career writing core: application stage profiles and CLI arguments are unchanged; Q&A stages are additive', run() {
+  { name: 'career writing core: application stage profiles are unchanged and CLI arguments default to ultracode off; Q&A stages are additive', run() {
     for (const [stage, profile] of Object.entries(golden.stageProfiles)) assert.deepEqual(claudeStageProfile(stage), profile, stage);
-    assert.deepEqual(claudeCliArgs({}), golden.cliArgs);
-    assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 's1' }), golden.cliArgsOpus);
+    // Ultracode is off by default (measured 2026-11-09): the captured invocation minus the
+    // settings pair, with the requested (empty) tool list instead of Workflow.
+    const ultracodeOff = args => {
+      const copy = [...args];
+      assert.equal(copy[copy.indexOf('--settings') + 1], '{"ultracode":true}');
+      copy.splice(copy.indexOf('--settings'), 2);
+      assert.equal(copy[copy.indexOf('--tools') + 1], 'Workflow');
+      copy[copy.indexOf('--tools') + 1] = '';
+      copy[copy.indexOf('--allowedTools') + 1] = '';
+      return copy;
+    };
+    assert.deepEqual(claudeCliArgs({}), ultracodeOff(golden.cliArgs));
+    assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 's1' }), ultracodeOff(golden.cliArgsOpus));
+    assert.deepEqual(claudeCliArgs({ ultracode: true }), golden.cliArgs, 'an explicit opt-in restores the captured ultracode invocation');
+    assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 's1', ultracode: true }), golden.cliArgsOpus);
     const research = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
-    assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow'], 'research tools and Workflow are offered and allowed; nothing else');
+    assert.equal(research.includes('--settings'), false, 'no ultracode setting unless opted in');
+    assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch'], 'research tools are offered and allowed without Workflow by default');
+    const researchOn = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', ultracode: true });
+    assert.deepEqual(researchOn.slice(researchOn.indexOf('--settings'), researchOn.indexOf('--settings') + 2), ['--settings', '{"ultracode":true}']);
+    assert.deepEqual(researchOn.slice(researchOn.indexOf('--tools'), researchOn.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow'], 'an explicit opt-in adds the setting and Workflow to the research tools');
     assert.equal(golden.cliArgs[golden.cliArgs.indexOf('--allowedTools') + 1], 'Workflow', 'application runs allow only the Workflow tool');
     assert.equal(CLAUDE_STAGE_PROFILES, APPLICATION_STAGE_PROFILES, 'the application runner reads the shared table');
     assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'medium' });

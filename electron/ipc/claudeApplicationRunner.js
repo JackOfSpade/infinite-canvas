@@ -113,8 +113,9 @@ function clip(value, max = 300) {
 // Ultracode is a setting, not an effort level: `--effort ultracode` would force
 // xhigh, while this setting leaves each stage's own effort in place.
 export const CLAUDE_ULTRACODE_SETTINGS = Object.freeze({ ultracode: true });
-// Ultracode orchestrates through the Workflow tool, so every call offers it.
-// Under --restricted the workflow's agents get no file, shell or web tools.
+// Ultracode orchestrates through the Workflow tool, so a call that opts into it
+// is offered Workflow. Under --restricted the workflow's agents get no file, shell or web tools.
+// Off by default since 2026-11-09 (see claudeApplicationSdkStage.js).
 export const CLAUDE_WORKFLOW_TOOL = 'Workflow';
 export const CLAUDE_WORKFLOW_UNFINISHED = 'CLAUDE_WORKFLOW_UNFINISHED';
 export const CLAUDE_WORKFLOW_UNFINISHED_MESSAGE = 'Claude\'s workflow did not finish, so its answer was not used.';
@@ -207,18 +208,18 @@ export function claudeCliArgs({
   effort = CLAUDE_APPLICATION_EFFORT,
   sessionId,
   resume = false,
-  // Every stage offers Workflow (for ultracode); interview research also adds
+  // A stage that opts into ultracode is offered Workflow; interview research also adds
   // the read-only web tools (search/fetch). No file, shell or MCP tools.
   tools = '', partialMessages = false,
-  // Ultracode is a setting that only acts through Workflow; stages can drop both.
-  ultracode = true } = {}) {
+  // Ultracode is a setting that only acts through Workflow; off unless a stage opts in.
+  ultracode = false } = {}) {
   let sessionArgs = [];
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     sessionArgs = resume === true ? ['--resume', sessionId] : ['--session-id', sessionId];
   }
-  const offered = (ultracode === false
-    ? splitToolList(tools).filter(name => name !== CLAUDE_WORKFLOW_TOOL)
-    : withWorkflowTool(tools)).join(',');
+  const offered = (ultracode === true
+    ? withWorkflowTool(tools)
+    : splitToolList(tools).filter(name => name !== CLAUDE_WORKFLOW_TOOL)).join(',');
   return [
     '-p',
     ...sessionArgs,
@@ -227,8 +228,8 @@ export function claudeCliArgs({
     '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT,
     '--restricted',
     '--strict-mcp-config',
-    ...(ultracode === false ? [] : ['--settings', JSON.stringify(CLAUDE_ULTRACODE_SETTINGS)]),
-    // An empty list is the CLI's "no tools" when ultracode removed Workflow.
+    ...(ultracode === true ? ['--settings', JSON.stringify(CLAUDE_ULTRACODE_SETTINGS)] : []),
+    // An empty list is the CLI's "no tools" when a stage has none.
     '--tools', offered,
     // Headless runs cannot prompt, so an offered tool must also be allowed.
     '--allowedTools', offered,
@@ -394,8 +395,8 @@ export function runClaudeStage({
   sessionId,
   resume = false,
   tools = '',
-  // Passed straight through: false drops the ultracode setting and Workflow.
-  ultracode = true,
+  // Passed straight through: only true adds the ultracode setting and Workflow.
+  ultracode = false,
   onActivity = null,
   spawnImpl = childProcess.spawn,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
@@ -684,7 +685,7 @@ function createProductionRunStage({ workspaceDir, fsImpl }) {
     }
     const { runClaudeSdkStage } = await import('./claudeApplicationSdkStage.js');
     const split = splitCareerCatalog(text);
-    return runClaudeSdkStage({ text: split.text, systemAppend: claudeCatalogSystemAppend(split.catalog), pageImages, signal, sessionId, resume, model, effort, ...(ultracode === false ? { ultracode: false } : {}), onThinkingSummary, onActivity, ...bound });
+    return runClaudeSdkStage({ text: split.text, systemAppend: claudeCatalogSystemAppend(split.catalog), pageImages, signal, sessionId, resume, model, effort, ...(ultracode === true ? { ultracode: true } : {}), onThinkingSummary, onActivity, ...bound });
   };
 }
 

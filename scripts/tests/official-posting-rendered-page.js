@@ -6,6 +6,11 @@ import { decideOfficialPostingJudgments, buildOfficialPostingJudgeRequest } from
 import { officialPostingComparativeTrail, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { unresolvedOfficialPosting } from '../../electron/ipc/officialPostingResolver.js';
 import { buildListingLivenessRequest, validateListingLivenessResponse } from '../../electron/ipc/listingLivenessAi.js';
+import { resolveOfficialPostings } from '../../electron/ipc/officialPostingService.js';
+import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const URL_A = 'https://careers.northwind.test/job/42';
 const VISIBLE = `Dispatch Engineer\nApply now\n${'Build routing services for regional delivery teams. '.repeat(10)}`;
@@ -14,6 +19,43 @@ const shell = async url => ({ url, contentType: 'text/html', body: '<html><body>
 const shown = (extra = {}) => ({ ok: true, status: 200, finalUrl: URL_A, settled: true, title: 'Dispatch Engineer',
   text: VISIBLE, html: `<html><body><main>${VISIBLE}</main></body></html>`, ...extra });
 const seq = values => { let at = 0; return () => values[Math.min(at++, values.length - 1)]; };
+// A download the site refused, and one the site answered not found. Both leave the lead unread.
+const blocked = async () => { throw Object.assign(new Error('HTTP 403'), { statusCode: 403 }); };
+const gone = async () => { throw Object.assign(new Error('HTTP 404'), { statusCode: 404 }); };
+const READER_TEXT = 'Dispatch Engineer\nApply now';
+
+// The resolveOfficialPostings harness, for the reader the service picks for itself.
+const DESCRIPTION = 'Northwind Labs is hiring a Dispatch Engineer to build reliable routing services for regional delivery teams.\n'
+  + '• Design the dispatch scheduling service and its reporting pipeline.\n'
+  + '• Review route reports with operations leads every week.\n'
+  + 'Requirements: five years building backend services in TypeScript or Go.';
+const job = () => ({ title: 'Dispatch Engineer', company: 'Northwind Labs', location: 'Lakeview, Ontario, Canada',
+  snippet: DESCRIPTION, url: 'https://www.linkedin.com/jobs/view/synthetic-dispatch', sourceJobKey: 'dispatch-1' });
+const POSTING = 'https://job-boards.greenhouse.io/northwind/jobs/4455667';
+const CAREERS = 'https://northwind.test/careers';
+const research = ids => ids.map(id => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: CAREERS,
+  postingUrl: POSTING, employer: 'Northwind Labs', employerDomain: 'https://northwind.test', ats: 'Greenhouse' })}\nEND OFFICIAL POSTING RESEARCH ${id}`).join('\n');
+const requestedIds = prompt => prompt.match(/Requested ids: ([a-f0-9, ]+)\./u)[1].split(', ');
+const hostLeads = prompt => JSON.parse(prompt.split('BEGIN HOST LEADS JSON\n')[1].split('\nEND HOST LEADS JSON')[0]);
+const uncertainAnswer = { choice: 'uncertain', postingUrl: '', status: 'unknown', statusQuote: '', employerLinked: false, employerPageUrl: '',
+  employerLinkQuote: '', title: '', employer: '', location: '', salary: '', description: '', evidence: [],
+  conflicts: ['The site blocked the download, so the page text cannot settle this lead.'] };
+const challenge = async () => { throw Object.assign(new Error('HTTP 202'), { statusCode: 202 }); };
+async function withStore(run) {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-reader-'));
+  try { return await run(createOfficialPostingStore(path.join(root, 'official-postings'))); }
+  finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+// Runs a lookup against a site that challenges every download, and returns what the judges saw.
+async function challengedLookup(readPage) {
+  return withStore(async store => {
+    const callRaw = async prompt => research(requestedIds(prompt));
+    const callMatch = async prompt => { hostLeads(prompt); return JSON.stringify(uncertainAnswer); };
+    await resolveOfficialPostings([job()], { store, snapshotFetch: challenge, readPage, bypassCache: true, callRaw, callMatch });
+    const log = await fs.readFile(path.join(store.rootDir, 'judgments.jsonl'), 'utf8').catch(() => '');
+    return log.split('\n').filter(Boolean).map(line => JSON.parse(line));
+  });
+}
 
 // A browser that records what the page tried to do, driven by the routes the test gives it.
 function fakeBrowser({ requests = [], goto, seen = { title: 'T', text: VISIBLE, html: `<p>${VISIBLE}</p>` }, status = 200, finalUrl = URL_A } = {}) {
@@ -421,6 +463,84 @@ export default [
       assert.equal(snaps[6].pageText, 'short');
       assert.equal(snaps[0].pageTextTruncated, true);
       assert.equal(snaps[6].pageTextTruncated, undefined);
+    },
+  },
+  {
+    name: 'A reader fills only the unread https pages the app could not download, never one that said not found or was read',
+    async run() {
+      const readerCalls = [];
+      const readPage = async (url, options) => { readerCalls.push({ url, signal: options?.signal }); return `  ${READER_TEXT}  `; };
+      const fetch = async url => {
+        if (url === 'https://careers.northwind.test/job/gone') return gone(url);
+        if (url === URL_A) return blocked(url);
+        if (url.startsWith('http:')) return blocked(url);
+        return shell(url);
+      };
+      const leads = [lead(), lead({ id: 'P2', url: 'https://careers.northwind.test/job/gone' }),
+        lead({ id: 'P3', url: 'https://boards.northwind.test/job/read' }),
+        lead({ id: 'P4', url: 'http://careers.northwind.test/job/plain' })];
+      const snaps = await snapshotOfficialPostingLeads(leads, { fetch, readPage, signal: undefined });
+      assert.deepEqual(readerCalls.map(call => call.url), [URL_A]);
+      assert.equal(snaps[0].pageText, READER_TEXT);
+      assert.equal(snaps[0].read, true);
+      assert.equal(snaps[0].reader, 'page-reader');
+      assert.equal(snaps[0].httpStatus, 403, 'the status stays for diagnosis');
+      assert.equal('rendered' in snaps[0], false, 'a reader page is text, not what a person saw');
+      assert.equal(snaps[1].notFound, true);
+      assert.equal(snaps[1].read, false);
+      assert.equal(snaps[1].reader, undefined);
+      assert.equal(snaps[2].read, true);
+      assert.equal(snaps[2].reader, undefined);
+      assert.equal(snaps[3].read, false);
+      assert.equal(snaps[3].pageText, undefined);
+    },
+  },
+  {
+    name: 'A reader that throws or returns nothing leaves the page unread, and read health sees the download itself',
+    async run() {
+      const observed = [];
+      // What read health sees is synchronous: copy the final snapshots at the moment it is handed them.
+      const watch = value => observed.push({ ...value, final: value.final.map(snapshot => ({ ...snapshot })) });
+      const throwing = await snapshotOfficialPostingLeads([lead()], { fetch: blocked,
+        readPage: async () => { throw new Error('reader down'); }, observe: watch });
+      assert.equal(throwing[0].read, false);
+      assert.equal(throwing[0].reader, undefined);
+      assert.equal(throwing[0].pageText, undefined);
+      assert.equal(throwing[0].httpStatus, 403);
+      const empty = await snapshotOfficialPostingLeads([lead()], { fetch: blocked, readPage: async () => '   ' });
+      assert.equal(empty[0].read, false);
+      assert.equal(empty[0].reader, undefined);
+      const filled = await snapshotOfficialPostingLeads([lead()], { fetch: blocked, readPage: async () => `  ${READER_TEXT}  `,
+        observe: watch });
+      assert.equal(observed.at(-1).final[0].read, false, 'the monitor saw the blocked download, not the reader');
+      assert.equal(observed.at(-1).final[0].pageText, undefined);
+      assert.equal(filled[0].read, true);
+      assert.equal(filled[0].reader, 'page-reader');
+    },
+  },
+  {
+    name: 'A lookup with an injected download never reaches the default reader, so a challenged lead stays unread',
+    async run() {
+      const entries = await challengedLookup(undefined);
+      assert.ok(entries.length > 0, 'the judges recorded what they were given');
+      const snapshots = entries.flatMap(entry => entry.snapshots || []);
+      assert.ok(snapshots.some(snapshot => snapshot.read === false && snapshot.httpStatus === 202));
+      assert.deepEqual(snapshots.filter(snapshot => snapshot.reader), []);
+      assert.deepEqual(snapshots.filter(snapshot => snapshot.pageTextChars > 0), []);
+    },
+  },
+  {
+    name: 'A lookup uses an injected reader and its judgments log says which pages a reader filled in',
+    async run() {
+      const readerCalls = [];
+      const entries = await challengedLookup(async (url, options) => { readerCalls.push({ url, signal: options?.signal }); return READER_TEXT; });
+      assert.deepEqual([...new Set(readerCalls.map(call => call.url))].sort(), [CAREERS, POSTING].sort());
+      const snapshots = entries.flatMap(entry => entry.snapshots || []);
+      const filled = snapshots.filter(snapshot => snapshot.reader === 'page-reader');
+      assert.ok(filled.length > 0, 'the log records the reader');
+      assert.ok(filled.every(snapshot => snapshot.read === true && snapshot.pageTextChars > 0));
+      assert.ok(filled.every(snapshot => snapshot.rendered === undefined));
+      assert.ok(!snapshots.some(snapshot => snapshot.read === false), 'every challenged page was read');
     },
   },
 ];

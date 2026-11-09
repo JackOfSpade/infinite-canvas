@@ -26,7 +26,10 @@ import {
 import { routedCall } from './aiCallProviders.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
 import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
+import { compensationCohortResearchIds, compensationRoleFamilyResearchIds } from './jobs.js';
+import { jobLocationLookupPromptRequests, mergeJobLocationLookupReplies } from './jobLocationLookup.js';
 import { mergeOfficialPostingResearchReplies, officialPostingResearchMembers, OFFICIAL_POSTING_RESEARCH_TASK } from './officialPostingBridge.js';
+import { mergeResearchSections } from './researchSectionMerge.js';
 import { readTavilyKey, tavilyMcpServers, tavilyPlainLeads, TAVILY_RESEARCH_TOOLS } from './tavily.js';
 
 export const CLAUDE_TASK_CONCURRENCY = 4;
@@ -37,6 +40,9 @@ const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 10 * 60_000;
 const USAGE_LIMIT_WAIT_MS = 10 * 60_000;
 const RESEARCH_MAX_TURNS = 16;
+// Cohort salary research, role-family research and the job location lookup share
+// this task id; the prompt itself decides which of them it is.
+const COMPENSATION_RESEARCH_TASK = 'job-compensation-research-batch';
 const IMAGE_MAX_EDGE = 1568;
 const ACTIVITY_NOTIFY_MS = 500;
 const OFFLOAD_BLOCK_MS = 30 * 60_000;
@@ -314,6 +320,13 @@ export function createClaudeTaskWorker({
       extraLeads: plain.status === 'fulfilled' ? Object.fromEntries(plain.value) : {},
     });
     const base = native.status === 'fulfilled' ? native.value : viaTavily.value;
+    // No member list (an unexpected prompt) or nothing valid: the built-in answer as it came.
+    return researchSpend(base, replies, members.length && merged ? merged : base.text);
+  }
+
+  // Lookups run side by side are one answer's spend: sum cost and numeric usage
+  // over the replies that succeeded, keeping only what they actually reported.
+  function researchSpend(base, replies, text) {
     const sum = field => replies.reduce((total, reply) => total + (Number(reply[field]) || 0), 0);
     const usage = {};
     for (const reply of replies) {
@@ -321,11 +334,63 @@ export function createClaudeTaskWorker({
     }
     return {
       ...base,
-      // No member list (an unexpected prompt) or nothing valid: the built-in answer as it came.
-      text: members.length && merged ? merged : base.text,
+      text,
       ...(replies.some(reply => typeof reply.costUsd === 'number') ? { costUsd: sum('costUsd') } : {}),
       ...(Object.keys(usage).length ? { usage } : {}),
     };
+  }
+
+  /**
+   * How a job-compensation-research-batch prompt combines two lookups, or null when it is
+   * answered once. The prompt itself decides: cohort salary research and experience-band
+   * (role-family) research are sectioned the same way, so both merge per section; the job
+   * location lookup picks one host-validated reply per posting.
+   */
+  function compensationMergePlan(prompt) {
+    const sections = ids => ({ native, tavily }) => mergeResearchSections({
+      ids,
+      replies: [
+        { label: 'built-in web search', text: native },
+        { label: 'Tavily search', text: tavily },
+      ],
+      begin: id => `BEGIN COMPENSATION RESEARCH ${id}`,
+      end: id => `END COMPENSATION RESEARCH ${id}`,
+    });
+    const cohortIds = compensationCohortResearchIds(prompt);
+    if (cohortIds.length) return sections(cohortIds);
+    const roleFamilyIds = compensationRoleFamilyResearchIds(prompt);
+    if (roleFamilyIds.length) return sections(roleFamilyIds);
+    const requests = jobLocationLookupPromptRequests(prompt);
+    if (requests.length) return ({ native, tavily }) => mergeJobLocationLookupReplies({ requests, replies: [native, tavily] });
+    return null;
+  }
+
+  /**
+   * Built-in web search and Tavily as two lookups at once: Claude with its own tools and
+   * Claude with Tavily, combined by `merge` (which receives each arm's reply text, null
+   * when that arm failed) and falling back to whichever reply succeeded. Measured
+   * 2026-11-09: cohort salary research gave 10 of 12 cohorts two independently verified
+   * sources against 7 built-in and 9 Tavily alone; experience-band research gave 8 of 12
+   * role families two against 4 and 4; the job location lookup gave 7 of 24 correct with
+   * none wrong against 5 and 6, and Tavily alone broke the format in 2 of 6 calls. Either
+   * lookup alone sometimes fails, so the other still answers.
+   */
+  async function researchTwoWays(claudeCall, merge) {
+    let key = '';
+    try { key = await tavily.readKey(); } catch { key = ''; }
+    if (!key) return claudeCall();
+    const [native, viaTavily] = await Promise.allSettled([
+      claudeCall(),
+      claudeCall({ tools: [...TAVILY_RESEARCH_TOOLS], mcpServers: tavilyMcpServers(key) }),
+    ]);
+    const replies = [native, viaTavily].filter(result => result.status === 'fulfilled').map(result => result.value);
+    if (!replies.length) throw native.reason;
+    const base = native.status === 'fulfilled' ? native.value : viaTavily.value;
+    const merged = merge({
+      native: native.status === 'fulfilled' ? native.value.text ?? null : null,
+      tavily: viaTavily.status === 'fulfilled' ? viaTavily.value.text ?? null : null,
+    });
+    return researchSpend(base, replies, merged ?? base.text);
   }
 
   async function serve(entry, controller) {
@@ -371,11 +436,19 @@ export function createClaudeTaskWorker({
         pageImages, signal: controller.signal,
         onActivity: event => activity.event(entry.requestId, event),
         model: profile.model, effort: profile.effort, persistSession: false,
+        // Ultracode is off unless a profile records the opt-in.
+        ...(profile.ultracode === true ? { ultracode: true } : {}),
         ...(profile.tools ? { tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS } : {}),
         ...extra,
       });
+      // Cohort salary research, experience-band research and the job location lookup
+      // are each measured as worth running built-in and via Tavily at once; the prompt
+      // decides which combination it needs.
+      const compensationMerge = entry.task === COMPENSATION_RESEARCH_TASK && !entry.hasAttachments
+        ? compensationMergePlan(handoff.prompt) : null;
       reply = entry.task === OFFICIAL_POSTING_RESEARCH_TASK && !entry.hasAttachments
         ? await researchThreeWays(handoff.prompt, claudeCall, controller.signal)
+        : compensationMerge ? await researchTwoWays(claudeCall, compensationMerge)
         : await claudeCall();
     }
     recordUsage(provider === 'offload'

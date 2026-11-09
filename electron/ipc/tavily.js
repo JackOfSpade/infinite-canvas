@@ -8,6 +8,7 @@ import { execFile as nodeExecFile } from 'node:child_process';
 
 export const TAVILY_KEYCHAIN_SERVICE = 'infinite-canvas-tavily-api-key';
 export const TAVILY_SEARCH_URL = 'https://api.tavily.com/search';
+export const TAVILY_EXTRACT_URL = 'https://api.tavily.com/extract';
 export const TAVILY_MCP_URL = 'https://mcp.tavily.com/mcp/';
 export const TAVILY_RESEARCH_TOOLS = Object.freeze(['mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract']);
 const SECURITY_BIN = '/usr/bin/security';
@@ -78,6 +79,41 @@ export async function tavilyPlainLeads({ key, member, fetch: fetchImpl = globalT
     }
     return leads;
   } catch { return []; } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', abort);
+  }
+}
+
+/**
+ * The text of one page Tavily's extract API read, or '' when it could not read it. No AI: the
+ * API returns the page's own text. A site that blocks the app's download (a bot challenge, a
+ * 403) often serves this reader the page anyway. Any failure is '' and the key never leaks.
+ */
+export async function tavilyExtract({ key, url, fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = 20_000 } = {}) {
+  if (!key) return '';
+  let page;
+  try { page = new URL(String(url ?? '')); } catch { return ''; }
+  if (page.protocol !== 'https:' || page.username || page.password) return '';
+  if (signal?.aborted) return '';
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener?.('abort', abort, { once: true });
+  const timer = setTimeout(abort, Math.max(1, Number(timeoutMs) || 20_000));
+  try {
+    const response = await fetchImpl(TAVILY_EXTRACT_URL, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'content-type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ urls: [page.href], extract_depth: 'advanced', format: 'markdown' }),
+    });
+    if (!response?.ok) return '';
+    const body = await response.json();
+    const failed = Array.isArray(body?.failed_results) ? body.failed_results : [];
+    // A url the API could not read comes back under failed_results, not as text.
+    if (failed.some(entry => entry?.url && String(entry.url) === page.href)) return '';
+    const result = Array.isArray(body?.results) ? body.results.find(entry => String(entry?.url ?? '') === page.href) || body.results[0] : null;
+    const text = String(result?.raw_content ?? '').trim();
+    return text || '';
+  } catch { return ''; } finally {
     clearTimeout(timer);
     signal?.removeEventListener?.('abort', abort);
   }

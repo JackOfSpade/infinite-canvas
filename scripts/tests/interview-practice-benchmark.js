@@ -4,9 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
-import { createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
+import { assertInterviewerConfig, createInterviewerSession } from '../../electron/interviewPracticeTransport.js';
 import {
-  assertExternalOutput, buildConfigs, buildJudgePackets, percentile, runBenchmark, shuffleForScenario, summarize,
+  assertExternalOutput, buildConfigs, buildJudgePackets, classifierConfigsOf, configId, parseUltracode, percentile,
+  runBenchmark, shuffleForScenario, summarize,
 } from '../interview-practice-benchmark.mjs';
 import {
   CLASSIFIER_CASES, SCENARIOS, SYNTHETIC_BRIEF, SYNTHETIC_HISTORY, SYNTHETIC_PLAN, classifierMessage,
@@ -52,7 +53,7 @@ const closeTo = (actual, expected) => assert(Math.abs(actual - expected) < 1e-9,
 const HELP = ['--print', '--output-format', '--tools', '--system-prompt', '--no-session-persistence', '--strict-mcp-config', '--mcp-config',
   '--model', '--effort', '--safe-mode', '--permission-mode dontAsk', '--no-chrome', '--input-format', '--verbose', '--include-partial-messages'].join('\n');
 
-function fakeSpawn({ replies = [], refuse = false } = {}) {
+function fakeSpawn({ replies = [], refuse = false, help = HELP } = {}) {
   const calls = [];
   const spawn = (bin, args, opts) => {
     calls.push({ bin, args, opts });
@@ -75,7 +76,7 @@ function fakeSpawn({ replies = [], refuse = false } = {}) {
         callback();
       },
     });
-    if (args[0] === '--help') setImmediate(() => { child.stdout.write(HELP); setImmediate(() => child.emit('close', 0)); });
+    if (args[0] === '--help') setImmediate(() => { child.stdout.write(help); setImmediate(() => child.emit('close', 0)); });
     else if (refuse) setImmediate(() => child.emit('close', 1));
     return child;
   };
@@ -383,6 +384,122 @@ export default [
         assert.equal(summary.interviewer[0].config, 'haiku/low');
         await fs.access(path.join(outDir, 'summary.md'));
         await fs.access(path.join(outDir, 'judge-packets', `${SCENARIOS[0].name}.md`));
+      });
+    },
+  },
+  {
+    name: 'interview practice transport: interviewer arguments are untouched by default and only ultracode:true offers Workflow and merges the setting',
+    async run() {
+      const systemPrompt = args => args[args.indexOf('--system-prompt') + 1];
+      const probe = async (help, config) => {
+        const { spawn, calls } = fakeSpawn({ replies: [{ text: 'READY', total: 0.01 }], help });
+        const session = await createInterviewerSession({ model: 'haiku', effort: 'high', claudeBin: 'stub-claude', ...config }, { spawn });
+        await session.start({ instructions: 'Instructions.' });
+        await session.close();
+        assert.equal(calls.length, 2);
+        return calls[1].args;
+      };
+      const head = args => ['-p', '--tools', '', '--system-prompt', systemPrompt(args), '--no-session-persistence', '--strict-mcp-config',
+        '--mcp-config', '{"mcpServers":{}}', '--output-format', 'stream-json', '--model', 'haiku'];
+      const tail = ['--permission-mode', 'dontAsk', '--no-chrome', '--input-format', 'stream-json', '--verbose', '--include-partial-messages'];
+
+      // Help without --allowedTools and without --settings: the safe-mode branch.
+      const safeOnly = HELP;
+      assert(!safeOnly.includes('--settings') && !safeOnly.includes('--allowedTools'));
+      const safeOff = await probe(safeOnly, {});
+      assert.deepEqual(safeOff, [...head(safeOff), '--effort', 'high', '--safe-mode', ...tail]);
+      assert(!safeOff.some(argument => /ultracode/i.test(argument)), 'ultracode must not appear by default');
+      const safeOn = await probe(safeOnly, { ultracode: true });
+      assert.deepEqual(safeOn, [...head(safeOn).map(argument => argument === '' ? 'Workflow' : argument), '--effort', 'high', '--safe-mode', ...tail]);
+      assert.equal(safeOn[safeOn.indexOf('--tools') + 1], 'Workflow');
+      assert(!safeOn.includes('--allowedTools') && !safeOn.includes('--settings'), 'unlisted flags are not passed');
+      assert(!safeOn.some(argument => /ultracode/i.test(argument)), '--settings is not listed, so the setting is not passed');
+
+      // Help with --allowedTools and --settings but without --safe-mode: Workflow, the tool allowlist and the merged setting.
+      const settingsHelp = HELP.split('\n').filter(line => line !== '--safe-mode')
+        .concat(['--allowedTools', '--settings', '--setting-sources', '--disable-slash-commands']).join('\n');
+      const settingsOff = await probe(settingsHelp, {});
+      assert.deepEqual(settingsOff, [...head(settingsOff), '--effort', 'high', '--settings', '{"disableAllHooks":true}',
+        '--setting-sources', '', '--disable-slash-commands', ...tail]);
+      assert(!settingsOff.includes('--allowedTools'), 'the default offers no tool');
+      const settingsOn = await probe(settingsHelp, { ultracode: true });
+      assert.deepEqual(settingsOn, [...head(settingsOn).map(argument => argument === '' ? 'Workflow' : argument), '--allowedTools', 'Workflow',
+        '--effort', 'high', '--settings', '{"disableAllHooks":true,"ultracode":true}', '--setting-sources', '', '--disable-slash-commands', ...tail]);
+      assert.deepEqual(JSON.parse(settingsOn[settingsOn.indexOf('--settings') + 1]), { disableAllHooks: true, ultracode: true });
+
+      for (const value of ['true', 1, 0, null, {}]) {
+        assert.throws(() => assertInterviewerConfig({ model: 'opus', effort: 'low', ultracode: value }), { code: 'CONFIG_REJECTED' });
+      }
+      assert.doesNotThrow(() => assertInterviewerConfig({ model: 'opus', effort: 'low', ultracode: true }));
+      assert.doesNotThrow(() => assertInterviewerConfig({ model: 'opus', effort: 'low' }));
+      const { spawn, calls } = fakeSpawn();
+      await assert.rejects(createInterviewerSession({ model: 'opus', effort: 'low', ultracode: 'yes' }, { spawn }), { code: 'CONFIG_REJECTED' });
+      assert.equal(calls.length, 0, 'a rejected ultracode starts no process');
+    },
+  },
+  {
+    name: 'interview practice benchmark: ultracode is a configuration dimension carried into ids, journal rows and reports',
+    async run() {
+      assert.deepEqual(parseUltracode(), [false]);
+      assert.deepEqual(parseUltracode('on,off'), [true, false]);
+      assert.throws(() => parseUltracode('mid'), { code: 'CONFIG_REJECTED' });
+      assert.throws(() => buildConfigs('haiku', 'low', 'yes'), { code: 'CONFIG_REJECTED' });
+      const configs = buildConfigs('haiku,sonnet', 'low,high', 'on,off');
+      assert.deepEqual(configs.map(configId), ['haiku/low+ultracode', 'haiku/low', 'haiku/high+ultracode', 'haiku/high',
+        'sonnet/low+ultracode', 'sonnet/low', 'sonnet/high+ultracode', 'sonnet/high']);
+      assert.deepEqual(buildConfigs('haiku', 'low').map(configId), ['haiku/low']);
+      assert.equal(configId({ model: 'haiku', effort: 'low', ultracode: false }), 'haiku/low');
+      const classifierConfigs = classifierConfigsOf(configs);
+      assert.deepEqual([...new Set(classifierConfigs.map(({ model, effort }) => `${model}/${effort}`))],
+        ['haiku/low', 'haiku/high', 'sonnet/low', 'sonnet/high']);
+      assert(!('ultracode' in classifierConfigs[0]), 'classifier configs stay unchanged');
+
+      await withOutput(async outDir => {
+        const seen = [];
+        const factory = async config => {
+          seen.push(config);
+          return {
+            async start() {},
+            async turn() {
+              return { text: 'Mm-hm, go on.', control: null, endCall: false, firstSentenceMs: config.ultracode ? 900 : 500,
+                firstDeltaMs: 100, totalMs: 1000, costUsd: config.ultracode ? 0.02 : 0.01 };
+            },
+            async close() {},
+          };
+        };
+        const { summary } = await runBenchmark({ outDir, runs: 1, only: 'interviewer',
+          interviewerConfigs: buildConfigs('haiku', 'low', 'on,off'), createSession: factory });
+        assert.deepEqual([...new Set(seen.map(config => config.ultracode))].sort(), [false, true], 'the dimension reaches the session factory');
+        const off = summary.interviewer.find(row => row.config === 'haiku/low');
+        const on = summary.interviewer.find(row => row.config === 'haiku/low+ultracode');
+        assert.equal(off.ultracode, false);
+        assert.equal(on.ultracode, true);
+        assert.equal(off.p95FirstSentenceMs, 500);
+        assert.equal(on.p95FirstSentenceMs, 900);
+        assert.equal(summary.ultracode.length, 1);
+        const [pair] = summary.ultracode;
+        assert.equal(pair.config, 'haiku/low');
+        assert.equal(pair.offP95FirstSentenceMs, 500);
+        assert.equal(pair.onP95FirstSentenceMs, 900);
+        assert.equal(pair.p95FirstSentenceDeltaMs, 400);
+        closeTo(pair.offMeanCostPerTurnUsd, 0.01);
+        closeTo(pair.onMeanCostPerTurnUsd, 0.02);
+        closeTo(pair.meanCostPerTurnDeltaUsd, 0.01);
+        assert.equal(pair.offEligible, true);
+        assert.equal(pair.onEligible, true);
+        assert.equal(pair.offFailures, 0);
+        assert.equal(pair.onFailures, 0);
+        assert.deepEqual(summarize({ records: [] }).ultracode, [], 'no ultracode run, no comparison rows');
+
+        const journal = (await readJournal(outDir)).map(line => JSON.parse(line));
+        assert.equal(journal.length, totalTurns * 2);
+        assert(journal.every(record => record.ultracode === record.config.endsWith('+ultracode')), 'rows carry the dimension');
+        const markdown = await fs.readFile(path.join(outDir, 'summary.md'), 'utf8');
+        assert(markdown.includes('## Ultracode on vs off (same model/effort)'));
+        assert(markdown.includes('| haiku/low | off |'));
+        assert(markdown.includes('| haiku/low+ultracode | on |'));
+        assert(markdown.includes('| haiku/low | 500 | 900 | +400 |'));
+        await fs.access(path.join(outDir, 'transcripts', 'haiku-low-ultracode', `${SCENARIOS[0].name}.md`));
       });
     },
   },
