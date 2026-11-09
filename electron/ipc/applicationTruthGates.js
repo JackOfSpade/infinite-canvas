@@ -43,6 +43,17 @@ export function targetIdentityNameLicensed(sentence, finding, ctx, { reportsNoPa
   for (const name of companyNames) if (sentenceAddressesTarget(text, name)) {
     const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(name)}(?:['’]s)?(?![\\p{L}\\p{N}])`, 'giu');
     for (const match of text.matchAll(pattern)) if (noPastWork || forwardReference(match.index)) spans.push([match.index, match.index + match[0].length]);
+    // The employer's possessive as the subject of its own need/mission/goal
+    // with a copula names the reader's need, not a place the candidate
+    // worked: it is licensed regardless of past-work words elsewhere in the
+    // sentence (which Amendment 6 deliberately reads broadly), and only at a
+    // clause start so a relative clause ("which meets <Employer>'s need for …")
+    // is not. The span is the possessive alone; the boundary group is dropped.
+    const thesis = new RegExp(`(^|[,;:—–]\\s*)(${phrase(name)}['’]s)(?=\\s+(?:(?:main|primary|core|central|biggest|key|top|clearest|most\\s+pressing)\\s+)?(?:need|needs|mission|goal|goals|priority|priorities|challenge|challenges)\\s+(?:is|are)\\b)`, 'giu');
+    for (const match of text.matchAll(thesis)) {
+      const start = match.index + match[1].length;
+      spans.push([start, start + match[2].length]);
+    }
   }
   if (!spans.length || !finding.term) return false;
   const pattern = new RegExp(`(?<![\\p{L}\\p{N}])${phrase(finding.term)}(?![\\p{L}\\p{N}])`, 'giu');
