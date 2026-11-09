@@ -8,7 +8,6 @@ import { PRACTICE_AUDIO_MESSAGES } from '../interviewPracticeAudio.js';
 const execFile = promisify(execFileCb);
 const CALL_CHANNELS = Object.freeze({ start: 'practice-call:start', openReplay: 'practice-call:open-replay', list: 'practice-call:list' });
 const PHASES = Object.freeze(['consent', 'downloading', 'precheck', 'ringing', 'connecting', 'in-call', 'ended', 'analyzing', 'replay', 'error']);
-const TEMPERAMENTS = Object.freeze(['warm', 'neutral', 'tough']);
 const CLASSIFIER_INSTRUCTIONS = 'You classify one candidate utterance. Reply with exactly one word: acknowledgement if it only acknowledges, agrees or fills a pause, or interruption if it starts a new thought, question or correction. No punctuation, no explanation.';
 const USAGE_LIMIT_MESSAGE = 'Claude usage is limited right now; analysis may wait until the limit resets.';
 const MODELS = Object.freeze(['smartTurn', 'tone']);
@@ -51,6 +50,7 @@ const DEFAULTS = Object.freeze({
 const MODULES = Object.freeze({
   prompts: lazily(() => import('../interviewPracticeCallPrompt.js')),
   catalog: lazily(() => import('./eleven/voiceCatalog.js')),
+  voiceLibrary: lazily(() => import('./eleven/voiceLibrary.js')),
 });
 
 function plainArgs(value) {
@@ -66,6 +66,48 @@ function pickRandom(list, random = Math.random) {
   const at = Number.isFinite(value) ? Math.floor(Math.min(Math.max(value, 0), 0.999999) * list.length) : 0;
   return list[at];
 }
+/** The pool keeps one stamp per voice; the newest one is the voice to avoid on the next call. */
+function mostRecentlyUsed(lastUsed) {
+  let best = null;
+  for (const [voiceId, at] of Object.entries(lastUsed && typeof lastUsed === 'object' ? lastUsed : {})) {
+    const value = Number(at);
+    if (!voiceId || !Number.isFinite(value)) continue;
+    if (!best || value > best.at) best = { voiceId, at: value };
+  }
+  return best ? best.voiceId : null;
+}
+/**
+ * One discarded 'Hi.' keeps an unsaved library voice fast: live tests on 2026-11-08
+ * measured ~4.5 s for its first line but ~0.25 s for every line after it, even after
+ * 180 s of silence. The audio is counted and thrown away, never played or transcribed.
+ */
+const WARM_UP_TIMEOUT_MS = 15000;
+async function warmUpVoice({ factory, clock }) {
+  let stream;
+  try { stream = factory?.open?.({ utteranceId: 'warm-up' }); } catch { return false; }
+  if (!stream) return false;
+  let bytes = 0;
+  let failed = false;
+  const cancel = () => { try { stream.cancel?.(); } catch { /* stream already closed */ } };
+  try {
+    stream.onAudio?.(chunk => { bytes += chunk?.byteLength ?? chunk?.length ?? 0; });
+    // Fakes may not implement onError; the optional call keeps them usable.
+    stream.onError?.(() => { failed = true; });
+    stream.sendText?.('Hi.');
+    let timer = null;
+    const finished = Promise.resolve(stream.finish?.()).then(() => true, () => false);
+    const timeout = new Promise(resolveTimeout => {
+      try { timer = clock.setTimeout(() => { cancel(); resolveTimeout(false); }, WARM_UP_TIMEOUT_MS); } catch { resolveTimeout(false); }
+    });
+    const settled = await Promise.race([finished, timeout]);
+    try { if (timer !== null) clock.clearTimeout(timer); } catch { /* the timer already fired */ }
+    if (!settled) return false;
+  } catch {
+    cancel();
+    return false;
+  }
+  return bytes > 0 && !failed;
+}
 /** Interviewer titles stay generic: they never imply a discipline the job did not advertise. */
 function roleFor(brief, random = Math.random) {
   const title = String(brief?.role?.title || '').trim();
@@ -76,11 +118,10 @@ function teamFor(brief) {
   const named = String(role.team ?? role.department ?? '').trim();
   return named || 'the hiring team';
 }
-/** Tough only when the request or the brief asks for it; otherwise uniform over the three moods. */
-function temperamentFor({ request, brief, random = Math.random } = {}) {
+/** Tough only when the request or the brief asks for it; otherwise null, and the interviewer picks one to fit its voice. */
+function temperamentFor({ request, brief } = {}) {
   const asked = String(request?.temperament ?? brief?.practice?.temperament ?? brief?.temperament ?? '').trim().toLowerCase();
-  if (asked === 'tough') return 'tough';
-  return pickRandom(TEMPERAMENTS, random);
+  return asked === 'tough' ? 'tough' : null;
 }
 /** The prepared brief flattened into the prompt module's brief shape. */
 function promptBrief(brief) {
@@ -333,6 +374,33 @@ export function createPracticeCallService(deps = {}) {
     self.engine?.helperEvent?.(event);
   }
 
+  /**
+   * The practice voice pool lives beside the call records and holds one thing: when each
+   * voice was last used. A missing, corrupt or unwritable file is never a reason to fail
+   * a call: every error becomes null.
+   */
+  async function openVoicePool() {
+    try {
+      const library = await resolve('voiceLibrary');
+      if (!library || typeof library.createVoicePoolStore !== 'function') return null;
+      // The pool file is the service's own bookkeeping, so it never goes through the
+      // call-recording file system the tests (and the journal) watch.
+      const store = library.createVoicePoolStore({ filePath: path.join(userDataPath, 'practice-voice-pool.json') });
+      let loaded = null;
+      try {
+        loaded = await store.load();
+      } catch { /* an unreadable pool file reads as an empty pool */ }
+      const loadedState = loaded && typeof loaded === 'object' && !Array.isArray(loaded) ? loaded : {};
+      const state = {
+        version: 1,
+        lastUsed: loadedState.lastUsed && typeof loadedState.lastUsed === 'object' ? { ...loadedState.lastUsed } : {},
+      };
+      return { library, store, state };
+    } catch {
+      return null;
+    }
+  }
+
   async function precheck() {
     const self = call;
     if (!self || self.finished) return snapshot();
@@ -356,21 +424,67 @@ export function createPracticeCallService(deps = {}) {
     const rateForTier = await resolve('rateForTier');
     const voiceRate = Number(rateForTier(tier)) || 24000;
     const catalog = await resolve('catalog');
-    const voices = await catalog.listConversationalVoices({ fetch: fetchImpl, key });
+    // The pool file only names the voices used before; it never grows, because the app
+    // never writes to the ElevenLabs account.
+    const pool = await openVoicePool();
+    const recentVoiceId = mostRecentlyUsed(pool?.state.lastUsed);
     const prompts = await resolve('prompts');
     const random = deps.random ?? Math.random;
-    const temperament = temperamentFor({ request: call.args, brief: call.brief, random });
-    const chosen = catalog.pickPersonaVoice({ voices, random, temperament });
-    const picked = typeof prompts.pickPersona === 'function' ? prompts.pickPersona({ random, temperament }) : null;
-    const persona = {
-      name: chosen?.name || picked?.name || 'Alex Morgan', role: roleFor(call.brief, random), team: teamFor(call.brief),
-      temperament, voiceId: chosen?.voiceId, initials: initialsOf(chosen?.name || picked?.name),
+    const temperament = temperamentFor({ request: call.args, brief: call.brief });
+    const voiceFactory = await resolve('voiceFactory');
+    const personaOf = (chosen, voiceSource) => {
+      const picked = !chosen?.name && typeof prompts.pickPersona === 'function' ? prompts.pickPersona({ random, temperament: temperament ?? 'neutral' }) : null;
+      return {
+        name: chosen?.name || picked?.name || 'Alex Morgan', role: roleFor(call.brief, random), team: teamFor(call.brief),
+        temperament, temperamentFrom: temperament ? 'request' : null,
+        voice: chosen ? { gender: chosen.gender, age: chosen.age, accent: chosen.accent, character: chosen.character } : null,
+        voiceId: chosen?.voiceId, voiceSource, initials: initialsOf(chosen?.name || picked?.name),
+      };
     };
+    // The interviewer voice comes only from the shared library: the account's own voices
+    // are never candidates and nothing here falls back to them.
+    let drawn = null;
+    try {
+      if (pool?.library && typeof pool.library.drawVoice === 'function') {
+        drawn = await pool.library.drawVoice({
+          fetch: fetchImpl, key, random,
+          excludeVoiceIds: recentVoiceId ? [recentVoiceId] : [],
+        });
+      }
+    } catch { drawn = null; }
+    let chosen = null;
+    if (drawn?.voice) {
+      try { chosen = catalog.pickPersonaVoice({ voices: [drawn.voice], random, temperament }); } catch { chosen = null; }
+      // A drawn voice with no usable id cannot speak, and there is no second choice.
+      if (!chosen?.voiceId) chosen = null;
+    }
+    if (call !== self || self.finished) return snapshot();
+    if (!chosen) {
+      return fail('voice-library-unavailable', {
+        userMessage: 'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.',
+      });
+    }
+    const persona = personaOf(chosen, 'library');
+    const factory = voiceFactory({ key, voiceId: persona.voiceId, tier });
+    // Warm the unsaved library voice up before the call can ring, so its first real line
+    // is not the slow one. A voice that does not answer is a failed call, not a second pick.
+    const warmed = await warmUpVoice({ factory, clock });
+    if (call !== self || self.finished) return snapshot();
+    if (!warmed) {
+      return fail('voice-warmup-failed', {
+        userMessage: 'The interviewer voice did not respond. Try starting the call again.',
+      });
+    }
     call.promptBrief = promptBrief(call.brief);
     call.persona = persona;
     state.persona = { name: persona.name, initials: persona.initials, role: persona.role, team: persona.team };
-    const voiceFactory = await resolve('voiceFactory');
-    call.voice = voiceFactory({ key, voiceId: persona.voiceId, tier });
+    // call.voice is always the factory of the voice actually used.
+    call.voice = factory;
+    if (pool && persona.voiceId) {
+      // A stale pool file must never cost the call its voice.
+      pool.state.lastUsed[persona.voiceId] = clock.now();
+      try { await pool.store.save(pool.state); } catch { /* a stale pool file must never cost the call */ }
+    }
     const helperFactory = await resolve('helperFactory');
     const trackFactory = await resolve('trackFactory');
     call.voiceRate = voiceRate;
@@ -418,18 +532,36 @@ export function createPracticeCallService(deps = {}) {
     const main = create();
     const classifier = create();
     const targetMinutes = deps.targetMinutes ?? [25, 30];
-    const promptPersona = {
-      name: call.persona.name, role: call.persona.role, team: call.persona.team, temperament: call.persona.temperament,
+    const optionsFor = temperament => ({
+      persona: {
+        name: call.persona.name, role: call.persona.role, team: call.persona.team, temperament, voice: call.persona.voice,
+      },
+      brief: call.promptBrief, plan: call.plan, targetMinutes,
+    });
+    const settle = temperament => {
+      const options = optionsFor(temperament);
+      call.instructions = { opener: prompts.buildOpenerInstructions(options), main: prompts.buildInterviewerInstructions(options) };
     };
-    const options = { persona: promptPersona, brief: call.promptBrief, plan: call.plan, targetMinutes };
-    const openerInstructions = prompts.buildOpenerInstructions(options);
-    const interviewerInstructions = prompts.buildInterviewerInstructions(options);
-    await Promise.all([
-      opener.start({ instructions: openerInstructions }),
-      main.start({ instructions: interviewerInstructions }),
-      classifier.start({ instructions: CLASSIFIER_INSTRUCTIONS }),
-    ]);
-    call.instructions = { opener: openerInstructions, main: interviewerInstructions };
+    if (call.persona.temperament) {
+      settle(call.persona.temperament);
+      await Promise.all([
+        opener.start({ instructions: call.instructions.opener }),
+        main.start({ instructions: call.instructions.main }),
+        classifier.start({ instructions: CLASSIFIER_INSTRUCTIONS }),
+      ]);
+    } else {
+      // The main session picks the temperament that fits its voice; the opener then
+      // starts with that same temperament so the short reactions match the replies.
+      const classifierReady = Promise.resolve(classifier.start({ instructions: CLASSIFIER_INSTRUCTIONS }));
+      classifierReady.catch(() => {}); // still awaited below; this only covers a main-session failure first
+      const ready = await main.start({ instructions: prompts.buildInterviewerInstructions(optionsFor(null)) });
+      const picked = typeof prompts.temperamentFromReady === 'function' ? prompts.temperamentFromReady(ready?.reply) : null;
+      call.persona.temperament = picked || 'neutral';
+      call.persona.temperamentFrom = picked ? 'claude' : 'fallback';
+      // A restarted main session gets the settled temperament, not a fresh choice.
+      settle(call.persona.temperament);
+      await Promise.all([opener.start({ instructions: call.instructions.opener }), classifierReady]);
+    }
     call.sessions = { opener, main, classifier };
     call.restartSession = async (kind, { transcriptText } = {}) => {
       const next = create();

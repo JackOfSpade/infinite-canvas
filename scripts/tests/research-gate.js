@@ -31,7 +31,7 @@ import { UNSCORED_SCORE_STATUS } from '../../electron/ipc/jobBatchReconcile.js';
 import { filterNonEnglishJobs } from '../../src/utils/jobLanguage.js';
 import { scoreSafeRowsWithBoardClosed } from '../../electron/ipc/officialPostingBoardClosed.js';
 import { createOfficialPostingRecoveryPassResolver } from '../../electron/ipc/officialPostingService.js';
-import { evaluateJobPreferences, researchDeferredJobPreferences } from '../../electron/ipc/jobPreferences.js';
+import { COMPANY_RESEARCH_VERSION, evaluateJobPreferences, researchDeferredJobPreferences } from '../../electron/ipc/jobPreferences.js';
 import { runBoundedJobTaxonomy } from '../../electron/ipc/jobTaxonomy.js';
 import { confirmSimilarJobLocationPairs } from '../../electron/ipc/jobLocationConsolidation.js';
 import { findSimilarLocationCandidates } from '../../src/utils/jobLocationConsolidation.js';
@@ -702,9 +702,11 @@ export default [
       assert.equal(carryBoardRescores([{ ...job, scoringEvidenceReceipt: { careerSnapshotId: 'c'.repeat(64) } }], [card])[0].matchScore, job.matchScore,
         'a rescore on an older career record never overwrites a fresh score');
       const pendingJob = { ...job, preferenceAssessment: { status: 'accepted', companyResearchPending: true, matches: [] } };
-      const answered = { status: 'accepted', matches: [] };
+      const answered = { status: 'accepted', companyResearchVersion: COMPANY_RESEARCH_VERSION, matches: [] };
       assert.deepEqual(carryBoardRescores([pendingJob], [{ ...card, data: { ...card.data, officialRescore: undefined, preferenceAssessment: answered } }])[0].preferenceAssessment, answered,
-        'finished company research on a card is not asked again');
+        'finished current-version company research on a card is not asked again');
+      assert.equal(carryBoardRescores([pendingJob], [{ ...card, data: { ...card.data, officialRescore: undefined, preferenceAssessment: { status: 'accepted', matches: [] } } }])[0].preferenceAssessment.companyResearchPending, true,
+        'research from before the current version is asked again');
       __registerJobsHandlersForTests({
         getOfficialPostingView: async row => ({ description: '', officialPosting: row.officialPosting }),
         resolvePinnedScoringInput: async () => ({ profile: { workHistory: [] }, careerData: 'Synthetic candidate career text.', pinned: true }),

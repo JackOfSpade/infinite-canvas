@@ -1,6 +1,7 @@
 import { runInNewContext } from 'node:vm';
 import { assert, canonicalizeGeneratedUntrustedBoundaryNonces, RESEARCH_MIN_FIT_SCORE, compensationAssessmentCacheMatchesResearch, compensationCohortAssessmentFits, compensationCohortAssessmentMaxTokens, compensationResearchFingerprint, buildRoleFamilyBatchResearchPrompt, getRoleFamilyExperienceBandCache, packCompensationAssessmentBatches, packCompensationResearchBatches, parseCompensationResearchSections, planRoleFamilyAssessmentBatches, planRoleFamilyResearchBatches, roleFamilyAssessmentMaxTokens, saveRoleFamilyExperienceBandsBatch, tryGetStore, validateCompensationEvidenceBatchSubmission, validateRoleFamilyExperienceBandsBatchSubmission } from '../test-dependencies.js';
 import { readFileSync } from 'node:fs';
+import { JOB_COMPENSATION_METHOD_VERSION } from '../../src/utils/jobCompensationVersion.js';
 import { buildCompensationAssessmentListings, buildCompensationPersonalSalaryEvidence, buildCompensationResearchPrompt, compensationContextForSalary, compensationPersonalizationSignature, compensationResearchCacheKey, COMPENSATION_RESEARCH_PROMPT_VERSION, researchCompensationAssessments, resolveCompensationCareerInputs } from '../../electron/ipc/jobs.js';
 import { createDependencyReadyQueue, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import {
@@ -996,8 +997,8 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
       && /typical band/u.test(comparableRange.note.description)
       && /full range/u.test(comparableRange.note.description),
     'the extraction schema describes min/max as the typical band with a typical-band or full-range note, without reshaping the schema');
-    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 2
-      && compensationResearchCacheKey('shared-market') === 'shared-market|research-prompt-v2',
+    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 3
+      && compensationResearchCacheKey('shared-market') === 'shared-market|research-prompt-v3',
     'the compensation research cache key is namespaced by the prompt version so old-prompt research is never reused');
     return { promptVersion: COMPENSATION_RESEARCH_PROMPT_VERSION };
   },
@@ -1587,5 +1588,98 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     'the fit gate must be boundary-inclusive at the shared threshold and reject one point below it');
 
     return { minFitScore: RESEARCH_MIN_FIT_SCORE };
+  },
+}, {
+  name: 'An unresolvable official posting location keeps the scraped location and attaches no work-location link',
+  run: async () => {
+    const officialPosting = {
+      location: { display: 'Remote - Ontario, Canada', remote: false, workMode: '' },
+      sourceUrl: 'https://careers.example.test/reddit/software-engineer',
+    };
+    const job = {
+      title: 'Senior Software Engineer',
+      company: 'Reddit',
+      location: 'Toronto, Ontario, Canada',
+      salary: 'C$150,000 per year',
+      matchScore: 92,
+      compensationContext: { roleFamily: 'Software Engineering', seniority: 'senior', employmentType: 'full-time' },
+      experienceAssessment: { categorySpecificExperience: [{ requiredMinimumYears: 5 }] },
+    };
+    await researchCompensationAssessments([job], {
+      nodeId: 'official-location-unresolvable',
+      signal: { aborted: true },
+      getPostingView: item => ({
+        title: item.title,
+        employer: item.company,
+        location: item.location,
+        salary: item.salary,
+        description: item.description,
+        officialPosting,
+      }),
+    });
+    const assessment = job.compensationAssessment;
+    assert(assessment?.comparisonLocation?.display === 'Toronto, Ontario, Canada',
+      `the usable scraped location must survive an unresolvable official place, got ${JSON.stringify(assessment?.comparisonLocation)}`);
+    assert(!(assessment?.sourceLinks || []).some(link => link.url === officialPosting.sourceUrl),
+      'an official location that did not resolve must not attach the employer-posting work-location link');
+  },
+}, {
+  name: 'A resolvable official posting location replaces the scraped location and attaches its work-location link',
+  run: async () => {
+    const officialPosting = {
+      location: { display: 'Vancouver, British Columbia, Canada', remote: false, workMode: '' },
+      sourceUrl: 'https://careers.example.test/fieldguide/software-engineer',
+    };
+    const job = {
+      title: 'Senior Software Engineer',
+      company: 'Fieldguide',
+      location: 'Toronto, Ontario, Canada',
+      salary: 'C$155,000 per year',
+      matchScore: 90,
+      compensationContext: { roleFamily: 'Software Engineering', seniority: 'senior', employmentType: 'full-time' },
+      experienceAssessment: { categorySpecificExperience: [{ requiredMinimumYears: 5 }] },
+    };
+    await researchCompensationAssessments([job], {
+      nodeId: 'official-location-resolvable',
+      signal: { aborted: true },
+      getPostingView: item => ({
+        title: item.title,
+        employer: item.company,
+        location: item.location,
+        salary: item.salary,
+        description: item.description,
+        officialPosting,
+      }),
+    });
+    const assessment = job.compensationAssessment;
+    assert(assessment?.comparisonLocation?.display === 'Vancouver, British Columbia, Canada',
+      `a resolvable official place must replace the scraped location, got ${JSON.stringify(assessment?.comparisonLocation)}`);
+    const link = (assessment?.sourceLinks || []).find(source => source.url === officialPosting.sourceUrl);
+    assert(link?.title === 'Employer posting (work location)',
+      `a resolvable official place must attach its work-location link, got ${JSON.stringify(assessment?.sourceLinks)}`);
+  },
+}, {
+  name: 'Salary research targets the cohort targetCurrency and cites a sourced exchange rate for other currencies',
+  run: () => {
+    const prompt = buildCompensationResearchPrompt([{
+      researchId: 'market-id',
+      researchParameters: { roleFamily: 'Software Engineering', targetCurrency: 'USD' },
+    }]);
+    assert(/Each request's targetCurrency is the currency the reported ranges will be compared in/u.test(prompt),
+      'the research prompt must say the request targetCurrency is the comparison currency');
+    assert(/whenever any useful source's currency differs from targetCurrency, also cite one current exchange-rate source for that currency pair/u.test(prompt)
+      && /give the direct URL, the rate, a short verbatim quote, and its date/u.test(prompt),
+    'the research prompt must require a dated exchange-rate source when a useful source publishes another currency');
+    const source = readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+    const extractionStart = source.indexOf('Extract comparable cash-salary evidence for every independent cohort below.');
+    const extractionEnd = source.indexOf('${PERSONAL_SALARY_GUIDANCE_PROMPT}', extractionStart);
+    const extractionPrompt = source.slice(extractionStart, extractionEnd);
+    assert(extractionStart >= 0 && extractionEnd > extractionStart
+      && /A comparable range published in another currency may be converted into the target currency ONLY using an exchange rate quoted, with its URL, in that SAME cohort's grounded section/u.test(extractionPrompt)
+      && /that range's note must state the original figures, the original currency, the rate used, and the rate source date/u.test(extractionPrompt)
+      && /Without such a rate, mark that range comparable=false/u.test(extractionPrompt),
+    'the assessment prompt must allow cross-currency conversion only from a rate quoted in the same cohort grounded section');
+    assert(COMPENSATION_RESEARCH_PROMPT_VERSION === 3 && JOB_COMPENSATION_METHOD_VERSION === 5,
+      `the target-currency round must bump both prompt and method versions, got ${COMPENSATION_RESEARCH_PROMPT_VERSION} and ${JOB_COMPENSATION_METHOD_VERSION}`);
   },
 }];

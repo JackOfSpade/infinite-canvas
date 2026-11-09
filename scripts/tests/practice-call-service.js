@@ -4,6 +4,7 @@ import * as nodeFs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createCallStore } from '../../electron/practiceCall/callStore.js';
+import { createVoicePoolStore, drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { createPracticeCallService } from '../../electron/practiceCall/callService.js';
 import { createReplayHandler } from '../../electron/practiceCall/replayProtocol.js';
 
@@ -60,7 +61,22 @@ function makeDeps(overrides = {}) {
       listConversationalVoices: async () => [{ voiceId: 'v1', name: 'Ada Lovelace' }],
       pickPersonaVoice: () => ({ voiceId: 'v1', name: 'Ada Lovelace' }),
     },
-    voiceFactory: () => ({ open: () => ({ sampleRate: 24000, onAudio() {}, onWords() {}, sendText() {}, finish: async () => {}, cancel() {} }) }),
+    // No network and no growth: the draw is a no-op that hands back the account's voice.
+    voiceLibrary: {
+      createVoicePoolStore: () => ({ load: async () => ({ version: 1, lastUsed: {} }), save: async () => {} }),
+      drawVoice: async () => ({ voice: DRAWN_LIBRARY_VOICE, source: 'library', libraryTotal: 3427, attempts: 1 }),
+    },
+    // Only the warm-up stream carries audio, so every start warms up and rings.
+    voiceFactory: () => ({
+      open: options => {
+        const stream = {
+          sampleRate: 24000, onAudio(listener) { stream.audioListener = listener; }, onWords() {},
+          sendText() {}, cancel() {},
+          finish: async () => { if (options?.utteranceId === 'warm-up') stream.audioListener?.(new Uint8Array(1024)); },
+        };
+        return stream;
+      },
+    }),
     helperFactory: ({ onEvent }) => {
       const helper = {
         start: async options => {
@@ -250,7 +266,16 @@ test('the tier comes from the dialogue voice module and sets the voice rate', as
     fetch: async () => { throw new Error('the service must not fetch the subscription itself'); },
     subscriptionTier: async options => { seen.tierOptions = options; return 'paid'; },
     rateForTier: tier => { seen.rated = tier; return 44100; },
-    voiceFactory: options => { seen.voice = options; return { open() {} }; },
+    voiceFactory: options => {
+      seen.voice = options;
+      // The unsaved library voice answers its warm-up line, so the call can ring.
+      return {
+        open: () => ({
+          onAudio(listener) { seen.warmAudio = listener; }, onWords() {}, sendText() {}, cancel() {},
+          finish: async () => { seen.warmAudio?.(new Uint8Array(1024)); },
+        }),
+      };
+    },
     trackFactory: options => { seen.track = options; tempo.push('track'); return { started() {}, ended() {}, addUtterance() {}, finalize: async () => {} }; },
     catalog: {
       listConversationalVoices: async () => [{ voiceId: 'v1', name: 'Ada Lovelace' }],
@@ -272,31 +297,66 @@ test('the ElevenLabs key is read without a promisified execFile', async () => {
   assert.deepEqual(calls[0], []);
 });
 
-test('temperament is uniform unless the brief asks for tough, and the role stays generic', async () => {
-  const rows = [];
-  for (const value of [0, 0.5, 0.99]) {
+test('without a requested temperament the interviewer chooses one that fits its voice', async () => {
+  const sessionsOf = replies => {
+    const starts = [];
+    let made = 0;
+    const factory = () => {
+      const kind = ['opener', 'main', 'classifier'][made++];
+      return { start: async ({ instructions }) => { starts.push({ kind, instructions }); return replies[kind]; } };
+    };
+    return { starts, factory };
+  };
+  const character = { traits: 'Dominant, Firm', descriptive: '', about: 'Brash and openly confident.' };
+  const run = async ({ reply, loadBrief } = {}) => {
     const seen = {};
-    const { service } = await startOf({ modelReady: true, deps: {
-      random: () => value,
+    const { starts, factory } = sessionsOf({ main: reply, opener: { reply: 'READY' }, classifier: { reply: 'READY' } });
+    const built = await startOf({ modelReady: true, deps: {
+      random: () => 0,
+      sessionsFactory: factory,
+      prompts: {
+        buildInterviewerInstructions: ({ persona }) => `main:${persona.temperament ?? 'choose'}:${persona.voice?.character?.traits}`,
+        buildOpenerInstructions: ({ persona }) => `opener:${persona.temperament ?? 'choose'}`,
+        temperamentFromReady: text => (/^READY (warm|neutral|tough)$/.exec(text ?? '') ?? [])[1] ?? null,
+      },
       catalog: {
         listConversationalVoices: async () => [{ voiceId: 'v1', name: 'Ada Lovelace' }],
-        pickPersonaVoice: options => { seen.temperament = options.temperament; return { voiceId: 'v1', name: 'Ada Lovelace' }; },
+        pickPersonaVoice: options => {
+          seen.temperament = options.temperament;
+          return { voiceId: 'v1', name: 'Ada Lovelace', gender: 'male', age: 'middle_aged', accent: 'american', character, temperament: null };
+        },
       },
     } });
+    if (loadBrief) built.deps.loadBrief = loadBrief(built.deps.loadBrief);
+    const service = createPracticeCallService(built.deps);
     const state = await service.start(ARGS);
-    rows.push({ temperament: seen.temperament, role: state.persona.role, team: state.persona.team });
-  }
-  assert.deepEqual(rows.map(row => row.temperament), ['warm', 'neutral', 'tough']);
-  assert.deepEqual(rows.map(row => row.role), ['Hiring Manager', 'Senior Engineer', 'Team Lead']);
-  assert.deepEqual(rows.map(row => row.team), ['the hiring team', 'the hiring team', 'the hiring team']);
-  const tough = await startOf({ modelReady: true, deps: { random: () => 0 } });
-  const brief = tough.deps.loadBrief;
-  tough.deps.loadBrief = async args => {
-    const loaded = await brief(args);
-    return { ...loaded, role: { ...loaded.role, team: 'Platform' }, practice: { temperament: 'tough' } };
+    return { seen, starts, state, built };
   };
-  const state = await createPracticeCallService(tough.deps).start(ARGS);
-  assert.equal(state.persona.team, 'Platform');
+  const chosen = await run({ reply: { reply: 'READY tough' } });
+  assert.equal(chosen.seen.temperament, null);
+  const main = chosen.starts.find(item => item.kind === 'main');
+  const opener = chosen.starts.find(item => item.kind === 'opener');
+  assert.equal(main.instructions, 'main:choose:Dominant, Firm');
+  assert.equal(opener.instructions, 'opener:tough');
+  // The main session chose before the opener started, so their temperaments match.
+  assert.ok(chosen.starts.indexOf(main) < chosen.starts.indexOf(opener));
+  assert.equal(chosen.state.persona.role, 'Hiring Manager');
+  assert.equal(chosen.state.persona.team, 'the hiring team');
+
+  const unclear = await run({ reply: { reply: 'READY' } });
+  assert.equal(unclear.starts.find(item => item.kind === 'opener').instructions, 'opener:neutral');
+
+  const asked = await run({
+    reply: { reply: 'READY' },
+    loadBrief: brief => async args => {
+      const loaded = await brief(args);
+      return { ...loaded, role: { ...loaded.role, team: 'Platform' }, practice: { temperament: 'tough' } };
+    },
+  });
+  assert.equal(asked.seen.temperament, 'tough');
+  assert.equal(asked.starts.find(item => item.kind === 'main').instructions, 'main:tough:Dominant, Firm');
+  assert.equal(asked.starts.find(item => item.kind === 'opener').instructions, 'opener:tough');
+  assert.equal(asked.state.persona.team, 'Platform');
 });
 
 test('analysis gets the Claude text call and a Scribe transcribe closure', async () => {
@@ -777,3 +837,293 @@ test('R12 finish waits for ear.settle before snapshotting tone samples and close
   assert.equal(record.toneNotes.length, 1);
   assert.equal(record.toneNotes[0].atMs, 1);
 });
+
+// --- the interviewer voice draw: the shared library only, warm-up and the pool file ---
+
+// Kept only to prove that no account voice is ever drawn or picked.
+const ACCOUNT_VOICES = Object.freeze([
+  { voiceId: 'v1', voiceName: 'Ada - calm', gender: 'female', age: 'young', accent: 'british', useCases: ['conversational'], category: 'premade', description: '' },
+  { voiceId: 'v2', voiceName: 'Bo - warm', gender: 'male', age: 'middle aged', accent: 'american', useCases: ['conversational'], category: 'premade', description: '' },
+]);
+const DRAWN_LIBRARY_VOICE = Object.freeze({
+  voiceId: 'lib-1', voiceName: 'Nora - crisp', gender: 'female', age: 'middle aged', accent: 'american',
+  useCases: ['conversational'], category: 'professional', description: 'A crisp, confident voice.',
+  descriptive: 'confident', language: 'en', rate: null,
+});
+const SECOND_LIBRARY_VOICE = Object.freeze({
+  voiceId: 'lib-2', voiceName: 'Miles - dry', gender: 'male', age: 'young', accent: 'irish',
+  useCases: ['conversational'], category: 'professional', description: 'A dry, even voice.',
+  descriptive: 'dry', language: 'en', rate: null,
+});
+const poolFilePath = tmp => path.join(tmp, 'practice-voice-pool.json');
+// One raw /v1/shared-voices row, for the test that runs the real draw against a fake fetch.
+const SHARED_LIBRARY_ROW = Object.freeze({
+  voice_id: 'lib-1', public_owner_id: 'owner-1', name: 'Nora', category: 'professional',
+  labels: { use_case: 'conversational', gender: 'female', accent: 'american', age: 'middle_aged', language: 'en' },
+  sharing: { rate: 1 },
+});
+const realPoolStore = { createVoicePoolStore: options => createVoicePoolStore(options) };
+
+/** The catalog fake records what every pick saw and every account-voice listing. */
+function recordingCatalog(voices) {
+  const picks = [];
+  const listings = [];
+  return {
+    picks,
+    listings,
+    listConversationalVoices: async () => { listings.push(voices); return voices; },
+    pickPersonaVoice: options => {
+      picks.push(options);
+      return { voiceId: options.voices[0].voiceId, name: 'Ada Lovelace' };
+    },
+  };
+}
+
+/** A voice factory whose streams are observable: they carry audio, an error, or silence. */
+function voiceHarness({ audio = false, fail = false, onSend } = {}) {
+  const factories = [];
+  const make = options => {
+    const opened = [];
+    const factory = {
+      options, opened,
+      open: openOptions => {
+        const stream = {
+          utteranceId: openOptions?.utteranceId, sent: [], finished: 0, cancelled: 0,
+          onAudio(listener) { stream.audioListener = listener; },
+          onWords() {},
+          onError(listener) { stream.errorListener = listener; },
+          sendText(text) { stream.sent.push(text); onSend?.(stream); },
+          async finish() {
+            stream.finished += 1;
+            if (fail) { stream.errorListener?.(new Error('warm-up stream failed')); throw new Error('warm-up stream failed'); }
+            if (audio) stream.audioListener?.(new Uint8Array(1024));
+          },
+          cancel() { stream.cancelled += 1; },
+        };
+        opened.push(stream);
+        return stream;
+      },
+    };
+    factories.push(factory);
+    return factory;
+  };
+  return { factories, make };
+}
+
+test('the draw gets the newest pool stamp and the service random, never the account voices', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-draw-'));
+  await writeFile(poolFilePath(tmp), JSON.stringify({ version: 1, lastUsed: { 'lib-1': 500, 'lib-2': 900 } }));
+  const draws = [];
+  const random = () => 0.25;
+  const catalog = recordingCatalog(ACCOUNT_VOICES);
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+    catalog, random,
+    voiceLibrary: { ...realPoolStore, drawVoice: async options => { draws.push(options); return { voice: DRAWN_LIBRARY_VOICE, source: 'library', libraryTotal: 3427, attempts: 2 }; } },
+  } });
+  const service = createPracticeCallService(deps);
+  await service.start(ARGS);
+  assert.equal(draws.length, 1);
+  assert.equal('accountVoices' in draws[0], false, 'the draw is never handed the account voices');
+  assert.deepEqual(draws[0].excludeVoiceIds, ['lib-2'], 'the newest pool stamp is the avoided voice');
+  assert.equal(draws[0].random, random);
+  assert.equal(draws[0].key, 'key-should-never-be-logged');
+  assert.equal(draws[0].fetch, deps.fetch);
+  assert.deepEqual(catalog.listings, [], 'the account voice list is never read');
+  assert.deepEqual(catalog.picks.map(pick => pick.voices.map(voice => voice.voiceId)), [['lib-1']]);
+  await service.answer();
+  await service.hangUp();
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.persona.voiceId, 'lib-1', 'the persona is built from the drawn voice');
+  assert.equal(record.persona.voiceSource, 'library');
+});
+
+test('a library draw opens one discarded warm-up line before the call rings', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-warmup-'));
+  const ref = {};
+  const phasesAtSend = [];
+  const trackUtterances = [];
+  const harness = voiceHarness({ audio: true, onSend: () => phasesAtSend.push(ref.service.getState().phase) });
+  const catalog = recordingCatalog(ACCOUNT_VOICES);
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+    catalog, random: () => 0,
+    voiceFactory: harness.make,
+    trackFactory: () => ({ started() {}, ended() {}, addUtterance(utterance) { trackUtterances.push(utterance); }, finalize: async () => {} }),
+    voiceLibrary: { ...realPoolStore, drawVoice: async () => ({ voice: DRAWN_LIBRARY_VOICE, source: 'library', libraryTotal: 3427, attempts: 4 }) },
+  } });
+  ref.service = createPracticeCallService(deps);
+  const state = await ref.service.start(ARGS);
+  assert.equal(state.phase, 'ringing');
+  assert.equal(harness.factories.length, 1, 'one factory, for the library voice');
+  assert.equal(harness.factories[0].options.voiceId, 'lib-1');
+  const opened = harness.factories[0].opened;
+  assert.deepEqual(opened.map(stream => stream.utteranceId), ['warm-up'], 'exactly one warm-up stream');
+  assert.deepEqual(opened[0].sent, ['Hi.']);
+  assert.deepEqual(phasesAtSend, ['precheck'], 'the warm-up happens before the call rings');
+  assert.equal(opened[0].finished, 1);
+  assert.deepEqual(trackUtterances, [], 'the warm-up audio never reaches the track');
+  await ref.service.answer();
+  await ref.service.hangUp();
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.persona.voiceSource, 'library');
+  assert.equal(record.persona.voiceId, 'lib-1');
+});
+
+test('the real pool file keeps only version and lastUsed across two starts', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-pool-file-'));
+  const filePath = poolFilePath(tmp);
+  const draws = [];
+  const voiceLibrary = {
+    ...realPoolStore,
+    drawVoice: async options => {
+      draws.push(options);
+      return { voice: draws.length === 1 ? DRAWN_LIBRARY_VOICE : SECOND_LIBRARY_VOICE, source: 'library', libraryTotal: 3427, attempts: 1 };
+    },
+  };
+  const readPool = async () => JSON.parse(await readFile(filePath, 'utf8'));
+  const depsFor = extra => makeDeps({ tmp, modelReady: true, deps: { voiceLibrary, catalog: recordingCatalog(ACCOUNT_VOICES), random: () => 0, ...extra } });
+
+  // The real store over a real file: the point is what the precheck save leaves on disk.
+  await createPracticeCallService(depsFor({}).deps).start(ARGS);
+  const afterFirst = await readPool();
+  assert.deepEqual(Object.keys(afterFirst).sort(), ['lastUsed', 'version'], 'nothing else survives the save');
+  assert.equal(afterFirst.version, 1);
+  assert.equal(afterFirst.lastUsed['lib-1'], 1000);
+
+  // A second start on a later clock avoids the first start's voice and adds its own stamp.
+  await createPracticeCallService(depsFor({
+    clock: { now: () => 2000, setTimeout: () => 1, clearTimeout: () => {} },
+    newId: () => 'call-2',
+  }).deps).start(ARGS);
+  const afterSecond = await readPool();
+  assert.deepEqual(draws[1].excludeVoiceIds, ['lib-1'], 'the second draw avoids the first start voice');
+  assert.deepEqual(Object.keys(afterSecond).sort(), ['lastUsed', 'version']);
+  assert.equal(afterSecond.lastUsed['lib-1'], 1000);
+  assert.equal(afterSecond.lastUsed['lib-2'], 2000);
+});
+
+test('a warm-up that errors or stays silent ends the call before anything is created', async () => {
+  for (const [label, streamOptions] of [['errors', { fail: true }], ['no audio', { audio: false }]]) {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-warmup-fail-'));
+    const harness = voiceHarness(streamOptions);
+    const catalog = recordingCatalog(ACCOUNT_VOICES);
+    const created = { helpers: 0, tracks: 0, sessions: 0 };
+    const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+      catalog, random: () => 0,
+      voiceFactory: harness.make,
+      helperFactory: () => { created.helpers += 1; throw new Error('no helper after a failed warm-up'); },
+      trackFactory: () => { created.tracks += 1; throw new Error('no track after a failed warm-up'); },
+      sessionsFactory: () => { created.sessions += 1; throw new Error('no sessions after a failed warm-up'); },
+      voiceLibrary: { ...realPoolStore, drawVoice: async () => ({ voice: DRAWN_LIBRARY_VOICE, source: 'library', libraryTotal: 3427, attempts: 1 }) },
+    } });
+    const service = createPracticeCallService(deps);
+    const state = await service.start(ARGS);
+    assert.equal(state.phase, 'error', label);
+    assert.equal(state.error.code, 'voice-warmup-failed', label);
+    assert.equal(state.error.message, 'The interviewer voice did not respond. Try starting the call again.', label);
+    assert.equal(harness.factories.length, 1, `${label}: only the drawn voice is opened`);
+    assert.equal(harness.factories[0].options.voiceId, 'lib-1', label);
+    assert.deepEqual(harness.factories[0].opened.map(stream => stream.utteranceId), ['warm-up'], label);
+    assert.deepEqual(created, { helpers: 0, tracks: 0, sessions: 0 }, `${label}: nothing is created`);
+    assert.deepEqual(catalog.listings, [], `${label}: the account voice list is never read`);
+    const stamped = await readFile(poolFilePath(tmp), 'utf8').then(() => true, () => false);
+    assert.equal(stamped, false, `${label}: no lastUsed stamp is saved`);
+  }
+});
+
+test('a draw failure ends the call before anything is created', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-draw-error-'));
+  const catalog = recordingCatalog(ACCOUNT_VOICES);
+  const created = { helpers: 0, tracks: 0, sessions: 0 };
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+    catalog, random: () => 0,
+    helperFactory: () => { created.helpers += 1; throw new Error('no helper after a failed draw'); },
+    trackFactory: () => { created.tracks += 1; throw new Error('no track after a failed draw'); },
+    sessionsFactory: () => { created.sessions += 1; throw new Error('no sessions after a failed draw'); },
+    voiceLibrary: { ...realPoolStore, drawVoice: async () => { throw new Error('voice library unreachable'); } },
+  } });
+  const service = createPracticeCallService(deps);
+  const state = await service.start(ARGS);
+  assert.equal(state.phase, 'error');
+  assert.equal(state.error.code, 'voice-library-unavailable');
+  assert.equal(state.error.message, 'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.');
+  assert.deepEqual(created, { helpers: 0, tracks: 0, sessions: 0 }, 'nothing is created');
+  assert.deepEqual(catalog.listings, [], 'the account voice list is never read');
+  assert.deepEqual(catalog.picks, [], 'no voice is picked');
+  const stamped = await readFile(poolFilePath(tmp), 'utf8').then(() => true, () => false);
+  assert.equal(stamped, false, 'no lastUsed stamp is saved');
+});
+
+test('a missing, throwing or unusable draw is voice-library-unavailable', async () => {
+  for (const [label, voiceLibrary] of [
+    ['missing', { ...realPoolStore }],
+    ['throwing', { ...realPoolStore, drawVoice: async () => { throw new Error('voice library unreachable'); } }],
+    ['unusable', { ...realPoolStore, drawVoice: async () => ({ voice: { voiceName: 'No id' }, source: 'library', libraryTotal: 3427, attempts: 1 }) }],
+  ]) {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-draw-fail-'));
+    const catalog = recordingCatalog(ACCOUNT_VOICES);
+    const { deps } = makeDeps({ tmp, modelReady: true, deps: { catalog, random: () => 0, voiceLibrary } });
+    const service = createPracticeCallService(deps);
+    const state = await service.start(ARGS);
+    assert.equal(state.phase, 'error', label);
+    assert.equal(state.error.code, 'voice-library-unavailable', label);
+    assert.equal(state.error.message,
+      'Could not load an interviewer voice from the ElevenLabs voice library. Check your internet connection and try again.', label);
+    assert.deepEqual(catalog.listings, [], `${label}: the account voice list is never read`);
+    const stamped = await readFile(poolFilePath(tmp), 'utf8').then(() => true, () => false);
+    assert.equal(stamped, false, `${label}: no lastUsed stamp is saved`);
+  }
+});
+
+test('a full start never sends POST or DELETE to the voices API', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-no-write-'));
+  const requests = [];
+  const fetchImpl = async (url, options = {}) => {
+    requests.push({ url: String(url), method: options.method ?? 'GET' });
+    if (new URL(String(url)).pathname === '/v1/shared-voices') return { ok: true, status: 200, json: async () => ({ voices: [SHARED_LIBRARY_ROW], total_count: 3427 }) };
+    return { ok: true, status: 200, json: async () => ({ tier: 'paid' }) };
+  };
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+    fetch: fetchImpl, catalog: recordingCatalog(ACCOUNT_VOICES), random: () => 0,
+    // The real draw against a recording fetch: every request it makes is a read.
+    voiceLibrary: { ...realPoolStore, drawVoice: options => drawVoice(options) },
+  } });
+  const service = createPracticeCallService(deps);
+  const state = await service.start(ARGS);
+  assert.equal(state.phase, 'ringing');
+  assert.equal(requests.some(request => new URL(request.url).pathname === '/v1/shared-voices'), true, 'the draw read the shared library');
+  assert.deepEqual(requests.filter(request => request.method !== 'GET'), []);
+  assert.deepEqual(requests.filter(request => new URL(request.url).pathname.startsWith('/v1/voices')), []);
+});
+
+test('an unreadable pool and a failing save never block the call', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-pool-fail-'));
+  const unhandled = [];
+  const onUnhandled = reason => unhandled.push(String(reason && reason.message));
+  const draws = [];
+  const catalog = recordingCatalog(ACCOUNT_VOICES);
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: {
+    catalog, random: () => 0,
+    voiceLibrary: {
+      createVoicePoolStore: () => ({ load: async () => { throw new Error('unreadable pool file'); }, save: async () => { throw new Error('disk full'); } }),
+      drawVoice: async options => {
+        draws.push(options);
+        return { voice: DRAWN_LIBRARY_VOICE, source: 'library', libraryTotal: 3427, attempts: 1 };
+      },
+    },
+  } });
+  const service = createPracticeCallService(deps);
+  process.on('unhandledRejection', onUnhandled);
+  let state;
+  try {
+    state = await service.start(ARGS);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  assert.equal(state.phase, 'ringing');
+  assert.deepEqual(draws[0].excludeVoiceIds, [], 'an unreadable pool excludes nothing');
+  assert.deepEqual(catalog.picks.map(pick => pick.voices.map(voice => voice.voiceId)), [['lib-1']]);
+  assert.deepEqual(catalog.listings, []);
+  assert.deepEqual(unhandled, []);
+});
+

@@ -468,7 +468,7 @@ export function locationSourceLink(source) {
   return {
     title: 'Employer posting (work location)',
     url: source.sourceUrl,
-    note: 'Work location was read from the employer\'s own posting because the scraped listing did not state one.',
+    note: 'Work location was read from the employer\'s own posting.',
   };
 }
 

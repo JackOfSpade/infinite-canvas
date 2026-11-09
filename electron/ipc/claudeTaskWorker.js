@@ -26,6 +26,8 @@ import {
 import { routedCall } from './aiCallProviders.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
 import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
+import { mergeOfficialPostingResearchReplies, officialPostingResearchMembers, OFFICIAL_POSTING_RESEARCH_TASK } from './officialPostingBridge.js';
+import { readTavilyKey, tavilyMcpServers, tavilyPlainLeads, TAVILY_RESEARCH_TOOLS } from './tavily.js';
 
 export const CLAUDE_TASK_CONCURRENCY = 4;
 export const CLAUDE_TASK_USAGE_FILE = 'claude-task-usage.jsonl';
@@ -167,11 +169,15 @@ export function createClaudeTaskWorker({
   offloadCall = offloadTextCall,
   shadow = createShadowMeasure(),
   shadowValidator = workerShadowValidator,
+  tavily = { readKey: readTavilyKey, plainLeads: tavilyPlainLeads },
 } = {}) {
   const allowTasks = new Set(taskIds);
   let offloadBlockedUntil = 0;
   const offloadRejections = new Map();
   const escalated = new Set();
+  // Requests whose attempt actually ran on Claude (not a routed provider), so a
+  // failure knows whether the spend it reports is Claude's.
+  const claudeAttempts = new Set();
   const running = new Map();
   const failures = new Map();
   let pausedUntil = 0;
@@ -215,7 +221,26 @@ export function createClaudeTaskWorker({
     wakeIn(ms);
   }
 
+  // A failed attempt still spent Claude's tokens, so its cost is logged the same
+  // way a success's is. Reporting must never disturb a retry or a pause.
+  function recordFailedUsage(entry, error) {
+    try {
+      const spent = error?.detail;
+      const usage = spent?.usage && typeof spent.usage === 'object' ? spent.usage : null;
+      const costUsd = typeof spent?.costUsd === 'number' ? spent.costUsd : null;
+      if (!usage && costUsd === null) return;
+      const profile = profileFor(entry.task);
+      if (!profile) return;
+      recordUsage({
+        at: new Date(now()).toISOString(), task: entry.task, model: profile.model, effort: profile.effort,
+        usage: usage ?? undefined, costUsd: costUsd ?? undefined, provider: 'claude',
+        outcome: 'failed', code: error?.code ?? null,
+      });
+    } catch { /* usage reporting cannot change what a failure does */ }
+  }
+
   function handleFailure(entry, error) {
+    if (claudeAttempts.delete(entry.requestId)) recordFailedUsage(entry, error);
     if (error?.code === 'CLAUDE_CANCELLED') return activity.released(entry.requestId);
     if (error?.code === 'CLAUDE_USAGE_LIMIT') {
       activity.released(entry.requestId);
@@ -265,6 +290,44 @@ export function createClaudeTaskWorker({
     return images.map((image, i) => ({ ...image, label: `Photo ${i + 1}` }));
   }
 
+  /**
+   * Official-posting research as three independent lookups combined: Claude with its
+   * built-in search, Claude with Tavily, and a plain Tavily search per job (no AI). Each
+   * finds postings the others miss (measured 2026-11-08: 17, 21 and 10 of 30 alone, 26
+   * together). Without a Tavily key, or if Tavily fails, it is the built-in lookup alone.
+   */
+  async function researchThreeWays(prompt, claudeCall, signal) {
+    let key = '';
+    try { key = await tavily.readKey(); } catch { key = ''; }
+    if (!key) return claudeCall();
+    const members = officialPostingResearchMembers(prompt);
+    const [native, viaTavily, plain] = await Promise.allSettled([
+      claudeCall(),
+      claudeCall({ tools: [...TAVILY_RESEARCH_TOOLS], mcpServers: tavilyMcpServers(key) }),
+      Promise.all(members.map(async member => [member.id, await tavily.plainLeads({ key, member, signal })])),
+    ]);
+    const replies = [native, viaTavily].filter(result => result.status === 'fulfilled').map(result => result.value);
+    if (!replies.length) throw native.reason;
+    const merged = mergeOfficialPostingResearchReplies({
+      ids: members.map(member => member.id),
+      replies: replies.map(reply => reply.text),
+      extraLeads: plain.status === 'fulfilled' ? Object.fromEntries(plain.value) : {},
+    });
+    const base = native.status === 'fulfilled' ? native.value : viaTavily.value;
+    const sum = field => replies.reduce((total, reply) => total + (Number(reply[field]) || 0), 0);
+    const usage = {};
+    for (const reply of replies) {
+      for (const [name, value] of Object.entries(reply.usage || {})) if (typeof value === 'number') usage[name] = (usage[name] || 0) + value;
+    }
+    return {
+      ...base,
+      // No member list (an unexpected prompt) or nothing valid: the built-in answer as it came.
+      text: members.length && merged ? merged : base.text,
+      ...(replies.some(reply => typeof reply.costUsd === 'number') ? { costUsd: sum('costUsd') } : {}),
+      ...(Object.keys(usage).length ? { usage } : {}),
+    };
+  }
+
   async function serve(entry, controller) {
     const comparisonProvenance = entry.comparisonGroup ? {
       version: 2, transport: 'worker', observed: true, comparisonGroup: entry.comparisonGroup, comparisonRun: entry.comparisonRun,
@@ -301,17 +364,24 @@ export function createClaudeTaskWorker({
     if (!reply) {
       const pageImages = await imagesFor(entry);
       const stage = binding();
-      reply = await runStage({
+      // Marked before the call so a failure is known to carry Claude's spend.
+      claudeAttempts.add(entry.requestId);
+      const claudeCall = extra => runStage({
         ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
         pageImages, signal: controller.signal,
         onActivity: event => activity.event(entry.requestId, event),
         model: profile.model, effort: profile.effort, persistSession: false,
         ...(profile.tools ? { tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS } : {}),
+        ...extra,
       });
+      reply = entry.task === OFFICIAL_POSTING_RESEARCH_TASK && !entry.hasAttachments
+        ? await researchThreeWays(handoff.prompt, claudeCall, controller.signal)
+        : await claudeCall();
     }
     recordUsage(provider === 'offload'
       ? { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: route.reasoning, usage: reply.usage, costUsd: reply.costUsd, provider, route: route.route, reasoning: route.reasoning, ...(reply.webTools ? { webTools: reply.webTools } : {}) }
       : { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: profile.effort, usage: reply.usage, costUsd: reply.costUsd, provider });
+    claudeAttempts.delete(entry.requestId);
     failures.delete(entry.requestId);
     if (provider === 'claude') {
       // An answer proves Claude is usable again, which is what ends a pause notice.
@@ -363,6 +433,7 @@ export function createClaudeTaskWorker({
     const live = new Set([...snapshot.handoffs.map(entry => entry.requestId), ...snapshot.settlingRequestIds]);
     for (const [requestId, run] of running) if (!live.has(requestId)) run.controller.abort();
     for (const requestId of failures.keys()) if (!live.has(requestId)) failures.delete(requestId);
+    for (const requestId of [...claudeAttempts]) if (!live.has(requestId)) claudeAttempts.delete(requestId);
     for (const requestId of [...offloadRejections.keys()]) if (!live.has(requestId)) offloadRejections.delete(requestId);
     for (const requestId of [...escalated]) if (!live.has(requestId)) escalated.delete(requestId);
     activity.prune(live);

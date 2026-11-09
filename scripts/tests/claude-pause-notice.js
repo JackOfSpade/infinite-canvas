@@ -48,6 +48,7 @@ export default [
           onEvent: () => () => {},
         },
         binding: () => ({ binary: 'claude', env: {}, cwd: '/tmp' }),
+        tavily: { readKey: async () => '', plainLeads: async () => [] },
         now: () => clock,
         setTimer: (fn, ms) => ({ fn, ms }),
         clearTimer: () => {},

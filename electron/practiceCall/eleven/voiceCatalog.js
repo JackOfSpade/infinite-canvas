@@ -19,6 +19,9 @@ const ACCENT_KEYS = [
   ['scottish', 'scottish'],
   ['australian', 'australian'],
   ['spanish', 'spanish'],
+  ['cantonese', 'chinese'],
+  ['mandarin', 'chinese'],
+  ['taiwan', 'chinese'],
   ['chinese', 'chinese'],
   ['french', 'french'],
   ['german', 'german'],
@@ -51,6 +54,46 @@ export const hasKnownGender = voice => {
   return gender.length > 0;
 };
 
+const textOf = value => String(value ?? '').trim().toLowerCase();
+
+/** Verified language codes, from raw API voices (objects) or normalized voices (strings). */
+export const verifiedLanguagesOf = voice => {
+  const list = Array.isArray(voice?.verifiedLanguages) ? voice.verifiedLanguages
+    : Array.isArray(voice?.verified_languages) ? voice.verified_languages : [];
+  return list.map(item => (typeof item === 'string' ? item : item?.language)).map(textOf).filter(Boolean);
+};
+
+/** labels.language, else fine_tuning.language, else the first verified language, else ''. */
+export const languageOf = voice => {
+  const labels = voice?.labels ?? {};
+  const explicit = textOf(voice?.language ?? labels.language);
+  if (explicit) return explicit;
+  const tuned = textOf(voice?.fine_tuning?.language);
+  if (tuned) return tuned;
+  return verifiedLanguagesOf(voice)[0] ?? '';
+};
+
+export const rateOf = voice => {
+  const raw = voice?.sharing?.rate ?? voice?.rate;
+  if (raw === null || raw === undefined || raw === '') return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+};
+
+/** English unless a language label says otherwise; any verified languages must include English. */
+export const isEnglishVoice = voice => {
+  const language = languageOf(voice);
+  if (language && !language.startsWith('en')) return false;
+  const verified = verifiedLanguagesOf(voice);
+  return verified.length === 0 || verified.some(item => item.startsWith('en'));
+};
+
+/** Standard price: no price multiplier at all, or one at or below the base rate. */
+export const isStandardPrice = voice => {
+  const rate = rateOf(voice);
+  return rate === null || rate <= 1;
+};
+
 /** Accent label → regional name pool key, or null for the deliberately diverse pool. */
 export function accentPoolKey(accent) {
   const text = String(accent ?? '').trim().toLowerCase();
@@ -68,7 +111,11 @@ export function normalizeVoice(voice) {
     accent: String(labels.accent ?? voice?.accent ?? '').trim().toLowerCase(),
     useCases: labelUseCases(labels),
     category: voice?.category ?? '',
-    description: labels.description ?? '',
+    descriptive: String(labels.descriptive ?? voice?.descriptive ?? '').trim().toLowerCase(),
+    description: String(voice?.description ?? labels.description ?? '').trim(),
+    language: languageOf(voice),
+    rate: rateOf(voice),
+    verifiedLanguages: verifiedLanguagesOf(voice),
   };
 }
 
@@ -107,6 +154,9 @@ export async function listConversationalVoices({
       if (!normalized.voiceId) continue;
       if (!isConversational(normalized)) continue;
       if (!hasKnownGender(normalized)) continue;
+      // A Chinese-language library voice must never voice an English interviewer.
+      if (!isEnglishVoice(normalized)) continue;
+      if (!isStandardPrice(normalized)) continue;
       voices.push(normalized);
     }
     token = body?.next_page_token;
@@ -116,11 +166,15 @@ export async function listConversationalVoices({
 }
 
 /** Picks the voice first, then a name that fits its accent and gender label. */
-export function pickPersonaVoice({ voices = [], random = Math.random, temperament } = {}) {
+export function pickPersonaVoice({ voices = [], random = Math.random, temperament, avoidVoiceIds } = {}) {
   const known = voices.filter(voice => voice?.voiceId && hasKnownGender(voice));
   const conversational = known.filter(isConversational);
-  const pool = conversational.length ? conversational : known;
-  if (!pool.length) throw voiceError('voice-protocol', 'no conversational voice with a known gender');
+  const eligible = conversational.length ? conversational : known;
+  if (!eligible.length) throw voiceError('voice-protocol', 'no conversational voice with a known gender');
+  // The last used voice is skipped only while another eligible voice exists.
+  const avoided = new Set((Array.isArray(avoidVoiceIds) ? avoidVoiceIds : []).map(textOf).filter(Boolean));
+  const fresh = avoided.size ? eligible.filter(voice => !avoided.has(textOf(voice.voiceId))) : eligible;
+  const pool = fresh.length ? fresh : eligible;
   const voice = pick(pool, random);
   const gender = normalizeGender(voice.gender);
   const accent = String(voice.accent ?? '').trim().toLowerCase();
@@ -132,9 +186,10 @@ export function pickPersonaVoice({ voices = [], random = Math.random, temperamen
     : (gendered?.length ? gendered : NEUTRAL_FIRST_NAMES);
   const first = pick(firstNames, random);
   const last = pick(names.last, random);
+  // Only a requested temperament is set here; otherwise Claude chooses one that fits the voice.
   const mood = temperament && ['warm', 'neutral', 'tough'].includes(String(temperament).toLowerCase())
     ? String(temperament).toLowerCase()
-    : pick(['warm', 'neutral', 'tough'], random);
+    : null;
   return {
     voiceId: voice.voiceId,
     voiceName: voice.voiceName ?? '',
@@ -142,6 +197,26 @@ export function pickPersonaVoice({ voices = [], random = Math.random, temperamen
     gender,
     age: voice.age || 'unknown',
     accent: voice.accent || 'unknown',
+    language: languageOf(voice),
     temperament: mood,
+    character: voiceCharacterOf(voice),
+  };
+}
+
+/** The voice's own descriptors, for the interviewer prompt: never its ElevenLabs first name. */
+export function voiceCharacterOf(voice) {
+  const named = String(voice?.voiceName ?? '');
+  const dash = named.search(/\s[-\u2013\u2014]\s/);
+  const traits = dash >= 0 ? named.slice(dash + 3).trim() : '';
+  // The interviewer has its own name, so the voice's own name words are cut from the blurb.
+  const nameWords = (dash >= 0 ? named.slice(0, dash) : named).split(/\s+/)
+    .map(word => word.replace(/[^\p{L}'-]/gu, '')).filter(word => word.length >= 2);
+  let about = String(voice?.description ?? '');
+  for (const word of nameWords) about = about.replace(new RegExp(`(?<![\\p{L}])${word}(?![\\p{L}])`, 'giu'), '');
+  about = about.replace(/\s+/g, ' ').replace(/^[\s\-\u2013\u2014,:.]+/, '').trim();
+  return {
+    traits: traits.slice(0, 80),
+    descriptive: String(voice?.descriptive ?? '').trim().toLowerCase(),
+    about: about.length > 200 ? `${about.slice(0, 197).trimEnd()}...` : about,
   };
 }

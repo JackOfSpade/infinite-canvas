@@ -52,8 +52,43 @@ const shownSalary = job => (mostOfficialSource(job).kind === 'official' ? normal
 export const JOB_TREE_LAYOUT_RESTORE_KEY = '_preserveTreeLayoutOnRestore';
 
 /**
+ * A PERSISTED per-card mark for a job card the user placed by hand on the
+ * canvas. Unlike the board-wide restore guard below, it is never stripped on
+ * save and no hierarchy action clears it: the layout skips these cards
+ * outright (see computeLayoutPositions), so every relayout path — a
+ * measured-height reflow, a filter re-application, a group expand, a
+ * re-Combine's tree build — leaves the hand-placed card exactly where the user
+ * dropped it while the cards below close the gap it left in the column.
+ */
+export const JOB_CARD_USER_POSITION_KEY = 'userPositioned';
+
+/**
+ * Mark each listed job card as user-positioned. `cardIds` is any iterable of
+ * node ids. Nodes already marked or not listed keep their identity, so React
+ * Flow's no-op path survives; the input array is returned unchanged when
+ * nothing changed (also when the input is not an array or no ids are given).
+ * Never mutates the input nodes.
+ */
+export function markJobCardsUserPositioned(nodes, cardIds) {
+  if (!Array.isArray(nodes) || !cardIds) return nodes;
+  const ids = cardIds instanceof Set ? cardIds : new Set(cardIds);
+  if (ids.size === 0) return nodes;
+  let changed = false;
+  const out = nodes.map((node) => {
+    if (node?.type !== 'jobcard'
+        || !ids.has(node.id)
+        || node.data?.[JOB_CARD_USER_POSITION_KEY] === true) return node;
+    changed = true;
+    return { ...node, data: { ...node.data, [JOB_CARD_USER_POSITION_KEY]: true } };
+  });
+  return changed ? out : nodes;
+}
+
+/**
  * Drop the restore-only layout guard from this board's cards. Returns the same
  * array when there is nothing to clear, preserving React Flow's no-op path.
+ * It deliberately leaves JOB_CARD_USER_POSITION_KEY alone: that mark is the
+ * user's own arrangement, not a restore-time guard.
  */
 export function clearRestoredJobTreeLayout(nodes, hubId) {
   if (!Array.isArray(nodes)) return nodes;
@@ -865,6 +900,13 @@ export function computeLayoutPositions(nodes, hubId, COL_X_, hubPos) {
     // tightens around whatever is removed. Visibility is owned by `hidden`
     // (see computeJobTreeView); this function just lays out what's visible.
     if (node.hidden) return startY;
+
+    // A card the user placed by hand owns its canvas position. Give it NO entry
+    // in the returned map — every caller here (computeJobTreeView, the Combine
+    // builder) only writes positions that are present, so the card keeps the
+    // position it has, mark and all — and let it consume no vertical space, so
+    // the cards below close up the gap it left in the column.
+    if (node.type === 'jobcard' && node.data?.[JOB_CARD_USER_POSITION_KEY] === true) return startY;
 
     let x;
     if (node.type === 'jobcard') {

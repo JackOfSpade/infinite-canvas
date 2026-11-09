@@ -5,7 +5,10 @@
 //    outliers dropped), research asks for typical bands, a card/market country
 //    conflict withholds the verdict, and the desired-salary ceiling reaches the
 //    posted midpoint (2026-11-08).
-export const JOB_COMPENSATION_METHOD_VERSION = 4;
+// 5: official posting location is used only when it resolves; grad/early-career
+//    titles price as entry level; research reports against targetCurrency with
+//    a sourced exchange rate when a source's currency differs (2026-11-08).
+export const JOB_COMPENSATION_METHOD_VERSION = 5;
 
 export function jobBoardSalaryNeedsRefresh(boardData, careerSnapshotId) {
   return String(careerSnapshotId || '') !== String(boardData?.salaryCareerSnapshotId || '')

@@ -55,7 +55,10 @@ export function parseOfficialPostingResearchResponse(raw, expectedIds) {
   if (typeof raw !== 'string' || !raw.trim()) issues.add('text.official-research-empty', 'response');
   else if (raw.length > MAX_RESEARCH_RESPONSE_CHARS) issues.add('text.official-research-length', 'response');
   fail(issues, 'Official posting research response is empty or over its bound.');
-  const sectionProblems = diagnoseMarkedSections(raw, { expectedIds: ids, label: LABEL, trimLines: true });
+  // The sections are strictly delimited by exact BEGIN/END marker lines. Web
+  // research replies may open with a short preface or close with a note; that
+  // surrounding prose is not part of any section and must not force a redo.
+  const sectionProblems = diagnoseMarkedSections(raw, { expectedIds: ids, label: LABEL, trimLines: true, outsideTextAllowed: true, decoratedLookalikes: true });
   if (sectionProblems.length) throw validationFailure({ message: 'Official posting research sections are malformed.',
     details: sectionProblems.map(problem => problem.line), ruleIds: sectionProblems.map(problem => problem.correctionRuleId),
     code: 'OFFICIAL_POSTING_RESPONSE_INVALID' });
@@ -127,4 +130,66 @@ ${untrustedJson('SCRAPED REFERENCES', members)}`;
   return { task: OFFICIAL_POSTING_RESEARCH_TASK, format: 'text', grounding: true, grounded: true, prompt,
     hints: { itemCount: members.length }, manualHandoff: {},
     responseValidator: raw => parseOfficialPostingResearchResponse(raw, ids) };
+}
+
+const MAX_RESEARCH_CANDIDATES = 6;
+const MEMBERS_BEGIN = 'BEGIN UNTRUSTED SCRAPED REFERENCES JSON\n';
+const MEMBERS_END = '\nEND UNTRUSTED SCRAPED REFERENCES JSON';
+
+/** The members a research prompt was built from (id, title, poster, location), or [] when the block is absent. */
+export function officialPostingResearchMembers(prompt) {
+  const text = String(prompt ?? '');
+  const start = text.indexOf(MEMBERS_BEGIN);
+  const end = start >= 0 ? text.indexOf(MEMBERS_END, start + MEMBERS_BEGIN.length) : -1;
+  if (start < 0 || end < 0) return [];
+  try {
+    const members = JSON.parse(text.slice(start + MEMBERS_BEGIN.length, end));
+    return Array.isArray(members) ? members.filter(member => member && /^[a-f0-9]{24}$/u.test(String(member.id ?? ''))) : [];
+  } catch { return []; }
+}
+
+const leadKey = url => {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname.toLowerCase().replace(/^www\./u, '')}${parsed.pathname.replace(/\/+$/u, '').toLowerCase()}`;
+  } catch { return ''; }
+};
+
+/**
+ * One research answer from several independent lookups for the same ids: each valid reply's
+ * candidates in the order given (earlier replies first), then plain extra leads per id,
+ * deduplicated by posting/careers URL and capped at the 6 a section allows. A reply that
+ * fails validation contributes nothing; null when no reply was valid and no lead exists.
+ * Measured 2026-11-08: built-in search and Claude-driven Tavily find different postings
+ * (17 and 21 of 30 alone, 25 together, 26 with plain Tavily leads added).
+ */
+export function mergeOfficialPostingResearchReplies({ ids, replies = [], extraLeads = {} } = {}) {
+  const ordered = (Array.isArray(ids) ? ids : []).map(String);
+  const parsed = [];
+  for (const reply of replies) {
+    if (typeof reply !== 'string' || !reply.trim()) continue;
+    try { parsed.push(new Map(parseOfficialPostingResearchResponse(reply, ordered).map(row => [row.id, row.candidates]))); } catch { /* an invalid reply adds nothing */ }
+  }
+  const leadsFor = id => (Array.isArray(extraLeads?.[id]) ? extraLeads[id] : [])
+    .map(url => officialHttpsUrl(url)).filter(Boolean)
+    .map(url => ({ careersPageUrl: '', postingUrl: url, employer: '', employerDomain: '', ats: '' }));
+  const anyLeads = ordered.some(id => leadsFor(id).length);
+  if (!parsed.length && !anyLeads) return null;
+  const sections = ordered.map(id => {
+    const seen = new Set();
+    const merged = [];
+    for (const candidate of [...parsed.flatMap(map => map.get(id) || []), ...leadsFor(id)]) {
+      const key = leadKey(candidate.postingUrl || candidate.careersPageUrl);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      merged.push(candidate);
+      if (merged.length >= MAX_RESEARCH_CANDIDATES) break;
+    }
+    const body = merged.length
+      ? merged.map(candidate => `CANDIDATE: ${JSON.stringify({ careersPageUrl: candidate.careersPageUrl, postingUrl: candidate.postingUrl,
+        employer: candidate.employer, employerDomain: candidate.employerDomain, ats: candidate.ats })}`).join('\n')
+      : 'NOT FOUND';
+    return `BEGIN ${LABEL} ${id}\n${body}\nEND ${LABEL} ${id}`;
+  });
+  return sections.join('\n');
 }

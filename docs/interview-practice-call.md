@@ -276,15 +276,69 @@ Pick the voice first, then a fitting name.
   Broad American and British accents get a name from a deliberately diverse
   pool. Neutral-gender voices are included and get gender-neutral names. Age
   can inform seniority. Name pools are data, not checks.
-- **Temperament.** Warm, neutral or tough, chosen at random unless the user
-  picks tough.
+- **Temperament.** Warm, neutral or tough. Unless the user picks tough, the
+  interviewer (Claude) chooses it to fit the voice: the main session's
+  prompt describes the voice (age, accent, gender, the descriptors after the
+  dash in its ElevenLabs name, its `descriptive` label and a 200-character
+  blurb with the voice's own name cut out) and asks for one temperament with
+  a sound-based rule (warm only for clearly warm or playful voices, neutral
+  for calm or professional ones, tough for firm or deep confident ones) and
+  "do not default to warm". It answers `READY <temperament>`; only the last
+  line counts, since Claude sometimes explains first. The opener session
+  starts after that with the same temperament, which adds one session start
+  to the precheck. An unreadable choice falls back to neutral
+  (`persona.temperamentFrom`: `claude`, `request` or `fallback`). A restarted
+  main session gets the settled temperament. Without the rule Claude chose
+  warm for all 8 account voices (2026-11-08). With it, the same choice came
+  back every time over 3 runs: 3 warm, 4 neutral, 1 tough (Charlie).
 - **Consistency.** One consistent voice per persona.
-- **Library voices** are added to the account and reused, never generated.
-  Plans cap added voices, so the pool rotates within the cap. The exact cap
-  is read from the API on a paid plan.
-- **Audio format.** 44.1 kHz once on a paid plan (same credits; ElevenLabs
-  bills per character). 24 kHz on the free tier, because 44.1 kHz returned
-  403 on free. Fallback is automatic.
+- **Eligibility.** A voice joins the pool only when it is conversational,
+  has a gender label, is English (labels, fine-tuning and verified languages;
+  premade voices carry no language label and count as English) and has a price
+  multiplier of at most 1. Until 2026-11-08 a Chinese-language library voice
+  ("Xin", `language: zh`) passed the conversational filter.
+- **Selection.** One uniform random draw over the whole ElevenLabs shared
+  library and never over the user's own account voices: 3,427 English
+  conversational voices on 2026-11-08, about 70% male, so interviewers skew
+  male. The voice used on the previous call is skipped while another exists
+  (`lastUsed` in `<userData>/practice-voice-pool.json`). The draw is
+  GET-only (`/v1/shared-voices`) and never writes to the account. Temperament
+  variety comes from the voice pick, since Claude's choice is steady per
+  voice. Checked live by `scripts/practice-probes/persona-e2e.mjs`
+  (`--claude K` starts K real interviewer sessions and records their
+  choices; `--library-draws N` chains N real draws and checks gender,
+  consecutive repeats and GET-only traffic). There is no fallback: if the
+  library cannot be read, or no eligible library row is found, the call ends
+  with `voice-library-unavailable` before it rings and the loading screen
+  shows "Could not load an interviewer voice from the ElevenLabs voice
+  library. Check your internet connection and try again."
+- **Library voices** are used straight from the shared library and never
+  saved, removed or edited (`electron/practiceCall/eleven/voiceLibrary.js`):
+  an unsaved library voice id works with the text-to-dialogue WebSocket, and
+  the app sends no POST or DELETE to `/v1/voices`, so it can never hit a
+  voice-slot or voice-operation limit. The first line of an unsaved voice is
+  slow (~4.5 s on 2026-11-08) while every later line is ~0.2 s, the same as
+  an account voice; loading time at call start does not matter to the user,
+  mid-call latency does. So a library voice gets exactly one discarded
+  warm-up `Hi.` while the call is loading, before it can ring: measured
+  latencies stay ~0.25 s for the greeting and later lines, even after 30, 90
+  and 180 s of silence. If the warm-up errors, returns no audio or does not
+  finish within 15 s, the call ends with `voice-warmup-failed` before it
+  rings and the loading screen shows "The interviewer voice did not respond.
+  Try starting the call again."; nothing falls back to an account voice and
+  no helper, track or session is created. The probe's step 10
+  measures the warm-up and the greeting on a real drawn library voice and
+  saves the greeting WAV. Background from 2026-11-08: saved library voices
+  take no custom voice slot (a Starter account with 10 slots reported
+  `voice_slots_used` 1 while holding 8 saved library voices, because slots
+  count only Voice Design and cloned voices), and saving or removing one
+  cost 0 of the 65 monthly voice operations (`voice_add_edit_counter`
+  stayed 0; editing would cost one).
+- **Audio format.** 44.1 kHz on Pro and above (same credits; ElevenLabs
+  bills per character). 24 kHz on Free, Starter and Creator: ElevenLabs
+  refuses `pcm_44100` below Pro (403 `subscription_required`, verified live
+  on Starter 2026-11-08). Tiers it does not know ask for 44.1 kHz and fall
+  back to 24 kHz automatically.
 - **Listening test.** The user found the conversational voices Roger, Chris,
   Jessica and River sounded much better than the narrative voice George.
 

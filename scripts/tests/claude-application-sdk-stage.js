@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { runClaudeSdkStage } from '../../electron/ipc/claudeApplicationSdkStage.js';
-import { CLAUDE_HANDOFF_SYSTEM_PROMPT, CLAUDE_STAGE_TIMEOUT_MS } from '../../electron/ipc/claudeApplicationRunner.js';
+import { CLAUDE_HANDOFF_SYSTEM_PROMPT, CLAUDE_STAGE_TIMEOUT_MS, claudeCliArgs } from '../../electron/ipc/claudeApplicationRunner.js';
+import { CLAUDE_TASK_PROFILES, profile } from '../../electron/ipc/claudeTaskProfiles.js';
 
 const SONNET = 'claude-sonnet-5-5';
 const OPUS = 'claude-opus-5-5';
@@ -79,6 +80,110 @@ export default [
       assert.equal('fallbackModel' in options, false);
       assert.equal('sessionId' in options, false);
       assert.equal('resume' in options, false);
+    },
+  },
+  {
+    name: 'claude SDK: ultracode:false drops the ultracode setting and Workflow but keeps every other option',
+    async run() {
+      const tavily = { type: 'http', url: 'https://mcp.example.test/mcp' };
+      const off = fakeQuery();
+      await stage(off.queryImpl, {
+        ultracode: false,
+        tools: ['WebFetch', 'Workflow', 'mcp__tavily__tavily_search'],
+        mcpServers: { tavily },
+      });
+      const offOptions = off.calls[0].options;
+      assert.deepEqual(offOptions.settings, {});
+      assert.equal(offOptions.tools.includes('Workflow'), false, 'ultracode off offers no Workflow');
+      assert.deepEqual(offOptions.tools, ['WebFetch']);
+      assert.deepEqual(offOptions.allowedTools, ['WebFetch', 'mcp__tavily__tavily_search']);
+      assert.deepEqual(offOptions.mcpServers, { tavily });
+
+      const on = fakeQuery();
+      await stage(on.queryImpl, { tools: ['WebFetch', 'mcp__tavily__tavily_search'], mcpServers: { tavily } });
+      const onOptions = on.calls[0].options;
+      assert.deepEqual(onOptions.settings, { ultracode: true });
+      assert.deepEqual(onOptions.tools, ['WebFetch', 'Workflow']);
+      assert.deepEqual(onOptions.allowedTools, ['WebFetch', 'Workflow', 'mcp__tavily__tavily_search']);
+
+      // Every option except the three ultracode ones is identical, key for key.
+      const differs = new Set(['settings', 'tools', 'allowedTools', 'abortController']);
+      assert.deepEqual(Object.keys(offOptions).sort(), Object.keys(onOptions).sort());
+      for (const key of Object.keys(onOptions)) {
+        if (differs.has(key)) continue;
+        assert.deepEqual(offOptions[key], onOptions[key], `option ${key} changed with ultracode`);
+      }
+    },
+  },
+  {
+    name: 'claude SDK: ultracode:false returns the first plain result and expects no workflow follow-up',
+    async run() {
+      const fake = fakeQuery([assistant(), result()]);
+      const value = await stage(fake.queryImpl, { ultracode: false });
+      assert.deepEqual(value, { text: 'answer', model: SONNET, durationMs: 42, summaryCount: 0, summaryChars: 0, thinkingDisplay: 'summarized' });
+      assert.deepEqual(fake.calls[0].options.settings, {});
+    },
+  },
+  {
+    name: 'claude CLI args: ultracode on keeps the setting and Workflow; off drops both and changes nothing else',
+    run() {
+      const fixed = { model: 'opus', effort: 'high', sessionId: '11111111-1111-4111-8111-111111111111', tools: 'WebSearch,WebFetch' };
+      const head = ['-p', '--session-id', fixed.sessionId, '--model', 'opus', '--effort', 'high',
+        '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config'];
+      const tail = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
+      assert.deepEqual(claudeCliArgs(fixed), [
+        ...head, '--settings', '{"ultracode":true}',
+        '--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow', ...tail,
+      ]);
+      assert.deepEqual(claudeCliArgs({ ...fixed, ultracode: false }), [
+        ...head, '--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch', ...tail,
+      ]);
+      // An empty list is how the CLI gets "no tools" once Workflow is gone.
+      assert.deepEqual(claudeCliArgs({ ...fixed, ultracode: false, tools: '' }), [
+        ...head, '--tools', '', '--allowedTools', '', ...tail,
+      ]);
+      // Workflow is never offered when ultracode is off, even if a caller asks for it.
+      const none = claudeCliArgs({ ...fixed, ultracode: false, tools: 'Workflow' });
+      assert.equal(none[none.indexOf('--tools') + 1], '');
+      assert.equal(none[none.indexOf('--allowedTools') + 1], '');
+      assert.equal(none.includes('--settings'), false);
+    },
+  },
+  {
+    name: 'claude task profiles: current profiles stay ultracode-on and profile() records only an explicit opt-out',
+    run() {
+      for (const [id, value] of Object.entries(CLAUDE_TASK_PROFILES)) {
+        assert.deepEqual(Object.keys(value), ['model', 'effort', 'tools'], `${id} gained a field`);
+        assert.equal('ultracode' in value, false, `${id} must keep ultracode on`);
+      }
+      assert.deepEqual(profile('haiku', 'low'), { model: 'haiku', effort: 'low', tools: '' });
+      assert.deepEqual(profile('opus', 'xhigh', 'WebSearch,WebFetch', {}), { model: 'opus', effort: 'xhigh', tools: 'WebSearch,WebFetch' });
+      assert.deepEqual(profile('opus', 'xhigh', 'WebSearch', { ultracode: true }), { model: 'opus', effort: 'xhigh', tools: 'WebSearch' });
+      const optedOut = profile('opus', 'xhigh', 'WebSearch', { ultracode: false });
+      assert.deepEqual(optedOut, { model: 'opus', effort: 'xhigh', tools: 'WebSearch', ultracode: false });
+      assert.equal(Object.isFrozen(optedOut), true);
+      assert.equal('ultracode' in CLAUDE_TASK_PROFILES['job-scoring'], false);
+    },
+  },
+  {
+    name: 'claude SDK: an explicit MCP server adds only its named tools, and nothing else loosens',
+    async run() {
+      const fake = fakeQuery();
+      const tavily = { type: 'http', url: 'https://mcp.example.test/mcp' };
+      await stage(fake.queryImpl, {
+        tools: ['WebFetch', 'mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract'],
+        mcpServers: { tavily },
+      });
+      const { options } = fake.calls[0];
+      assert.deepEqual(options.mcpServers, { tavily });
+      assert.equal(options.tools.includes('mcp__tavily__tavily_search'), false, 'MCP tools are not built-in tools');
+      assert.deepEqual([...options.tools].sort(), ['WebFetch', 'Workflow']);
+      assert.deepEqual([...options.allowedTools].sort(), ['WebFetch', 'Workflow', 'mcp__tavily__tavily_extract', 'mcp__tavily__tavily_search']);
+      assert.equal(options.strictMcpConfig, true);
+      assert.deepEqual(options.settingSources, []);
+      const bad = fakeQuery();
+      await stage(bad.queryImpl, { mcpServers: ['not', 'a', 'map'] });
+      assert.deepEqual(bad.calls[0].options.mcpServers, {});
     },
   },
   {

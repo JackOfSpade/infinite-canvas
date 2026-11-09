@@ -10,15 +10,16 @@ import { cachedPromptParts, claudeTaskStatusView, createClaudeTaskWorker } from 
 import { createShadowMeasure } from '../../electron/ipc/aiShadowMeasure.js';
 import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { answeringModel, buildClaudeInputMessage } from '../../electron/ipc/claudeApplicationRunner.js';
+import { buildOfficialPostingResearchRequest, officialPostingResearchMembers } from '../../electron/ipc/officialPostingBridge.js';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const settle = async () => { for (let i = 0; i < 20; i += 1) await tick(); };
 
-function harness({ entries, runStage, submit, ...options }) {
+function harness({ entries, runStage, submit, prompts = {}, ...options }) {
   const state = { pending: new Map(entries.map(entry => [entry.requestId, entry])), failed: [], reads: [], submits: [], returned: [], stages: [], listeners: new Set(), timers: [], clock: 1000 };
   const seam = {
     list: () => ({ handoffs: [...state.pending.values()], settlingRequestIds: [], retryAfterMs: 0 }),
-    read: (args) => { state.reads.push(args); return state.pending.has(args.requestId) ? { ok: true, prompt: `prompt ${args.requestId}` } : { ok: false }; },
+    read: (args) => { state.reads.push(args); return state.pending.has(args.requestId) ? { ok: true, prompt: prompts[args.requestId] ?? `prompt ${args.requestId}` } : { ok: false }; },
     assigned: () => true,
     attachments: async () => ({ attachments: [{ name: 'a.jpg', mime: 'image/jpeg', bytes: new Uint8Array([1]) }] }),
     submit: async (args) => {
@@ -38,6 +39,8 @@ function harness({ entries, runStage, submit, ...options }) {
     setTimer: (fn, ms) => { const timer = { fn, ms }; state.timers.push(timer); return timer; },
     clearTimer: (timer) => { state.timers = state.timers.filter(item => item !== timer); },
     runStage: async (options_) => { state.stages.push(options_); return runStage(options_, state); },
+    // Never the real keychain in tests: no Tavily unless a test supplies one.
+    tavily: { readKey: async () => '', plainLeads: async () => [] },
     ...options,
   });
   return { worker, state };
@@ -112,6 +115,82 @@ export default [
       await settle();
       assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
       assert(state.stages[0].maxTurns > 1);
+    },
+  },
+  {
+    name: 'claude task worker: official posting research combines built-in search, Claude with Tavily and plain Tavily leads',
+    async run() {
+      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://www.linkedin.com/jobs/view/1', snippet: 'desc' }]);
+      const [{ id }] = officialPostingResearchMembers(request.prompt);
+      const section = urls => `BEGIN OFFICIAL POSTING RESEARCH ${id}\n${urls.map(url => `CANDIDATE: ${JSON.stringify({ careersPageUrl: '', postingUrl: url, employer: 'Acme', employerDomain: '', ats: '' })}`).join('\n')}\nEND OFFICIAL POSTING RESEARCH ${id}`;
+      const leadCalls = [];
+      const rows = [];
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-official-posting-research' })],
+        prompts: { a: request.prompt },
+        recordUsage: row => rows.push(row),
+        tavily: {
+          readKey: async () => 'tvly-test-key',
+          plainLeads: async ({ key, member }) => { leadCalls.push({ key, title: member.title }); return ['https://acme.com/jobs/platform-engineer']; },
+        },
+        runStage: options => (options.mcpServers?.tavily
+          ? { text: `Based on my research:\n${section(['https://jobs.lever.co/acme/2', 'https://jobs.lever.co/acme/1/'])}`, model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 }
+          : { text: section(['https://jobs.lever.co/acme/1']), model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 }),
+      });
+      worker.start();
+      await until(() => state.submits.length === 1);
+      assert.equal(state.stages.length, 2, 'two Claude lookups');
+      const native = state.stages.find(stage => !stage.mcpServers);
+      const viaTavily = state.stages.find(stage => stage.mcpServers);
+      assert.deepEqual(native.tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(viaTavily.tools, ['mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract']);
+      assert.deepEqual(Object.keys(viaTavily.mcpServers), ['tavily']);
+      assert.equal(viaTavily.mcpServers.tavily.url.includes('tavilyApiKey=tvly-test-key'), true);
+      assert.deepEqual(leadCalls, [{ key: 'tvly-test-key', title: 'Platform Engineer' }]);
+      const rowsOut = request.responseValidator(state.submits[0].response);
+      assert.deepEqual(rowsOut[0].candidates.map(candidate => candidate.postingUrl),
+        ['https://jobs.lever.co/acme/1', 'https://jobs.lever.co/acme/2', 'https://acme.com/jobs/platform-engineer'],
+        'built-in first, then Tavily, then plain leads; the duplicate lever link appears once');
+      assert.equal(rows[0].costUsd, 0.45, 'both Claude lookups are recorded as spend');
+      assert.deepEqual(rows[0].usage, { output_tokens: 12 });
+      assert.equal(JSON.stringify(rows).includes('tvly-test-key'), false, 'the key is never recorded');
+    },
+  },
+  {
+    name: 'claude task worker: official posting research without a Tavily key is the built-in lookup alone',
+    async run() {
+      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
+      const { worker, state } = harness({ entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt }, runStage: () => answer });
+      worker.start();
+      await until(() => state.submits.length === 1);
+      assert.equal(state.stages.length, 1);
+      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
+      assert.equal('mcpServers' in state.stages[0], false);
+      assert.equal(state.submits[0].response, 'answer', 'the built-in answer goes through unchanged');
+    },
+  },
+  {
+    name: 'claude task worker: official posting research keeps whichever lookup succeeded',
+    async run() {
+      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
+      const [{ id }] = officialPostingResearchMembers(request.prompt);
+      const reply = url => ({ text: `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: '', postingUrl: url, employer: '', employerDomain: '', ats: '' })}\nEND OFFICIAL POSTING RESEARCH ${id}`, model: 'claude-opus-5-5', usage: {}, costUsd: 0.1 });
+      for (const failing of ['tavily', 'native']) {
+        const { worker, state } = harness({
+          entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt },
+          tavily: { readKey: async () => 'k', plainLeads: async () => { throw new Error('search down'); } },
+          runStage: options => {
+            const isTavily = Boolean(options.mcpServers);
+            if ((failing === 'tavily') === isTavily) throw Object.assign(new Error('boom'), { code: 'CLAUDE_FAILED' });
+            return reply(isTavily ? 'https://t.test/job' : 'https://n.test/job');
+          },
+        });
+        worker.start();
+        await until(() => state.submits.length === 1);
+        const candidates = request.responseValidator(state.submits[0].response)[0].candidates.map(candidate => candidate.postingUrl);
+        assert.deepEqual(candidates, [failing === 'tavily' ? 'https://n.test/job' : 'https://t.test/job'], failing);
+        worker.stop();
+      }
     },
   },
   {
@@ -237,6 +316,92 @@ export default [
       state.timers.shift().fn();
       await settle();
       assert.equal(state.pending.size, 0);
+    },
+  },
+  {
+    name: 'claude task worker usage: a failed attempt with a cost logs one failed row, then the retry logs its normal row',
+    async run() {
+      const rows = []; let tries = 0;
+      const { worker, state } = harness({
+        entries: [entry('a')],
+        recordUsage: row => rows.push(row),
+        runStage: () => {
+          tries += 1;
+          if (tries === 1) {
+            throw Object.assign(new Error('workflow unfinished'), {
+              code: 'CLAUDE_WORKFLOW_UNFINISHED',
+              detail: { usage: { input_tokens: 40, output_tokens: 7 }, costUsd: 1.5 },
+            });
+          }
+          return answer;
+        },
+      });
+      worker.start();
+      await settle();
+      assert.equal(rows.length, 1, 'the failed attempt spent money, so it logs one row');
+      assert.equal(rows[0].outcome, 'failed');
+      assert.equal(rows[0].code, 'CLAUDE_WORKFLOW_UNFINISHED');
+      assert.equal(rows[0].costUsd, 1.5);
+      assert.deepEqual(rows[0].usage, { input_tokens: 40, output_tokens: 7 });
+      assert.equal(rows[0].provider, 'claude');
+      assert.equal(rows[0].model, 'opus');
+      assert.equal(rows[0].effort, 'low');
+      assert.equal(rows[0].task, 'job-scoring');
+      assert.equal(state.timers.length, 1, 'the failure still backs off and retries');
+      state.clock += 30_000;
+      state.timers.shift().fn();
+      await settle();
+      assert.equal(state.submits.length, 1);
+      assert.equal(rows.length, 2);
+      assert.equal('outcome' in rows[1], false, 'a success row gains no failed-attempt fields');
+      assert.equal('code' in rows[1], false);
+      assert.equal(rows[1].provider, 'claude');
+      assert.equal(rows[1].costUsd, 0);
+    },
+  },
+  {
+    name: 'claude task worker usage: a failure without cost or usage records nothing and still retries',
+    async run() {
+      const rows = []; let tries = 0;
+      const { worker, state } = harness({
+        entries: [entry('a')],
+        recordUsage: row => rows.push(row),
+        runStage: () => { tries += 1; if (tries === 1) failing('CLAUDE_ERROR')(); return answer; },
+      });
+      worker.start();
+      await settle();
+      assert.equal(rows.length, 0, 'no spend was reported, so nothing is logged');
+      assert.equal(state.timers.length, 1);
+      state.clock += 30_000;
+      state.timers.shift().fn();
+      await settle();
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].outcome, undefined);
+    },
+  },
+  {
+    name: 'claude task worker usage: a throwing usage log cannot throw out of handleFailure or change the retry',
+    async run() {
+      const rows = []; let tries = 0;
+      const { worker, state } = harness({
+        entries: [entry('a')],
+        recordUsage: (row) => { rows.push(row); if (row.outcome === 'failed') throw new Error('usage log is unwritable'); },
+        runStage: () => {
+          tries += 1;
+          if (tries === 1) throw Object.assign(new Error('workflow unfinished'), { code: 'CLAUDE_WORKFLOW_UNFINISHED', detail: { costUsd: 2 } });
+          return answer;
+        },
+      });
+      worker.start();
+      await settle();
+      assert.equal(rows.length, 1);
+      assert.equal(state.timers[0].ms, 30_000, 'the same backoff is armed');
+      state.clock += 30_000;
+      state.timers.shift().fn();
+      await settle();
+      assert.equal(state.pending.size, 0, 'the retry still finished the task');
+      assert.equal(rows.length, 2);
+      assert.equal(rows[1].outcome, undefined);
     },
   },
   {

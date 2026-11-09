@@ -4,7 +4,11 @@
 // judges found no material loss against Opus xhigh, or, for the audits, where seeded
 // defects were still caught. Fable and max effort are excluded.
 const WEB = 'WebSearch,WebFetch';
-const profile = (model, effort, tools = '') => Object.freeze({ model, effort, tools });
+// Ultracode is on everywhere today; a profile records only an explicit opt-out,
+// so every current profile keeps exactly the fields it had.
+export const profile = (model, effort, tools = '', options = {}) => Object.freeze({
+  model, effort, tools, ...(options.ultracode === false ? { ultracode: false } : {}),
+});
 
 export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-role-screen-batch': profile('haiku', 'low'),

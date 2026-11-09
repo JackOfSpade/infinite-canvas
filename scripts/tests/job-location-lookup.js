@@ -397,4 +397,23 @@ export default [{
     }
     return { ok: true };
   },
+}, {
+  name: 'Province-qualified remote listings use the same country residence as bare-country forms',
+  run: () => {
+    const bare = resolveCompensationLocation({ location: 'Remote - Canada', remote: false }, {}, residences);
+    assert(bare?.kind === 'remote_canada_residence' && bare.city === 'Toronto',
+      `bare Remote - Canada must use the saved Canada residence, got ${JSON.stringify(bare)}`);
+    for (const location of ['Remote - Ontario, Canada', 'Remote (Ontario, Canada)']) {
+      const resolved = resolveCompensationLocation({ location, remote: false }, {}, residences);
+      assert(resolved?.kind === 'remote_canada_residence' && resolved.city === 'Toronto'
+        && resolved.display === bare.display && resolved.basis === bare.basis,
+      `"${location}" must resolve exactly like Remote - Canada, got ${JSON.stringify(resolved)}`);
+    }
+    assert(resolveCompensationLocation({ location: 'Remote - Texas, United States', remote: false }, {}, residences)?.kind === 'remote_usa_residence',
+      'a state-qualified United States remote listing must use the saved US residence');
+    assert(resolveCompensationLocation({ location: 'Remote', remote: false }, {}, residences) === null,
+      'bare Remote must stay unresolved');
+    assert(resolveCompensationLocation({ location: 'Remote - United States', remote: false }, {}, { canada: residences.canada }) === null,
+      'a United States remote listing must never borrow a Canadian residence');
+  },
 }];

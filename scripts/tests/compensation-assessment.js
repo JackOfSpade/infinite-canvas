@@ -699,4 +699,37 @@ export default [
       }
     },
   },
+  {
+    name: 'University grad and early-career titles price as entry level despite senior prose',
+    run() {
+      const grad = estimateCompensationExperienceYearsFromDescription({
+        title: 'University Grad – Product Engineer (2026-2027)',
+        description: 'You will work with senior software engineers to ship product features.',
+      });
+      assert(grad.years === 1 && grad.basis === 'description-seniority-estimate',
+        `a university-grad title must price as entry level, got ${JSON.stringify(grad)}`);
+      const phrases = [
+        'New Grad Software Engineer', 'Recent Graduate Developer', 'Early Career Engineer',
+        'Early-Career Analyst', 'Co-op Developer', 'Coop Designer', 'Apprentice Engineer', 'Internship Engineer',
+      ];
+      for (const title of phrases) {
+        const result = estimateCompensationExperienceYearsFromDescription({ title, description: 'Work with senior software engineers.' });
+        assert(result.years === 1 && result.basis === 'description-seniority-estimate',
+          `${title} must price as entry level, got ${JSON.stringify(result)}`);
+      }
+      const proseGrad = estimateCompensationExperienceYearsFromDescription({
+        title: 'Product Engineer',
+        description: 'This new grad engineer role ships features. You will work with senior software engineers.',
+      });
+      assert(proseGrad.years === 1, `a new-grad description must price as entry level, got ${JSON.stringify(proseGrad)}`);
+      for (const [title, description] of [
+        ['Upgrade Engineer', 'You will work with a senior software engineer on upgrades.'],
+        ['Grade Systems Engineer', 'You will work with a senior software engineer on grade changes.'],
+      ]) {
+        const result = estimateCompensationExperienceYearsFromDescription({ title, description });
+        assert(result.years === 5 && result.basis === 'description-seniority-estimate',
+          `"${title}" must not read as entry level, got ${JSON.stringify(result)}`);
+      }
+    },
+  },
 ];

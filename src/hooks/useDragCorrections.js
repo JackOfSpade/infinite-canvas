@@ -10,6 +10,9 @@ import { appendPhotoFiles } from '../utils/photoPathList';
 import { collectAbsorptionClosure, partitionEdgesForMove, buildGroupHoverState } from '../utils/nestedCanvasAbsorption';
 import { markJobWorkflowRelocationPending, settleJobWorkflowRelocation } from '../utils/nodeDeletionLifecycle';
 import { markJobTreeLayoutUserArranged } from '../nodes/jobsearch/buildJobTree';
+// The persisted, per-card counterpart of that board-wide guard: a card the user
+// dropped by hand is marked so no later relayout snaps it back into the column.
+import { markJobCardsUserPositioned } from '../nodes/jobsearch/buildJobTree';
 
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -537,6 +540,16 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
     );
     for (const hubId of arrangedHubIds) {
       setNodes(nds => markJobTreeLayoutUserArranged(nds, hubId));
+    }
+    // Durable half of the same decision: a persisted per-card mark, so the placed
+    // card keeps its exact canvas position through EVERY later relayout — not
+    // just the ones that happen while the board-wide restore guard is still set
+    // (the next hierarchy action clears it, and save strips it).
+    const placedCardIds = droppedCards
+      .filter(n => n.type === 'jobcard' && n.data?.hubId)
+      .map(n => n.id);
+    if (placedCardIds.length > 0) {
+      setNodes(nds => markJobCardsUserPositioned(nds, placedCardIds));
     }
 
     // Snapshot the final resting canvas state for ordinary drags only. Hub-input

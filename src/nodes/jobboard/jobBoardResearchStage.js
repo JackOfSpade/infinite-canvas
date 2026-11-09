@@ -1,4 +1,5 @@
 import { isResearchEligible, RESEARCH_MIN_FIT_SCORE } from '../../../electron/ipc/researchGate.js';
+import { COMPANY_RESEARCH_VERSION } from '../../../electron/ipc/companyResearchVersion.js';
 import { normalizeOfficialPosting, officialPostingExhausted } from '../../../electron/ipc/officialPostingFields.js';
 import { officialPostingPreparationSourceKey, projectOfficialPostingGenerationJob } from '../../utils/officialPostingPreparation.js';
 import { refreshBoardOfficialPostingJobs } from '../../utils/jobBoardOfficialPostingRefresh.js';
@@ -30,7 +31,8 @@ const ruleKeys = assessment => (Array.isArray(assessment?.matches) ? assessment.
 /**
  * Accepted Board work on a card for this exact source: a rescore of the same
  * official text on the same career record, and finished company research on the
- * same rules. An edited brief owes its new company rules their own research.
+ * same rules from the current research version. An edited brief owes its new
+ * company rules their own research, and older research is asked again.
  */
 export function carryBoardRescores(jobs, cards) {
   const bySource = new Map();
@@ -42,6 +44,7 @@ export function carryBoardRescores(jobs, cards) {
     if (!card) return job;
     let carried = job;
     if (job?.preferenceAssessment?.companyResearchPending && card.preferenceAssessment && !card.preferenceAssessment.companyResearchPending
+      && card.preferenceAssessment.companyResearchVersion === COMPANY_RESEARCH_VERSION
       && ruleKeys(card.preferenceAssessment) === ruleKeys(job.preferenceAssessment)) {
       carried = { ...carried, preferenceAssessment: card.preferenceAssessment };
     }

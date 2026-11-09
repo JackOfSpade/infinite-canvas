@@ -763,7 +763,12 @@ function parseRemoteListingLocation(raw) {
 
 function recognizedRemoteLocationCountry(raw) {
   const parsed = parseRemoteListingLocation(raw);
-  return !parsed.countryConflict && ['country', 'city', 'state'].includes(parsed.scope) ? String(parsed.country || '').trim() : '';
+  // A province/state-qualified remote place ("Remote - Ontario, Canada")
+  // names the same country as the bare-country form, so its country is a
+  // permitted residence scope too.
+  return !parsed.countryConflict && ['country', 'subdivision', 'city', 'state'].includes(parsed.scope)
+    ? String(parsed.country || '').trim()
+    : '';
 }
 
 function isNonGeographicCompensationLocation(raw) {
@@ -847,7 +852,7 @@ function remoteResidenceKeyFor(context = {}, rawLocation = '') {
   // A city is only a provisional country hint when no region was established.
   // In particular, a U.S. board city must not narrow an Americas/global role
   // and invalidate the already selected Canadian "other" residence.
-  const allowCountryHint = !region || region === 'unknown' || rawPlace.scope === 'country';
+  const allowCountryHint = !region || region === 'unknown' || rawPlace.scope === 'country' || rawPlace.scope === 'subdivision';
   const permittedCountry = structuredPermittedCountry || (allowCountryHint ? recognizedRemoteLocationCountry(rawLocation) : '');
   const key = region === 'usa' || region === 'us'
     ? 'usa'
@@ -864,7 +869,7 @@ function remoteResidenceKeyFor(context = {}, rawLocation = '') {
               : '';
   const provisional = !structuredPermittedCountry && (!region || region === 'unknown')
     && Boolean(permittedCountry)
-    && parseRemoteListingLocation(rawLocation).scope !== 'country';
+    && !['country', 'subdivision'].includes(parseRemoteListingLocation(rawLocation).scope);
   return { key, permittedCountry, provisional };
 }
 
@@ -1068,7 +1073,9 @@ export function estimateCompensationExperienceYearsFromDescription(job = {}, con
   const title = String(job?.title || '').toLowerCase();
   const contextSeniority = String(context?.seniority || '').toLowerCase();
   const estimates = [
-    [/\b(?:junior|jr\.?|entry(?:[-\s]?level)?|graduate|intern)\b/, 1],
+    // "grad" covers new grad / university grad / recent grad; every phrase is
+    // word-bounded so "grade" and "upgrade" never read as entry level.
+    [/\b(?:junior|jr\.?|entry(?:[-\s]?level)?|graduate|grad|early[-\s]?career|co[-\s]?op|intern|internship|apprentice)\b/, 1],
     [/\b(?:mid(?:[-\s]?level)?|intermediate)\b/, 3],
     [/\b(?:principal|distinguished|fellow|director|head\s+of)\b/, 10],
     [/\b(?:staff|lead|manager)\b/, 8],
@@ -1086,7 +1093,7 @@ export function estimateCompensationExperienceYearsFromDescription(job = {}, con
     [new RegExp(`\\b(?:staff|lead)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 8],
     [new RegExp(`\\b(?:senior|sr\\.?)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 5],
     [new RegExp(`\\b(?:mid(?:[-\\s]?level)?|intermediate)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 3],
-    [new RegExp(`\\b(?:junior|jr\\.?|entry(?:[-\\s]?level)?|graduate|intern)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 1],
+    [new RegExp(`\\b(?:junior|jr\\.?|entry(?:[-\\s]?level)?|graduate|grad|early[-\\s]?career|co[-\\s]?op|intern(?:ship)?|apprentice)\\s+(?:[a-z]+\\s+){0,2}${roleWord}\\b`, 'i'), 1],
   ];
   for (const sentence of description.split(/[.!?]+/)) {
     if (/\breport(?:s|ing)?\s+to\b/i.test(sentence)) continue;

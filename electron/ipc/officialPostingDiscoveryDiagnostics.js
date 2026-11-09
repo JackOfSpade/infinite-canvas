@@ -162,6 +162,7 @@ export function buildOfficialPostingDiscoveryMarkdown() {
     '> Counts, closed handoff error classes and opaque input digests only. No listing identities, URLs, prompts, candidate text, raw errors or semantic proof hashes are retained.',
     '> Validated comparison runs count responses that passed host validation, not attempted calls, failed responses or research calls.',
     '> Chat lookups report supplied leads as candidates. Chat resolution reasons retain final unsettled trail codes only. Chat counts include service calls across all review rounds, not transport-owned correction attempts. Snapshot failures do not prove the judges could not read a page themselves. Cache reuse does not create or relabel an observation.',
+    '> `worker-aborted` means the lookup was stopped from the app side (your Cancel, a removed card, or quitting the app), not that a worker failed; Non-API AI Handoff Lifecycle names the exact cancel cause.',
     `> Official worker availability and planner transitions: at most ${snapshot.availabilityDecisionLimit} recent rows, fixed reasons and counts only.`,
     `- Captured: ${new Date().toISOString()} · ${rows.length} input observation(s) retained`,
   ];

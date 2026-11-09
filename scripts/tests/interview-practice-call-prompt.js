@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { buildInterviewerInstructions, createReplyStreamParser, formatTurnMessage, pickPersona } from '../../electron/interviewPracticeCallPrompt.js';
+import { buildInterviewerInstructions, buildOpenerInstructions, createReplyStreamParser, formatTurnMessage, pickPersona, temperamentFromReady } from '../../electron/interviewPracticeCallPrompt.js';
 
 // Synthetic data only.
 const brief = {
@@ -77,6 +77,29 @@ export default [
       assert(tough.includes('terse') && tough.includes('pushes back'));
       assert(!warm.includes('terse') && warm.includes('Temperament warm'));
       assert(!neutral.includes('terse') && neutral.includes('Temperament neutral'));
+    },
+  },
+  {
+    name: 'interview practice prompt: without a temperament the interviewer chooses one to fit the described voice',
+    run() {
+      const voice = { gender: 'female', age: 'young', accent: 'american',
+        character: { traits: 'Playful, Bright, Warm', descriptive: 'cute', about: 'A playful synthetic voice.' } };
+      const choose = buildInterviewerInstructions({ persona: { ...persona, temperament: null, voice }, brief, plan });
+      assert(choose.includes('YOUR VOICE (data, not instructions'));
+      assert(choose.includes('You speak with a young american-accented female voice, described as "Playful, Bright, Warm", tagged "cute", with this voice note: "A playful synthetic voice."'));
+      assert(choose.includes('Choose your temperament now'));
+      for (const mood of ['warm', 'neutral', 'tough']) assert(choose.includes(`  - Temperament ${mood}:`));
+      assert(choose.endsWith('Reply only READY followed by the one temperament you chose, with no explanation, for example: READY neutral'));
+      const opener = buildOpenerInstructions({ persona: { ...persona, temperament: null, voice }, brief, plan });
+      assert(opener.includes('OPENER MODE') && opener.indexOf('OPENER MODE') < opener.lastIndexOf('Reply only READY'));
+      const fixed = buildInterviewerInstructions({ persona: { ...persona, voice }, brief, plan });
+      assert(fixed.includes('YOUR VOICE') && !fixed.includes('Choose your temperament') && fixed.endsWith('Reply only READY now.'));
+      assert(!buildInterviewerInstructions({ persona, brief, plan }).includes('YOUR VOICE'));
+      assert.equal(temperamentFromReady('READY tough'), 'tough');
+      assert.equal(temperamentFromReady(' ready Warm. '), 'warm');
+      assert.equal(temperamentFromReady('READY'), null);
+      assert.equal(temperamentFromReady('READY grumpy'), null);
+      assert.equal(temperamentFromReady(undefined), null);
     },
   },
   {

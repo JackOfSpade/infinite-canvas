@@ -8,6 +8,7 @@ import {
   CLAUDE_HANDOFF_SYSTEM_PROMPT,
   CLAUDE_STAGE_TIMEOUT_MS,
   CLAUDE_ULTRACODE_SETTINGS,
+  CLAUDE_WORKFLOW_TOOL,
   CLAUDE_WORKFLOW_UNFINISHED,
   CLAUDE_WORKFLOW_UNFINISHED_MESSAGE,
   ClaudeRunnerError,
@@ -51,6 +52,12 @@ export async function runClaudeSdkStage({
   sessionId,
   resume = false,
   tools = [],
+  // Ultracode is a settings flag that only does anything through the Workflow
+  // tool. Stages opt out to measure it, or when it adds nothing.
+  ultracode = true,
+  // Explicit MCP servers only (never the user's own connectors or settings). Empty for
+  // every app task today; a server's tools are named mcp__<server>__<tool> in `tools`.
+  mcpServers = {},
   // One turn suffices for a launched workflow (the CLI still runs the turn
   // after its task notification), but a failed Workflow call leaves no turn
   // to answer in, so such a stage ends on error_max_turns.
@@ -81,7 +88,14 @@ export async function runClaudeSdkStage({
   let terminal = null;
   let terminalProvisional = false;
   const backgroundTasks = createClaudeBackgroundTasks();
-  const offeredTools = withWorkflowTool(tools);
+  const toolNames = Array.isArray(tools) ? tools.map(String) : [];
+  const mcpToolNames = toolNames.filter(name => name.startsWith('mcp__'));
+  const builtInToolNames = toolNames.filter(name => !name.startsWith('mcp__'));
+  // Ultracode does nothing without Workflow, so the tool is only offered with it.
+  const offeredTools = ultracode === false
+    ? builtInToolNames.filter(name => name !== CLAUDE_WORKFLOW_TOOL)
+    : withWorkflowTool(builtInToolNames);
+  const servers = mcpServers && typeof mcpServers === 'object' && !Array.isArray(mcpServers) ? mcpServers : {};
   let summaryCount = 0;
   let summaryChars = 0;
   let usageResetsAt = null;
@@ -131,6 +145,9 @@ export async function runClaudeSdkStage({
       summaryCount,
       summaryChars,
       thinkingDisplay: 'summarized',
+      // A failed stage still spent money; its caller records that spend.
+      ...(terminal?.usage ? { usage: terminal.usage } : {}),
+      ...(typeof terminal?.costUsd === 'number' ? { costUsd: terminal.costUsd } : {}),
       ...(usageResetsAt !== null ? { resetsAt: usageResetsAt } : {}),
       ...(refuse || {}),
     };
@@ -149,14 +166,15 @@ export async function runClaudeSdkStage({
         cwd,
         env,
         abortController: controller,
-        // Workflow is always offered for ultracode; research adds its web tools.
+        // Workflow is offered only for ultracode; research adds its web tools.
         // Every offered tool must run without a prompt in a headless stage.
         tools: offeredTools,
-        allowedTools: offeredTools,
+        allowedTools: [...offeredTools, ...mcpToolNames],
         permissionMode: 'dontAsk',
-        settings: { ...CLAUDE_ULTRACODE_SETTINGS },
+        // An empty settings overlay is the same as none, so every other option stays.
+        settings: ultracode === false ? {} : { ...CLAUDE_ULTRACODE_SETTINGS },
         strictMcpConfig: true,
-        mcpServers: {},
+        mcpServers: servers,
         settingSources: [],
         persistSession,
         maxTurns,

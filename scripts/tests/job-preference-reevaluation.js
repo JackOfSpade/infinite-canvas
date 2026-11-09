@@ -8,7 +8,7 @@ import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
 import { buildJobBoardDiagnostics } from '../../electron/ipc/bugReport/jobsSnapshot.js';
-import { evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJobPreferences } from '../../electron/ipc/jobPreferences.js';
+import { COMPANY_RESEARCH_VERSION, evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJobPreferences } from '../../electron/ipc/jobPreferences.js';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { savedJobsReevaluationKeepsScores } from '../../src/utils/jobSearchSplitClear.js';
 import { carryBoardRescores } from '../../src/nodes/jobboard/jobBoardResearchStage.js';
@@ -22,6 +22,29 @@ const OTHER_SNAPSHOT = 'b'.repeat(64);
 const item = (id, criterion, category) => ({ id, criterion, category });
 const plan = strictRequirements => ({ version: 1, summary: '', direction: { summary: '', roleDirections: [], avoidDirections: [], explorationEnabled: false }, softPreferences: [], strictRequirements, warnings: [], settingConflicts: [], titles: [] });
 const verdict = (preferenceId, outcome, evidenceQuote = '') => ({ preferenceId, outcome, evidence: 'Fixture evidence.', evidenceQuote });
+// The raw research prompt embeds the request list as JSON inside its untrusted
+// wrapper; read it back so the assertion is about the data the model receives.
+function embeddedRequestList(prompt) {
+  const start = prompt.indexOf('[{"researchId"');
+  assert.ok(start >= 0, 'the prompt embeds the research request list');
+  let depth = 0; let inString = false; let escaped = false;
+  for (let index = start; index < prompt.length; index += 1) {
+    const char = prompt[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === '[') depth += 1;
+    else if (char === ']') {
+      depth -= 1;
+      if (depth === 0) return JSON.parse(prompt.slice(start, index + 1));
+    }
+  }
+  throw new Error('the embedded research request list is unterminated');
+}
 const listing = (title, description = 'Northwind Labs builds billing software for customers.') => ({ title, company: 'Northwind Labs', location: 'Remote', description, url: `https://jobs.example.test/${encodeURIComponent(title)}` });
 
 async function evaluate(strictRequirements, matches, { deferCompanyResearch = true } = {}) {
@@ -120,10 +143,85 @@ export default [
     run: () => {
       const url = 'https://jobs.example.test/saved';
       const assessment = (criterion, pending) => ({ status: 'accepted', ...(pending ? { companyResearchPending: true } : {}), matches: [{ preferenceId: 'r8', criterion, category: 'company', strict: true, outcome: pending ? 'unverified' : 'confirmed' }] });
-      const card = criterion => ({ type: 'jobcard', data: { ...listing('Saved'), url, preferenceAssessment: assessment(criterion, false) } });
+      const card = (criterion, version = COMPANY_RESEARCH_VERSION) => ({ type: 'jobcard', data: { ...listing('Saved'), url, preferenceAssessment: { ...assessment(criterion, false), ...(version === null ? {} : { companyResearchVersion: version }) } } });
       const job = { ...listing('Saved'), url, preferenceAssessment: assessment('No staffing agencies', true) };
-      assert.equal(carryBoardRescores([job], [card('No staffing agencies')])[0].preferenceAssessment.companyResearchPending, undefined, 'the same rule keeps its finished research');
-      assert.equal(carryBoardRescores([job], [card('No government employers')])[0].preferenceAssessment.companyResearchPending, true, 'a new rule stays pending');
+      const carried = candidate => carryBoardRescores([job], [candidate])[0].preferenceAssessment;
+      assert.equal(carried(card('No staffing agencies')).companyResearchPending, undefined, 'the same rule keeps its finished research');
+      assert.equal(carried(card('No government employers')).companyResearchPending, true, 'a new rule stays pending');
+      assert.equal(carried(card('No staffing agencies', null)).companyResearchPending, true, 'research from before the research version is asked again');
+      assert.equal(carried(card('No staffing agencies', 1)).companyResearchPending, true, 'version 1 research is asked again before it can confirm a rule');
+    },
+  },
+  {
+    name: 'company research: the request carries the posting identities and research must identify the poster first',
+    run: async () => {
+      const criterion = 'Exclude agencies, consultancies, and outsourcing firms';
+      const description = 'Technology-led solutions. '.repeat(40);
+      const posting = n => ({
+        ...listing(`Saskatoon Engineer ${n}`, description),
+        company: 'Stelvio Inc.',
+        location: `Saskatoon, SK ${n}`,
+        url: `https://stelvio.example.test/postings/${n}`,
+        preferenceAssessment: { status: 'accepted', companyResearchPending: true, matches: [{ preferenceId: 'r8', criterion, category: 'company', strict: true, outcome: 'unverified' }] },
+      });
+      const rawPrompts = [];
+      const assessmentPrompts = [];
+      const researchQuote = 'Stelvio Inc. is a technology recruitment firm that hires for unnamed clients.';
+      const settled = await researchDeferredJobPreferences({
+        jobs: [1, 2, 3, 4].map(posting),
+        callRaw: async prompt => {
+          rawPrompts.push(prompt);
+          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/gu) || [])];
+          return ids.map(id => `BEGIN RESEARCH ${id}\n${researchQuote} https://stelvio.example.test/about\nEND RESEARCH ${id}`).join('\n');
+        },
+        callText: async prompt => {
+          assessmentPrompts.push(prompt);
+          const ids = [...new Set(prompt.match(/research-[a-f0-9]{20}/gu) || [])];
+          return { assessments: ids.map(researchId => ({ researchId, preferenceId: 'r8', outcome: 'conflicts', evidence: 'Recruiter posting.', evidenceQuote: researchQuote, sourceUrls: ['https://stelvio.example.test/about'], sourceDate: '' })) };
+        },
+      });
+      assert.equal(rawPrompts.length, 1, 'one grouped request covers every Stelvio posting');
+      const requests = embeddedRequestList(rawPrompts[0]);
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0].postings.length, 3, 'at most three posting identities travel with the request');
+      assert.deepEqual(requests[0].postings[0], {
+        title: 'Saskatoon Engineer 1',
+        location: 'Saskatoon, SK 1',
+        listingUrl: 'https://stelvio.example.test/postings/1',
+        excerpt: description.slice(0, 300),
+      });
+      assert.equal(requests[0].postings[0].excerpt.length, 300, 'the excerpt stops at 300 characters');
+      assert.ok(rawPrompts[0].includes('FIRST identify the organization that actually posted these jobs'), 'the research identifies the poster before answering');
+      assert.ok(rawPrompts[0].includes('A name match alone is not identification'), 'a name match alone is not identification');
+      assert.ok(rawPrompts[0].includes('IDENTITY UNCERTAIN'), 'the research knows how to report an unidentifiable poster');
+      assert.ok(rawPrompts[0].includes('Do not put one employer\'s evidence, URL, or facts in another employer\'s section.'), 'the per-employer isolation sentence survives');
+      assert.ok(assessmentPrompts[0].includes('A section that says IDENTITY UNCERTAIN, or that identifies an organization other than the one that posted these jobs, can never yield confirmed'), 'the assessment forbids confirming another organization');
+      assert.ok(assessmentPrompts[0].includes('an agency, staffing, intermediary or outsourcing requirement is conflicts'), 'an established intermediary conflicts with an agency rule');
+      assert.equal(settled.filtered, 4, 'the researched agency conflict removes every Stelvio posting');
+      assert.equal(settled.jobs[0].preferenceAssessment.status, 'filtered');
+      assert.equal(settled.jobs[0].preferenceAssessment.companyResearchVersion, COMPANY_RESEARCH_VERSION, 'web research stamps the research version on its assessment');
+      const replayed = reapplyStoredJobPreferences({ jobs: [{ ...listing('Saved'), preferenceAssessment: { matches: [{ preferenceId: 'r1', criterion: 'Exclude agencies', category: 'company', strict: true, outcome: 'confirmed', source: 'listing' }] } }], preferencePlan: plan([item('r1', 'Exclude agencies', 'company')]) });
+      assert.equal(replayed.candidatePool[0].preferenceAssessment.companyResearchVersion, undefined, 'a listing-only answer owes no research version');
+    },
+  },
+  {
+    name: 'listing prompt: a generic unnamed employer is an intermediary posting',
+    run: async () => {
+      const prompts = [];
+      await evaluateJobPreferences({
+        jobs: [listing('Backend Engineer')],
+        jobPreferences: 'Fixture brief.',
+        preferencePlan: plan([item('r1', 'Exclude agencies', 'company')]),
+        deferCompanyResearch: true,
+        callRaw: () => { throw new Error('this fixture needs no web research'); },
+        callText: async prompt => {
+          prompts.push(prompt);
+          return { assessments: [{ index: 0, matches: [verdict('r1', 'unverified')] }] };
+        },
+      });
+      const listingPrompt = prompts.find(prompt => prompt.includes('Second, intermediaries:'));
+      assert.ok(listingPrompt, 'the listing pass runs');
+      assert.ok(listingPrompt.includes('a listing that does not name the employer it hires for and describes it only generically, for example as "a business", "our client" or "an established company", is an intermediary posting'), 'the unnamed-employer rule is left to the wording, with no keyword list');
     },
   },
   {

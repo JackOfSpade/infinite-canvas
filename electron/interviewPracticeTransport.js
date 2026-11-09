@@ -217,7 +217,12 @@ export async function createInterviewerSession(config = {}, { spawn = nodeSpawn 
       warm = warmProcess(handle);
       const ready = await warm.request(instructions, signal);
       costDelta(ready.event);
-      if (ready.text.trim() !== 'READY') throw error('TRANSPORT_INVALID_RESPONSE');
+      // A bare READY, or READY plus the temperament the interviewer chose for itself. A short
+      // explanation before it is tolerated: only the last line counts.
+      const lines = ready.text.trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+      const reply = lines.at(-1) ?? '';
+      if (!/^READY(?:\s+(?:warm|neutral|tough)\.?)?$/i.test(reply)) throw error('TRANSPORT_INVALID_RESPONSE');
+      return { reply };
     },
     async turn(message, { signal, onDelta } = {}) {
       if (closed || signal?.aborted) throw cancelled();

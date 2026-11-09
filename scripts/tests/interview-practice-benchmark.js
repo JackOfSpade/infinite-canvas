@@ -105,6 +105,22 @@ export default [
     },
   },
   {
+    name: 'interview practice transport: start accepts READY with a chosen temperament and rejects anything else',
+    async run() {
+      for (const [text, ok, reply = text] of [
+        ['READY', true], ['READY tough', true], ['READY warm.', true],
+        ['Voice is charming and casual: that reads as warm.\n\nREADY warm', true, 'READY warm'],
+        ['READY grumpy', false], ['Sure, READY', false], ['READY neutral\nActually tough.', false],
+      ]) {
+        const { spawn } = fakeSpawn({ replies: [{ text, total: 0.01 }] });
+        const session = await createInterviewerSession({ model: 'opus', effort: 'low', claudeBin: 'stub-claude' }, { spawn });
+        if (ok) assert.deepEqual(await session.start({ instructions: 'Instructions.' }), { reply });
+        else await assert.rejects(session.start({ instructions: 'Instructions.' }), { code: 'TRANSPORT_INVALID_RESPONSE' });
+        await session.close?.();
+      }
+    },
+  },
+  {
     name: 'interview practice transport: warm session streams text deltas, times the first sentence and splits cumulative cost',
     async run() {
       const { spawn, calls } = fakeSpawn({ replies: [

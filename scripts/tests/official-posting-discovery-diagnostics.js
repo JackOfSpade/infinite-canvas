@@ -167,6 +167,31 @@ export default [
     },
   },
   {
+    name: 'Official discovery legend explains worker-aborted as an app-side stop with and without observations',
+    run() {
+      const legend = '> `worker-aborted` means the lookup was stopped from the app side (your Cancel, a removed card, or quitting the app), not that a worker failed; Non-API AI Handoff Lifecycle names the exact cancel cause.';
+      isolated(() => {
+        const empty = buildOfficialPostingDiscoveryMarkdown().split('\n');
+        assert.ok(empty.includes(legend), 'the empty report carries the exact worker-aborted legend line');
+        assert.ok(empty.some(line => line.startsWith('- No discovery observation retained')), 'no observation is retained yet');
+        const anchor = empty.findIndex(line => line.startsWith('> Chat lookups report'));
+        assert.notEqual(anchor, -1);
+        assert.equal(empty[anchor + 1], legend, 'the legend follows the chat lookups header line');
+      });
+      isolated(() => {
+        recordOfficialPostingDiscovery(job(), observation({ failureCodes: ['worker-aborted'] }));
+        const markdown = buildOfficialPostingDiscoveryMarkdown();
+        const lines = markdown.split('\n');
+        assert.ok(lines.includes(legend), 'the populated report carries the exact worker-aborted legend line');
+        assert.ok(markdown.includes('1 input observation(s) retained'), 'the observation was retained');
+        assert.ok(lines.includes('  - Handoff failure classes: worker-aborted'));
+        const anchor = lines.findIndex(line => line.startsWith('> Chat lookups report'));
+        assert.notEqual(anchor, -1);
+        assert.equal(lines[anchor + 1], legend, 'the legend follows the chat lookups header line');
+      });
+    },
+  },
+  {
     name: 'Official discovery empty process explicitly declines prior-process reconstruction',
     run() {
       isolated(() => {

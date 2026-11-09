@@ -23,10 +23,15 @@ export function voiceError(code, message, extra = {}) {
   return error;
 }
 
-/** 44.1 kHz only on a known paid plan; free (and unknown) tiers get 24 kHz. */
+// ElevenLabs refuses pcm_44100 below Pro with 403 subscription_required "only available on
+// the Pro tier and above" (verified live on Starter, 2026-11-08). Asking anyway costs the
+// first utterance of every call a refused socket before the 24 kHz retry.
+const BELOW_PRO_TIERS = /^(free|starter|creator)\b/;
+
+/** 44.1 kHz on Pro and above (other paid tiers fall back on refusal); free, starter, creator and empty tiers get 24 kHz. */
 export function rateForTier(tier) {
   const value = String(tier ?? '').trim().toLowerCase();
-  if (!value || value === 'free') return FREE_RATE;
+  if (!value || BELOW_PRO_TIERS.test(value)) return FREE_RATE;
   return PAID_RATE;
 }
 

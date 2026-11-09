@@ -119,10 +119,15 @@ export const CLAUDE_WORKFLOW_TOOL = 'Workflow';
 export const CLAUDE_WORKFLOW_UNFINISHED = 'CLAUDE_WORKFLOW_UNFINISHED';
 export const CLAUDE_WORKFLOW_UNFINISHED_MESSAGE = 'Claude\'s workflow did not finish, so its answer was not used.';
 
+/** A comma list or an array of tool names, trimmed and without blanks. */
+export function splitToolList(tools) {
+  return (Array.isArray(tools) ? tools : String(tools ?? '').split(','))
+    .map(name => String(name).trim()).filter(Boolean);
+}
+
 /** The offered tools plus Workflow, from a comma list or an array. */
 export function withWorkflowTool(tools) {
-  const list = (Array.isArray(tools) ? tools : String(tools ?? '').split(','))
-    .map(name => String(name).trim()).filter(Boolean);
+  const list = splitToolList(tools);
   return list.includes(CLAUDE_WORKFLOW_TOOL) ? list : [...list, CLAUDE_WORKFLOW_TOOL];
 }
 
@@ -202,14 +207,18 @@ export function claudeCliArgs({
   effort = CLAUDE_APPLICATION_EFFORT,
   sessionId,
   resume = false,
-  // Every stage offers only Workflow (for ultracode); interview research also
-  // adds the read-only web tools (search/fetch). No file, shell or MCP tools.
-  tools = '', partialMessages = false } = {}) {
+  // Every stage offers Workflow (for ultracode); interview research also adds
+  // the read-only web tools (search/fetch). No file, shell or MCP tools.
+  tools = '', partialMessages = false,
+  // Ultracode is a setting that only acts through Workflow; stages can drop both.
+  ultracode = true } = {}) {
   let sessionArgs = [];
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     sessionArgs = resume === true ? ['--resume', sessionId] : ['--session-id', sessionId];
   }
-  const offered = withWorkflowTool(tools).join(',');
+  const offered = (ultracode === false
+    ? splitToolList(tools).filter(name => name !== CLAUDE_WORKFLOW_TOOL)
+    : withWorkflowTool(tools)).join(',');
   return [
     '-p',
     ...sessionArgs,
@@ -218,7 +227,8 @@ export function claudeCliArgs({
     '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT,
     '--restricted',
     '--strict-mcp-config',
-    '--settings', JSON.stringify(CLAUDE_ULTRACODE_SETTINGS),
+    ...(ultracode === false ? [] : ['--settings', JSON.stringify(CLAUDE_ULTRACODE_SETTINGS)]),
+    // An empty list is the CLI's "no tools" when ultracode removed Workflow.
     '--tools', offered,
     // Headless runs cannot prompt, so an offered tool must also be allowed.
     '--allowedTools', offered,
@@ -384,6 +394,8 @@ export function runClaudeStage({
   sessionId,
   resume = false,
   tools = '',
+  // Passed straight through: false drops the ultracode setting and Workflow.
+  ultracode = true,
   onActivity = null,
   spawnImpl = childProcess.spawn,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
@@ -397,7 +409,7 @@ export function runClaudeStage({
     }
     let child;
     try {
-      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools, partialMessages: typeof onActivity === 'function' }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools, ultracode, partialMessages: typeof onActivity === 'function' }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)
@@ -664,7 +676,7 @@ export function claudeCatalogSystemAppend(catalog) {
 
 function createProductionRunStage({ workspaceDir, fsImpl }) {
   let bound = null;
-  return async ({ text, pageImages, signal, sessionId, resume, model, effort, onThinkingSummary, onActivity }) => {
+  return async ({ text, pageImages, signal, sessionId, resume, model, effort, ultracode, onThinkingSummary, onActivity }) => {
     if (!bound) {
       if (workspaceDir) await fsImpl.mkdir(workspaceDir, { recursive: true });
       const binary = resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
@@ -672,7 +684,7 @@ function createProductionRunStage({ workspaceDir, fsImpl }) {
     }
     const { runClaudeSdkStage } = await import('./claudeApplicationSdkStage.js');
     const split = splitCareerCatalog(text);
-    return runClaudeSdkStage({ text: split.text, systemAppend: claudeCatalogSystemAppend(split.catalog), pageImages, signal, sessionId, resume, model, effort, onThinkingSummary, onActivity, ...bound });
+    return runClaudeSdkStage({ text: split.text, systemAppend: claudeCatalogSystemAppend(split.catalog), pageImages, signal, sessionId, resume, model, effort, ...(ultracode === false ? { ultracode: false } : {}), onThinkingSummary, onActivity, ...bound });
   };
 }
 

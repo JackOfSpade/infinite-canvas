@@ -38,6 +38,8 @@ function workerHarness({ entries, runStage, submit, ...options }) {
     clearTimer: (timer) => { state.timers = state.timers.filter(item => item !== timer); },
     onActivityChange: snapshot => state.notified.push(snapshot),
     runStage,
+    // Never the real keychain in tests: no Tavily unless a test supplies one.
+    tavily: { readKey: async () => '', plainLeads: async () => [] },
     ...options,
   });
   return { worker, state };
