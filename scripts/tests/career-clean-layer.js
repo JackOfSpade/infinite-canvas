@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   CAREER_CLEAN_PAGE_CHARACTERS, buildCareerCleanLayer, careerCleanLayerPages, cleanCareerSkillNames, readCareerCleanLayer,
-  produceCareerCleanLayer, verifyCareerCleanText, writeCareerCleanLayer,
+  produceCareerCleanLayer, validateCareerCleanPage, verifyCareerCleanText, writeCareerCleanLayer,
 } from '../../electron/ipc/careerCleanLayer.js';
 import { fullApprovedHand, writeVerifySourcePrompt } from '../../electron/ipc/applicationWriteVerify.js';
 import { __pasteTwinParagraphCitationsForTests, __pasteUnitGroundingErrorsForTests } from '../../electron/ipc/localAiApplication.js';
@@ -234,5 +234,34 @@ export default [{
     const withoutAnnotationFence = await import(`data:text/javascript;base64,${Buffer.from(source.replace(annotationFence, '')).toString('base64')}`);
     assert.equal(verifyCareerCleanText('- python [Skill ID: python]', '- Python [Skill ID: Python]'), false);
     assert.equal(withoutAnnotationFence.verifyCareerCleanText('- python [Skill ID: python]', '- Python [Skill ID: Python]'), true);
+  },
+}, {
+  name: 'Clean page answer that leaves out rows is rejected so the transport re-asks',
+  async run() {
+    const rows = careers.map(({ id, quote }) => ({ id, quote }));
+    const full = { items: careers.map(({ id, clean }) => ({ id, clean })) };
+    assert.equal(validateCareerCleanPage(full, rows), full);
+    assert.equal(validateCareerCleanPage(JSON.stringify(full), rows), JSON.stringify(full));
+    const short = { items: full.items.slice(0, 2) };
+    assert.throws(() => validateCareerCleanPage(short, rows), /2 of 4 rows are missing \(host\.career\.achievement\.clinic\.1/u);
+    assert.throws(() => validateCareerCleanPage({ items: [...full.items, full.items[0]] }, rows), /1 ids repeat/u);
+    assert.throws(() => validateCareerCleanPage({ items: [...full.items, { id: 'host.other.1', clean: 'x' }] }, rows), /not on this page/u);
+    assert.throws(() => validateCareerCleanPage('not json', rows), /Return JSON/u);
+    // The production call carries the check: a short first answer is rejected, the retry is published.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'career-clean-validator-'));
+    try {
+      let attempts = 0;
+      const callText = async (_prompt, options) => {
+        for (const answer of [short, full]) {
+          attempts += 1;
+          try { return options.responseValidator(answer); } catch { /* corrected retry */ }
+        }
+        throw new Error('no valid answer');
+      };
+      const result = await produceCareerCleanLayer({ snapshotId: 'd'.repeat(64), catalog: rows.map(row => ({ ...row, sourceId: 'career-data' })), root, callText });
+      assert.equal(attempts, 2);
+      assert.deepEqual(result.layer.rejections, []);
+      assert.equal(result.layer.items.find(item => item.id === careers[2].id).clean, careers[2].clean);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
   },
 }];
