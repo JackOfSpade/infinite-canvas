@@ -12,6 +12,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { assertDurableOutDir, createRunJournal, takeEphemeralFlag, tallyRows } from './ai-test-journal.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const TASKS = ['job-preference-evaluation', 'job-scoring', 'job-official-posting-research', 'job-official-posting-match',
@@ -23,6 +24,9 @@ export const UNREPLAYABLE_TASKS = {
   'job-compensation-research-batch': 'electron/ipc/jobs.js runFreshCompensationPipeline calls the module-level callLLMRaw (no caller seam) with cohorts built live from the profile and earlier grounded role-band/location lookups (researchParameters via compensationResearchParametersForGroup); board rows persist none of roleFamily, experienceBand or seniority.',
 };
 export const REASONING_LEVELS = ['off', 'low', 'medium', 'high', 'max'];
+// Claude at an explicit model/effort (cheapest-first ladders); `max` is a DeepSeek-only reasoning level.
+export const CLAUDE_SETTING_MODELS = ['haiku', 'sonnet', 'opus'];
+export const CLAUDE_SETTING_EFFORTS = ['low', 'medium', 'high', 'xhigh'];
 export const DEFAULT_CONFIGS = ['claude', ...['flash', 'pro'].flatMap(model => REASONING_LEVELS.map(level => `${model}:${level}`))].join(',');
 const ROUTES = { flash: 'deepseek-flash', pro: 'deepseek-pro' };
 const RESEARCH_MAX_TURNS = 16;
@@ -41,6 +45,15 @@ export function parseConfigs(list) {
   const configs = [];
   for (const raw of String(list || '').split(',').map(part => part.trim()).filter(Boolean)) {
     if (raw === 'claude') { configs.push({ id: 'claude', kind: 'claude' }); continue; }
+    if (raw.startsWith('claude:')) {
+      // claude:<model>:<effort> runs the same Claude stage as the baseline with a cheaper or stronger setting.
+      const [family, model, effort, extra] = raw.split(':');
+      if (family !== 'claude' || !CLAUDE_SETTING_MODELS.includes(model) || !CLAUDE_SETTING_EFFORTS.includes(effort) || extra !== undefined) {
+        throw new Error(`Unknown config ${raw}.`);
+      }
+      configs.push({ id: raw, kind: 'claude-setting', model, effort });
+      continue;
+    }
     const [model, reasoning, extra] = raw.split(':');
     if (!ROUTES[model] || !REASONING_LEVELS.includes(reasoning) || extra !== undefined) throw new Error(`Unknown config ${raw}.`);
     configs.push({ id: raw, kind: 'offload', route: ROUTES[model], reasoning });
@@ -255,8 +268,11 @@ const safeName = value => String(value).replace(/[^A-Za-z0-9._-]/g, '_');
  *   execute({ config, rep, call }) -> { text, costUsd, durationMs, model, usage }
  *   validate(call, text)          -> parsed value, throwing when invalid
  */
-export async function replayTask({ task, outDir, startFlow, materialize, execute, validate, configs, reps, claudeReps, batches, concurrency, dryRun = false, log = () => {} }) {
+export async function replayTask({ task, outDir, startFlow, materialize, execute, validate, configs, reps, claudeReps, batches, concurrency, dryRun = false, log = () => {}, journal = null }) {
   const done = loadResults(outDir);
+  // journal: validity and cost per config in docs/ai-test-runs.md, rewritten as rows land.
+  const recordJournal = force => journal?.update({ rows: replayJournalRows([...done.values()]) }, { force });
+  // Only the plain claude baseline drives the flow; a claude-setting config is measured like an offload one.
   const claude = configs.find(config => config.kind === 'claude');
   const limit = createLimiter(concurrency);
   const calls = [];
@@ -291,6 +307,7 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
       }
       writePrivate(path.join(outDir, 'results.jsonl'), `${JSON.stringify(row)}\n`, { append: true });
       done.set(resultKey(task, call.batch, config.id, rep), row);
+      recordJournal(false);
       return row;
     });
   };
@@ -380,6 +397,15 @@ export function appValidate(app) {
   };
 }
 
+/**
+ * The child environment without this process's own Claude Code session and Electron launcher: every name starting with
+ * CLAUDE or ANTHROPIC plus ELECTRON_RUN_AS_NODE is dropped before claudeChildEnv shapes the child's.
+ */
+export function replayChildEnv(env) {
+  const keep = ([name]) => !name.startsWith('CLAUDE') && !name.startsWith('ANTHROPIC') && name !== 'ELECTRON_RUN_AS_NODE';
+  return Object.fromEntries(Object.entries(env || {}).filter(keep));
+}
+
 /** Mirrors claudeTaskWorker.serve(): Claude through the SDK stage, DeepSeek through offloadTextCall. */
 export function appExecute(app, task, signal) {
   const profile = app.claudeTaskProfile(task);
@@ -393,11 +419,14 @@ export function appExecute(app, task, signal) {
       return app.offloadTextCall({ messages: app.handoffMessages(cached), route: config.route, reasoning: config.reasoning, tag: task, signal,
         ...(maxTokens ? { maxTokens } : {}), ...(tools.length ? { webTools: {} } : {}) });
     }
+    // This tool runs inside a Claude Code session, and its CLAUDE*/ANTHROPIC* (plus Electron) env must not reach the child.
     const binary = app.resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
-    const stage = { binary, env: app.claudeChildEnv(process.env, path.dirname(binary)), cwd: os.tmpdir() };
+    const stage = { binary, env: app.claudeChildEnv(replayChildEnv(process.env), path.dirname(binary)), cwd: os.tmpdir() };
+    // A claude-setting config is the baseline call with its own model/effort; the baseline keeps the task profile's.
+    const setting = config.kind === 'claude-setting' ? { model: config.model, effort: config.effort } : { model: profile.model, effort: profile.effort };
     return app.runClaudeSdkStage({
       ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
-      pageImages: [], signal, model: profile.model, effort: profile.effort, persistSession: false,
+      pageImages: [], signal, ...setting, persistSession: false,
       ...(tools.length ? { tools, maxTurns: RESEARCH_MAX_TURNS } : {}),
     });
   };
@@ -491,13 +520,34 @@ async function buildFlow({ task, opts, node, rows, signal }) {
   };
 }
 
-export async function main(argv) {
+/** Journal rows for a replay: validity and cost per config (agreement comes from ai-task-replay-score.mjs). */
+export function replayJournalRows(rows = []) {
+  return tallyRows(rows, row => row.config).map(group => ({ ...group, notes: 'agreement: run ai-task-replay-score.mjs --out <dir>' }));
+}
+
+export async function main(argv, deps = {}) {
   let opts;
   let outDir;
   try {
     opts = parseArgs(argv);
     outDir = assertOutsideRepo(opts.out);
+    // Only the CLI entry sets requireDurable; tests call main() without it.
+    if (deps.requireDurable && !opts.dryRun) assertDurableOutDir(outDir, { allowEphemeral: deps.allowEphemeral === true });
   } catch (error) { console.error(error.message); return 2; }
+  const journal = !opts.dryRun && deps.journalFactory ? deps.journalFactory({
+    tool: 'ai-task-replay', task: opts.task, label: opts.configs.map(config => config.id).join(', '), outDir, command: deps.command ?? '',
+  }) : null;
+  try {
+    const code = await replayMain(opts, outDir, journal);
+    journal?.finish(code === 0 ? 'finished' : `stopped with exit code ${code}`);
+    return code;
+  } catch (error) {
+    journal?.finish(`failed: ${codeOf(error)}`);
+    throw error;
+  }
+}
+
+async function replayMain(opts, outDir, journal) {
   const { task } = opts;
   if (UNREPLAYABLE_TASKS[task]) { console.error(`Replay stopped: ${task} cannot be replayed faithfully: ${UNREPLAYABLE_TASKS[task]}`); return 1; }
   try {
@@ -518,6 +568,7 @@ export async function main(argv) {
     const { calls, results } = await replayTask({
       task, outDir, startFlow: flow.startFlow, materialize: appMaterialize(app), execute: appExecute(app, task, controller.signal), validate: appValidate(app),
       configs: opts.configs, reps: opts.reps, claudeReps: opts.claudeReps, batches: opts.batches, concurrency: opts.concurrency, dryRun: opts.dryRun, log: line => console.log(line),
+      journal,
     });
     const profile = app.claudeTaskProfile(task);
     if (opts.dryRun) {
@@ -538,5 +589,7 @@ export async function main(argv) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).then(code => { process.exitCode = code; });
+  const [cliArgs, allowEphemeral] = takeEphemeralFlag(process.argv.slice(2));
+  main(cliArgs, { requireDurable: true, allowEphemeral, journalFactory: allowEphemeral ? null : createRunJournal,
+    command: `node scripts/ai-task-replay.mjs ${cliArgs.join(' ')}` }).then(code => { process.exitCode = code; });
 }

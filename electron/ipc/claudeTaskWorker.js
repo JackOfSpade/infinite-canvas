@@ -24,6 +24,7 @@ import {
   workerShadowValidator,
 } from './nonApiAi.js';
 import { routedCall } from './aiCallProviders.js';
+import { configureAiRecording, recordAiReplaySample } from './aiReplaySamples.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
 import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 import { compensationCohortResearchIds, compensationRoleFamilyResearchIds } from './jobs.js';
@@ -469,6 +470,30 @@ export function createClaudeTaskWorker({
       try { shadowValidate = shadowValidator({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks }); } catch { shadowValidate = null; }
     }
     const outcome = await seam.submit({ requestId: entry.requestId, handoffCode: entry.handoffCode, response: reply.text, allowTasks });
+    if (provider === 'claude') {
+      // The exact request that produced this answer, so a future model can
+      // re-answer it offline. Recording never changes what the task does.
+      try {
+        recordAiReplaySample({
+          at: new Date(now()).toISOString(),
+          task: entry.task,
+          stage: null,
+          attempt: entry.rejections || 0,
+          text: cached.text,
+          systemAppend: cached.systemAppend,
+          model: reply.model ?? null,
+          requestedModel: profile.model ?? null,
+          effort: profile.effort ?? null,
+          tools: profile.tools ?? null,
+          costUsd: reply.costUsd ?? null,
+          usage: reply.usage ?? null,
+          durationMs: reply.durationMs ?? null,
+          answer: reply.text,
+          outcome: outcome?.outcome === 'accepted' || outcome?.outcome === 'rejected' ? outcome.outcome : null,
+          validationCode: outcome?.validationCode ?? null,
+        });
+      } catch { /* recording cannot change or fail the task */ }
+    }
     if (provider === 'offload') {
       if (outcome?.outcome === 'rejected') {
         const count = (offloadRejections.get(entry.requestId) || 0) + 1;
@@ -580,6 +605,8 @@ export function createClaudeTaskWorker({
 
 /** Start answering AI tasks with Claude for this process. */
 export function startClaudeTaskWorker({ userData, nativeImage = null, getAllWindows = () => [] } = {}) {
+  // Samples and usage rows live beside the worker's own usage log.
+  configureAiRecording({ userData });
   const usageFile = userData ? path.join(userData, CLAUDE_TASK_USAGE_FILE) : null;
   const broadcast = (snapshot) => {
     for (const win of getAllWindows() || []) {

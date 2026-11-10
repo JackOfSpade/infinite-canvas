@@ -56,11 +56,13 @@ async function textsSentFor(handoffs) {
 const USAGE_MESSAGE = 'Claude usage limit reached. Retry this application after your limit resets.';
 const LOGIN_MESSAGE = 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription, then retry.';
 
-function resultLine({ result = 'final answer', isError = false, subtype = 'success', models = ['claude-sonnet-5-5'], apiErrorStatus } = {}) {
+function resultLine({ result = 'final answer', isError = false, subtype = 'success', models = ['claude-sonnet-5-5'], apiErrorStatus, totalCostUsd, usage } = {}) {
   const modelUsage = Object.fromEntries(models.map(model => [model, { inputTokens: 1 }]));
   return JSON.stringify({
     type: 'result', subtype, is_error: isError, result, session_id: 's1', duration_ms: 42, modelUsage,
     ...(apiErrorStatus !== undefined ? { api_error_status: apiErrorStatus } : {}),
+    ...(totalCostUsd !== undefined ? { total_cost_usd: totalCostUsd } : {}),
+    ...(usage !== undefined ? { usage } : {}),
   });
 }
 
@@ -746,6 +748,56 @@ export default [
       });
       assert.equal(parseClaudeStreamOutput(JSON.stringify({ type: 'assistant' })), null);
       assert.equal(parseClaudeStreamOutput(resultLine({ subtype: 'error_during_execution' })).isError, true);
+    },
+  },
+  {
+    name: 'claude runner: stream parsing keeps the reported cost and token usage',
+    run() {
+      const usage = { input_tokens: 10, output_tokens: 5 };
+      const parsed = parseClaudeStreamOutput(resultLine({ result: 'priced', totalCostUsd: 0.42, usage }));
+      assert.deepEqual(parsed, {
+        isError: false, subtype: 'success', result: 'priced', apiErrorStatus: null,
+        models: ['claude-sonnet-5-5'], sessionId: 's1', durationMs: 42,
+        costUsd: 0.42, usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      assert.equal(parsed.costUsd, 0.42);
+      assert.equal(parsed.usage.input_tokens, 10);
+      assert.equal(parsed.usage.output_tokens, 5);
+      // A zero-cost run is still a real cost, not a missing one.
+      assert.equal(parseClaudeStreamOutput(resultLine({ totalCostUsd: 0 })).costUsd, 0);
+    },
+  },
+  {
+    name: 'claude runner: an unusable cost or usage leaves its key out',
+    run() {
+      const parseExtra = extra => parseClaudeStreamOutput(JSON.stringify({
+        type: 'result', subtype: 'success', is_error: false, result: 'ok', session_id: 's1', duration_ms: 42, ...extra,
+      }));
+      const has = (parsed, key) => Object.prototype.hasOwnProperty.call(parsed, key);
+      for (const total_cost_usd of ['0.42', 'NaN', -0.01, -1, null, true, {}]) {
+        assert.equal(has(parseExtra({ total_cost_usd }), 'costUsd'), false, `total_cost_usd ${JSON.stringify(total_cost_usd)} is not a usable cost`);
+      }
+      assert.equal(has(parseExtra({}), 'costUsd'), false, 'a missing total_cost_usd yields no costUsd');
+      assert.equal(has(parseExtra({ total_cost_usd: 0 }), 'costUsd'), true, 'a zero cost is reported');
+      for (const usage of ['input_tokens', 12, true, [10, 5], null]) {
+        assert.equal(has(parseExtra({ usage }), 'usage'), false, `usage ${JSON.stringify(usage)} is not an object`);
+      }
+      assert.equal(has(parseExtra({}), 'usage'), false, 'a missing usage yields no usage key');
+      assert.deepEqual(parseExtra({ usage: { input_tokens: 10 } }).usage, { input_tokens: 10 });
+    },
+  },
+  {
+    name: 'claude runner: a successful stage returns the cost and usage the stream carried',
+    async run() {
+      const usage = { input_tokens: 10, output_tokens: 5 };
+      const priced = await stageWith({ stdout: `${JSON.stringify({ type: 'system' })}\n${resultLine({ result: '{"ok":true}', totalCostUsd: 0.42, usage })}\n` });
+      assert.deepEqual(await priced.promise, {
+        text: '{"ok":true}', model: 'claude-sonnet-5-5', durationMs: 42,
+        costUsd: 0.42, usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      // A stream without them returns exactly the fields it always did.
+      const plain = await stageWith({ stdout: `${resultLine({ result: '{"ok":true}' })}\n` });
+      assert.deepEqual(await plain.promise, { text: '{"ok":true}', model: 'claude-sonnet-5-5', durationMs: 42 });
     },
   },
   {

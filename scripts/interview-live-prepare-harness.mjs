@@ -6,7 +6,8 @@
  *   --user-data "<dir>" --snapshot-id <id> --job-url <url> \
  *   --bundle-dir "<applied-job folder>" --out /tmp/interview-live-prep \
  *   [--transport claude|replay] [--ultracode on|off] \
- *   [--research native|tavily|merged] [--merge-from "<dirA>,<dirB>"] [--stop-after all|brief]
+ *   [--research native|tavily|merged] [--merge-from "<dirA>,<dirB>"] [--stop-after all|brief] \
+ *   [--research-profile <model>:<effort>]
  *
  * The Claude transport feeds the real Prepare handoffs (buildInterviewBrief
  * then buildInterviewPreparedAnswers) through the same headless Claude Code
@@ -23,6 +24,13 @@
  * proportionally trimmed to the research validator's maximum. Every other call
  * keeps using the transport. --stop-after brief stops after final-brief.json
  * and still writes report.json and calls.jsonl.
+ *
+ * --research-profile <model>:<effort> answers the one research call at that
+ * model/effort instead of its production profile (qa-research: opus xhigh), so
+ * a cheaper research setting can be measured in the same run. Model is haiku,
+ * sonnet or opus; effort is low, medium, high or xhigh. Every other stage
+ * keeps its production profile, and report.json records the effective research
+ * model/effort beside the production pair.
  *
  * Every Claude attempt is recorded: 001.prompt.txt / 001.response.txt and one
  * calls.jsonl line with task, stage, attempt, duration, cost, usage, Workflow
@@ -42,6 +50,8 @@ const TRANSPORTS = Object.freeze(['claude', 'replay']);
 const ULTRACODE_SETTINGS = Object.freeze(['on', 'off']);
 export const RESEARCH_MODES = Object.freeze(['native', 'tavily', 'merged']);
 export const STOP_AFTER_SETTINGS = Object.freeze(['all', 'brief']);
+export const RESEARCH_PROFILE_MODELS = Object.freeze(['haiku', 'sonnet', 'opus']);
+export const RESEARCH_PROFILE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh']);
 export const RESEARCH_TASK = 'interview-brief-research';
 export const RESEARCH_STAGE = 'qa-research';
 export const TAVILY_RESEARCH_MAX_TURNS = 24;
@@ -57,10 +67,18 @@ const inside = (parent, child) => child === parent || (!path.relative(parent, ch
 
 function fail(code) { const error = new Error(code); error.code = code; throw error; }
 
+/** Parses a --research-profile value ("haiku:low") into { model, effort }. */
+export function parseResearchProfile(value) {
+  const [model, effort, ...rest] = String(value ?? '').split(':');
+  if (rest.length > 0 || !RESEARCH_PROFILE_MODELS.includes(model)
+    || !RESEARCH_PROFILE_EFFORTS.includes(effort)) fail('INVALID_ARGUMENTS');
+  return { model, effort };
+}
+
 export function parseHarnessArgs(argv) {
   const args = { transport: 'claude', ultracode: 'off', research: 'native', 'stop-after': 'all' };
   const allowed = new Set(['user-data', 'snapshot-id', 'job-url', 'bundle-dir', 'out', 'transport', 'ultracode', 'ultracode-off-tasks',
-    'research', 'merge-from', 'stop-after']);
+    'research', 'merge-from', 'stop-after', 'research-profile']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index]?.slice(2);
@@ -72,6 +90,9 @@ export function parseHarnessArgs(argv) {
   if (!/^[a-f0-9]{64}$/u.test(args['snapshot-id']) || !TRANSPORTS.includes(args.transport)
     || !ULTRACODE_SETTINGS.includes(args.ultracode) || !RESEARCH_MODES.includes(args.research)
     || !STOP_AFTER_SETTINGS.includes(args['stop-after'])) fail('INVALID_ARGUMENTS');
+  // --research-profile re-labels the one research handoff; null (the flag is
+  // omitted) keeps every recorded profile exactly as before.
+  args.researchProfile = args['research-profile'] === undefined ? null : parseResearchProfile(args['research-profile']);
   // Tasks that keep ultracode off even under --ultracode on, so later stages can be
   // measured on top of a stage known to fail with it (comma list of task ids).
   args.ultracodeOffTasks = String(args['ultracode-off-tasks'] || '').split(',').map(task => task.trim()).filter(Boolean);
@@ -239,13 +260,17 @@ export function createCallRecorder({ save, append, now = () => Date.now() } = {}
   }
   return {
     calls,
-    begin({ task = null, stage = null, attempt = null } = {}) {
+    begin({ task = null, stage = null, attempt = null, model = null, effort = null } = {}) {
       sequence += 1;
       const number = String(sequence).padStart(3, '0');
       const startedAt = now();
       const record = {
         number, task, stage, attempt, startedAt: new Date(startedAt).toISOString(),
         durationMs: null, costUsd: null, usage: null, workflowCalls: 0, model: null,
+        // The model/effort this attempt was asked for; `model` above is what the
+        // reply reported back, so an overridden research profile stays visible.
+        requestedModel: typeof model === 'string' && model ? model : null,
+        effort: typeof effort === 'string' && effort ? effort : null,
         outcome: 'running', errorCode: null,
       };
       let workflowCalls = 0;
@@ -307,6 +332,8 @@ export function createMeasuredRunStage({ runStage, recorder, currentCall = () =>
       task: context?.task ?? null,
       stage: context?.stage ?? null,
       attempt: context && typeof context === 'object' ? attempt : null,
+      model: typeof args.model === 'string' ? args.model : null,
+      effort: typeof args.effort === 'string' ? args.effort : null,
     });
     await call.prompt(args.text);
     let reply;
@@ -335,6 +362,40 @@ export function redactTavilyKey(value, key) {
   return text.split(secret).join('[REDACTED]').split(encodeURIComponent(secret)).join('[REDACTED]');
 }
 
+/**
+ * The effective research profile: the production qa-research pair unless
+ * --research-profile overrides its model/effort. Everything else (ultracode and
+ * any future profile field) stays as production has it.
+ */
+export function effectiveResearchProfile({ production, override = null } = {}) {
+  if (!production || typeof production.model !== 'string' || !production.model
+    || typeof production.effort !== 'string' || !production.effort) {
+    throw new TypeError('RESEARCH_PROFILE_NEEDS_PRODUCTION_MODEL_AND_EFFORT');
+  }
+  if (override === null) return production;
+  if (typeof override.model !== 'string' || !override.model || typeof override.effort !== 'string' || !override.effort) {
+    throw new TypeError('RESEARCH_PROFILE_NEEDS_MODEL_AND_EFFORT');
+  }
+  return { ...production, model: override.model, effort: override.effort };
+}
+
+/**
+ * The narrow seam for --research-profile: the transport still picks every
+ * stage's production profile and hands model/effort to this runStage, so
+ * re-labelling the qa-research attempt changes that one handoff only. With no
+ * override the original runStage is returned untouched.
+ */
+export function createResearchProfileRunStage({ runStage, profile = null, currentCall = () => null, researchStage = RESEARCH_STAGE } = {}) {
+  if (typeof runStage !== 'function') throw new TypeError('RESEARCH_PROFILE_RUN_STAGE_NEEDS_RUN_STAGE');
+  if (profile === null) return runStage;
+  if (typeof profile?.model !== 'string' || !profile.model
+    || typeof profile?.effort !== 'string' || !profile.effort) throw new TypeError('RESEARCH_PROFILE_RUN_STAGE_NEEDS_MODEL_AND_EFFORT');
+  return async function researchProfileRunStage(stageArgs = {}) {
+    if (currentCall()?.stage !== researchStage) return runStage(stageArgs);
+    return runStage({ ...stageArgs, model: profile.model, effort: profile.effort });
+  };
+}
+
 const redactedError = (error, key) => {
   const copy = new Error(redactTavilyKey(error?.message ?? '', key));
   if (typeof error?.code === 'string' && error.code) copy.code = error.code;
@@ -343,8 +404,9 @@ const redactedError = (error, key) => {
 
 /**
  * Answers the one 'interview-brief-research' call with runClaudeSdkStage
- * directly (no CLI transport): the qa-research profile's model and effort, the
- * Tavily MCP tools, maxTurns 24, persistSession false and ultracode off. The
+ * directly (no CLI transport): the qa-research profile's model and effort (the
+ * effective pair, so --research-profile reaches this path too), the Tavily MCP
+ * tools, maxTurns 24, persistSession false and ultracode off. The
  * SDK reply is recorded like a transport attempt (duration, cost, usage and
  * Workflow/tool counts), then validated by the same responseValidator the
  * transport's call carried.
@@ -362,9 +424,14 @@ export function createTavilyResearchCall({
     let key = '';
     try { key = String((await readKey()) ?? '').trim(); } catch { key = ''; }
     if (!key) fail('TAVILY_KEY_MISSING');
-    const call = recorder && typeof recorder.begin === 'function' ? recorder.begin(beginCall({
-      task: typeof opts.task === 'string' && opts.task ? opts.task : RESEARCH_TASK, stage: RESEARCH_STAGE,
-    })) : null;
+    const call = recorder && typeof recorder.begin === 'function' ? recorder.begin({
+      ...beginCall({
+        task: typeof opts.task === 'string' && opts.task ? opts.task : RESEARCH_TASK, stage: RESEARCH_STAGE,
+      }),
+      // The profile actually sent to the SDK, which --research-profile may override.
+      model: profile.model,
+      effort: profile.effort,
+    }) : null;
     if (call) await call.prompt(String(prompt ?? ''));
     let reply;
     try {
@@ -623,6 +690,13 @@ export async function runHarness(args) {
       const text = await readPrivate(path.join(output, `${String(replayIndex).padStart(3, '0')}.response.txt`));
       return { text, model: 'replay', durationMs: 0 };
     };
+    const { careerWritingStageProfile } = await import('../electron/ipc/careerWritingCore.js');
+    const productionResearchProfile = careerWritingStageProfile(RESEARCH_STAGE);
+    if (!productionResearchProfile?.model || !productionResearchProfile?.effort) fail('RESEARCH_PROFILE_UNAVAILABLE');
+    // --research-profile re-labels the research handoff only; every other stage
+    // keeps the production profile the transport itself picks for it.
+    const researchProfile = effectiveResearchProfile({ production: productionResearchProfile, override: args.researchProfile });
+    const researchOverride = args.researchProfile ? researchProfile : null;
     let currentCall = null;
     const transport = transportModule.createInterviewClaudeTransport({
       // Claude-only: an offload route would confound an ultracode comparison.
@@ -630,9 +704,17 @@ export async function runHarness(args) {
       shadow: { enabled: false, measure() {} },
       // Replay runs no process, so it must not require an installed Claude CLI.
       ...(args.transport === 'replay' ? { resolveBinary: () => path.join(output, 'claude-replay') } : {}),
-      runStage: createMeasuredRunStage({
-        runStage: args.transport === 'replay' ? replayRunStage : runner.runClaudeStage,
-        recorder,
+      // The harness's own runStage is the seam: the transport still picks the
+      // production profile per stage, and only the research attempt is relabelled.
+      // The override sits inside the measurement so calls.jsonl records the
+      // model/effort the research attempt actually ran with.
+      runStage: createResearchProfileRunStage({
+        runStage: createMeasuredRunStage({
+          runStage: args.transport === 'replay' ? replayRunStage : runner.runClaudeStage,
+          recorder,
+          currentCall: () => currentCall,
+        }),
+        profile: researchOverride,
         currentCall: () => currentCall,
       }),
       onStage: event => {
@@ -647,10 +729,10 @@ export async function runHarness(args) {
       transportCalls.push(currentCall);
       return withUltracode(call, args.ultracodeOffTasks.includes(task) ? 'off' : args.ultracode)(prompt, opts);
     };
-    const { careerWritingStageProfile } = await import('../electron/ipc/careerWritingCore.js');
-    const researchProfile = careerWritingStageProfile(RESEARCH_STAGE);
-    if (!researchProfile?.model || !researchProfile?.effort) fail('RESEARCH_PROFILE_UNAVAILABLE');
     Object.assign(report.research, { model: researchProfile.model, effort: researchProfile.effort,
+      // With --research-profile, keep the production pair beside the effective one.
+      ...(researchOverride ? { profileOverride: true, productionModel: productionResearchProfile.model,
+        productionEffort: productionResearchProfile.effort } : {}),
       callPath: args.research === 'native' ? 'transport' : args.research === 'tavily' ? 'runClaudeSdkStage' : 'merged' });
     const transportRaw = measured(transport.callRaw);
     let researchCall = null;
@@ -734,7 +816,8 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const totals = report.totals || {};
     const stages = Object.entries(report.stageTotals || {})
       .map(([name, stage]) => `${name} ${stage.attempts}/${stage.calls}`).join(', ') || 'none';
-    process.stdout.write(`Interview Prepare harness: ${report.transport} transport, research ${report.research?.mode || 'native'}, ultracode ${report.ultracode}; `
+    process.stdout.write(`Interview Prepare harness: ${report.transport} transport, research ${report.research?.mode || 'native'} `
+      + `(${report.research?.model}/${report.research?.effort}), ultracode ${report.ultracode}; `
       + `${totals.attempts || 0} Claude attempts (${totals.failures || 0} failed) over ${totals.calls || 0} calls in ${Math.round(totals.durationMs || 0)} ms `
       + `(attempts/calls by stage: ${stages}); ${Math.round(report.timings?.totalMs || 0)} ms wall clock. `
       + `${report.status === 'brief-only' ? 'Sealed brief saved; answer bank skipped.' : 'Sealed brief and answer bank saved.'}\n`);

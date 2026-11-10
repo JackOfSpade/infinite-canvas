@@ -5782,14 +5782,31 @@ export function getJobsSourceRunHistoryForReport(currentNodeIds, reportWindowId 
  * predicate. Note the one consequence that is inherited on purpose: a
  * telemetry record with NO nodeId is attributable to no hub here, even though
  * the contextless branch of getJobsTelemetryForReport still returns it.
+ *
+ * careerCompilation is the single narrow exception opt-in, used only by
+ * getJobsCareerCompilationForReport: a compile stamps its own owner on
+ * careerSnapshotCache and never calls recordJobsSourceScope, so a process that
+ * only parsed career files has telemetry.nodeId === null. The helper below
+ * attributes exactly those records by the compile's own stamp. Every other
+ * caller keeps the strict predicate above.
  */
-function reportAttributableHubTelemetry(currentNodeIds, reportWindowId = null) {
+function reportAttributableHubTelemetry(currentNodeIds, reportWindowId = null, { careerCompilation = false } = {}) {
   const context = getCurrentIpcRequestContext();
   const sender = context?.sender;
   const ids = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
+  const attributable = (nodeId, telemetry) => careerCompilation
+    ? careerCompilationOwnedBy(nodeId, telemetry)
+    : telemetry?.nodeId === nodeId;
   const ambient = () => {
-    const nodeId = latestJobsTelemetry?.nodeId;
-    return nodeId && ids.has(nodeId) ? [[nodeId, latestJobsTelemetry]] : [];
+    // Career compiles are the one record that carries its own owner when the
+    // ambient telemetry was never stamped by a search or rescore.
+    const stamped = latestJobsTelemetry?.careerSnapshotCache?.nodeId;
+    const nodeId = careerCompilation && typeof stamped === 'string' && stamped
+      ? stamped
+      : latestJobsTelemetry?.nodeId;
+    return nodeId && ids.has(nodeId) && attributable(nodeId, latestJobsTelemetry)
+      ? [[nodeId, latestJobsTelemetry]]
+      : [];
   };
   if (!sender) return ambient();
   if (reportWindowId != null && sender.id !== reportWindowId) return [];
@@ -5799,8 +5816,23 @@ function reportAttributableHubTelemetry(currentNodeIds, reportWindowId = null) {
     return ambient();
   }
   return [...byNode.entries()]
-    .filter(([nodeId, telemetry]) => ids.has(nodeId) && telemetry?.nodeId === nodeId)
+    .filter(([nodeId, telemetry]) => ids.has(nodeId) && attributable(nodeId, telemetry))
     .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+}
+
+/**
+ * Career compiles write their owner id onto their own record, not onto the
+ * enclosing telemetry: parse-career-data sets careerSnapshotCache.nodeId and
+ * never calls recordJobsSourceScope, so a process that only dropped career
+ * files has telemetry.nodeId === null. Requiring telemetry.nodeId therefore
+ * dropped every such record from the report. A career record is attributable
+ * to its map key when the compile's own stamp names that key; a stamp naming
+ * another hub still excludes it, and a compile that left no stamp falls back
+ * to the enclosing nodeId. Search/funnel attribution must not use this rule.
+ */
+function careerCompilationOwnedBy(nodeId, telemetry) {
+  const owner = telemetry?.careerSnapshotCache?.nodeId;
+  return typeof owner === 'string' && owner ? owner === nodeId : telemetry?.nodeId === nodeId;
 }
 
 export const CAREER_CONVERGENCE_CATEGORIES = Object.freeze(['coverage', 'grounding', 'attribution', 'metrics', 'skills', 'conflict']);
@@ -5879,7 +5911,7 @@ export function appendCareerConvergenceRound(telemetry, value) {
 // Compilation happens before the search funnel exists. Keep each hub's
 // bounded cache/stage evidence independently reportable on multi-hub canvases.
 export function getJobsCareerCompilationForReport(currentNodeIds, reportWindowId = null) {
-  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId)
+  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId, { careerCompilation: true })
     .filter(([, telemetry]) => telemetry?.careerSnapshotCache)
     .map(([nodeId, telemetry]) => ({ nodeId, cache: telemetry.careerSnapshotCache }));
 }

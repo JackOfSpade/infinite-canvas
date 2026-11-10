@@ -19,6 +19,7 @@ export const CLAUDE_OPUS_MODEL = 'opus';
 export const CAREER_WRITING_DEFAULT_PROFILE = Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' });
 
 // Chosen on cost and quality, 2026-11-01 (docs/application-improvement-sessions.md).
+// docs/ai-model-selection.md holds the selection policy, results and open gaps.
 // Writing at Opus low cost a quarter of xhigh with no measurable loss in blind
 // panels; Opus high fact-checks catch ownership overstatements Sonnet passes.
 export const APPLICATION_STAGE_PROFILES = Object.freeze({
@@ -32,10 +33,11 @@ export const APPLICATION_STAGE_PROFILES = Object.freeze({
   'fact-correction': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   'fact-recheck': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
 });
-// Interview Q&A, tested the same way. Research results varied with blocked pages,
-// so its top setting is the safe reading of that test.
+// Interview Q&A. qa-research, 2026-11-09: Opus high scored within the run-to-run noise of
+// Opus xhigh in blind judging on three postings at 18-47% less cost; every low and medium
+// setting lost real content (docs/ai-model-selection.md).
 export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
-  'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'xhigh' }),
+  'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // Post-call review of an in-app practice call (judgement and writing, one call per practice): same profile as qa-brief.

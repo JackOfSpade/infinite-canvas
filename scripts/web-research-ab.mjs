@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parseArgs as parseNodeArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { assertDurableOutDir, createRunJournal, takeEphemeralFlag, tallyRows } from './ai-test-journal.mjs';
 
 const PREFERENCE_TASK = 'job-preference-research-batch';
 const PREFERENCE_ASSESSMENT_TASK = 'job-preference-research-batch-assessment';
@@ -48,9 +49,11 @@ export function cliOptions(argv) {
     task: { type: 'string' }, canvas: { type: 'string' }, out: { type: 'string' }, count: { type: 'string' },
     seed: { type: 'string', default: '1' }, concurrency: { type: 'string', default: '3' }, 'dry-run': { type: 'boolean', default: false },
     ultracode: { type: 'string', default: DEFAULT_ULTRACODE },
+    profile: { type: 'string' },
   } });
   const task = String(values.task ?? '');
   if (!TASKS.includes(task)) throw new Error(`--task must be one of ${TASKS.join(', ')}.`);
+  const profile = values.profile === undefined ? null : parseProfileOverride(values.profile);
   const ultracode = String(values.ultracode ?? DEFAULT_ULTRACODE);
   if (ultracode !== 'on' && ultracode !== 'off') throw new Error('--ultracode must be on or off.');
   if (!values.canvas || !values.out) throw new Error('--canvas and --out are required.');
@@ -58,8 +61,25 @@ export function cliOptions(argv) {
   return {
     task, canvas: values.canvas, out: path.resolve(values.out), count: int('count', values.count ?? DEFAULT_COUNTS[task], 1),
     seed: int('seed', values.seed, 0), concurrency: int('concurrency', values.concurrency, 1), dryRun: values['dry-run'] === true,
-    ultracode: ultracode === 'on',
+    ultracode: ultracode === 'on', profile,
   };
+}
+
+const PROFILE_MODELS = Object.freeze(['haiku', 'sonnet', 'opus']);
+const PROFILE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh']);
+
+/** `--profile sonnet:high` -> { model, effort }. Max effort and Fable are never measured. */
+export function parseProfileOverride(value) {
+  const [model, effort, ...rest] = String(value ?? '').split(':');
+  if (rest.length || !PROFILE_MODELS.includes(model) || !PROFILE_EFFORTS.includes(effort)) {
+    throw new Error(`--profile must be <model>:<effort> with model ${PROFILE_MODELS.join('/')} and effort ${PROFILE_EFFORTS.join('/')}.`);
+  }
+  return { model, effort };
+}
+
+/** The task's production profile, with only model and effort replaced by --profile (tools stay). */
+export function effectiveProfile(production, override) {
+  return override ? { ...production, model: override.model, effort: override.effort } : production;
 }
 
 const redactWith = key => text => (key && key !== 'dry-run-no-key' ? String(text ?? '').split(key).join('<tavily-key>') : String(text ?? ''));
@@ -970,8 +990,39 @@ function dryLocation({ opts, rows, location }) {
 
 let redactOutput = text => String(text ?? '');
 
-async function main(argv) {
+/** Journal rows: research calls per arm (validity, cost) so far. */
+export function researchJournalRows(calls = []) {
+  return tallyRows(calls, call => `research ${call.arm}`, { validOf: call => call.valid === true, failedOf: call => call.valid === false })
+    .map(group => ({ ...group, notes: 'outcome per arm: summary.json' }));
+}
+
+/** The numeric top-level fields of a summary, for the journal; text never leaves the out dir. */
+function numericFacts(summary) {
+  const facts = {};
+  for (const [key, value] of Object.entries(summary || {})) {
+    if (Number.isFinite(value)) facts[`summary ${key}`] = value;
+  }
+  return facts;
+}
+
+async function main(argv, deps = {}) {
   const opts = cliOptions(argv);
+  if (deps.requireDurable && !opts.dryRun) assertDurableOutDir(opts.out, { allowEphemeral: deps.allowEphemeral === true });
+  const journal = !opts.dryRun && deps.journalFactory ? deps.journalFactory({
+    tool: 'web-research-ab', task: opts.task, label: opts.profile ? `${opts.profile.model}:${opts.profile.effort}` : 'production profile',
+    outDir: opts.out, command: deps.command ?? '', facts: { Count: opts.count, Seed: opts.seed },
+  }) : null;
+  try {
+    const code = await abMain(opts, journal);
+    journal?.finish('finished');
+    return code;
+  } catch (error) {
+    journal?.finish(`failed: ${redactOutput(error?.message || error).slice(0, 200)}`);
+    throw error;
+  }
+}
+
+async function abMain(opts, journal) {
   const [{ parseWorkspaceText, restoreWorkspaceContent }, tavily, nonApi, worker, profiles, sdk, runner, replay] = await Promise.all([
     ipc('workspaceContentPool.js'), ipc('tavily.js'), ipc('nonApiAi.js'), ipc('claudeTaskWorker.js'),
     ipc('claudeTaskProfiles.js'), ipc('claudeApplicationSdkStage.js'), ipc('claudeApplicationRunner.js'),
@@ -997,6 +1048,13 @@ async function main(argv) {
   const redact = redactWith(key);
   redactOutput = redact;
   const output = writers(opts.out, redact);
+  if (journal) {
+    const writeJson = output.json;
+    output.json = (name, value) => {
+      writeJson(name, value);
+      if (name === 'summary.json') journal.update({ rows: researchJournalRows(calls), facts: numericFacts(value) }, { force: true });
+    };
+  }
   const log = message => console.log(redact(message));
   const binary = runner.resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
   const stage = { binary, env: runner.claudeChildEnv(process.env, path.dirname(binary)), cwd: os.tmpdir() };
@@ -1006,27 +1064,30 @@ async function main(argv) {
   const app = { ...nonApi, ...worker, ...profiles, ...sdk, ...runner, runClaudeSdkStage: callOpts => sdk.runClaudeSdkStage({ ...callOpts, ultracode }) };
   const limit = replay.createLimiter(opts.concurrency);
   const calls = [];
+  // Research runs for a long time: record the per-arm totals once a minute.
+  const heartbeat = journal ? setInterval(() => journal.update({ rows: researchJournalRows(calls) }, { force: true }), 60_000) : null;
+  heartbeat?.unref?.();
 
   if (opts.task === 'preference') {
-    const profile = profiles.claudeTaskProfile(PREFERENCE_TASK);
+    const profile = effectiveProfile(profiles.claudeTaskProfile(PREFERENCE_TASK), opts.profile);
     if (!profile) throw new Error(`No Claude task profile for ${PREFERENCE_TASK}.`);
     const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: PREFERENCE_TASK,
       begin: preferenceBegin, end: preferenceEnd, parse: (raw, ids) => prefs.parseJobPreferenceResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
     await runPreference({ opts, rows, replay, app, researcher, output, log });
   } else if (opts.task === 'role-family') {
-    const profile = profiles.claudeTaskProfile(COMPENSATION_TASK);
+    const profile = effectiveProfile(profiles.claudeTaskProfile(COMPENSATION_TASK), opts.profile);
     if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
     const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: COMPENSATION_TASK,
       begin: compensationBegin, end: compensationEnd, parse: (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
     await runRoleFamily({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildRoleFamilyBatchResearchPrompt });
   } else if (opts.task === 'location') {
-    const profile = profiles.claudeTaskProfile(COMPENSATION_TASK);
+    const profile = effectiveProfile(profiles.claudeTaskProfile(COMPENSATION_TASK), opts.profile);
     if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
     const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: COMPENSATION_TASK,
       begin: locationBegin, end: locationEnd, parse: (raw, ids) => location.parseJobLocationLookupSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
     await runLocation({ opts, rows, researcher, output, log, location });
   } else {
-    const profile = profiles.claudeTaskProfile(COMPENSATION_TASK);
+    const profile = effectiveProfile(profiles.claudeTaskProfile(COMPENSATION_TASK), opts.profile);
     if (!profile) throw new Error(`No Claude task profile for ${COMPENSATION_TASK}.`);
     const researcher = createResearcher({ app, profile, stage, tavily, tavilyKey: key, task: COMPENSATION_TASK,
       begin: compensationBegin, end: compensationEnd, parse: (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
@@ -1036,5 +1097,7 @@ async function main(argv) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  main(process.argv.slice(2)).then(code => { process.exitCode = code; }, error => { console.error(redactOutput(error?.message || error)); process.exitCode = 1; });
+  const [cliArgs, allowEphemeral] = takeEphemeralFlag(process.argv.slice(2));
+  main(cliArgs, { requireDurable: true, allowEphemeral, journalFactory: allowEphemeral ? null : createRunJournal,
+    command: `node scripts/web-research-ab.mjs ${cliArgs.join(' ')}` }).then(code => { process.exitCode = code; }, error => { console.error(redactOutput(error?.message || error)); process.exitCode = 1; });
 }

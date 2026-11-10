@@ -22,6 +22,7 @@ import { reportClaudeUsageLimit, trackClaudeCall, waitForClaudeRelease, waitForC
 import { standaloneClaudeActivity } from './claudeTaskActivity.js';
 import { careerWritingStageProfile } from './careerWritingCore.js';
 import { routedCall } from './aiCallProviders.js';
+import { recordAiReplaySample, recordAiUsage } from './aiReplaySamples.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
 import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 
@@ -100,6 +101,10 @@ export function createInterviewClaudeTransport({
   offloadCall = offloadTextCall,
   shadow = createShadowMeasure(),
   now = () => Date.now(),
+  // Every Claude attempt is recorded for offline re-measurement; tests inject
+  // recorders so a sample's contents can be inspected without touching disk.
+  recordSample = recordAiReplaySample,
+  recordUsage = recordAiUsage,
 } = {}) {
   let bound = null;
   const binding = () => {
@@ -185,6 +190,45 @@ export function createInterviewClaudeTransport({
         value = json ? firstJsonObject(reply?.text) : String(reply?.text ?? '');
         if (typeof responseValidator === 'function') responseValidator(value);
       } catch (error) { failure = error; }
+      if (provider === 'claude') {
+        // The exact text this attempt sent and how the app judged the reply,
+        // kept so a future model can answer it again offline. Recording may
+        // never change or fail a call.
+        const at = new Date(now()).toISOString();
+        const durationMs = Date.now() - started;
+        try {
+          recordSample({
+            at,
+            task,
+            stage,
+            attempt,
+            text,
+            systemAppend: '',
+            model: reply?.model ?? null,
+            requestedModel: profile.model ?? null,
+            effort: profile.effort ?? null,
+            tools: tools || null,
+            costUsd: reply?.costUsd ?? null,
+            usage: reply?.usage ?? null,
+            durationMs,
+            answer: String(reply?.text ?? ''),
+            outcome: failure ? 'rejected' : 'accepted',
+            validationCode: failure ? (failure.code || 'invalid') : null,
+          });
+        } catch { /* recording cannot change or fail the call */ }
+        try {
+          recordUsage({
+            at,
+            task,
+            stage,
+            model: reply?.model ?? null,
+            effort: profile.effort ?? null,
+            usage: reply?.usage ?? null,
+            costUsd: reply?.costUsd ?? null,
+            provider: 'claude',
+          });
+        } catch { /* usage reporting cannot change or fail the call */ }
+      }
       if (attempt === 0 && provider === 'claude' && shadow.enabled && SHADOW_STAGES.includes(stage)) {
         try {
           shadow.measure({

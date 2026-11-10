@@ -2,7 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mergeSectionReplies, extractSectionUrls, moneyFiguresNear, pageHasFigure, compensationParameters, cohortKey,
   roleFamilyResearchId, quotesNear, pageHasQuote, normalizeSourceText, hasYearBands, locationMatches, decideMergedLocation,
-  cliOptions, DEFAULT_ULTRACODE } from './web-research-ab.mjs';
+  cliOptions, DEFAULT_ULTRACODE, parseProfileOverride, effectiveProfile } from './web-research-ab.mjs';
+
+test('--profile parses model:effort, keeps the production profile when absent, and refuses max and Fable', () => {
+  const base = ['--task', 'compensation', '--canvas', 'c.json', '--out', 'out'];
+  assert.equal(cliOptions(base).profile, null);
+  assert.deepEqual(cliOptions([...base, '--profile', 'sonnet:high']).profile, { model: 'sonnet', effort: 'high' });
+  assert.deepEqual(parseProfileOverride('haiku:low'), { model: 'haiku', effort: 'low' });
+  for (const bad of ['opus:max', 'fable:low', 'opus', 'opus:high:x', 'gpt:low']) {
+    assert.throws(() => parseProfileOverride(bad), /--profile must be/, bad);
+  }
+});
+
+test('effectiveProfile replaces only model and effort and keeps the task tools', () => {
+  const production = { model: 'opus', effort: 'medium', tools: 'WebSearch,WebFetch' };
+  assert.equal(effectiveProfile(production, null), production);
+  assert.deepEqual(effectiveProfile(production, { model: 'sonnet', effort: 'low' }), { model: 'sonnet', effort: 'low', tools: 'WebSearch,WebFetch' });
+});
 
 const begin = id => `BEGIN COMPENSATION RESEARCH ${id}`;
 const end = id => `END COMPENSATION RESEARCH ${id}`;

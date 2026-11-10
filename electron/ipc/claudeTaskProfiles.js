@@ -3,6 +3,8 @@
 // Tested 2026-11-02 on cost and quality: each is the cheapest setting where blind
 // judges found no material loss against Opus xhigh, or, for the audits, where seeded
 // defects were still caught. Fable and max effort are excluded.
+// docs/ai-model-selection.md records the selection policy, every measured result
+// and the open gaps; read it before re-testing or changing a profile here.
 const WEB = 'WebSearch,WebFetch';
 // Ultracode is off for every task (measured 2026-11-09: no quality gain, 3-5x cost
 // on the research tasks where it acted). A profile records only an explicit opt-in.
@@ -28,7 +30,9 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   'career-profile-repair': profile('sonnet', 'low'),
   'job-role-audit': profile('sonnet', 'medium'),
   'job-taxonomy-classify-batch': profile('sonnet', 'medium'),
-  'job-preference-evaluation': profile('sonnet', 'high'),
+  // 2026-11-09: Sonnet low agreed with Sonnet high within run-to-run noise (decision 98.0% vs 96.8%,
+  // 6 batches x 2 runs) at about 15% less cost; Haiku fell 12-14 points short (docs/ai-model-selection.md).
+  'job-preference-evaluation': profile('sonnet', 'low'),
   'job-gap-review': profile('sonnet', 'high'),
   'job-preference-research-batch-assessment': profile('sonnet', 'high'),
   'job-scoring': profile('opus', 'low'),
@@ -36,9 +40,15 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-location-consolidation-confirmation': profile('opus', 'low'),
   'job-official-posting-research': profile('opus', 'low', WEB),
   'bundle-price-synthesis': profile('opus', 'medium'),
-  'job-compensation-research-batch': profile('opus', 'medium', WEB),
+  // 2026-11-09: Sonnet medium kept two-source salary coverage (10-11 of 12 cohorts vs 9-10 on Opus medium)
+  // with about 20% fewer verified sources, at about 75% less cost; Sonnet high and Opus medium buy a few
+  // sources at 3-4x the price (docs/ai-model-selection.md).
+  'job-compensation-research-batch': profile('sonnet', 'medium', WEB),
   'job-preference-research-batch': profile('opus', 'medium', WEB),
-  'career-profile-audit-skills': profile('opus', 'xhigh'),
+  // 2026-11-09: Haiku medium caught the same planted skill defects as Opus xhigh (16/18), was valid on
+  // every real prompt, and a full compile with it converged in 2 rounds; Haiku low stalled the compile
+  // with unactionable findings (docs/ai-model-selection.md).
+  'career-profile-audit-skills': profile('haiku', 'medium'),
   'career-profile-compile': profile('opus', 'xhigh'),
   // Not tested: a blank-brief search is rare, and no product photos were available.
   'job-query-generation': profile('sonnet', 'medium'),

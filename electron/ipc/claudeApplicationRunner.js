@@ -51,7 +51,54 @@ export function answeringModel(requested, models) {
   return list.find(id => (family ? family.id.test(id) : id === requested)) || null;
 }
 
+// Test-only stage profile overrides. These exist for the paired live bundle
+// tests described in docs/ai-model-selection.md, which measure one stage at a
+// different model/effort; they are ignored outside INFINITE_CANVAS_E2E=1.
+const OVERRIDE_MODELS = new Set(['haiku', 'sonnet', 'opus']);
+// `max` is deliberately absent: no measured bundle test may pin it.
+const OVERRIDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
+
+/** `convert=haiku:medium,verify-correction=sonnet:low` -> frozen { stage: { model, effort } }. */
+export function parseStageProfileOverrides(value) {
+  const overrides = {};
+  if (value !== null && typeof value !== 'undefined') {
+    for (const raw of String(value).split(',')) {
+      const entry = raw.trim();
+      if (!entry) continue;
+      const separator = entry.indexOf('=');
+      const stage = separator > 0 ? entry.slice(0, separator).trim() : '';
+      const profile = separator > 0 ? entry.slice(separator + 1).trim() : '';
+      const colon = profile.indexOf(':');
+      if (!stage || colon <= 0 || colon === profile.length - 1) {
+        throw new Error(`Stage profile override ${entry} is not <stage>=<model>:<effort>.`);
+      }
+      const model = profile.slice(0, colon).trim();
+      const effort = profile.slice(colon + 1).trim();
+      if (!OVERRIDE_MODELS.has(model)) {
+        throw new Error(`Stage profile override ${entry} names unsupported model ${model}; expected haiku, sonnet or opus.`);
+      }
+      if (!OVERRIDE_EFFORTS.has(effort)) {
+        throw new Error(`Stage profile override ${entry} names unsupported effort ${effort}; expected low, medium, high or xhigh.`);
+      }
+      overrides[stage] = Object.freeze({ model, effort });
+    }
+  }
+  return Object.freeze(overrides);
+}
+
+/** The overrides the harness asked for, and none at all outside INFINITE_CANVAS_E2E=1. */
+export function stageProfileOverridesFromEnv(env = process.env) {
+  if (env?.INFINITE_CANVAS_E2E !== '1') return Object.freeze({});
+  return parseStageProfileOverrides(env.INFINITE_CANVAS_STAGE_PROFILES);
+}
+
+// Read once at module load, so a malformed value fails loudly when the harness
+// starts instead of quietly running a stage on the production profile.
+const STAGE_PROFILE_OVERRIDES = stageProfileOverridesFromEnv();
+
 export function claudeStageProfile(stage) {
+  const override = typeof stage === 'string' && Object.hasOwn(STAGE_PROFILE_OVERRIDES, stage) ? STAGE_PROFILE_OVERRIDES[stage] : null;
+  if (override) return { model: override.model, effort: override.effort };
   return CLAUDE_STAGE_PROFILES[stage] || { model: CLAUDE_APPLICATION_MODEL, effort: CLAUDE_APPLICATION_EFFORT };
 }
 // Normal Opus write stages take 5-7 minutes; the cap leaves room for Claude
@@ -318,6 +365,9 @@ export function parseClaudeStreamOutput(stdoutText) {
   const { last: obj, provisional, pendingTasks } = readClaudeStream(stdoutText);
   if (!obj) return null;
   const isError = obj.is_error === true || obj.subtype !== 'success';
+  // The CLI reports the run's spend here; callers record it against the step.
+  const costUsd = obj.total_cost_usd;
+  const usage = obj.usage;
   return {
     isError,
     subtype: obj.subtype,
@@ -326,6 +376,8 @@ export function parseClaudeStreamOutput(stdoutText) {
     models: Object.keys(obj.modelUsage || {}),
     sessionId: obj.session_id,
     durationMs: obj.duration_ms,
+    ...(typeof costUsd === 'number' && Number.isFinite(costUsd) && costUsd >= 0 ? { costUsd } : {}),
+    ...(usage && typeof usage === 'object' && !Array.isArray(usage) ? { usage } : {}),
     // The stub after a workflow launch is never the answer.
     ...(!isError && (provisional || pendingTasks > 0) ? { workflowUnfinished: true } : {}),
   };
@@ -540,7 +592,13 @@ export function runClaudeStage({
           { models: parsed.models, subtype: parsed.subtype, apiErrorStatus: parsed.apiErrorStatus, exitCode, durationMs: parsed.durationMs }, parsed.result));
         return;
       }
-      finish(null, { text: parsed.result, model: answered, durationMs: parsed.durationMs });
+      finish(null, {
+        text: parsed.result,
+        model: answered,
+        durationMs: parsed.durationMs,
+        ...(parsed.costUsd !== undefined ? { costUsd: parsed.costUsd } : {}),
+        ...(parsed.usage !== undefined ? { usage: parsed.usage } : {}),
+      });
     });
 
     if (child.stdin) {

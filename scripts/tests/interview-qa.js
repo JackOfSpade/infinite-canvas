@@ -182,7 +182,7 @@ export default [
     assert.match(runs[2].text, /^YOUR PREVIOUS REPLY WAS REJECTED BY THE APP\..*\nnot ok$/su);
     runs.length = 0; replies = ['Research prose with https://x.test'];
     assert.equal(await transport.callRaw('R', { task: 'interview-brief-research' }), 'Research prose with https://x.test');
-    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'xhigh', INTERVIEW_RESEARCH_TOOLS]);
+    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'high', INTERVIEW_RESEARCH_TOOLS]);
     runs.length = 0; replies = ['{}'];
     await transport.callText('C', { task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: { type: 'object' } });
     assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'high', '']);

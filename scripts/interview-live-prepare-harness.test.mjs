@@ -4,10 +4,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { careerWritingStageProfile } from '../electron/ipc/careerWritingCore.js';
 import { TAVILY_RESEARCH_TOOLS } from '../electron/ipc/tavily.js';
+import { createInterviewClaudeTransport, interviewClaudeStage } from '../electron/ipc/interviewClaudeTransport.js';
 import {
   parseHarnessArgs, withUltracode, createCallRecorder, createMeasuredRunStage, workflowToolCalls,
   summarizeStageTotals, runHarness, createTavilyResearchCall, createResearchRouter, buildMergedResearchText,
-  readResearchResponse, RESEARCH_MAX_CHARS, RESEARCH_SOURCE_LABELS,
+  readResearchResponse, RESEARCH_MAX_CHARS, RESEARCH_SOURCE_LABELS, parseResearchProfile,
+  effectiveResearchProfile, createResearchProfileRunStage, RESEARCH_PROFILE_MODELS, RESEARCH_PROFILE_EFFORTS,
 } from './interview-live-prepare-harness.mjs';
 
 const SNAPSHOT_ID = 'a'.repeat(64);
@@ -319,7 +321,7 @@ const TAVILY_TEST_KEY_ENCODED = encodeURIComponent(TAVILY_TEST_KEY);
 const qaResearchProfile = careerWritingStageProfile('qa-research');
 
 test('the tavily research call passes the qa-research profile, Tavily tools/MCP, 24 turns and no ultracode', async () => {
-  assert.deepEqual({ ...qaResearchProfile }, { model: 'opus', effort: 'xhigh' });
+  assert.deepEqual({ ...qaResearchProfile }, { model: 'opus', effort: 'high' });
   const io = fakeTranscripts();
   let clock = 1_000;
   const recorder = createCallRecorder({ save: io.save, append: io.append, now: () => clock });
@@ -442,4 +444,144 @@ test('the tavily research call needs the SDK stage, a key reader and the qa-rese
     error => error instanceof TypeError);
   assert.throws(() => createTavilyResearchCall({ runClaudeSdkStage: async () => ({}), readKey: async () => TAVILY_TEST_KEY, profile: {} }),
     error => error instanceof TypeError);
+});
+
+test('parseHarnessArgs accepts every research model and effort, and no flag means no profile', () => {
+  assert.equal(parseHarnessArgs(argv()).researchProfile, null);
+  assert.equal(parseHarnessArgs(argv(['--research', 'tavily'])).researchProfile, null);
+  for (const model of RESEARCH_PROFILE_MODELS) {
+    for (const effort of RESEARCH_PROFILE_EFFORTS) {
+      const args = parseHarnessArgs(argv(['--research-profile', `${model}:${effort}`]));
+      assert.deepEqual(args.researchProfile, { model, effort });
+      assert.equal(args['research-profile'], `${model}:${effort}`);
+      assert.equal(args.research, 'native');
+    }
+  }
+  assert.deepEqual(parseHarnessArgs(argv(['--research', 'tavily', '--research-profile', 'sonnet:xhigh'])).researchProfile,
+    { model: 'sonnet', effort: 'xhigh' });
+});
+
+test('parseHarnessArgs rejects max, fable and malformed research profiles', () => {
+  const rejected = ['opus:max', 'fable:low', 'fable:max', 'haiku:minimal', 'haiku', 'haiku:', ':low', 'haiku:low:extra',
+    'Haiku:low', 'haiku:LOW', 'gpt-5:low', ' opus:high', 'opus:high '];
+  for (const value of rejected) {
+    assert.throws(() => parseHarnessArgs(argv(['--research-profile', value])), invalidArguments, value);
+  }
+  assert.throws(() => parseHarnessArgs(argv(['--research-profile'])), invalidArguments);
+  assert.throws(() => parseHarnessArgs(argv(['--research-profile', 'haiku:low', '--research-profile', 'opus:high'])), invalidArguments);
+  assert.throws(() => parseResearchProfile(undefined), invalidArguments);
+  assert.throws(() => parseResearchProfile('opus:max'), invalidArguments);
+  // The production research profile itself stays what the app ships.
+  assert.deepEqual({ ...careerWritingStageProfile('qa-research') }, { model: 'opus', effort: 'high' });
+});
+
+test('the effective research profile replaces model and effort and nothing else', () => {
+  const production = careerWritingStageProfile('qa-research');
+  assert.equal(effectiveResearchProfile({ production }), production);
+  assert.deepEqual(effectiveResearchProfile({ production, override: parseResearchProfile('haiku:low') }),
+    { model: 'haiku', effort: 'low' });
+  assert.throws(() => effectiveResearchProfile({ production: { model: 'opus' } }), error => error instanceof TypeError);
+  assert.throws(() => effectiveResearchProfile({ production, override: { model: 'haiku' } }), error => error instanceof TypeError);
+});
+
+test('createResearchProfileRunStage leaves an unoverridden runStage untouched and needs a profile', async () => {
+  const runStage = async () => ({ text: 'x' });
+  assert.equal(createResearchProfileRunStage({ runStage }), runStage);
+  assert.throws(() => createResearchProfileRunStage({ runStage: null }), error => error instanceof TypeError);
+  assert.throws(() => createResearchProfileRunStage({ runStage, profile: { model: 'haiku' } }), error => error instanceof TypeError);
+  const seen = [];
+  const wrapped = createResearchProfileRunStage({
+    runStage: async args => { seen.push(args); return { text: 'x' }; },
+    profile: { model: 'haiku', effort: 'low' },
+    currentCall: () => ({ stage: 'qa-research' }),
+  });
+  await wrapped({ text: 'research', model: 'opus', effort: 'xhigh', sessionId: 's1', tools: 'WebSearch,WebFetch' });
+  assert.deepEqual(seen, [{ text: 'research', model: 'haiku', effort: 'low', sessionId: 's1', tools: 'WebSearch,WebFetch' }]);
+});
+
+// Drives the production transport with a fake runner, the way runHarness does:
+// the measured runStage records what each stage's runStage call received.
+async function runTransportStages({ profile = null } = {}) {
+  const seen = [];
+  const io = fakeTranscripts();
+  let currentCall = null;
+  const recorder = createCallRecorder({ save: io.save, append: io.append, now: () => 0 });
+  const measured = createResearchProfileRunStage({
+    runStage: createMeasuredRunStage({
+      runStage: async args => {
+        seen.push({ stage: currentCall.stage, model: args.model, effort: args.effort, tools: args.tools });
+        return { text: '{"ok":true}', model: `resolved-${args.model}` };
+      },
+      recorder,
+      currentCall: () => currentCall,
+    }),
+    profile,
+    currentCall: () => currentCall,
+  });
+  const transport = createInterviewClaudeTransport({
+    runStage: measured,
+    resolveBinary: () => path.join('/tmp', 'claude-research-profile'),
+    env: {},
+    routeFor: () => null,
+    shadow: { enabled: false, measure() {} },
+    onStage: () => {},
+  });
+  const tasks = ['interview-brief-research', 'interview-brief-assessment', 'interview-answer-bank'];
+  for (const task of tasks) {
+    currentCall = { task, stage: interviewClaudeStage(task), attempts: 0 };
+    await transport.callText(`prompt:${task}`, { task });
+  }
+  return { seen, rows: io.lines.map(line => JSON.parse(line)) };
+}
+
+test('--research-profile reaches the native research stage and no other stage', async () => {
+  const override = parseResearchProfile('haiku:low');
+  const { seen, rows } = await runTransportStages({ profile: override });
+  const production = task => careerWritingStageProfile(interviewClaudeStage(task));
+  assert.deepEqual(seen, [
+    { stage: 'qa-research', model: 'haiku', effort: 'low', tools: 'WebSearch,WebFetch' },
+    { stage: 'qa-brief', model: production('interview-brief-assessment').model,
+      effort: production('interview-brief-assessment').effort, tools: '' },
+    { stage: 'qa-write', model: production('interview-answer-bank').model,
+      effort: production('interview-answer-bank').effort, tools: '' },
+  ]);
+  // The brief stage must not inherit the research override.
+  assert.notDeepEqual({ model: seen[1].model, effort: seen[1].effort }, override);
+  assert.deepEqual(rows.map(row => [row.task, row.stage, row.requestedModel, row.effort]), [
+    ['interview-brief-research', 'qa-research', 'haiku', 'low'],
+    ['interview-brief-assessment', 'qa-brief', production('interview-brief-assessment').model,
+      production('interview-brief-assessment').effort],
+    ['interview-answer-bank', 'qa-write', production('interview-answer-bank').model,
+      production('interview-answer-bank').effort],
+  ]);
+  // rows[0].model keeps what the reply reported; requestedModel is what was sent.
+  assert.equal(rows[0].model, 'resolved-haiku');
+});
+
+test('without --research-profile the native research stage keeps the production profile', async () => {
+  const { seen, rows } = await runTransportStages({ profile: null });
+  assert.deepEqual(seen[0], { stage: 'qa-research', model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
+  assert.deepEqual([rows[0].stage, rows[0].requestedModel, rows[0].effort], ['qa-research', 'opus', 'high']);
+});
+
+test('the tavily research call sends and records the effective research profile', async () => {
+  const io = fakeTranscripts();
+  const recorder = createCallRecorder({ save: io.save, append: io.append, now: () => 0 });
+  const requests = [];
+  const profile = effectiveResearchProfile({ production: qaResearchProfile, override: parseResearchProfile('haiku:low') });
+  const research = createTavilyResearchCall({
+    runClaudeSdkStage: async request => {
+      requests.push(request);
+      return { text: 'researched text', model: 'claude-haiku-4-5', costUsd: 0.01, usage: { input_tokens: 5 }, durationMs: 10 };
+    },
+    readKey: async () => TAVILY_TEST_KEY,
+    profile,
+    recorder,
+  });
+  assert.equal(await research('prompt', { task: 'interview-brief-research' }), 'researched text');
+  assert.deepEqual([requests[0].model, requests[0].effort], ['haiku', 'low']);
+  assert.deepEqual(requests[0].tools, TAVILY_RESEARCH_TOOLS);
+  const record = JSON.parse(io.lines[0]);
+  assert.deepEqual([record.stage, record.requestedModel, record.effort, record.model],
+    ['qa-research', 'haiku', 'low', 'claude-haiku-4-5']);
 });

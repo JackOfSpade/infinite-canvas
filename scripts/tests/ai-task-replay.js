@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { appExecute, appValidate, assertOutsideRepo, findBoardNode, main, matchFlow, parseArgs, prepareOutDir, replayTask, resetResearchedMatches, selectRowsForTask, selectScoringGroup, StopCapture, storedPostingUrls, UNREPLAYABLE_TASKS } from '../ai-task-replay.mjs';
+import { appExecute, appValidate, assertOutsideRepo, findBoardNode, main, matchFlow, parseArgs, parseConfigs, prepareOutDir, replayChildEnv, replayTask, resetResearchedMatches, selectRowsForTask, selectScoringGroup, StopCapture, storedPostingUrls, UNREPLAYABLE_TASKS } from '../ai-task-replay.mjs';
 import { compensationMap, normalizePostingUrl, officialPostingMap, percentile, preferenceResearchMap, renderText, summarize } from '../ai-task-replay-score.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -404,6 +404,135 @@ export default [
       near(pro.chosenLeadAgreement, 0.5);
       const text = renderText(summarize(rows));
       assert.match(text, /noise floor \(claude rep>=2 vs rep 1\): decision 75\.0% chosen-lead 75\.0% \[4 compared\]/);
+    },
+  },
+  {
+    name: 'ai task replay: --configs accepts claude:<model>:<effort> and keeps the plain claude baseline',
+    async run() {
+      const configs = parseConfigs('claude:haiku:low,claude:opus:xhigh');
+      assert.deepEqual(configs[0], { id: 'claude', kind: 'claude' }, 'the baseline is still prepended');
+      assert.deepEqual(configs[1], { id: 'claude:haiku:low', kind: 'claude-setting', model: 'haiku', effort: 'low' });
+      assert.deepEqual(configs[2], { id: 'claude:opus:xhigh', kind: 'claude-setting', model: 'opus', effort: 'xhigh' });
+      assert.deepEqual(parseConfigs('claude'), [{ id: 'claude', kind: 'claude' }], 'the bare baseline is unchanged');
+      assert.deepEqual(parseConfigs('claude,claude:sonnet:medium'), parseConfigs('claude:sonnet:medium'), 'a listed baseline is not duplicated');
+      for (const bad of ['claude:opus:max', 'claude:fable:low', 'claude:opus', 'claude:haiku:low:extra', 'claude:haiku:max']) {
+        assert.throws(() => parseConfigs(bad), new RegExp(`Unknown config ${bad}\\.`), `${bad} must be rejected`);
+        assert.throws(() => parseArgs(['--task', 'job-preference-evaluation', '--canvas', 'c', '--out', 'o', '--configs', `flash:low,${bad}`]),
+          new RegExp(`Unknown config ${bad}\\.`), `${bad} must be rejected by --configs`);
+      }
+      const opts = parseArgs(['--task', 'job-preference-evaluation', '--canvas', 'c', '--out', 'o', '--configs', 'claude:haiku:low']);
+      assert.deepEqual(opts.configs.map(config => config.id), ['claude', 'claude:haiku:low']);
+    },
+  },
+  {
+    name: 'ai task replay: a claude-setting config runs the baseline stage call with its own model and effort',
+    async run() {
+      const seen = [];
+      const childEnvs = [];
+      const fakeApp = toolList => ({
+        claudeTaskProfile: () => ({ model: 'opus', effort: 'high', ...(toolList ? { tools: toolList } : {}) }),
+        cachedPromptParts: (prompt, cachedPrefix) => ({ prompt, cachedPrefix, systemAppend: '' }),
+        resolveClaudeBinary: () => '/bin/claude',
+        claudeChildEnv: env => { childEnvs.push(env); return { ...env, CHILD: '1' }; },
+        runClaudeSdkStage: async args => { seen.push(args); return { text: 't' }; },
+        offloadTextCall: async () => { throw new Error('offload is not expected here'); },
+      });
+      const call = { prompt: 'p', cachedPrefix: 'c' };
+      const baseline = { id: 'claude', kind: 'claude' };
+      const setting = { id: 'claude:haiku:low', kind: 'claude-setting', model: 'haiku', effort: 'low' };
+      const strip = ({ model, effort, ...rest }) => rest;
+      const research = appExecute(fakeApp('WebSearch,WebFetch'), 'job-official-posting-research', null);
+      await research({ config: baseline, call });
+      await research({ config: setting, call });
+      assert.deepEqual({ model: seen[0].model, effort: seen[0].effort }, { model: 'opus', effort: 'high' }, 'the baseline uses the task profile');
+      assert.deepEqual({ model: seen[1].model, effort: seen[1].effort }, { model: 'haiku', effort: 'low' }, 'the setting uses its own model/effort');
+      assert.deepEqual(strip(seen[1]), strip(seen[0]), 'cached parts, caching rule, tools, maxTurns and persistSession are identical');
+      assert.equal(seen[1].persistSession, false);
+      assert.deepEqual(seen[1].tools, ['WebSearch', 'WebFetch']);
+      assert.equal(seen[1].maxTurns, 16);
+      assert.equal(seen[1].env.DISABLE_PROMPT_CACHING, '1');
+
+      const plain = appExecute(fakeApp(''), 'job-scoring', null);
+      await plain({ config: baseline, call });
+      await plain({ config: { ...setting, id: 'claude:sonnet:xhigh', model: 'sonnet', effort: 'xhigh' }, call });
+      assert.equal('tools' in seen[2], false);
+      assert.equal('maxTurns' in seen[2], false);
+      assert.equal('tools' in seen[3], false);
+      assert.deepEqual(strip(seen[3]), strip(seen[2]));
+      assert.deepEqual({ model: seen[3].model, effort: seen[3].effort }, { model: 'sonnet', effort: 'xhigh' });
+
+      // Both Claude paths hand claudeChildEnv this session's env with the Claude/Electron variables dropped.
+      const saved = ['CLAUDE_CODE_ENTRYPOINT', 'ANTHROPIC_API_KEY', 'ELECTRON_RUN_AS_NODE'].map(name => [name, process.env[name]]);
+      Object.assign(process.env, { CLAUDE_CODE_ENTRYPOINT: 'replay-test', ANTHROPIC_API_KEY: 'replay-test', ELECTRON_RUN_AS_NODE: '1' });
+      try {
+        childEnvs.length = 0;
+        const withSession = appExecute(fakeApp(''), 'job-scoring', null);
+        await withSession({ config: baseline, call });
+        await withSession({ config: setting, call });
+        assert.equal(childEnvs.length, 2);
+        for (const env of childEnvs) {
+          assert.equal('CLAUDE_CODE_ENTRYPOINT' in env, false, 'CLAUDE* is dropped');
+          assert.equal('ANTHROPIC_API_KEY' in env, false, 'ANTHROPIC* is dropped');
+          assert.equal('ELECTRON_RUN_AS_NODE' in env, false, 'ELECTRON_RUN_AS_NODE is dropped');
+          assert.equal(env.PATH, process.env.PATH, 'other variables are kept');
+        }
+      } finally {
+        for (const [name, value] of saved) { if (value === undefined) delete process.env[name]; else process.env[name] = value; }
+      }
+    },
+  },
+  {
+    name: 'ai task replay: the Claude child env drops CLAUDE*, ANTHROPIC* and ELECTRON_RUN_AS_NODE only',
+    async run() {
+      const env = { PATH: '/bin', HOME: '/h', ELECTRON_NO_ATTACH_CONSOLE: '1', CLAUDE_CODE_ENTRYPOINT: 'cli', CLAUDECODE: '1',
+        CLAUDE_CODE_SSE_PORT: '123', ANTHROPIC_API_KEY: 'k', ANTHROPIC_BASE_URL: 'u', ELECTRON_RUN_AS_NODE: '1' };
+      const copy = { ...env };
+      const stripped = replayChildEnv(env);
+      assert.deepEqual(stripped, { PATH: '/bin', HOME: '/h', ELECTRON_NO_ATTACH_CONSOLE: '1' });
+      assert.deepEqual(Object.keys(env).filter(name => !(name in stripped)).sort(),
+        ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDECODE', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT', 'ELECTRON_RUN_AS_NODE']);
+      assert.deepEqual(env, copy, 'the caller env is not mutated');
+      assert.deepEqual(replayChildEnv({}), {});
+      assert.deepEqual(replayChildEnv(undefined), {}, 'a missing env strips to nothing');
+    },
+  },
+  {
+    name: 'ai task replay: a claude-setting config uses --reps, never drives the flow, and is an ordinary measured result',
+    async run() {
+      const dir = tempDir();
+      const failing = tempDir();
+      const configs = [{ id: 'claude', kind: 'claude' }, { id: 'claude:haiku:low', kind: 'claude-setting', model: 'haiku', effort: 'low' }];
+      const readRows = outDir => fs.readFileSync(path.join(outDir, 'results.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      try {
+        prepareOutDir(dir);
+        const h = fakeHarness(dir);
+        await replayTask(h.args({ batches: 2, configs, reps: 3, claudeReps: 2 }));
+        const rows = readRows(dir);
+        assert.equal(rows.filter(row => row.config === 'claude').length, 4, 'the baseline keeps --claude-reps');
+        assert.deepEqual(rows.filter(row => row.config === 'claude:haiku:low').map(row => `${row.batch}/${row.rep}`).sort(),
+          ['1/1', '1/2', '1/3', '2/1', '2/2', '2/3'], 'a claude-setting config uses --reps');
+        assert.ok(h.executed.includes('1-claude:haiku:low-3'));
+        assert.equal(h.executed.includes('1-claude:haiku:low-4'), false);
+        assert.deepEqual(h.received.map(answer => [answer.config, answer.rep, answer.batch]), [['claude', 1, 1], ['claude', 1, 2]],
+          'the flow is driven by the plain baseline answers only');
+        assert.equal(fs.existsSync(path.join(dir, 'texts', '1-claude_haiku_low-1.txt')), true);
+        const settingRow = rows.find(row => row.config === 'claude:haiku:low' && row.batch === 2 && row.rep === 3);
+        assert.deepEqual(settingRow.answer, { config: 'claude:haiku:low', rep: 3, batch: 2 });
+
+        prepareOutDir(failing);
+        const g = fakeHarness(failing);
+        await replayTask(g.args({ batches: 2, configs, reps: 1, claudeReps: 1, execute: async ({ config, rep, call }) => {
+          if (config.kind === 'claude-setting') throw new Error('setting unavailable');
+          return okReply(config, rep, call);
+        } }));
+        assert.deepEqual(g.received.map(answer => answer.config), ['claude', 'claude'], 'a failing setting never takes over the flow');
+        const settingRows = readRows(failing).filter(row => row.config === 'claude:haiku:low');
+        assert.equal(settingRows.length, 2);
+        assert.ok(settingRows.every(row => row.ok === false && row.code === 'Error'));
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+        fs.rmSync(failing, { recursive: true, force: true });
+      }
     },
   },
 ];
