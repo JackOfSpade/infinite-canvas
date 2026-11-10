@@ -1,6 +1,6 @@
 import { assert, __setAuthorityLedgerStoreFaultHookForTests, fs, getLocalApplicationHandoff, localApplicationStatus, openAuthorityLedgerStore, path, submitLocalApplicationHandoff } from '../test-dependencies.js';
 import { requirementsAuditCapTerminal } from '../../electron/ipc/applicationRequirementsAuditPolicy.js';
-import { queueLocalApplicationJob, __setLocalAiJobMutationLockObserverForTests, __setQueuedCurrentAuthorityProtocolForTests, PASTE_REQUIREMENTS_SCHEMA_RULE_IDS, pasteCorrectionPrompt, pasteRejectionCheckIds } from '../../electron/ipc/localAiApplication.js';
+import { queueLocalApplicationJob, __setLocalAiJobMutationLockObserverForTests, __setQueuedCurrentAuthorityProtocolForTests, PASTE_REQUIREMENTS_SCHEMA_RULE_IDS, pasteCorrectionPrompt, pasteRejectionCheckIds, requirementProseIdError } from '../../electron/ipc/localAiApplication.js';
 import { _resetPasteHandoffDiagnostics, getPasteHandoffDiagnosticsSnapshot } from '../../electron/ipc/pasteHandoffDiagnostics.js';
 import { makeCurrentAuthorityParallelMatchFixture } from './fixtures/current-authority-parallel-match.mjs';
 
@@ -239,6 +239,49 @@ async function assertAuthorityRootReferencesExist(contextDir, root, label) {
 }
 
 export default [
+  { name: 'requirements prose rule: ID-shaped or self-naming requirement text is rejected, short real requirements pass', run() {
+    const check = (requirement, knownIds) => requirementProseIdError('Listing evidence item', { id: 'p1-e01', requirement }, 'requirement', knownIds);
+    // The 2026-11-10 haiku:medium shapes, plus the item's own ID and an ID the page names.
+    for (const text of ['p1-r03', 'e2-p1-r03', 'p1-u51-r12', 'P1-R03', 'p1-e01']) {
+      const error = check(text);
+      assert(error && error.startsWith('requirements-schema-requirement-text: ') && error.includes('p1-e01'), `${text} is rejected as ID text (${error})`);
+    }
+    assert(check('Payments', new Set(['Payments'])), 'text equal to another ID on the page is rejected');
+    assert(PASTE_REQUIREMENTS_SCHEMA_RULE_IDS.includes('requirements-schema-requirement-text'), 'the rule joins the closed requirements schema vocabulary');
+    for (const text of ['SQL', 'React', 'Kubernetes', 'CI-CD', 'ci-cd', 'B2B-SaaS', 'full-stack', 'e2e-testing', 'C++', 'Web3', 'AWS S3', '5+ years of Python']) {
+      assert(check(text, new Set(['p1-r01'])) === null, `${JSON.stringify(text)} is real requirement prose`);
+    }
+    assert(check('') === null && check(undefined) === null, 'empty text is left to the existing requirement-prose check');
+    assert(requirementProseIdError('Requirement', { id: 'p1-r01', text: 'p1-r01' }, 'text')?.startsWith('requirements-schema-requirement-text:'), 'a requirement whose text is its own ID is rejected');
+  } },
+  { name: 'current authority requirements: an evidence item whose requirement is an ID is rejected; "SQL" is accepted', async run() {
+    const fixture = await makeCurrentAuthorityParallelMatchFixture();
+    try {
+      const queued = await queueLocalApplicationJob({ transport: 'paste', canvasFilePath: fixture.canvasFilePath, careerSnapshotId: fixture.snapshotId, job: fixture.job });
+      let handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath })).handoff;
+      const submit = async (requirementText) => {
+        const context = contextOf(handoff);
+        const source = context.requirementsProgress.sourceCoverage;
+        const unitIndex = source.units.findIndex(unit => unit.text === fixture.requirements[0]);
+        assert(unitIndex >= 0, 'the first synthetic requirement is in the first source window');
+        const evidence = [{ id: 'p1-e01', sourceId: 'job-listing', quote: fixture.requirements[0], requirement: requirementText, priority: 'high' }];
+        const requirements = [{ id: 'p1-r01', text: 'SQL', priority: 'high', evidenceIds: ['p1-e01'] }];
+        const result = await submitLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: fixture.canvasFilePath, handoffCode: handoff.handoffCode,
+          response: JSON.stringify({ protocol: 1, jobId: queued.id, stage: handoff.stage, handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes,
+            storeDigest: context.authorityStore.digest, complete: false, identity: context.trustedIdentity, evidence, requirements,
+            ...coverageFor(context, evidence, requirements, source.unitStart + unitIndex + 1) }) });
+        handoff = result.handoff;
+        return result;
+      };
+      const rejected = await submit('p1-r01');
+      const ruleErrors = (rejected.validationErrors || []).filter(message => message.startsWith('requirements-schema-requirement-text:'));
+      assert(!rejected.accepted && ruleErrors.length === 1 && ruleErrors[0].includes('p1-e01'),
+        `an ID in the evidence requirement field is rejected under its own rule (${JSON.stringify(rejected.validationErrors)})`);
+      assert(pasteRejectionCheckIds(rejected.validationErrors).checkIds.includes('requirements-schema-requirement-text'), 'the rule is a typed rejection check');
+      const accepted = await submit('SQL');
+      assert(accepted.accepted, `a short real requirement is accepted (${JSON.stringify(accepted.validationErrors || [])})`);
+    } finally { await fs.promises.rm(fixture.root, { recursive: true, force: true }); }
+  } },
   { name: 'current authority requirements audit: agreed audit advances a compact write-verify job into writing', async run() {
     const fixture = await makeCurrentAuthorityParallelMatchFixture();
     fixture.requirements = fixture.requirements.slice(0, 2);

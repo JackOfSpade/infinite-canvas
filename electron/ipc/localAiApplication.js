@@ -448,6 +448,7 @@ export const PASTE_REQUIREMENTS_SCHEMA_RULE_IDS = Object.freeze([
   'requirements-schema-response',
   'requirements-schema-coverage',
   'requirements-schema-binding',
+  'requirements-schema-requirement-text',
   'requirements-audit-schema-envelope',
   'requirements-audit-schema-rows',
   'requirements-adjudication-schema-envelope',
@@ -2486,6 +2487,27 @@ async function authorityStorePriorIdErrors(store, evidence, requirements, { requ
     if (text && await store.hasPriorIndexKey(key)) errors.push(`Requirement text ${JSON.stringify(String(item.text).trim())} exactly duplicates an earlier accepted requirement.`);
   }
   return errors;
+}
+
+// The writer reads an evidence item's `requirement` (and a requirement's
+// `text`) as the plain-language requirement. A model can fill it with an ID
+// instead — 2026-11-10 haiku:medium wrote `p1-r03` into a third of its
+// evidence items, and every one passed. Reject text that is the item's own ID,
+// any ID this page names, or ID-shaped with no words: two or more
+// hyphen-joined segments of at most three letters plus digits, at least one
+// digit overall (`p1-r03`, `e2-p1-r03`, `p1-e-1`). Real short requirements
+// ("SQL", "React", "CI-CD", "B2B-SaaS", "full-stack") have no such shape.
+const REQUIREMENT_PROSE_ID_SEGMENT_RE = /^[a-z]{0,3}\d*$/iu;
+export function requirementProseIdError(label, item, field, knownIds = new Set()) {
+  const value = item?.[field];
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  const segments = text.split('-');
+  const idShaped = segments.length >= 2 && /\d/u.test(text)
+    && segments.every(segment => segment && REQUIREMENT_PROSE_ID_SEGMENT_RE.test(segment));
+  if (text !== item?.id && !knownIds.has(text) && !idShaped) return null;
+  return `requirements-schema-requirement-text: ${label} ${String(item?.id)} has ${field} ${JSON.stringify(text)}, which is an ID, not requirement prose. Write ${field} as the plain-language requirement its quote states (for example "Builds and ships React front ends"); IDs belong only in id and evidenceIds.`;
 }
 
 function requirementsSchemaRuleId(stage, detail) {
@@ -6690,17 +6712,20 @@ function validatePasteResponse(response, state, input, envelopeEcho) {
       if (evidence.length > MAX_EVIDENCE_PLAN_PAGE_EVIDENCE_ITEMS || requirements.length > MAX_EVIDENCE_PLAN_PAGE_REQUIREMENT_ITEMS) errors.push('Requirements response exceeds its bounded evidence or requirement page limit.');
       if (canonicalFrozenValue(response.identity || null) !== canonicalFrozenValue(authorityTrustedIdentity(authority))) errors.push('Authority requirements must repeat the host-derived trusted identity exactly.');
       const evidenceIds = new Set(); const requirementIds = new Set(); const normalized = new Set();
+      const pageIds = new Set([...evidence, ...requirements].map(item => item?.id).filter(id => typeof id === 'string'));
       for (const item of evidence) {
         const itemError = pasteStableIdError('listing evidence item', item?.id, evidenceIds); if (itemError) errors.push(itemError);
         if (typeof item?.id !== 'string' || !item.id.startsWith(prefix)) errors.push(`Requirements page ${page.index + 1} IDs must start with ${prefix}.`);
         evidenceIds.add(item?.id);
         errors.push(...requirementsListingQuoteErrors(item, page.text));
         if (!nonemptyText(item?.requirement) || !PASTE_EVIDENCE_PRIORITIES.includes(item?.priority)) errors.push('Every listing evidence item needs requirement prose and a supported priority.');
+        const proseError = requirementProseIdError('Listing evidence item', item, 'requirement', pageIds); if (proseError) errors.push(proseError);
       }
       for (const requirement of requirements) {
         const itemError = pasteStableIdError('requirement', requirement?.id, requirementIds); if (itemError) errors.push(itemError);
         if (typeof requirement?.id !== 'string' || !requirement.id.startsWith(prefix)) errors.push(`Requirements page ${page.index + 1} IDs must start with ${prefix}.`);
         requirementIds.add(requirement?.id); const text = String(requirement?.text || '').trim(); const ids = Array.isArray(requirement?.evidenceIds) ? requirement.evidenceIds : [];
+        const proseError = requirementProseIdError('Requirement', requirement, 'text', pageIds); if (proseError) errors.push(proseError);
         if (!text || normalized.has(text.toLocaleLowerCase()) || !PASTE_EVIDENCE_PRIORITIES.includes(requirement?.priority) || !ids.length || new Set(ids).size !== ids.length || !ids.some(id => evidenceIds.has(id)) || !ids.every(id => evidenceIds.has(id))) errors.push(`Requirement ${String(requirement?.id)} must have unique text and current-page listing evidence IDs.`);
         normalized.add(text.toLocaleLowerCase());
       }
@@ -6735,6 +6760,7 @@ function validatePasteResponse(response, state, input, envelopeEcho) {
     }
     if (canonicalFrozenValue(response.identity || null) !== canonicalFrozenValue(authorityTrustedIdentity(authority))) errors.push('Authority requirements must repeat the host-derived trusted identity exactly.');
     const evidenceIds = new Set(priorEvidence);
+    const pageIds = new Set([...priorEvidence, ...priorRequirements, ...[...evidence, ...requirements].map(item => item?.id)].filter(id => typeof id === 'string'));
     const normalizedTexts = new Set(ledger.requirements.map(item => String(item?.text || '').trim().toLocaleLowerCase()));
     for (const item of evidence) {
       const itemError = pasteStableIdError('listing evidence item', item?.id, evidenceIds);
@@ -6744,6 +6770,7 @@ function validatePasteResponse(response, state, input, envelopeEcho) {
       evidenceIds.add(item?.id);
       errors.push(...requirementsListingQuoteErrors(item, page.text));
       if (!nonemptyText(item?.requirement) || !PASTE_EVIDENCE_PRIORITIES.includes(item?.priority)) errors.push(`Every listing evidence item needs requirement prose and a priority of ${PASTE_EVIDENCE_PRIORITIES.join('/')}.`);
+      const proseError = requirementProseIdError('Listing evidence item', item, 'requirement', pageIds); if (proseError) errors.push(proseError);
     }
     const requirementIds = new Set(priorRequirements);
     for (const requirement of requirements) {
@@ -6753,6 +6780,7 @@ function validatePasteResponse(response, state, input, envelopeEcho) {
       if (typeof requirement?.id !== 'string' || !requirement.id.startsWith(prefix)) errors.push(`Requirements page ${page.pageIndex + 1} IDs must start with ${prefix}.`);
       requirementIds.add(requirement?.id);
       const text = String(requirement?.text || '').trim();
+      const proseError = requirementProseIdError('Requirement', requirement, 'text', pageIds); if (proseError) errors.push(proseError);
       if (!text || !PASTE_EVIDENCE_PRIORITIES.includes(requirement?.priority) || !Array.isArray(requirement?.evidenceIds) || !requirement.evidenceIds.length) errors.push('Every requirement needs text, priority highest/high/supporting, and listing evidenceIds.');
       const normalized = text.toLocaleLowerCase();
       if (normalizedTexts.has(normalized)) errors.push(`Requirement text ${JSON.stringify(text)} exactly duplicates an earlier accepted requirement.`);
