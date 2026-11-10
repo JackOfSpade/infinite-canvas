@@ -55,7 +55,7 @@ import { confirmSimilarJobLocationPairs } from './jobLocationConsolidation.js';
 import electronPkg from 'electron';
 import { abortNodeTasksAndWait, drainNodeTasksForQuit, getCurrentIpcRequestContext, handleSafe, isAppQuitPauseReason, nodeCancellationError } from './ipcUtils.js';
 import { clearBrowserSession, getBrowserSessionResetBlocker, resetPlatformSession } from './stealthBrowser.js';
-import { buildPhysicalCardWalkPlan, scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions, preloadResolvedJobList } from './browser/manualScraper.js';
+import { buildPhysicalCardWalkPlan, scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions, preloadResolvedJobList, followGoogleApplyRedirects, normalizeGoogleApplyOptions, selectGoogleApplyUrl, googleApplyLinksRateLimitedWarning, GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, markManualSolveRequired, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
 import { openCaptchaResolveWindow, openNativeIndeedChallengeWindow } from './browser/authWindows.js';
 import { jobScoringBatchSize, JOB_SCORE_CAP, RESEARCH_MIN_FIT_SCORE, MAX_COMPENSATION_ROWS_PER_ASSESSMENT_COHORT } from './resultCaps.js';
@@ -6293,6 +6293,7 @@ const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
   'resolve-description-incomplete',
   'resolve-detail-enrichment-failed',
   'cloudflare-hard-block',
+  'google-apply-links-rate-limited',
 ]);
 const SOURCE_RUN_RESOLVE_COUNT_FIELDS = [
   'providerRowsLoaded',
@@ -7157,9 +7158,11 @@ export function buildResolvedDescriptionWarning(sourceId, rootWarning, completeR
       ...rootWarning,
       severity: 'block',
       action: 'none',
-      shortLabel: 'Wait, then rerun',
+      // The card counts down `retryAfterAt` (surviving through this spread) and
+      // then offers a real Retry; a hard block needs time, not a hidden action.
+      shortLabel: 'Wait, then retry',
       evidence: `${rootWarning.evidence || `${sourceLabel} returned a non-interactive human-verification hard block.`} ${accounting}`,
-      suggestion: `There is no interactive challenge to solve in this window. Wait for the IP/session restriction to cool down, confirm ${sourceLabel} opens normally in Chrome, then use Re-run Search. Choose Skip only if you intentionally want to continue without these listings.`,
+      suggestion: `There is no interactive challenge to solve in this window. Retry unlocks after the wait, once the IP/session restriction cools down — confirm ${sourceLabel} opens normally in Chrome, then choose Retry. Skip continues without these listings.`,
     };
   }
 
@@ -10785,6 +10788,50 @@ export function __registerJobsHandlersForTests(dependencies = {}) {
   return registerJobsHandlersWithDependencies(dependencies);
 }
 
+/**
+ * Apply the results of a Google apply-link retry to already-saved rows.
+ *
+ * Pure: it takes the resolved `from → to` redirect pairs and returns ONLY the
+ * rows whose employer link it fixed — `url` from the resolved Apply-on redirect,
+ * `applyOptions` from the same candidates, and the parked
+ * `pendingApplyRedirects` removed. Rows without parked redirects are never
+ * returned, so the hub's `replaceMatchingItems` merge leaves them untouched, and
+ * `remaining` counts the rows a second rate limit stopped the reader from fixing.
+ */
+export function applyGoogleApplyLinkRetryResults(rows, { resolvedHrefByHref, attemptedAll = false } = {}) {
+  const resolvedMap = resolvedHrefByHref instanceof Map
+    ? resolvedHrefByHref
+    : new Map(Object.entries(resolvedHrefByHref || {}));
+  const items = [];
+  let remaining = 0;
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const pending = Array.isArray(row?.pendingApplyRedirects) ? row.pendingApplyRedirects : [];
+    if (pending.length === 0) continue;
+    // The resolver returns candidates in the same shape it was given: an
+    // unfollowed redirect keeps its own /goto href, which no Apply-on selector
+    // accepts, so only genuinely read links can produce a url here.
+    const candidates = pending.map(entry => ({
+      label: entry?.label,
+      href: resolvedMap.get(entry?.href) || entry?.href,
+    }));
+    const url = selectGoogleApplyUrl(candidates, row?.applySource);
+    const { pendingApplyRedirects: _readRedirects, ...rest } = row;
+    if (!url) {
+      // With no rate limit this pass, every parked redirect was followed: a row
+      // that still has no acceptable link never will, so it leaves the queue
+      // (keeping its Google URL) instead of holding the warning open forever.
+      if (attemptedAll) {
+        items.push({ ...rest, applyOptions: normalizeGoogleApplyOptions(candidates) });
+        continue;
+      }
+      remaining += 1;
+      continue;
+    }
+    items.push({ ...rest, url, applyOptions: normalizeGoogleApplyOptions(candidates) });
+  }
+  return { items, remaining };
+}
+
 function registerJobsHandlersWithDependencies(dependencies = {}) {
   const compileCareerSnapshot = dependencies.compileCareerSnapshot || compileAuditedCareerSnapshot;
   const resolvePinnedScoringInputForHandler = dependencies.resolvePinnedScoringInput || resolvePinnedScoringInput;
@@ -10801,6 +10848,10 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const callListingLiveness = dependencies.callListingLiveness || callLLMText;
   const listingLivenessCalibrationStore = dependencies.listingLivenessCalibrationStore || getListingLivenessCalibrationStore();
   const retryIndeedDescriptions = dependencies.retryIndeedJobDescriptions || retryIndeedJobDescriptions;
+  // Google's apply-link Retry must follow only the parked /goto links, so this is
+  // injectable: tests drive the branch with a fake reader, and production uses
+  // the shared-profile background reader from manualScraper.
+  const retryGoogleApplyLinks = dependencies.retryGoogleApplyLinks || followGoogleApplyRedirects;
   const settleBoardClosedRowsForHandler = dependencies.settleBoardClosedRowsForTests || settleBoardClosedRows;
   // Before scoring: keep or retire every row an aggregator board reported
   // closed. A failure of this step is contained to the conservative rule: a
@@ -16402,7 +16453,7 @@ Return a JSON object with four arrays of search query strings:
   // pendingJobs and drop the warning. items is [] when no extractor is
   // available for the source (API sources can't be inline-extracted; their
   // Solve button doesn't render).
-  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, preferredLocation, secondTabUrl, collectionLimits, enabledSourceIds, continuationIntentId = null, continuationLeaseToken = null, careerSnapshotId = null, operationAuthority = null, parentArtifactFingerprint = null } = {}, signal) => {
+  handleSafe('resolve-job-source', async (event, { url, sourceId, nodeId, jobRunId = null, canvasFilePath, searchWindow, maxAgeDays, preferredLocation, secondTabUrl, collectionLimits, enabledSourceIds, continuationIntentId = null, continuationLeaseToken = null, careerSnapshotId = null, operationAuthority = null, parentArtifactFingerprint = null, warningCode = null } = {}, signal) => {
     requireSavedJobRecoveryCanvas(canvasFilePath);
     const continuationAdmission = await admitContinuationProviderWork(event, {
       canvasFilePath, nodeId, jobRunId, continuationIntentId, continuationLeaseToken,
@@ -16926,6 +16977,62 @@ Return a JSON object with four arrays of search query strings:
         }, { nodeId, jobRunId });
       }
       if (blocked) return blocked;
+    }
+    // Google's apply-link reader stopped part-way through the description pass:
+    // those rows are parked with the redirects it never read. Retry re-reads ONLY
+    // those /goto links — no listing is scraped again — and a second rate limit
+    // keeps the rows fixed so far and restarts the same wait. The checkpoint
+    // above already proved ownership for Google, so an unattributable snapshot
+    // was refused before anything here runs.
+    // Only a Solve that names the rate-limit warning takes this link-only path
+    // (the card and Solve all both send warningCode); every other Google block,
+    // and an unnamed caller, keeps its own visible-window scrape.
+    const wantsGoogleApplyLinkRetry = sourceId === 'google'
+      && warningCode === GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE;
+    const pendingApplyRedirectRows = wantsGoogleApplyLinkRetry
+      ? sourceRecoveryJobs.filter(row => row?.source === 'google'
+        && Array.isArray(row?.pendingApplyRedirects) && row.pendingApplyRedirects.length > 0)
+      : [];
+    if (pendingApplyRedirectRows.length > 0) {
+      const pendingRedirects = pendingApplyRedirectRows.flatMap(row => row.pendingApplyRedirects);
+      const retried = await withSharedProfileLock(
+        () => retryGoogleApplyLinks(pendingRedirects),
+        signal,
+        'Google apply-link retry',
+      );
+      const resolvedHrefByHref = new Map();
+      for (const link of Array.isArray(retried?.links) ? retried.links : []) {
+        if (link?.from && link?.to && link.from !== link.to) resolvedHrefByHref.set(link.from, link.to);
+      }
+      const { items: fixedRows, remaining } = applyGoogleApplyLinkRetryResults(pendingApplyRedirectRows, {
+        resolvedHrefByHref,
+        attemptedAll: retried?.rateLimited !== true,
+      });
+      recordJobSourceResolvePass(sourceId, {
+        outcome: 'completed',
+        warning: remaining === 0
+          ? null
+          : { code: GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE, severity: 'block' },
+        checkpoint: 'unchanged',
+        targeted: pendingApplyRedirectRows.length,
+        attempted: pendingRedirects.length,
+        recovered: fixedRows.length,
+        unavailable: remaining,
+      }, { nodeId, jobRunId });
+      if (remaining === 0) {
+        return { resolved: true, items: fixedRows, replaceMatchingItems: true, warning: null };
+      }
+      return {
+        resolved: true,
+        items: fixedRows,
+        replaceMatchingItems: true,
+        warning: googleApplyLinksRateLimitedWarning({
+          url,
+          readLinks: Number.isFinite(retried?.read) ? retried.read : 0,
+          capturedLinks: fixedRows.length,
+          pendingRows: remaining,
+        }),
+      };
     }
     const persistSourceRecoveryJobs = async (
       recoveryJobs,

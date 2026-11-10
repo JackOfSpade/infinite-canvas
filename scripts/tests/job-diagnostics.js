@@ -31,7 +31,7 @@ import { _resetPasteHandoffDiagnostics, buildPasteHandoffDiagnosticsMarkdown, re
 import { buildPasteRejectionTraceMarkdown } from '../../electron/ipc/bugReport/pasteRejectionTraceRollup.js';
 import { listDescriptionRecoveryCheckpointsSync } from '../test-dependencies.js';
 import { createSourceProgressRunGuard, descriptionRecoveryCheckpointWriteFailureWarning, isJobSourceResolveBusyHubState, reconcileJobSourceWarnings } from '../test-dependencies.js';
-import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterDetailErrorShell, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs, zipRecruiterDetailErrorShellBackoffMs } from '../test-dependencies.js';
+import { ADVANCE_CONTROL_LABEL_PATTERNS, buildResolvedDescriptionWarning, canAttemptJobSourceResolve, canAutomaticallyResolveJobSourceWarning, challengeHeartbeatIntervalMs, CHALLENGE_INTERSTITIAL_MAX_CHARS, classifyManualChallengeSignals, descriptionPanelPacing, formatChallengeTextEvidence, hasManualHardBlockText, hasManualVerificationText, isAppcastTemporaryRestriction, isDetachedDetailFrameError, isZipRecruiterDetailErrorShell, isZipRecruiterClosedDetailRedirect, mergeDescriptionDetailMissWarning, pinGlassdoorDetailUrlToListHost, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, zipRecruiterAppcastRestrictionBackoffMs, zipRecruiterDetailErrorShellBackoffMs } from '../test-dependencies.js';
 import { planPartialScoreRecovery } from '../test-dependencies.js';
 import { reconcileSearchFunnel } from '../test-dependencies.js';
 import { sanitizeLastRunReceipt } from '../test-dependencies.js';
@@ -12813,7 +12813,7 @@ export default [
     },
   },
 {
-    name: 'Glassdoor terminal detail hard blocks do not offer a fake Solve loop',
+    name: 'Glassdoor terminal detail hard blocks offer Retry only after the retry wait',
     run: () => {
       const rootWarning = {
         code: 'description-detail-hard-block', severity: 'block', action: 'none',
@@ -12826,17 +12826,23 @@ export default [
         [],
         [{ title: 'Solutions Architect' }, { title: 'Platform Architect' }],
       );
+      const now = 1_700_000_000_000;
       assert(warning.code === 'description-detail-hard-block'
         && warning.action === 'none'
-        && warning.shortLabel === 'Wait, then rerun'
+        && warning.shortLabel === 'Wait, then retry'
         && warning.evidence.includes('0 description-complete listing(s)')
         && warning.evidence.includes('2 still lack a full description')
         && warning.suggestion.includes('There is no interactive challenge to solve')
-        && !canAttemptJobSourceResolve(warning),
-      'a resolved list page must retain the terminal detail-block cause and suppress another immediate Solve');
-      assert(!canAttemptJobSourceResolve({ code: 'cloudflare-hard-block', severity: 'block' })
+        && canAttemptJobSourceResolve(warning),
+      'a resolved list page must retain the terminal detail-block cause and offer Retry instead of suppressing it');
+      assert(canAutomaticallyResolveJobSourceWarning({ ...warning, retryAfterAt: now + 900_000 }, now) === false
+        && canAutomaticallyResolveJobSourceWarning({ ...warning, retryAfterAt: now - 1 }, now) === true
+        && canAutomaticallyResolveJobSourceWarning(warning, now) === true,
+      'a hard-block retry cannot run automatically during its wait, and can once the wait has passed or was never stamped');
+      assert(canAttemptJobSourceResolve({ code: 'cloudflare-hard-block', severity: 'block' })
+        && canAttemptJobSourceResolve({ code: 'cloudflare-hard-block', severity: 'block', action: 'none' })
         && canAttemptJobSourceResolve({ code: 'http-403', severity: 'block' }),
-      'older persisted terminal hard-block warnings are also non-resolvable, while a real 403 challenge stays solvable');
+      'older persisted terminal hard-block warnings offer Retry too, while a real 403 challenge stays solvable');
       return { code: warning.code, canResolve: canAttemptJobSourceResolve(warning) };
     },
   },

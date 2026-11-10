@@ -1,11 +1,11 @@
-import React, { useCallback, useEffect, useState, useContext, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useContext, useRef } from 'react';
 import { useReactFlow, useStore } from '@xyflow/react';
 import { Loader2, CheckCircle2, ShieldAlert, ExternalLink, SkipForward } from 'lucide-react';
 import { PlatformBadge } from '../components/PlatformBadge';
 import { NodeHandles } from './_shared/NodeHandles';
 import { SourceWarningPanel } from './_shared/SourceWarningPanel';
 import { createSourceProgressRunGuard, mergeSourceProgress, isTerminalSourceStatus } from '../utils/sourceProgress';
-import { canAttemptJobSourceResolve, effectiveJobSourceCardRunId, isJobSourceResolveBusyHubState, isJobSourceWarningGating, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
+import { canAttemptJobSourceResolve, effectiveJobSourceCardRunId, hardBlockRetryWaitMs, isJobSourceResolveBusyHubState, isJobSourceWarningGating, isTimedRetrySourceWarning, jobSourceWarningAction } from '../utils/jobSourceWarningPolicy';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
@@ -157,7 +157,26 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   // depending on that changing wrapper object in lifecycle effects.
   const { acquireModuleRun, cancelQueuedRunsForNode } = useModuleRunQueue();
   const jobSearchCoordinator = useJobSearchCoordinator();
-  const [progress, setProgressState] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
+  const [storedProgress, setProgressState] = useState(data.persistedProgress || null); // { status, count, warning, url } | null
+  // A hard block (Cloudflare / detail walk) is retried only after a wait, so its
+  // countdown comes from this clock rather than from Date.now() in render: the
+  // interval further down is what advances it. The wait is folded into
+  // `progress` as a presentation-only `retryLabel`, because the button label is
+  // a single inline expression that reads `progress` and nothing else.
+  const [hardBlockClock, setHardBlockClock] = useState(() => Date.now());
+  const hardBlockWaitMs = hardBlockRetryWaitMs(storedProgress?.warning, hardBlockClock);
+  const hardBlockRetryPending = hardBlockWaitMs > 0;
+  // Rounded up: "Retry in 0m" would claim the wait is over.
+  const hardBlockRetryLabel = hardBlockRetryPending ? `Retry in ${Math.ceil(hardBlockWaitMs / 60_000)}m` : null;
+  const progress = useMemo(() => {
+    // A restored warning can still carry an old label; override it in both
+    // directions so a countdown can never outlive the wait it describes.
+    if (!hardBlockRetryLabel && !storedProgress?.warning?.retryLabel) return storedProgress;
+    return {
+      ...storedProgress,
+      warning: { ...(storedProgress?.warning || {}), retryLabel: hardBlockRetryLabel },
+    };
+  }, [storedProgress, hardBlockRetryLabel]);
   const progressRef = useRef(data.persistedProgress || null);
   // Terminal source state is part of the graph snapshot a waiting Job Board
   // captures as soon as this action releases the global lane. Persist it in
@@ -1061,6 +1080,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       } else {
         result = await window.electronAPI.resolveJobSource({
           url: pendingUrl,
+          // Which warning this click belongs to: Google's rate-limited apply-link
+          // reader needs a link-only retry, every other block a real scrape.
+          warningCode: pendingWarning?.code || null,
           sourceId: data.sourceId,
           nodeId: data.hubId,
           canvasFilePath: nav?.currentFile || null,
@@ -1881,13 +1903,40 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
   const hasWarn     = warning?.severity === 'warn';
   // Non-gating, but a broken scraper has to read as broken, not as a footnote.
   const hasHealthFailure = warning?.code === 'source-health-failed';
+  // A hard block has nothing to solve, but it does clear: the scraper stamps
+  // `retryAfterAt` when it sees the block, and this card counts that wait down
+  // (see the clock at the top of the component) before offering a real Retry.
+  // Google's rate-limited apply-link reader is in the same timed-retry group, so
+  // it shows the same countdown and the same real Retry.
+  const warningIsHardBlock = isTimedRetrySourceWarning(warning);
+  // A re-block stamps a fresh `retryAfterAt`; restart the clock on that stamp so
+  // the new countdown is exact instead of inheriting the previous one's age.
+  const hardBlockRetryAfterAt = warningIsHardBlock && Number.isFinite(warning?.retryAfterAt)
+    ? warning.retryAfterAt
+    : 0;
+  useEffect(() => {
+    if (!hardBlockRetryAfterAt) return;
+    setHardBlockClock(Date.now());
+  }, [hardBlockRetryAfterAt]);
+  useEffect(() => {
+    if (!hardBlockRetryPending) return undefined;
+    const timer = setInterval(() => setHardBlockClock(Date.now()), 20_000);
+    return () => clearInterval(timer);
+  }, [hardBlockRetryPending]);
   // Keep the durable-recovery poll behind the exact same gate as the Resolve
   // control. Informational cards (notably country-source-skipped) have no
   // resolver control, so polling their recovery receipt every 750ms cannot
   // enable an action and only creates background IPC noise.
+  // A hard block carries no `actionLabel` but keeps `action: 'none'`, so its
+  // code must be an explicit disjunct here — that is what puts its Retry (the
+  // countdown, then Retry) on the card without letting anything run unattended.
   const hasVisibleResolverControl = Boolean(
     warningCanResolve
-    && (progress?.warning?.actionLabel || progress?.warning?.resumeState || (progress?.url && !hasWarn))
+    && (progress?.warning?.actionLabel || progress?.warning?.resumeState
+      || progress?.warning?.code === 'cloudflare-hard-block'
+      || progress?.warning?.code === 'description-detail-hard-block'
+      || progress?.warning?.code === 'google-apply-links-rate-limited'
+      || (progress?.url && !hasWarn))
     && !hasInfo
     && (!hasWarn || warningBlocksScoring)
   );
@@ -2099,7 +2148,7 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
               // clears a warning nor mutates the source run, unlike Solve.
               disabled={['open-external', 'login-platform'].includes(warningAction)
                 ? (resolving || hubLocked)
-                : resolverActionDisabled}
+                : resolverActionDisabled || hardBlockRetryPending}
               className="nodrag flex-1 flex items-center justify-center gap-1 px-2 py-1 text-[9px] font-medium text-white/70 hover:text-white bg-white/5 hover:bg-white/10 transition-colors disabled:opacity-50 disabled:cursor-default border-r border-white/10"
               title={hubLocked
                 ? 'Hub is locked'
@@ -2107,6 +2156,10 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                   ? 'The owning Job Board run must finish or be cancelled first'
                 : resolverBusy
                   ? 'Source recovery is waiting for the active Job Search. Wait for processing, or Resume the search to prepare recovery.'
+                : progress?.warning?.retryLabel
+                  // Say what the wait is for: a hard block has no control to
+                  // act on, and retrying it immediately is what looped before.
+                  ? 'This source is still inside its hard-block wait — there is nothing to solve yet. Retrying too soon usually gets blocked again. Skip continues without this source.'
                 : progress?.warning?.actionTitle
                   ? progress.warning.actionTitle
                   : progress?.warning?.resumeState?.mode === 'native-challenge'
@@ -2124,7 +2177,9 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
                   : 'Open the failed page in a browser sharing your session — solve the captcha or log in. A waiting Job Board continues automatically once every blocked source is resolved or skipped'}
             >
               <ExternalLink size={9} />
-              {resolving ? 'Running…' : progress?.warning?.actionLabel || (progress?.warning?.resumeState ? 'Continue' : 'Solve')}
+              {/* A hard block's own label (e.g. the no-match "Wait, then rerun")
+                  would contradict an enabled button: after the wait it says Retry. */}
+              {resolving ? 'Running…' : progress?.warning?.retryLabel || ((progress?.warning?.code === 'cloudflare-hard-block' || progress?.warning?.code === 'description-detail-hard-block' || progress?.warning?.code === 'google-apply-links-rate-limited') ? 'Retry' : progress?.warning?.actionLabel || (progress?.warning?.resumeState ? 'Continue' : 'Solve'))}
             </button>
           )}
           <button

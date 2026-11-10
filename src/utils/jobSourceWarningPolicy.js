@@ -195,18 +195,74 @@ export function jobSourceWarningAction(warning) {
 }
 
 /**
- * Whether a source warning represents something the resolver can actually
- * change in its shared-profile Chrome window. A terminal hard block has no
- * checkbox, captcha, or login control, so offering Solve only creates an
- * open/auto-close/retry loop while the IP/session restriction remains active.
- * Keep the code allow-list here as well as honoring the explicit action field
- * so older persisted warnings get the corrected behavior after an upgrade.
+ * How long a hard-blocked source must be left alone before a retry is offered.
+ *
+ * A hard block ("Additional Verification Required", a blocked detail walk) has
+ * no checkbox, captcha, or login control to act on. The earlier behaviour hid
+ * Solve for those codes so a click could not sit in an open/auto-close/retry
+ * loop. That hid the retry the person actually needs: the block does clear, it
+ * just needs time. Waiting IS the remedy, so the card counts down and then
+ * offers a real Retry instead of refusing one forever.
+ */
+export const HARD_BLOCK_RETRY_WAIT_MS = 15 * 60 * 1000;
+
+const HARD_BLOCK_WARNING_CODES = new Set([
+  'cloudflare-hard-block',
+  'description-detail-hard-block',
+]);
+
+/**
+ * Warnings whose only remedy is to wait and then retry: the two interactive-less
+ * hard blocks, plus Google's apply-link reader. The reader gives up for the rest
+ * of the run on a `/sorry` hop or an HTTP 429, leaving later rows with only their
+ * Google card URL; like a hard block, the block clears with time, so the card
+ * counts down and then offers a real Retry (and "Solve all" must wait too).
+ */
+const TIMED_RETRY_WARNING_CODES = new Set([
+  ...HARD_BLOCK_WARNING_CODES,
+  'google-apply-links-rate-limited',
+]);
+
+/** Is this warning an interactive-less hard block (Cloudflare or detail walk)? */
+export function isHardBlockSourceWarning(warning) {
+  return HARD_BLOCK_WARNING_CODES.has(warning?.code);
+}
+
+/**
+ * Is this warning in the timed-retry group (hard blocks + Google's rate-limited
+ * apply-link reader)? These share one cooldown and one card affordance, while
+ * `isHardBlockSourceWarning` keeps its narrower hard-block meaning.
+ */
+export function isTimedRetrySourceWarning(warning) {
+  return TIMED_RETRY_WARNING_CODES.has(warning?.code);
+}
+
+/**
+ * Milliseconds remaining before a hard block may be retried. `retryAfterAt` is
+ * stamped by the scraper when the block was seen; an older persisted warning
+ * carries no stamp and may retry at once (the restriction is already stale, and
+ * a fresh block stamps a fresh wait). Non-hard-block warnings never wait.
+ */
+export function hardBlockRetryWaitMs(warning, now = Date.now()) {
+  if (!isTimedRetrySourceWarning(warning)) return 0;
+  const retryAfterAt = warning?.retryAfterAt;
+  if (typeof retryAfterAt !== 'number' || !Number.isFinite(retryAfterAt)) return 0;
+  return Math.max(0, retryAfterAt - now);
+}
+
+/**
+ * Whether a source warning represents something the resolver can attempt in its
+ * shared-profile Chrome window. A hard block IS retryable, but only after the
+ * cooldown above — `canAutomaticallyResolveJobSourceWarning` enforces the wait
+ * while this stays true so the card can show a countdown and then a real Retry.
+ * The hard-block check runs before the explicit-action early return because old
+ * persisted warnings carry `action: 'none'` with no stamp and must still get the
+ * retry affordance after an upgrade.
  */
 export function canAttemptJobSourceResolve(warning) {
+  if (isTimedRetrySourceWarning(warning)) return true;
   if (!warning || warning.action === 'none') return false;
   return ![
-    'cloudflare-hard-block',
-    'description-detail-hard-block',
     // These are state/ownership outcomes, not interactive browser challenges.
     // Retrying the same card cannot make the current run checkpoint appear or
     // make a stale snapshot belong to this run; wait for final warning resync
@@ -220,9 +276,12 @@ export function canAttemptJobSourceResolve(warning) {
 /**
  * Whether the hub's "Solve all" loop may drive this warning unattended.
  * Login and external-navigation actions are deliberately per-card only: they
- * open a human workflow and do not prove the source has resumed.
+ * open a human workflow and do not prove the source has resumed. A hard block is
+ * held back until its retry wait expires so an unattended loop cannot reopen the
+ * blocked page during the cooldown.
  */
-export function canAutomaticallyResolveJobSourceWarning(warning) {
+export function canAutomaticallyResolveJobSourceWarning(warning, now = Date.now()) {
+  if (hardBlockRetryWaitMs(warning, now) > 0) return false;
   return canAttemptJobSourceResolve(warning)
     && !['open-external', 'login-platform'].includes(jobSourceWarningAction(warning));
 }

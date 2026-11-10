@@ -131,6 +131,7 @@ import claude_application_runner from './tests/claude-application-runner.js';
 import offload_complete_stage from './tests/offload-complete-stage.js';
 import ai_shadow_report from './tests/ai-shadow-report.js';
 import ai_task_replay from './tests/ai-task-replay.js';
+import ai_model_calibration from './tests/ai-model-calibration.js';
 import claude_application_sdk_stage from './tests/claude-application-sdk-stage.js';
 import application_editorial_plan from './tests/application-editorial-plan.js';
 import application_editorial_plan_archive from './tests/application-editorial-plan-archive.js';
@@ -304,6 +305,10 @@ import gapfix_v17_resume_dispositions from './tests/gapfix-v17-resume-dispositio
 import gapfix_v17_letter_dispositions from './tests/gapfix-v17-letter-dispositions.js';
 import gapfix_v17_truth_recall from './tests/gapfix-v17-truth-recall.js';
 import expense_outcome_contractions from './tests/expense-outcome-contractions.js';
+import scrape_pace from './tests/scrape-pace.js';
+import panel_walk_interrupt from './tests/panel-walk-interrupt.js';
+import job_source_hard_block_retry from './tests/job-source-hard-block-retry.js';
+import google_apply_link_retry from './tests/google-apply-link-retry.js';
 import oracle_leak_gate from './tests/oracle-leak-gate.js';
 
 // Keep the file name beside its group so omissions and stale registrations
@@ -320,6 +325,10 @@ const testGroups = [
   ['ai-models.js', ai_models],
   ['fixtures-canvas.js', fixtures_canvas],
   ['job-diagnostics.js', job_diagnostics],
+  ['scrape-pace.js', scrape_pace],
+  ['panel-walk-interrupt.js', panel_walk_interrupt],
+  ['job-source-hard-block-retry.js', job_source_hard_block_retry],
+  ['google-apply-link-retry.js', google_apply_link_retry],
   ['job-scoring-cache.js', job_scoring_cache],
   ['claude-prompt-limit.js', claude_prompt_limit],
   ['claude-task-worker.js', claude_task_worker],
@@ -440,6 +449,7 @@ const testGroups = [
   ['offload-complete-stage.js', offload_complete_stage],
   ['ai-shadow-report.js', ai_shadow_report],
   ['ai-task-replay.js', ai_task_replay],
+  ['ai-model-calibration.js', ai_model_calibration],
   ['claude-application-sdk-stage.js', claude_application_sdk_stage],
   ['application-editorial-plan.js', application_editorial_plan],
   ['application-editorial-plan-archive.js', application_editorial_plan_archive],

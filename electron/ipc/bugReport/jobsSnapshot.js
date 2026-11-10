@@ -1,6 +1,7 @@
 import electronPkg from 'electron';
 import { normalizeJobScoringIntegrity, summarizeJobScoringIntegrity } from '../../../src/utils/jobScoringContract.js';
 const { app } = electronPkg;
+
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -8,7 +9,7 @@ import { CAREER_CONVERGENCE_CATEGORIES, sanitizeCareerConvergenceRound, getCurre
 import { getNonApiAiHandoffLifecycleSnapshot, SAFE_NON_API_AI_CANCEL_CAUSES, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS } from '../nonApiAi.js';
 import { formatTypeAreaUtilization, getApplicationTelemetry } from '../jobApplication.js';
 import { getApplicationSyncTelemetry } from '../applicationSync.js';
-import { getManualScraperTelemetry } from '../browser/manualScraper.js';
+import { formatScrapePaceLine, getManualScraperTelemetry } from '../browser/manualScraper.js';
 import { LISTING_LIVENESS_COUNT_FIELDS } from '../listingLivenessTelemetry.js';
 import { getListingLivenessProbeCounts } from '../listingLivenessProbe.js';
 import { getJobsSettings, getGlassdoorLocIdCache, hasStoredDiceApiKey } from '../settings.js';
@@ -32,6 +33,27 @@ import { consolidateBoardCascadeNodes, summarizeConsolidation } from '../../../s
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobBoardPreferenceOverrideView } from '../../../src/utils/jobBoardPreferenceOverride.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
+
+// Per-source "Scrape pace" rows for the Active Browser Scrape block. The line
+// itself is rendered by manualScraper's formatScrapePaceLine so the report and
+// the log stream can never drift apart. Metadata only (counts + durations): no
+// URL, no job title. Older processes carry no `pace` at all — return no rows so
+// the report gains nothing extra.
+export function renderScrapePaceLines(pace, now = Date.now()) {
+  if (!pace || typeof pace !== 'object' || Array.isArray(pace)) return [];
+  return Object.values(pace)
+    .filter(entry => entry && typeof entry === 'object')
+    .map(entry => {
+      try {
+        return formatScrapePaceLine(entry, now);
+      } catch {
+        return ''; // fail-soft: a bad record must not break the report
+      }
+    })
+    .filter(Boolean)
+    .map(line => `  - ${line}`);
+}
+
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
 // builds. Keep the old decision helper only to explain those historical rejected
 // samples; current provider-trust runs do not execute a local title gate.
@@ -96,6 +118,39 @@ export function buildJobsConfigSnapshot() {
  * happens to use the same words, so a report that omits them can only be
  * trusted, never verified.
  */
+// How a check ended: how long it stayed open and what input reached the page
+// meanwhile (challengeInputProbe.js). Counts only; a click inside the check's
+// own frame is visible only as focus moving into it.
+function formatChallengeInputEvidence(e) {
+  if (!e || e.phase !== 'challenge-resolved') return null;
+  const c = e.inputCounts && typeof e.inputCounts === 'object' ? e.inputCounts : null;
+  const input = typeof e.input === 'string' ? e.input : 'unknown';
+  const counts = c ? ` (clicks ${Number(c.clicks) || 0}, keys ${Number(c.keys) || 0}, into-check focus ${Number(c.frameFocus) || 0}, mouse moves ${Number(c.moves) || 0})` : '';
+  return `${e.clearedAfter ? `cleared=${e.clearedAfter} ` : ''}input=${input}${counts}`;
+}
+
+// What covered the page when the description card walk stopped making progress
+// (panelWalkInterrupt.js). The dialog's own text is page content, so — exactly
+// like `title=captured` above — the report publishes only its presence; the
+// producer already bounded the recorded text to 120 chars. The centre element
+// and frame count are structural and are printed as read.
+export function formatPanelWalkInterruptEvidence(e) {
+  if (!e || e.phase !== 'panel-walk-interrupt') return null;
+  const verdict = ['check', 'popup', 'covered', 'none', 'unknown'].includes(e.verdict) ? e.verdict : 'unknown';
+  const failure = e.failure === 'click' ? 'click' : 'panel-timeout';
+  const stage = e.stage === 'stop' ? 'stop' : 'first';
+  const index = Math.max(0, Math.trunc(Number(e.itemIndex) || 0));
+  const total = Math.max(0, Math.trunc(Number(e.itemTotal) || 0));
+  const bits = [`verdict=${verdict}`, `failure=${failure}`];
+  if (index > 0) bits.push(`card=${index}${total > 0 ? `/${total}` : ''}`);
+  bits.push(`stage=${stage}`);
+  bits.push(`dialog="${closeReportDiagnostic(e.dialogText, 'none')}"`);
+  bits.push(`cover=${projectReportDiagnostic(e.cover, 'none', 80)}`);
+  const frames = Number(e.checkFrames);
+  if (Number.isFinite(frames)) bits.push(`checkFrames=${Math.max(0, Math.trunc(frames))}`);
+  return bits.join(' ');
+}
+
 export function formatChallengeTextEvidence(entry) {
   if (!entry) return '';
   const chars = Number(entry.bodyTextLength);
@@ -5568,6 +5623,7 @@ const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
   'description-recovery-snapshot-stale',
   'description-recovery-snapshot-unavailable',
   'description-unsupported-url',
+  'google-apply-links-rate-limited',
   'resolve-description-incomplete',
   'resolve-detail-enrichment-failed',
   'cloudflare-hard-block',
@@ -7519,6 +7575,18 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       lines.push('- Current: (no active scrape)');
     }
 
+    // ── Scrape pace (per source) ─────────────────────────────────────────────
+    // How many list/detail pages were opened, how many verification checks
+    // appeared (list vs detail), how many detail pages opened between checks, and
+    // where the wall time went — so a 15-minute 16-detail-page run is diagnosable
+    // from this report alone instead of by counting log lines by hand.
+    // Older processes have no `pace` field at all: render nothing extra.
+    const scrapePaceLines = renderScrapePaceLines(browserScrape?.pace);
+    if (scrapePaceLines.length > 0) {
+      lines.push('- Scrape pace (per source, this process):');
+      lines.push(...scrapePaceLines);
+    }
+
     // ── Liveness ─────────────────────────────────────────────────────────────
     // `active` above only advances on telemetry PHASES, and the per-card
     // description walk that dominates a Glassdoor/Google run emits a phase only
@@ -7584,13 +7652,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // phase ring for reports generated by an already-running older process.
     const fieldAnomalies = Array.isArray(browserScrape.fieldAnomalies)
       ? browserScrape.fieldAnomalies
-      : allScrapeEvents.filter(e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared'].includes(e?.phase));
+      : allScrapeEvents.filter(e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'panel-walk-interrupt'].includes(e?.phase));
     // getManualScraperTelemetry deliberately returns defensive entry copies, so
     // object identity cannot distinguish the dedicated anomaly ring from the
     // ordinary event ring here. Classify by the retained phase contract instead
     // of rendering every detail anomaly twice (once bare in Recent phases and
     // once with its full diagnostic evidence below).
-    const isDetailAnomaly = e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared'].includes(e?.phase);
+    const isDetailAnomaly = e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'panel-walk-interrupt'].includes(e?.phase);
     // Run-origin rows (source-start / query-start / the location resolution and
     // host-redirect trail) are emitted at most once per source, so on a long run
     // the 30-slot recency ring evicts them behind per-job chatter — taking the
@@ -7648,6 +7716,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           isChromephase && e.stderr         ? `stderr=${closeReportDiagnostic(e.stderr, 'recorded')}`    : null,
           isChallengePhase && e.reason      ? `reason=${closeReportDiagnostic(e.reason, 'recorded')}`    : null,
           isChallengePhase && e.repeatCount ? `repeat=${e.repeatCount}`                           : null,
+          isChallengePhase ? formatChallengeInputEvidence(e) : null,
           isChallengePhase && e.title       ? 'title=captured' : null,
           isChallengePhase && e.pageState   ? 'signals=captured' : null,
           isChallengePhase && formatChallengeTextEvidence(e) ? `text=${formatChallengeTextEvidence(e)}` : null,
@@ -7673,8 +7742,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           e.key ? `key=${e.key}` : null,
           e.reason ? `reason=${closeReportDiagnostic(e.reason, 'recorded')}` : null,
           e.repeatCount ? `repeat=${e.repeatCount}` : null,
+          formatChallengeInputEvidence(e),
           e.hardBlock ? 'hardBlock=yes' : null,
           e.title ? 'title=captured' : null,
+          formatPanelWalkInterruptEvidence(e),
           e.pageState ? 'signals=captured' : null,
           formatChallengeTextEvidence(e) ? `text=${formatChallengeTextEvidence(e)}` : null,
           e.status != null ? `HTTP=${e.status}` : null,
@@ -7683,7 +7754,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           // no endpoint. Page/item position is what shows how far into the walk
           // the throttle landed.
           e.pageNum != null ? `page=${e.pageNum}` : null,
-          e.itemIndex != null ? `card=${e.itemIndex}${e.itemTotal != null ? `/${e.itemTotal}` : ''}` : null,
+          // A panel-walk interrupt prints its own card/stage (see
+          // formatPanelWalkInterruptEvidence) in the order a reader needs them,
+          // so the generic field would only repeat it.
+          e.itemIndex != null && e.phase !== 'panel-walk-interrupt' ? `card=${e.itemIndex}${e.itemTotal != null ? `/${e.itemTotal}` : ''}` : null,
           e.waitedMs != null ? `waited=${Math.round(e.waitedMs / 1000)}s` : null,
           e.attempt != null ? `attempt=${e.attempt}${e.maxAttempts != null ? `/${e.maxAttempts}` : ''}` : null,
           e.expanded != null ? `expanded=${e.expanded}${e.attempted != null ? `/${e.attempted}` : ''}` : null,

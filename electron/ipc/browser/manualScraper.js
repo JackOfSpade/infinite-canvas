@@ -16,6 +16,8 @@
  *   Array<{ id, sourceId, success, data, pagesWalked, stopReason, warning }>
  */
 
+import { challengeInputVerdict, createChallengeInputProbe, describeChallengeInput } from './challengeInputProbe.js';
+import { classifyPanelWalkInterrupt, describePanelWalkInterrupt, readPanelWalkCover } from './panelWalkInterrupt.js';
 import {
   closeOwnedBrowserProcess, closeStealthBrowser, getUserDataDir, findChromePath, launchWithProfileLockRetry,
 } from '../stealthBrowser.js';
@@ -28,6 +30,7 @@ import { humanCooldown, humanDelay } from '../../utils/humanDelay.js';
 import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
+import { HARD_BLOCK_RETRY_WAIT_MS } from '../../../src/utils/jobSourceWarningPolicy.js';
 import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, resolvePageCeiling } from '../../../src/utils/jobCollectionLimits.js';
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../src/utils/textEncoding.js';
@@ -263,7 +266,229 @@ const manualScraperTelemetry = {
   // the singleton-derived "scrape browser" line in a bug report reads "not
   // running" while this one is very much running on the same profile.
   browser: null,
+  // Per-source "scrape pace": WHERE a slow run's wall time went, keyed by
+  // sourceId. A real ZipRecruiter run (2026-11-10) took 15 minutes to open 16
+  // detail pages because Cloudflare served a verification check on 9 of them, and
+  // the only way to see that was counting individual log lines by hand. Counts
+  // and durations only — no URL, no job title. Reset per source at source start.
+  pace: {},
 };
+
+// ── Per-source scrape pace ────────────────────────────────────────────────────
+// Diagnostics ONLY. Each record answers: how many list pages and detail pages
+// were opened, how many verification checks appeared (list vs detail), how many
+// detail pages opened between consecutive checks, and where wall time went.
+// Every writer below funnels through updateScrapePace and swallows its own
+// errors: a telemetry fault must never unwind a scrape's await chain.
+const PACE_BETWEEN_CHALLENGES_LIMIT = 20;
+const PACE_DETAIL_PAGE_LOG_EVERY = 10;
+
+function paceRecordFor(sourceId, meta = {}) {
+  const key = String(sourceId || 'unknown');
+  let pace = manualScraperTelemetry.pace[key];
+  if (!pace) {
+    pace = {
+      sourceId: key,
+      srcName: null,
+      startedAt: Date.now(),
+      queryIndex: 1,
+      queryTotal: null,
+      listPages: 0,
+      detailOpened: 0,
+      challenges: { list: 0, detail: 0 },
+      challengeWaitMs: 0,
+      spacingWaitMs: 0,
+      detailLoadMs: 0,
+      // Detail pages opened since the LAST check started — one value per check
+      // (only the last PACE_BETWEEN_CHALLENGES_LIMIT are kept).
+      opensBetweenChallenges: [],
+      opensSinceLastChallenge: 0,
+      lastChallengeAt: null,
+      // Non-null while a check is on screen but unsolved: its elapsed time is
+      // reported as ongoing rather than silently dropped from the totals.
+      openChallengeSince: null,
+      // How each finished check ended, by what input reached the page meanwhile
+      // (challengeInputProbe.js): 'input' | 'movement' | 'none' | 'unknown'.
+      checkInput: { input: 0, movement: 0, none: 0, unknown: 0 },
+      // What was on screen when a card-walk failure streak STARTED
+      // (panelWalkInterrupt.js). Only the first failure of a streak is counted,
+      // so three failing cards behind one check is one interruption, not three.
+      // 'none'/'unknown' are counted but never printed.
+      panelInterrupts: { check: 0, popup: 0, covered: 0, none: 0, unknown: 0 },
+    };
+    manualScraperTelemetry.pace[key] = pace;
+  }
+  // Identity is refreshed by whichever hook knows it; the record itself is
+  // normally created by resetScrapePace at source start.
+  if (meta.srcName) pace.srcName = meta.srcName;
+  if (Number(meta.queryIndex) > 0) pace.queryIndex = Number(meta.queryIndex);
+  if (Number(meta.queryTotal) > 0) pace.queryTotal = Number(meta.queryTotal);
+  return pace;
+}
+
+function updateScrapePace(sourceId, meta = {}, mutate = () => {}) {
+  try {
+    const pace = paceRecordFor(sourceId, meta);
+    mutate(pace);
+    return pace;
+  } catch {
+    return null; // fail-soft by contract
+  }
+}
+
+// Wall time spent on verification checks, INCLUDING the one on screen right now:
+// an open check is ongoing, not completed — a report written mid-challenge must
+// still show where the time went.
+function formatWaitDuration(ms) {
+  const sec = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+  return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
+}
+
+function paceChallengeWaitMs(pace, now = Date.now()) {
+  const completed = Math.max(0, Number(pace?.challengeWaitMs) || 0);
+  const open = pace?.openChallengeSince ? Math.max(0, Number(now) - Number(pace.openChallengeSince)) : 0;
+  return completed + open;
+}
+
+function logScrapePaceSummary(pace) {
+  try {
+    const line = formatScrapePaceLine(pace);
+    if (line) logger.info(`[BrowserScraper] ${line}`);
+  } catch {
+    // fail-soft: logging must never break a scrape
+  }
+}
+
+// Reset (create) a source's record — called at source start so a re-dispatched
+// source cannot inherit an earlier attempt's counts.
+export function resetScrapePace(sourceId, meta = {}) {
+  try {
+    delete manualScraperTelemetry.pace[String(sourceId || 'unknown')];
+  } catch {
+    // ignore — the record is rebuilt below regardless
+  }
+  return updateScrapePace(sourceId, meta);
+}
+
+export function notePaceListPage(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => { pace.listPages += 1; });
+}
+
+export function notePaceDetailOpened(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.detailOpened += 1;
+    pace.opensSinceLastChallenge += 1;
+    pace.detailLoadMs += Math.max(0, Number(meta.loadMs) || 0);
+    if (pace.detailOpened % PACE_DETAIL_PAGE_LOG_EVERY === 0) logScrapePaceSummary(pace);
+  });
+}
+
+export function notePaceSpacingWait(sourceId, meta = {}) {
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.spacingWaitMs += Math.max(0, Number(meta.waitMs) || 0);
+  });
+}
+
+// `challengeOnly` is how waitForReady was entered: true means a DETAIL page is on
+// screen (detail-page gate), false means list navigation/extraction.
+export function notePaceChallengeStart(sourceId, meta = {}) {
+  const at = Number(meta.now) || Date.now();
+  return updateScrapePace(sourceId, meta, pace => {
+    const context = meta.challengeOnly ? 'detail' : 'list';
+    pace.challenges[context] = (Number(pace.challenges[context]) || 0) + 1;
+    pace.opensBetweenChallenges.push(pace.opensSinceLastChallenge);
+    if (pace.opensBetweenChallenges.length > PACE_BETWEEN_CHALLENGES_LIMIT) {
+      pace.opensBetweenChallenges.splice(0, pace.opensBetweenChallenges.length - PACE_BETWEEN_CHALLENGES_LIMIT);
+    }
+    pace.opensSinceLastChallenge = 0;
+    pace.lastChallengeAt = at;
+    pace.openChallengeSince = at;
+  });
+}
+
+export function notePaceChallengeEnd(sourceId, meta = {}) {
+  const at = Number(meta.now) || Date.now();
+  return updateScrapePace(sourceId, meta, pace => {
+    if (pace.openChallengeSince) {
+      pace.challengeWaitMs += Math.max(0, at - Number(pace.openChallengeSince));
+      pace.openChallengeSince = null;
+    }
+    if (meta.input) {
+      const kind = ['input', 'movement', 'none'].includes(meta.input) ? meta.input : 'unknown';
+      pace.checkInput ||= { input: 0, movement: 0, none: 0, unknown: 0 };
+      pace.checkInput[kind] = (Number(pace.checkInput[kind]) || 0) + 1;
+    }
+    logScrapePaceSummary(pace);
+  });
+}
+
+// Diagnostics-only companion to the card walk: what was on screen when a click
+// or panel-read failure streak STARTED. Counted at stage 'first' only, so one
+// covered page cannot turn into one count per failing card.
+export function notePacePanelInterrupt(sourceId, meta = {}) {
+  const verdict = ['check', 'popup', 'covered', 'none', 'unknown'].includes(meta.verdict) ? meta.verdict : 'unknown';
+  return updateScrapePace(sourceId, meta, pace => {
+    pace.panelInterrupts ||= { check: 0, popup: 0, covered: 0, none: 0, unknown: 0 };
+    pace.panelInterrupts[verdict] = (Number(pace.panelInterrupts[verdict]) || 0) + 1;
+  });
+}
+
+// One-line summary shared by the log stream and the bug report, e.g.
+// "ZipRecruiter pace: query 1/11 · 16 detail pages · 2 list pages · 9 checks
+//  (9 detail, 0 list) · detail pages between checks 1,1,2,1,4 · waiting on you
+//  7m12s · spacing 4m03s · page loads 1m10s · 54s per detail page"
+export function formatScrapePaceLine(pace, now = Date.now()) {
+  if (!pace || typeof pace !== 'object') return '';
+  const at = Number(now) || Date.now();
+  const duration = (ms) => {
+    const sec = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
+    return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
+  };
+  const detailChecks = Math.max(0, Number(pace.challenges?.detail) || 0);
+  const listChecks = Math.max(0, Number(pace.challenges?.list) || 0);
+  const checks = detailChecks + listChecks;
+  const detailOpened = Math.max(0, Number(pace.detailOpened) || 0);
+  const listPages = Math.max(0, Number(pace.listPages) || 0);
+  const between = Array.isArray(pace.opensBetweenChallenges)
+    ? pace.opensBetweenChallenges.map(n => String(Number(n) || 0)).join(',')
+    : '';
+  const waitMs = paceChallengeWaitMs(pace, at);
+  const spacingMs = Math.max(0, Number(pace.spacingWaitMs) || 0);
+  const loadMs = Math.max(0, Number(pace.detailLoadMs) || 0);
+  const perDetailMs = detailOpened > 0 ? (waitMs + spacingMs + loadMs) / detailOpened : 0;
+  const queryTotal = Number(pace.queryTotal) || 0;
+  const bits = [
+    `query ${Number(pace.queryIndex) || 1}${queryTotal > 0 ? `/${queryTotal}` : ''}`,
+    `${detailOpened} detail page${detailOpened === 1 ? '' : 's'}`,
+    `${listPages} list page${listPages === 1 ? '' : 's'}`,
+    `${checks} check${checks === 1 ? '' : 's'} (${detailChecks} detail, ${listChecks} list)`,
+    `detail pages between checks ${between || 'n/a'}`,
+    `waiting on you ${duration(waitMs)}${pace.openChallengeSince ? ' (check still open)' : ''}`,
+    ...(() => {
+      const input = pace.checkInput || {};
+      const counts = ['input', 'movement', 'none', 'unknown'].map(kind => Math.max(0, Number(input[kind]) || 0));
+      const finished = counts.reduce((a, b) => a + b, 0);
+      if (!finished) return [];
+      const [touched, moved, untouched, unknown] = counts;
+      const parts = [`${touched} with clicks or keys`, `${moved + untouched} without`];
+      if (unknown) parts.push(`${unknown} unknown`);
+      return [`checks cleared: ${parts.join(', ')}`];
+    })(),
+    ...(() => {
+      const interrupts = pace.panelInterrupts || {};
+      const [check, popup, covered] = ['check', 'popup', 'covered'].map(kind => Math.max(0, Number(interrupts[kind]) || 0));
+      const parts = [];
+      if (check) parts.push(`${check} check(s)`);
+      if (popup) parts.push(`${popup} popup(s)`);
+      if (covered) parts.push(`${covered} covered`);
+      return parts.length ? [`panel walk interruptions: ${parts.join(', ')}`] : [];
+    })(),
+    `spacing ${duration(spacingMs)}`,
+    `page loads ${duration(loadMs)}`,
+    `${duration(perDetailMs)} per detail page`,
+  ];
+  return `${pace.srcName || pace.sourceId || 'source'} pace: ${bits.join(' · ')}`;
+}
 
 // Renderer sink for mid-walk progress, installed per run by scrapeManualSources.
 // The module never imports Electron or reaches for a webContents itself — the
@@ -437,7 +662,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // the single `detail-panel-rate-limit` event that explained the whole run.
   // The rate-limit / panel-HTTP phases are the CAUSE rows — keep them in the
   // longer-lived anomaly ring so a report written an hour later still has them.
-  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed'].includes(entry.phase)) {
+  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'panel-walk-interrupt'].includes(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -673,6 +898,18 @@ export function getManualScraperTelemetry() {
     beat: manualScraperTelemetry.beat ? { ...manualScraperTelemetry.beat } : null,
     inFlight: manualScraperTelemetry.inFlight ? { ...manualScraperTelemetry.inFlight } : null,
     browser: manualScraperTelemetry.browser ? { ...manualScraperTelemetry.browser } : null,
+    // Defensive copies here too: the report and any caller must not be able to
+    // mutate the live rings the next pace hook writes into.
+    pace: Object.fromEntries(Object.entries(manualScraperTelemetry.pace || {}).map(([key, pace]) => [
+      key,
+      {
+        ...pace,
+        challenges: { ...(pace?.challenges || {}) },
+        opensBetweenChallenges: Array.isArray(pace?.opensBetweenChallenges)
+          ? [...pace.opensBetweenChallenges]
+          : [],
+      },
+    ])),
   };
 }
 
@@ -1110,6 +1347,10 @@ const GOOGLE_APPLY_REDIRECT_GAP_MS = 150;
  */
 export function createGoogleApplyRedirectResolver(openPage) {
   let tab = null; let rateLimited = false; let pending = null;
+  // When (and how often) Google stopped the reader: a bug report has to show when
+  // it started and why the later rows lost their employer link.
+  let rateLimitedAt = 0; let followed = 0; let rateLimitedCause = '';
+  const markRateLimited = cause => { rateLimited = true; if (!rateLimitedAt) rateLimitedAt = Date.now(); if (!rateLimitedCause) rateLimitedCause = cause; };
   const prepare = async () => {
     if (tab) return tab;
     const page = await openPage();
@@ -1120,16 +1361,21 @@ export function createGoogleApplyRedirectResolver(openPage) {
       if (!request.isNavigationRequest() || request.frame() !== tab.mainFrame()) { void request.abort().catch(() => {}); return; }
       let host = ''; let path = '';
       try { ({ hostname: host, pathname: path } = new URL(request.url())); } catch { /* an unreadable hop ends the walk below */ }
-      if (path.startsWith('/sorry')) rateLimited = true;
+      if (path.startsWith('/sorry')) markRateLimited('sorry-hop');
       if (host && !path.startsWith('/sorry') && isGoogleHost(host)) { void request.continue().catch(() => {}); return; }
       if (pending && host && !path.startsWith('/sorry')) pending.destination = request.url();
       void request.abort().catch(() => {});
     });
-    tab.on('response', response => { if (response.status() === 429) rateLimited = true; });
+    tab.on('response', response => { if (response.status() === 429) markRateLimited('http-429'); });
     return tab;
   };
   return {
     get rateLimited() { return rateLimited; },
+    get rateLimitedAt() { return rateLimitedAt; },
+    /** Why the reader stopped ('sorry-hop' or 'http-429'), for the report trail. */
+    get rateLimitedCause() { return rateLimitedCause; },
+    /** Redirect navigations attempted so far, the "read" half of the capture tally. */
+    get followed() { return followed; },
     /** Same candidates, each redirect replaced by where it goes. One that can't be followed stays as it was, so it is rejected as before. */
     async resolve(candidates) {
       const result = [];
@@ -1138,6 +1384,7 @@ export function createGoogleApplyRedirectResolver(openPage) {
         try {
           const page = await prepare();
           pending = { destination: '' };
+          followed += 1;
           await page.goto(candidate.href, { waitUntil: 'domcontentloaded', timeout: GOOGLE_APPLY_REDIRECT_TIMEOUT_MS }).catch(() => {});
           result.push(pending.destination ? { ...candidate, href: pending.destination } : candidate);
         } catch { result.push(candidate); } finally { pending = null; }
@@ -1147,6 +1394,98 @@ export function createGoogleApplyRedirectResolver(openPage) {
     },
     async close() { const page = tab; tab = null; await page?.close().catch(() => {}); },
   };
+}
+
+export const GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE = 'google-apply-links-rate-limited';
+/** At most this many still-unread redirects ride on one row into the checkpoint. */
+export const GOOGLE_PENDING_APPLY_REDIRECT_LIMIT = 4;
+const GOOGLE_PENDING_APPLY_LABEL_MAX = 120;
+
+const googlePendingApplyLabel = value => String(value ?? '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, GOOGLE_PENDING_APPLY_LABEL_MAX);
+
+/**
+ * The still-unfollowed `/goto` candidates of ONE Google detail panel, kept on the
+ * row so Retry can re-read exactly those links instead of re-scraping the source.
+ * Only real redirects qualify: a candidate that already resolved is job.url, and
+ * any other Google route is an internal address, never a destination.
+ */
+export function buildPendingGoogleApplyRedirects(candidates) {
+  const pending = [];
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const href = String(candidate?.href || '').trim();
+    if (!isGoogleApplyRedirect(href)) continue;
+    pending.push({ label: googlePendingApplyLabel(candidate?.label), href });
+    if (pending.length === GOOGLE_PENDING_APPLY_REDIRECT_LIMIT) break;
+  }
+  return pending;
+}
+
+/**
+ * The one source warning a stopped apply-link reader produces. `severity: 'block'`
+ * holds scoring exactly like a hard block, and `retryAfterAt` starts the same wait
+ * the card counts down before it offers Retry. Pure, so the wording, the counts and
+ * the wait are testable without a browser.
+ */
+export function googleApplyLinksRateLimitedWarning({
+  url = '', readLinks = 0, capturedLinks = 0, pendingRows = 0, now = Date.now(),
+} = {}) {
+  const read = Number.isFinite(readLinks) ? readLinks : 0;
+  const captured = Number.isFinite(capturedLinks) ? capturedLinks : 0;
+  const rows = Number.isFinite(pendingRows) ? pendingRows : 0;
+  return {
+    code: GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE,
+    severity: 'block',
+    retryAfterAt: now + HARD_BLOCK_RETRY_WAIT_MS,
+    url: url || null,
+    shortLabel: 'Links paused, wait then retry',
+    evidence: `Google stopped the apply-link reader after ${read} apply link${read === 1 ? '' : 's'} ${read === 1 ? 'was' : 'were'} read (${captured} employer link${captured === 1 ? '' : 's'} captured); ${rows} listing${rows === 1 ? '' : 's'} ${rows === 1 ? 'has' : 'have'} no employer link yet.`,
+    suggestion: 'Retry re-reads only those links after the wait. Skip keeps them with their Google links.',
+  };
+}
+
+/**
+ * Follow the still-unread Google apply redirects parked on already-saved rows,
+ * WITHOUT re-scraping any source. Uses the same shared-profile browser setup the
+ * scrape pass uses (the caller holds the shared-profile lane), and reports
+ * whether Google throttled the reader again so the caller can restart the wait.
+ */
+export async function followGoogleApplyRedirects(pending, { signal = null } = {}) {
+  const candidates = [];
+  const seen = new Set();
+  for (const entry of Array.isArray(pending) ? pending : []) {
+    if (signal?.aborted) break;
+    const href = String(entry?.href || '').trim();
+    if (!isGoogleApplyRedirect(href) || seen.has(href)) continue;
+    seen.add(href);
+    candidates.push({ label: String(entry?.label || ''), href });
+  }
+  const result = { links: [], rateLimited: false, rateLimitedAt: null, read: 0 };
+  if (candidates.length === 0) return result;
+  const userDataDir = await getUserDataDir();
+  const executablePath = process.env.CHROME_PATH || await findChromePath();
+  const sandboxArgs = process.platform === 'darwin' ? [] : ['--no-sandbox', '--disable-setuid-sandbox'];
+  const platform = await launchScrapePlatformBrowser({ userDataDir, executablePath, sandboxArgs, onCrash: () => {} });
+  const resolver = createGoogleApplyRedirectResolver(() => createBackgroundScrapePage(platform.browser));
+  try {
+    const resolved = await resolver.resolve(candidates);
+    // Paired positionally: the resolver answers in the order it was asked, so an
+    // unfollowed redirect comes back with its own /goto href and stays unread.
+    result.links = resolved.map((link, index) => ({
+      from: candidates[index].href,
+      to: String(link?.href || candidates[index].href),
+      label: String(link?.label || candidates[index].label || ''),
+    }));
+  } finally {
+    result.rateLimited = resolver.rateLimited;
+    result.rateLimitedAt = resolver.rateLimitedAt || null;
+    result.read = resolver.followed;
+    await resolver.close().catch(() => {});
+    await platform.teardown().catch(() => {});
+  }
+  return result;
 }
 
 async function waitForGoogleApplyDestination(page, preferredSource, timeoutMs = 1_500) {
@@ -2626,11 +2965,13 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
     : null;
   let terminalTransitionCount  = 0;
   let recordedTextSuppression  = false;
+  let inputProbe               = null; // mouse/key input seen while a check is open (diagnostics only)
 
   while (true) {
     if (signal?.aborted) return 'abort';
 
     const signals     = await getChallengeSignals(page);
+    if (inputProbe) await inputProbe.poll();
     const isChallenge = !!signals?.isChallenge;
     if (signals?.suppressedReason && !recordedTextSuppression) {
       // Say what was seen and what was done with it. Without this the report
@@ -2783,6 +3124,16 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
       if (!inChallenge) {
         inChallenge = true;
         challengeStartedAt = Date.now();
+        inputProbe = createChallengeInputProbe(page);
+        await inputProbe.poll();
+        // Pace telemetry (diagnostics only): counts the check, files how many
+        // detail pages opened since the previous one, and opens the ongoing
+        // window. challengeOnly is the detail-page gate vs list navigation.
+        notePaceChallengeStart(sourceId, {
+          srcName: overlayBase.srcName,
+          challengeOnly,
+          now: challengeStartedAt,
+        });
         lastChallengeHeartbeat = Date.now();
         lastChallengeBeatAt = Date.now();
         challengeHeartbeats = 0;
@@ -2925,7 +3276,16 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         continue;
       }
       await updateOverlay(page, { ...overlayBase, status: 'Extracting jobs…' });
-      logger.info(`[BrowserScraper] ${overlayBase.srcName}: challenge resolved — resuming`);
+      // Pace telemetry (diagnostics only): closes the ongoing check window and
+      // emits the one-line summary. Fail-soft.
+      const inputSummary = inputProbe?.summary() || null;
+      const clearedAfter = formatWaitDuration(Date.now() - challengeStartedAt);
+      recordManualScraperTelemetry({
+        phase: 'challenge-resolved', srcName: overlayBase.srcName,
+        clearedAfter, input: challengeInputVerdict(inputSummary), inputCounts: inputSummary,
+      });
+      notePaceChallengeEnd(sourceId, { srcName: overlayBase.srcName, input: challengeInputVerdict(inputSummary) });
+      logger.info(`[BrowserScraper] ${overlayBase.srcName}: challenge resolved after ${clearedAfter} — resuming; ${describeChallengeInput(inputSummary)}`);
       // 'recovered' signals that a home-landing recovery fired — caller is on the
       // base search URL (page 1), not the paginated URL that triggered the challenge.
       // Pagination callers should break rather than re-navigating to the same page.
@@ -3199,6 +3559,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         const detailGapMs = sourceId === 'ziprecruiter'
           ? zipRecruiterDetailGapMs(solvedDetailChallenges)
           : 0;
+        // Pace telemetry (diagnostics only): the deliberate spacing wait is one of
+        // the three places a slow run's wall time hides. This is a timestamp only;
+        // the wait below is untouched.
+        const spacingWaitStartedAt = Date.now();
         if (detailGapMs > 0 && lastDetailNavigationAt) {
           const waitMs = detailGapMs - (Date.now() - lastDetailNavigationAt);
           if (waitMs > 0 && !(await (runtime?.delay || waitForAbortableDelay)(waitMs, signal))) break;
@@ -3208,6 +3572,13 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           ...overlayBase,
           count:  baseCount + i + 1,
           status: `Fetching descriptions… ${i + 1}/${enhanced.length}`,
+        });
+        // Measured from the timestamp taken before the wait; recorded here (after
+        // the overlay paint) so no telemetry call sits between the wait and the
+        // navigation. Fail-soft, and an aborted wait breaks out above uncounted.
+        notePaceSpacingWait(sourceId, {
+          srcName: overlayBase.srcName,
+          waitMs: Date.now() - spacingWaitStartedAt,
         });
 
         recordManualScraperTelemetry({
@@ -3227,12 +3598,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           const previousUrl = fetchPage.url();
           let navigationResponse = null;
           let navigationError = null;
+          const detailOpenStartedAt = Date.now();
           try {
             if (detailGapMs > 0) lastDetailNavigationAt = Date.now();
             navigationResponse = await fetchPage.goto(viewUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
           } catch (error) {
             navigationError = error;
           }
+          // Pace telemetry (diagnostics only): counts the detail page opened and
+          // adds its load time — a failed goto still consumed that time, so it is
+          // recorded here rather than only on success. Fail-soft.
+          notePaceDetailOpened(sourceId, {
+            srcName: overlayBase.srcName,
+            queryIndex: overlayBase?.queryIndex,
+            queryTotal: overlayBase?.queryTotal,
+            loadMs: Date.now() - detailOpenStartedAt,
+          });
           if (keepDetailForeground) {
             await injectOverlay(fetchPage).catch(() => {});
             await updateOverlay(fetchPage, {
@@ -3652,12 +4033,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 descWarning ||= {
                   code: hardBlock ? 'description-detail-hard-block' : 'description-detail-challenge',
                   severity: hardBlock ? 'block' : 'warn',
-                  ...(hardBlock ? { action: 'none', shortLabel: 'Wait, then rerun' } : {}),
+                  ...(hardBlock ? {
+                    action: 'none',
+                    shortLabel: 'Wait, then retry',
+                    // Instant retries re-open the same blocked pages and loop;
+                    // the card counts this wait down before offering Retry.
+                    retryAfterAt: Date.now() + HARD_BLOCK_RETRY_WAIT_MS,
+                    // The resolver re-opens a results page and re-walks this
+                    // source's detail pass from it, so the page whose details
+                    // were blocked is the retry target the IPC needs.
+                    url: safePageUrl(page) || job.url || null,
+                  } : {}),
                   evidence: hardBlock
                     ? `${overlayBase.srcName} returned a non-interactive human-verification hard block while fetching "${job.title || 'an untitled listing'}" (${challengeSignals?.title || 'untitled page'} at ${challengeSignals?.url || fetchPage.url()}). Detail requests stopped immediately.`
                     : `${overlayBase.srcName} re-served a verification challenge while fetching "${job.title || 'an untitled listing'}" after the detail tab was presented for solving. Relevant listing rows were retained, but this and later rows may lack full descriptions.`,
                   suggestion: hardBlock
-                    ? `Do not keep retrying ${overlayBase.srcName}: wait for the IP/session restriction to cool down, confirm the site opens normally in Chrome, then rerun the search.`
+                    ? `Retry unlocks after the wait. Let the IP/session restriction on ${overlayBase.srcName} cool down, confirm the site opens normally in Chrome, then choose Retry. Skip continues without these listings.`
                     : `Complete the site verification in normal Chrome, then rerun ${overlayBase.srcName} for full descriptions.`,
                 };
                 // A terminal/session-level stop must remain visible for every
@@ -3688,6 +4079,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             let descHeartbeats = 0;
             let descBeatAt = Date.now();
             const descChallengeStart = Date.now();
+            const descInputProbe = createChallengeInputProbe(page);
+            await descInputProbe.poll();
             // Wait INDEFINITELY for the user to solve. The only exits are abort
             // (Reset / hub close) or the user closing the window — never a timer.
             while (true) {
@@ -3696,6 +4089,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               if (await recoverFromChallengeHomeLanding(page, overlayBase, signal, viewUrl, baseCount + i + 1)) {
                 continue;
               }
+              await descInputProbe.poll();
               const stillChallenge = await detectChallengePage(page);
               if (!stillChallenge) { solved = true; break; }
               const descElapsedSec = Math.floor((Date.now() - descChallengeStart) / 1000);
@@ -3721,6 +4115,15 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
               }
             }
             if (!solved) break;
+            {
+              const descInput = descInputProbe.summary();
+              const descClearedAfter = formatWaitDuration(Date.now() - descChallengeStart);
+              recordManualScraperTelemetry({
+                phase: 'challenge-resolved', srcName: overlayBase.srcName, context: 'description-expansion',
+                clearedAfter: descClearedAfter, input: challengeInputVerdict(descInput), inputCounts: descInput,
+              });
+              logger.info(`[BrowserScraper] ${overlayBase.srcName}: description-expansion check cleared after ${descClearedAfter}; ${describeChallengeInput(descInput)}`);
+            }
             await updateOverlay(page, {
               ...overlayBase,
               count:  baseCount + i + 1,
@@ -4321,8 +4724,15 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let blockingModalsDismissed = 0;
   let blockingModalFailures = 0;
   const googleApplyRedirects = createGoogleApplyRedirectResolver(() => createBackgroundScrapePage(page.browser()));
+  // The search URL this reader was throttled on, captured before the detail walk
+  // leaves the results page: the rate-limit warning's Retry needs it.
+  const googleApplySourceUrl = sourceId === 'google' ? String(page.url() || '').slice(0, 240) : '';
   let googleApplyLinksCaptured = 0;
   let googleApplyLinksMissing = 0;
+  // Rows (and their still-unread redirects) left without an employer link because
+  // Google stopped the reader. Counted so the source report can say what is left.
+  let googleApplyLinkPendingRows = 0;
+  let googleApplyLinkPendingRedirects = 0;
   let googleApplyOptionsNonAggregator = 0;
   const googleApplyLinkMissSamples = [];
   const failureSamples = [];
@@ -4596,14 +5006,76 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     return result;
   };
 
-  const abortWithError = async (evidence, suggestion, code = 'stale-desc-selectors') => {
+  // Diagnostics only: when a failure streak starts (or stops a walk) look at
+  // what is actually on screen. A check or an unexpected popup leaves the panel
+  // unchanged, so a timeout streak alone cannot tell a covered page from a
+  // changed selector — and today's stop message blamed the selector either way.
+  // Nothing here waits, retries, clicks or dismisses: it reads and records.
+  let panelWalkInterrupts = 0;
+  const inspectPanelWalkInterrupt = async (stage, failure, itemIndex) => {
+    // The cap bounds report noise from many short streaks; the look at a stop
+    // always runs, because it is the one that names why the walk ended.
+    if (panelWalkInterrupts >= 6 && stage !== 'stop') return null;
+    panelWalkInterrupts++;
+    let signals = null;
+    let cover = null;
+    try {
+      signals = await getChallengeSignals(page);
+    } catch {
+      signals = null;
+    }
+    try {
+      cover = await page.evaluate(readPanelWalkCover);
+    } catch {
+      cover = null;
+    }
+    const verdict = classifyPanelWalkInterrupt({ signals, cover });
+    recordManualScraperTelemetry({
+      phase:           'panel-walk-interrupt',
+      sourceId,
+      srcName:         overlayBase.srcName,
+      itemIndex:       itemIndex + 1,
+      itemTotal:       enhanced.length,
+      failure,
+      stage,
+      verdict,
+      challengeReason: signals?.reason || null,
+      title:           signals?.title || null,
+      dialogText:      cover?.dialogText || null,
+      dialogLabel:     cover?.dialogLabel || null,
+      checkFrames:     cover?.checkFrames ?? null,
+      cover:           cover?.cover || null,
+      coverPosition:   cover?.position || null,
+    }, { updateActive: false });
+    if (stage === 'first') notePacePanelInterrupt(sourceId, { srcName: overlayBase.srcName, verdict });
+    const described = describePanelWalkInterrupt(verdict, { signals, cover });
+    logger.info(`[BrowserScraper] ${overlayBase.srcName} ${failure === 'click' ? 'card click' : 'panel read'} failure ${panelWalkInterrupts} for card ${itemIndex + 1}/${enhanced.length} (${stage === 'stop' ? 'stopping the walk' : 'first of a streak'}): ${described}`);
+    return { verdict, signals, cover, described };
+  };
+
+  // A 'check' or 'popup' verdict means the walk stopped because the page was
+  // covered, not because the selector broke. Say so in the stop message and the
+  // overlay; the error code (and therefore cards, warnings and resolvers) is
+  // unchanged.
+  const interruptStopText = (inspection, count, failure) => {
+    if (!inspection || (inspection.verdict !== 'check' && inspection.verdict !== 'popup')) return null;
+    return {
+      evidence: `${count} consecutive card ${failure === 'click' ? 'clicks' : 'panel reads'} failed for ${sourceId} while ${inspection.described}`,
+      suggestion: 'This is not a selector failure: solve the check or close the popup in the browser, then retry the source.',
+      status: inspection.verdict === 'check'
+        ? 'Verification check interrupted the card walk'
+        : 'A popup interrupted the card walk',
+    };
+  };
+
+  const abortWithError = async (evidence, suggestion, code = 'stale-desc-selectors', status = null) => {
     logger.warn(`[BrowserScraper] ${sourceId}: ${evidence}`);
     await updateOverlay(page, {
       ...overlayBase,
       count:  totalSoFar,
-      status: code === 'glassdoor-job-alert-modal'
+      status: status || (code === 'glassdoor-job-alert-modal'
         ? 'Glassdoor job-alert prompt blocked the card walk — retry after it is closed.'
-        : 'Desc selector broken — fix selector code and restart.',
+        : 'Desc selector broken — fix selector code and restart.'),
       error:  true,
     }).catch(() => {});
     await new Promise(r => setTimeout(r, humanDelay(3000)));
@@ -4781,6 +5253,14 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         }, { updateActive: false });
         consecutiveClickFails++;
         consecutivePanelTimeouts = 0;
+        // Look at the page when the streak starts and when it stops the walk —
+        // and nowhere else, so a covered page cannot flood the report.
+        const clickFailureStage = consecutiveClickFails === 1
+          ? 'first'
+          : consecutiveClickFails === DESC_STALE_THRESHOLD ? 'stop' : null;
+        const clickInspection = clickFailureStage
+          ? await inspectPanelWalkInterrupt(clickFailureStage, 'click', i)
+          : null;
         if (consecutiveClickFails >= DESC_STALE_THRESHOLD) {
           if (sourceId === 'google') {
             // Google retains extracted rows after its virtualized list has
@@ -4800,9 +5280,14 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             };
             break;
           }
+          const clickInterrupt = interruptStopText(clickInspection, consecutiveClickFails, 'click');
           await abortWithError(
-            `${consecutiveClickFails} consecutive card-click failures for ${sourceId} — card element not found in DOM (key="${key}")`,
-            `The card selector for ${sourceId} description expansion may have changed. Check DESC_CONFIGS['${sourceId}'] cardAttr/cardIdPrefix/cardHrefKey in electron/ipc/browser/manualScraper.js.`,
+            clickInterrupt?.evidence
+              ?? `${consecutiveClickFails} consecutive card-click failures for ${sourceId} — card element not found in DOM (key="${key}")`,
+            clickInterrupt?.suggestion
+              ?? `The card selector for ${sourceId} description expansion may have changed. Check DESC_CONFIGS['${sourceId}'] cardAttr/cardIdPrefix/cardHrefKey in electron/ipc/browser/manualScraper.js.`,
+            'stale-desc-selectors',
+            clickInterrupt?.status ?? null,
           );
           break;
         }
@@ -5055,7 +5540,19 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         const applyOptions = normalizeGoogleApplyOptions(applyCandidates);
         manualScraperTelemetry.googleApplyCapture = addGoogleApplyCapture(manualScraperTelemetry.googleApplyCapture, {
           ...applyResult, counts: applyResult.url ? null : await page.evaluate(readGoogleApplyCaptureCounts).catch(() => null) });
+        // Google stopped the reader, so this row keeps only its Google card URL.
+        // Park the redirects it never got to read on the row: Retry follows those
+        // exact links instead of re-scraping the source, and Skip simply keeps the
+        // Google links it has.
+        const pendingApplyRedirects = applyResult.url || !googleApplyRedirects.rateLimited
+          ? []
+          : buildPendingGoogleApplyRedirects(applyCandidates);
         enhanced[i] = { ...enhanced[i], ...(applyResult.url ? { url: applyResult.url } : {}), applyOptions, salaryProvenance: 'unknown' };
+        if (pendingApplyRedirects.length > 0) {
+          enhanced[i].pendingApplyRedirects = pendingApplyRedirects;
+          googleApplyLinkPendingRows++;
+          googleApplyLinkPendingRedirects += pendingApplyRedirects.length;
+        }
         if (applyOptions.some(option => !isAggregatorHost(new URL(option.href).hostname))) googleApplyOptionsNonAggregator++;
         if (applyResult.url) {
           googleApplyLinksCaptured++;
@@ -5106,15 +5603,29 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         panelTimeoutCount++;
         rememberCardWalkFailure(i + 1, key, selectionAssessment.selectionMismatch ? 'detail-title-mismatch' : 'panel-timeout');
         consecutivePanelTimeouts++;
+        // Look at the page when the streak starts and when it stops the walk.
+        // The inspection runs BEFORE the closeSelector click below so it sees
+        // what actually covers the panel, not the cleaned-up page.
+        const panelFailureStage = consecutivePanelTimeouts === 1
+          ? 'first'
+          : consecutivePanelTimeouts === DESC_STALE_THRESHOLD ? 'stop' : null;
+        const panelInspection = panelFailureStage
+          ? await inspectPanelWalkInterrupt(panelFailureStage, 'panel-timeout', i)
+          : null;
         if (consecutivePanelTimeouts >= DESC_STALE_THRESHOLD) {
           // Try to close any open modal before aborting so the page is left clean
           if (cfg.closeSelector) {
             await page.evaluate(sel => { document.querySelector(sel)?.click(); }, cfg.closeSelector).catch(() => {});
             await new Promise(r => setTimeout(r, humanDelay(400)));
           }
+          const panelInterrupt = interruptStopText(panelInspection, consecutivePanelTimeouts, 'panel-timeout');
           await abortWithError(
-            `${consecutivePanelTimeouts} consecutive panel-read timeouts for ${sourceId} — panel selector matched nothing or click no longer triggers panel update`,
-            `Check DESC_CONFIGS['${sourceId}'] panelSelector (and clickSelector) in electron/ipc/browser/manualScraper.js.`,
+            panelInterrupt?.evidence
+              ?? `${consecutivePanelTimeouts} consecutive panel-read timeouts for ${sourceId} — panel selector matched nothing or click no longer triggers panel update`,
+            panelInterrupt?.suggestion
+              ?? `Check DESC_CONFIGS['${sourceId}'] panelSelector (and clickSelector) in electron/ipc/browser/manualScraper.js.`,
+            'stale-desc-selectors',
+            panelInterrupt?.status ?? null,
           );
           break;
         }
@@ -5213,6 +5724,43 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     strategy: 'list-card-panel',
     panelSelector: cfg.panelSelector,
   }, { updateActive: false });
+
+  // Google's apply-link reader gives up for the rest of the run once it hits a
+  // /sorry hop or an HTTP 429. Every later row then keeps only its Google card
+  // URL and would reach scoring as "no employer link" with no stated reason, so
+  // the stop is always recorded (telemetry + log) and, when listings were
+  // actually left unresolved, surfaced as the same wait-then-retry choice as a
+  // hard block. Nothing retries on its own: the click does.
+  if (sourceId === 'google' && googleApplyRedirects.rateLimited) {
+    const rateLimitedAt = googleApplyRedirects.rateLimitedAt || null;
+    recordManualScraperTelemetry({
+      phase: 'google-apply-links-rate-limited',
+      sourceId,
+      srcName: overlayBase.srcName,
+      queryIndex: overlayBase.queryIndex ?? null,
+      queryTotal: overlayBase.queryTotal ?? null,
+      pageNum: overlayBase.pageNum ?? null,
+      read: googleApplyRedirects.followed,
+      captured: googleApplyLinksCaptured,
+      rowsLeft: googleApplyLinkPendingRows,
+      redirectsLeft: googleApplyLinkPendingRedirects,
+      rateLimitedAt,
+      reason: googleApplyRedirects.rateLimitedCause || null,
+      sinceRateLimitMs: rateLimitedAt ? Math.max(0, Date.now() - rateLimitedAt) : null,
+    }, { updateActive: false });
+    logger.warn(`[BrowserScraper] ${overlayBase.srcName} apply-link reader rate-limited (${googleApplyRedirects.rateLimitedCause || 'unknown cause'})${rateLimitedAt ? ` at ${new Date(rateLimitedAt).toISOString()}` : ''}: followed ${googleApplyRedirects.followed} redirect(s), captured ${googleApplyLinksCaptured} employer link(s), ${googleApplyLinkPendingRows} listing(s) left without one`);
+    // A same-batch block outranks this: a block may replace a non-block, never
+    // the reverse (see mergeDescriptionDetailMissWarning).
+    if (googleApplyLinkPendingRows > 0 && descWarning?.severity !== 'block') {
+      descWarning = googleApplyLinksRateLimitedWarning({
+        url: googleApplySourceUrl,
+        readLinks: googleApplyRedirects.followed,
+        capturedLinks: googleApplyLinksCaptured,
+        pendingRows: googleApplyLinkPendingRows,
+        now: rateLimitedAt || Date.now(),
+      });
+    }
+  }
 
   return {
     jobs: enhanced,
@@ -6631,6 +7179,9 @@ export function resetManualScraperTelemetry() {
   manualScraperTelemetry.active = null;
   manualScraperTelemetry.events = [];
   manualScraperTelemetry.origins = [];
+  // A new run must not report the previous run's pace. Per-source dispatch uses
+  // resetScrapePace (source start) and keeps sibling sources' records.
+  manualScraperTelemetry.pace = {};
   manualScraperTelemetry.paused = false;
   manualScraperTelemetry.beat = null;
   manualScraperTelemetry.inFlight = null;
@@ -6851,6 +7402,12 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         sourceTotal: displayTotal,
         queryTotal: sourceTasks.length,
       });
+      // Fresh pace record for THIS source run (diagnostics only, fail-soft).
+      resetScrapePace(sourceId, {
+        srcName,
+        queryIndex: 1,
+        queryTotal: sourceTasks.length,
+      });
 
       for (let qi = 0; qi < sourceTasks.length; qi++) {
         if (earlyExit || sourceSkipped || signal?.aborted) break;
@@ -7031,15 +7588,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         if (readyState === 'abort' || signal?.aborted) { earlyExit = true; break; }
         if (readyState === 'hard-block') {
           // Cloudflare "Additional Verification Required" — no interactive widget,
-          // nothing the user can solve. Skip all remaining queries for this source.
+          // nothing the user can solve. Skip all remaining queries for this
+          // source, but keep a real Retry on the card: the block clears with
+          // time, so stamp that wait instead of hiding the retry forever.
           if (!sourceSiteChangedWarning) {
             sourceSiteChangedWarning = {
-              code:       'cloudflare-hard-block',
-              severity:   'block',
-              action:     'none',
-              shortLabel: 'Wait, then rerun',
-              evidence:   `${srcName} was hard-blocked by Cloudflare ("Additional Verification Required") — no interactive challenge to solve.`,
-              suggestion: `Open ${srcName} in a normal Chrome tab and ensure you are fully logged in, then retry. If the block persists your IP/session may be flagged — try again in a few hours.`,
+              code:        'cloudflare-hard-block',
+              severity:    'block',
+              action:      'none',
+              shortLabel:  'Wait, then retry',
+              retryAfterAt: Date.now() + HARD_BLOCK_RETRY_WAIT_MS,
+              // The resolver IPC requires a URL; this query's search page is
+              // what a retry re-opens, and the per-source warning slot carries
+              // no other card URL.
+              url:         task.url,
+              evidence:    `${srcName} was hard-blocked by Cloudflare ("Additional Verification Required") — no interactive challenge to solve.`,
+              suggestion:  `Retry unlocks after the wait. Let the IP/session restriction cool down, confirm ${srcName} opens normally in a normal Chrome tab, then choose Retry. Skip continues without these listings.`,
             };
           }
           sourceSkipped = true;
@@ -7209,6 +7773,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             ...overlayBase,
             count:  allJobs.length,
             status: pageNum > 1 ? `Extracting page ${pageNum}…` : 'Extracting jobs…',
+          });
+          // Pace telemetry (diagnostics only): one list/extraction page walk.
+          notePaceListPage(sourceId, {
+            srcName, queryIndex: qi + 1, queryTotal: sourceTasks.length,
           });
           recordManualScraperTelemetry({
             phase: 'page-extract',
@@ -7481,9 +8049,15 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                         sourceSiteChangedWarning = retryReady === 'hard-block'
                           ? {
                             code: 'cloudflare-hard-block', severity: 'block',
-                            action: 'none', shortLabel: 'Wait, then rerun',
+                            action: 'none', shortLabel: 'Wait, then retry',
+                            // A hard block clears with time, not with another
+                            // instant open; the card counts this wait down.
+                            retryAfterAt: Date.now() + HARD_BLOCK_RETRY_WAIT_MS,
+                            // The resolver IPC needs a URL; the search page for
+                            // this query is what a retry re-opens.
+                            url: task.url || safePageUrl(page),
                             evidence: `${srcName} was hard-blocked by Cloudflare while reloading page ${pageNum} after a blank result page.`,
-                            suggestion: `Open ${srcName} in a normal Chrome tab and ensure you are fully logged in, then retry.`,
+                            suggestion: `Retry unlocks after the wait. Let the IP/session restriction cool down, confirm ${srcName} opens normally in a normal Chrome tab, then choose Retry. Skip continues without these listings.`,
                           }
                           : {
                             code: 'session-blocked', severity: 'block',
@@ -8117,9 +8691,15 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
                     code:       'cloudflare-hard-block',
                     severity:   'block',
                     action:     'none',
-                    shortLabel: 'Wait, then rerun',
+                    shortLabel: 'Wait, then retry',
+                    // Instant retries re-open the same blocked page; the card
+                    // counts this wait down and then offers a real Retry.
+                    retryAfterAt: Date.now() + HARD_BLOCK_RETRY_WAIT_MS,
+                    // The resolver IPC needs a URL to re-open; this query's
+                    // search page is the retry target.
+                    url:        task.url,
                     evidence:   `${srcName} was hard-blocked by Cloudflare on page ${pageNum} — no interactive challenge to solve.`,
-                    suggestion: `Open ${srcName} in a normal Chrome tab and ensure you are fully logged in, then retry.`,
+                    suggestion: `Retry unlocks after the wait. Let the IP/session restriction cool down, confirm ${srcName} opens normally in a normal Chrome tab, then choose Retry. Skip continues without these listings.`,
                   }
                 : {
                     code:       'session-blocked',
