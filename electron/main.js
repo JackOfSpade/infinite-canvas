@@ -36,6 +36,7 @@ import { createPracticeCallController, createReplayHandler } from './practiceCal
 import { getInterviewPracticeRegistry } from './ipc/interviewPracticeRegistry.js';
 import { createInterviewClaudeTransport } from './ipc/interviewClaudeTransport.js';
 import { configureAiRecording } from './ipc/aiReplaySamples.js';
+import { configureModelCalibration, registerModelCalibrationHandler } from './ipc/aiModelCalibration.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
 import { getLocalApplicationHandoff, registerLocalAiApplicationHandlers, submitLocalApplicationHandoff, stopLocalApplicationJob, subscribeLocalApplicationDiscards } from './ipc/localAiApplication.js';
 import { recheckClaudeUsageAfterWake, reportClaudeUsageLimit, waitForClaudeUsage } from './ipc/claudePause.js';
@@ -1489,6 +1490,9 @@ if (!gotTheLock) {
     registerNonApiAiHandlers();
     // Every Claude call is recorded for offline re-measurement on a future model.
     configureAiRecording({ userData: app.getPath('userData') });
+    // An answer from any other model id means the choices above need re-measuring.
+    configureModelCalibration({ userData: app.getPath('userData'), getAllWindows: () => BrowserWindow.getAllWindows() });
+    registerModelCalibrationHandler({ ipcMain: electronPkg.ipcMain });
     // Every AI task is answered by the local Claude Code CLI.
     startClaudeTaskWorker({ userData: app.getPath('userData'), nativeImage: electronPkg.nativeImage, getAllWindows: () => BrowserWindow.getAllWindows() });
     registerClaudeTaskStatusHandler({ ipcMain: electronPkg.ipcMain });

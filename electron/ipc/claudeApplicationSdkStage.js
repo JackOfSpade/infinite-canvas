@@ -15,6 +15,7 @@ import {
   createClaudeBackgroundTasks,
   withWorkflowTool,
 } from './claudeApplicationRunner.js';
+import { noteResolvedClaudeModel } from './aiModelCalibration.js';
 import { claudeResetTimeMs, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
 
@@ -298,6 +299,9 @@ export async function runClaudeSdkStage({
     if (!terminal.result.trim()) {
       throw new ClaudeRunnerError('CLAUDE_ERROR', 'Claude Code returned an empty answer.', detail(), terminal.result);
     }
+    // Any answered id outside the calibrated set means our model and effort
+    // choices need re-measuring; the renderer raises its banner from this.
+    noteResolvedClaudeModel(answered, 'claude-sdk-stage');
     return {
       text: terminal.result,
       model: answered,

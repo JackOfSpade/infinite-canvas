@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { noteResolvedClaudeModel } from './ipc/aiModelCalibration.js';
 import { claudeChildEnv } from './ipc/claudeApplicationRunner.js';
 import { createReplyStreamParser } from './interviewPracticeCallPrompt.js';
 
@@ -271,6 +272,8 @@ export async function createInterviewerSession(config = {}, { spawn = nodeSpawn 
       sentences.push(...last.sentences);
       if (firstSentenceMs === null && last.sentences.length) firstSentenceMs = totalMs;
       const resolvedModel = result.model || Object.keys(result.event.modelUsage || {})[0] || config.model;
+      // A live call answered by an id we never calibrated raises the banner too.
+      noteResolvedClaudeModel(resolvedModel, 'practice-call');
       return {
         text: result.text, control: last.control, endCall: last.endCall, sentences,
         firstDeltaMs: Math.round(firstDeltaMs), firstSentenceMs: firstSentenceMs === null ? null : Math.round(firstSentenceMs),

@@ -93,9 +93,13 @@
    "model": "sonnet",
    "effort": "medium"
   },
-  "verify-correction": {
+  "requirements-adjudication": {
    "model": "sonnet",
-   "effort": "high"
+   "effort": "low"
+  },
+  "verify-correction": {
+   "model": "haiku",
+   "effort": "medium"
   },
   "fit-correction": {
    "model": "sonnet",

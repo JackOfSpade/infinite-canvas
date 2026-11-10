@@ -299,6 +299,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   revealNonApiAiAttachment: (requestId, filePath) => ipcRenderer.invoke('reveal-non-api-ai-attachment', { requestId, filePath }),
   // Whether the Claude worker is held up by a usage limit or a sign-in problem.
   getClaudeTaskStatus: () => ipcRenderer.invoke('get-claude-task-status'),
+  // Only reported when a Claude call answers with a model id we never calibrated.
+  getModelCalibrationStatus: () => ipcRenderer.invoke('ai-model-calibration:status'),
+  onModelCalibrationChanged: createListener('ai-model-calibration:changed'),
   getClaudeTaskActivity: () => ipcRenderer.invoke('get-claude-task-activity'),
   onClaudeTaskActivity: createListener('claude-task:activity'),
   holdClaude: key => ipcRenderer.invoke('claude-pause:hold', { key }),

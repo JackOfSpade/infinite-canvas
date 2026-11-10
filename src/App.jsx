@@ -8,6 +8,7 @@ import { JobSearchCoordinatorProvider } from './contexts/JobSearchCoordinatorCon
 import './index.css';
 
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { ModelRecalibrationBanner } from './components/ModelRecalibrationBanner';
 import { NonApiAiDialog } from './components/NonApiAiDialog';
 
 // The canvas owns the node implementations and most of the interaction
@@ -18,6 +19,7 @@ const Canvas = React.lazy(() => import('./Canvas').then(module => ({ default: mo
 export default function App() {
   return (
     <>
+      <ModelRecalibrationBanner />
       <ErrorBoundary>
         <SessionStatusProvider>
           <ToastProvider>

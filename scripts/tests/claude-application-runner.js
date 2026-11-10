@@ -841,14 +841,15 @@ export default [
     },
   },
   {
-    name: 'claude runner: Opus plans (xhigh), writes (low), judges and fact-checks (high); Sonnet converts (medium) and repairs (high)',
+    name: 'claude runner: Opus plans (xhigh), writes (low), judges and fact-checks (high); Sonnet converts (medium), adjudicates (low) and fits (high); Haiku verifies (medium)',
     run() {
       assert.deepEqual(JSON.parse(JSON.stringify(CLAUDE_STAGE_PROFILES)), {
         'editorial-plan': { model: 'opus', effort: 'xhigh' },
         write: { model: 'opus', effort: 'low' },
         pick: { model: 'opus', effort: 'high' },
         convert: { model: 'sonnet', effort: 'medium' },
-        'verify-correction': { model: 'sonnet', effort: 'high' },
+        'requirements-adjudication': { model: 'sonnet', effort: 'low' },
+        'verify-correction': { model: 'haiku', effort: 'medium' },
         'fit-correction': { model: 'sonnet', effort: 'high' },
         'fact-check': { model: 'opus', effort: 'high' },
         'fact-correction': { model: 'opus', effort: 'high' },
@@ -1542,7 +1543,7 @@ export default [
         ['requirements', 'sonnet', 'high'],
         ['requirements', 'opus', 'high'],
         ['requirements', 'opus', 'high'],
-        ['requirements-adjudication', 'sonnet', 'high'],
+        ['requirements-adjudication', 'sonnet', 'low'],
         ['convert', 'sonnet', 'medium'],
       ]);
       assert.equal(runner.status([jobId])[jobId].upgradeModel, undefined);

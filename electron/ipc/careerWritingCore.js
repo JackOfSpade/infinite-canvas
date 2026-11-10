@@ -16,6 +16,7 @@
 
 export const CLAUDE_SONNET_MODEL = 'sonnet';
 export const CLAUDE_OPUS_MODEL = 'opus';
+export const CLAUDE_HAIKU_MODEL = 'haiku';
 export const CAREER_WRITING_DEFAULT_PROFILE = Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' });
 
 // Chosen on cost and quality, 2026-11-01 (docs/application-improvement-sessions.md).
@@ -27,7 +28,10 @@ export const APPLICATION_STAGE_PROFILES = Object.freeze({
   write: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   pick: Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   convert: Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'medium' }),
-  'verify-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
+  // requirements-adjudication, 2026-11-10: Sonnet low matched a production rerun (Sonnet high) at 91.3% decision agreement on 54 real prompts at 7% less; every Haiku setting failed (68-77%) (docs/ai-model-selection.md).
+  'requirements-adjudication': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
+  // verify-correction, 2026-11-10: Haiku medium matched production in blind judging of final bundles over 7 jobs (mean 7.57 vs 7.43 and 7.29 for two Sonnet high runs) with acceptance within the production pair and 30-43% lower stage cost; Haiku low failed (docs/ai-model-selection.md).
+  'verify-correction': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }),
   'fit-correction': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'high' }),
   'fact-check': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   'fact-correction': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
@@ -38,9 +42,10 @@ export const APPLICATION_STAGE_PROFILES = Object.freeze({
 // setting lost real content (docs/ai-model-selection.md).
 export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // qa-brief, 2026-11-10: Opus low scored within the noise of an Opus medium rerun in blind judging of 4 real Prepare briefs (7.5 vs 8.0; two production runs differ by 0.75) at 39% less cost; Sonnet medium and Haiku medium scored 7.0 (docs/ai-model-selection.md).
+  'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // Post-call review of an in-app practice call (judgement and writing, one call per practice): same profile as qa-brief.
+  // Post-call review of an in-app practice call (judgement and writing, one call per practice): Opus medium, not yet tested (needs a recorded practice call; docs/ai-model-selection.md).
   'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   'qa-fact-check': APPLICATION_STAGE_PROFILES['fact-check'],
   'qa-fact-correction': APPLICATION_STAGE_PROFILES['fact-correction'],
