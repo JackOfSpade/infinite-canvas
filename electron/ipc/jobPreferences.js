@@ -5,7 +5,7 @@ export const PREFERENCE_LISTING_CORRECTION_TEMPLATES = templatesFor('listing.');
 export const PREFERENCE_RESEARCH_CORRECTION_TEMPLATES = templatesFor('research.');
 export const PREFERENCE_PLAN_CORRECTION_TEMPLATES = templatesFor('plan.');
 import crypto from 'node:crypto';
-import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_ROLE_AUDIT_SCHEMA, JOB_ROLE_SCREEN_SCHEMA } from './aiSchemas.js';
+import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_LISTING_EVALUATION_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA, JOB_ROLE_SCREEN_SCHEMA } from './aiSchemas.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { COMPANY_RESEARCH_VERSION } from './companyResearchVersion.js';
 import { sourcesPresentInGroundedResearch } from './jobCompensation.js';
@@ -479,7 +479,7 @@ function hasValidRawJobRoleAuditShape(value) {
     || !Array.isArray(value.added) || value.added.length > 20
     || !Array.isArray(value.removed) || value.removed.length > 20
     || !isBoundedString(value.addedReason, 500) || !isBoundedString(value.removedReason, 500)
-    || !isBoundedString(value.rationale, 800)) return false;
+    || !isBoundedString(value.rationale, JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH)) return false;
   // Every title-shaped array entry must itself be a bounded, non-empty
   // string — the same per-item check hasValidRawPlanShape applies to
   // value.titles — before normalizeJobRoleAudit is trusted to clean it up.
@@ -498,7 +498,7 @@ export function normalizeJobRoleAudit(value) {
     addedReason: cleanText(audit.addedReason, 500),
     removed: cleanArray(audit.removed, MAX_TITLES, JOB_PREFERENCE_TITLE_MAX_LENGTH),
     removedReason: cleanText(audit.removedReason, 500),
-    rationale: cleanText(audit.rationale, 800),
+    rationale: cleanText(audit.rationale, JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH),
   };
 }
 /**
@@ -603,6 +603,7 @@ export async function resolveSearchRoles({ jobPreferences, profile, careerData, 
     + 'DRAFT TITLES from pass 1 (trusted): ' + JSON.stringify(draftPlan.titles) + '\n'
     + 'CAREER PROFILE (untrusted reference): ' + wrapUntrustedText('career-profile', JSON.stringify(profile || {})) + '\n'
     + 'CAREER DATA (untrusted reference): ' + wrapUntrustedText('career-data', String(careerData || '').slice(0, 30000)) + '\n'
+    + 'Keep `rationale` to one short paragraph of at most about 150 words (1,500 characters); keep `addedReason` and `removedReason` under about 70 words (500 characters) each.\n'
     + 'Return only the requested JSON audit.';
   const result = await callText(auditPrompt, {
     signal, task: 'job-role-audit', responseSchema: JOB_ROLE_AUDIT_SCHEMA,

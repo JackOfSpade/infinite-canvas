@@ -3013,6 +3013,17 @@ export function buildJobCompletionAssessment(
   // "removed by Job Preferences" and "removed by the role screen" are
   // different findings and a report must not assert one for the other.
   const roleScreenBackstopDropped = nonnegativeCount(preferences?.roleScreenBackstopDropped);
+  // Job Preferences is evaluated against the POST-backstop candidate list, so
+  // the saved preference candidate pool is lower than the raw search+recovery
+  // aggregate by exactly the rows this screen removed. That count is process
+  // telemetry, not durable receipt evidence: it may only explain THIS receipt's
+  // saved pool when the live telemetry belongs to the same hub. With no receipt
+  // there is nothing to correlate against, so the run-scoped count stands.
+  const poolTelemetryHubId = receiptIdentifier(telemetry?.nodeId, '') || null;
+  const poolReceiptHubId = receiptIdentifier(receipt?.nodeId, '') || null;
+  const poolBackstopDropped = (!receipt || (!!poolTelemetryHubId && poolTelemetryHubId === poolReceiptHubId))
+    ? (roleScreenBackstopDropped || 0)
+    : 0;
   // Rows appended AFTER this run's search funnel was reconciled — a USAJobs
   // background refresh, a Solve, a Resume. They raise the scorer input without
   // ever appearing in `search/recovery`, so on a run that received any, the
@@ -3124,9 +3135,12 @@ export function buildJobCompletionAssessment(
   // scorer inputs than this queue. The saved snapshot retains both dimensions:
   // `candidatePoolJobs` is the pre-preference universe, while `jobs` is the
   // score-ready subset. Validate the recovery aggregate against the former.
+  // That pool is saved AFTER the backstop role screen, so the run-scoped
+  // backstop drops (`poolBackstopDropped`, already gated to this receipt's hub)
+  // legitimately lower it below the raw search+recovery aggregate.
   const receiptRecoveryReconcilesCandidatePool = receiptRecoveryExpectedInput != null
     && snapshot.candidatePoolJobs != null
-    && receiptRecoveryExpectedInput === snapshot.candidatePoolJobs;
+    && receiptRecoveryExpectedInput - poolBackstopDropped === snapshot.candidatePoolJobs;
   const receiptPreferenceFiltered = receiptRecoveryReconcilesCandidatePool
     && snapshot.jobs != null && snapshot.candidatePoolJobs > snapshot.jobs
     ? snapshot.candidatePoolJobs - snapshot.jobs
@@ -3197,7 +3211,9 @@ export function buildJobCompletionAssessment(
     // check a truncated snapshot could be reported as complete while silently
     // losing listings the user needs for a later preference edit.
     && snapshot.candidatePoolJobs != null
-    && snapshot.candidatePoolJobs === expected;
+    // Same saved-after-backstop pool as above: the run-scoped role-screen drops
+    // are part of this run's accounting, not a missing candidate.
+    && snapshot.candidatePoolJobs === expected - poolBackstopDropped;
   const completedWithoutScoring = completedZeroResult || completedPreferenceFiltered;
   const runTokens = [
     // Keep these independently: a stale search stamp and a newer pipeline
@@ -3568,12 +3584,20 @@ export function buildJobCompletionAssessment(
     gaps.push(`durable receipt scoring is incomplete (input ${receiptScoreInput ?? '?'} → scored ${receiptScored ?? '?'} · placeholders ${receiptPlaceholders ?? '?'} · unscored ${receiptUnscored ?? '?'} · failed batches ${receiptFailedBatches ?? '?'})`);
   }
   if (receiptRecoveryInconsistent) {
-    gaps.push(`durable recovery ${receiptInitialKept ?? '?'} initial ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)} = ${receiptRecoveryExpectedInput ?? '?'} ≠ saved preference candidate pool ${snapshot.candidatePoolJobs ?? '?'}`);
+    // The saved pool excludes rows this run's backstop role screen removed. The
+    // gap is still real, but its arithmetic must show that term to balance.
+    const backstopTerm = poolBackstopDropped > 0
+      ? ` − ${poolBackstopDropped} role-screened${receiptRecoveryExpectedInput == null ? '' : ` = ${receiptRecoveryExpectedInput - poolBackstopDropped}`}`
+      : '';
+    gaps.push(`durable recovery ${receiptInitialKept ?? '?'} initial ${receiptRecovery >= 0 ? '+' : '−'}${Math.abs(receiptRecovery)} = ${receiptRecoveryExpectedInput ?? '?'}${backstopTerm} ≠ saved preference candidate pool ${snapshot.candidatePoolJobs ?? '?'}`);
   }
   if (expected != null && expected < 0) gaps.push(`search/recovery produced an impossible negative input (${expected})`);
+  const expectedPostBackstopCandidates = expected == null ? null : expected - poolBackstopDropped;
   if (expected != null && snapshot.state === 'parseable' && snapshot.candidatePoolJobs != null
-    && snapshot.candidatePoolJobs !== expected) {
-    gaps.push(`saved preference candidate pool ${snapshot.candidatePoolJobs} ≠ post-history candidates ${expected}`);
+    && snapshot.candidatePoolJobs !== expectedPostBackstopCandidates) {
+    gaps.push(poolBackstopDropped > 0
+      ? `saved preference candidate pool ${snapshot.candidatePoolJobs} ≠ post-history candidates ${expected} − ${poolBackstopDropped} role-screened = ${expectedPostBackstopCandidates}`
+      : `saved preference candidate pool ${snapshot.candidatePoolJobs} ≠ post-history candidates ${expected}`);
   }
   if (!completedWithoutScoring) {
     if (expectedAfterPreferences != null && scoreInput != null && expectedAfterPreferences !== scoreInput) {
@@ -3760,7 +3784,7 @@ export function buildJobCompletionAssessment(
     ? receiptRecoveryReconcilesInput
       ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''} = ${receiptScoreInput} terminal scoring input.`
       : receiptRecoveryReconcilesViaPreferences
-        ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''} = ${snapshot.candidatePoolJobs} candidate pool − ${receiptPreferenceFiltered} preference-filtered = ${receiptScoreInput} terminal scoring input.`
+        ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''}${poolBackstopDropped > 0 ? ` − ${poolBackstopDropped} removed by the backstop role screen` : ''} = ${snapshot.candidatePoolJobs} candidate pool − ${receiptPreferenceFiltered} preference-filtered = ${receiptScoreInput} terminal scoring input.`
       : receiptRecovery != null
         ? `- Search + recovery: durable terminal receipt — ${receiptInitialKept ?? '?'} initial score-ready${receiptRecovery > 0 ? ` + ${receiptRecovery} recovered` : receiptRecovery < 0 ? ` − ${Math.abs(receiptRecovery)} removed by recovery` : ''}${receiptScoreInput != null ? ` · terminal scoring input ${receiptScoreInput}` : ''}.`
         : telemetryAmbiguity

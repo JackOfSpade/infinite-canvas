@@ -28,16 +28,25 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   'career-profile-audit-conflicts': profile('haiku', 'medium'),
   'price-synthesis-batch': profile('sonnet', 'low'),
   'career-profile-repair': profile('sonnet', 'low'),
-  'job-role-audit': profile('sonnet', 'medium'),
+  // 2026-11-10: On 4 real audits x 2 runs Haiku high matched a Sonnet medium rerun on final titles, removals
+  // and additions at about 1/10 the cost; Haiku low and Sonnet low removed brief-allowed Senior titles, which a
+  // blind judge ruled a clear rule violation (docs/ai-model-selection.md).
+  'job-role-audit': profile('haiku', 'high'),
   'job-taxonomy-classify-batch': profile('sonnet', 'medium'),
   // 2026-11-09: Sonnet low agreed with Sonnet high within run-to-run noise (decision 98.0% vs 96.8%,
   // 6 batches x 2 runs) at about 15% less cost; Haiku fell 12-14 points short (docs/ai-model-selection.md).
   'job-preference-evaluation': profile('sonnet', 'low'),
   'job-gap-review': profile('sonnet', 'high'),
-  'job-preference-research-batch-assessment': profile('sonnet', 'high'),
+  // 2026-11-10: Sonnet low matched every production outcome (40 of 40 across 2 runs of a real 20-item batch)
+  // at about 30% less cost; Haiku medium and high reversed most outcomes (4 of 40) (docs/ai-model-selection.md).
+  'job-preference-research-batch-assessment': profile('sonnet', 'low'),
   'job-scoring': profile('opus', 'low'),
   'job-compensation-assessment-batch': profile('opus', 'low'),
-  'job-location-consolidation-confirmation': profile('opus', 'low'),
+  // 2026-11-10: On the real board prompt plus planted pairs (a copy with changed seniority, employment type,
+  // team, required stack, level, or a separate requisition must be split; a location-only or boilerplate-only
+  // copy must merge), Haiku low decided 40 of 40 correctly across 2 runs, the same as Opus low or better (Opus
+  // low split one boilerplate-only copy), at about 1/20 the cost (docs/ai-model-selection.md).
+  'job-location-consolidation-confirmation': profile('haiku', 'low'),
   'job-official-posting-research': profile('opus', 'low', WEB),
   'bundle-price-synthesis': profile('opus', 'medium'),
   // 2026-11-09: Sonnet medium kept two-source salary coverage (10-11 of 12 cohorts vs 9-10 on Opus medium)

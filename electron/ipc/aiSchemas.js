@@ -992,6 +992,15 @@ export const JOB_PREFERENCE_PLAN_SCHEMA = {
 // are kept as their OWN fields (not folded into a single free-text diff) so
 // a bug report can show exactly what the audit changed and why, without
 // re-deriving it by diffing two title arrays.
+// The one bound for the audit's `rationale` text — imported by the domain
+// shape check/normalizer (jobPreferences.js) and by the staging test so the
+// schema, the shape check and the normalizer can never drift apart. 1500 (not
+// 800) because the audit prompt asks for coverage, compliance AND any tension
+// in one field: models write ~800-1050 chars there, and a schema-only 800 cap
+// rejected real answers (STRUCTURED_OUTPUT_SCHEMA_INVALID) for a bound the
+// prompt never stated.
+export const JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH = 1500;
+
 export const JOB_ROLE_AUDIT_SCHEMA = {
   type: 'object',
   required: ['titles', 'added', 'addedReason', 'removed', 'removedReason', 'rationale'],
@@ -1010,7 +1019,7 @@ export const JOB_ROLE_AUDIT_SCHEMA = {
     addedReason: { type: 'string', maxLength: 500, description: 'Why the added roles were missing from the draft, and why the brief implies them. Empty if `added` is empty.' },
     removed: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: JOB_PREFERENCE_TITLE_MAX_LENGTH, pattern: NON_BLANK_TEXT_PATTERN }, description: 'Draft titles that were REMOVED for violating an explicit exclusion or level constraint in the brief. Empty if nothing was removed.' },
     removedReason: { type: 'string', maxLength: 500, description: 'Which brief exclusion/constraint each removed title violated. Empty if `removed` is empty.' },
-    rationale: { type: 'string', maxLength: 800, description: 'One short paragraph summarizing the audit decision.' },
+    rationale: { type: 'string', maxLength: JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH, description: 'One short paragraph summarizing the audit decision.' },
   },
 };
 

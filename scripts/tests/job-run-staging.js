@@ -38,7 +38,7 @@ import crypto from 'node:crypto';
 import quitWorkflowPauseTests from './quitWorkflowPauseFixture.mjs';
 import jobCollectionDiagnosticsTests from './jobCollectionDiagnosticsFixture.mjs';
 import { jobWorkflowNeedsQuitPause } from '../../src/utils/quitWorkflowPause.js';
-import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
+import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_PLAN_SCHEMA, JOB_PREFERENCE_RESEARCH_BATCH_ASSESSMENT_SCHEMA, JOB_PREFERENCE_TITLE_MAX_LENGTH, JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH, JOB_ROLE_AUDIT_SCHEMA } from '../../electron/ipc/aiSchemas.js';
 import { parseJobPreferenceResearchSections } from '../../electron/ipc/jobPreferences.js';
 import { HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 import { canClaimJobRunCollectionCompletion, exactJobRunCareerSnapshotBindingMatches } from '../../src/utils/jobCareerSnapshotBinding.js';
@@ -1894,7 +1894,7 @@ export default [
         addedReason: 'a'.repeat(501),
         removed: [],
         removedReason: '',
-        rationale: 'r'.repeat(801),
+        rationale: 'r'.repeat(JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH + 1),
       }, JOB_ROLE_AUDIT_SCHEMA).map(error => error.path);
       assert([
         '$.summary', '$.direction.summary', '$.softPreferences[0].id', '$.warnings[0]', '$.titles[0]',

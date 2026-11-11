@@ -15,6 +15,7 @@ import marketplace_monitor from './tests/marketplace-monitor.js';
 import ai_models from './tests/ai-models.js';
 import fixtures_canvas from './tests/fixtures-canvas.js';
 import job_diagnostics from './tests/job-diagnostics.js';
+import job_completion_backstop_pool from './tests/job-completion-backstop-pool.js';
 import job_scoring_cache from './tests/job-scoring-cache.js';
 import claude_prompt_limit from './tests/claude-prompt-limit.js';
 import claude_task_worker from './tests/claude-task-worker.js';
@@ -325,6 +326,7 @@ const testGroups = [
   ['ai-models.js', ai_models],
   ['fixtures-canvas.js', fixtures_canvas],
   ['job-diagnostics.js', job_diagnostics],
+  ['job-completion-backstop-pool.js', job_completion_backstop_pool],
   ['scrape-pace.js', scrape_pace],
   ['panel-walk-interrupt.js', panel_walk_interrupt],
   ['job-source-hard-block-retry.js', job_source_hard_block_retry],

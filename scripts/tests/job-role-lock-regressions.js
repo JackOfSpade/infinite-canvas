@@ -17,8 +17,9 @@
 // the same technique already used by scripts/tests/solve-ipc-failure.js and
 // platform-utils.js -- so these tests exercise the REAL current behavior,
 // not a paraphrase of it in prose.
-import { assert, buildPinnedTitleQueryBundle, flattenJobSearchQueries, fs, mergeNonRestorableNodeDataFromLive, normalizeJobPreferencePlan, redactReportEventHistoryLine, resolveSearchRoles, sanitizeJobPreferencePlan, screenJobRolesByTitle } from '../test-dependencies.js';
+import { assert, buildPinnedTitleQueryBundle, flattenJobSearchQueries, fs, mergeNonRestorableNodeDataFromLive, normalizeJobPreferencePlan, redactReportEventHistoryLine, resolveSearchRoles, sanitizeJobPreferencePlan, screenJobRolesByTitle, validateJobRoleAuditSubmission } from '../test-dependencies.js';
 import { ROLE_SCREEN_MAX_ROWS } from '../../electron/ipc/resultCaps.js';
+import { JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH } from '../../electron/ipc/aiSchemas.js';
 import { buildJobCareerQueryCacheKey, careerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from '../../src/utils/jobCareerSnapshotBinding.js';
 
 // Shared minimal-but-schema-valid raw plan builder -- mirrors the `rawPlan`
@@ -855,6 +856,69 @@ export default [
         'moduleLabel must fall back to the generic "Job Search" label when neither list has a role');
 
       return { resolvedRolesPreferred: true, staleOverridden: true, fallbackWorks: true };
+    },
+  },
+  {
+    // PRODUCTION REPLAY REGRESSION: in 8 Sonnet-medium job-role-audit
+    // attempts across 4 sessions, 4 answers were rejected with
+    // STRUCTURED_OUTPUT_SCHEMA_INVALID, and in every one the ONLY broken
+    // bound was `rationale` length (950, 860, 1027, 817 chars) against the
+    // old schema-only maxLength of 800 -- while every accepted answer sat at
+    // 629-760. The prompt itself asks for coverage, compliance AND any
+    // tension in that one field, so ~800+ characters is a natural answer the
+    // model has no way to count against an appended JSON schema. The fix
+    // raises the bound to JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH from the ONE
+    // exported constant (schema, shape check and normalizer all read it) and
+    // states the limit in the prompt's own plain words, so the model is
+    // actually told the bound it must respect. Each avoidable rejection cost
+    // a full extra call plus a correction round.
+    name: 'REGRESSION: job-role-audit accepts the real 1,027-char rationale UNTRUNCATED, still rejects one over JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH, and the prompt states the 150-word bound',
+    run: async () => {
+      const auditWithRationale = rationale => ({
+        titles: ['Product Manager'],
+        added: [], addedReason: '',
+        removed: [], removedReason: '',
+        rationale,
+      });
+
+      // The longest rationale actually rejected by the old 800 cap.
+      const realRejectedRationale = 'r'.repeat(1027);
+      const accepted = validateJobRoleAuditSubmission(auditWithRationale(realRejectedRationale));
+      assert(accepted.rationale === realRejectedRationale,
+        `a 1,027-character rationale (the real rejected length) must be accepted VERBATIM, not truncated or rejected; got length ${accepted.rationale.length}`);
+
+      // Exactly at the constant is the inclusive upper bound.
+      const atBoundRationale = 'r'.repeat(JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH);
+      assert(validateJobRoleAuditSubmission(auditWithRationale(atBoundRationale)).rationale === atBoundRationale,
+        'a rationale of exactly JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH characters must be accepted');
+
+      // One character over must still be rejected -- the bound is real.
+      let thrown = null;
+      try {
+        validateJobRoleAuditSubmission(auditWithRationale('r'.repeat(JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH + 1)));
+      } catch (err) { thrown = err; }
+      assert(thrown instanceof Error && /invalid or incomplete structure/i.test(thrown.message),
+        `a rationale of JOB_ROLE_AUDIT_RATIONALE_MAX_LENGTH + 1 characters must still be rejected, got: ${thrown ? thrown.message : '(no throw -- the bound is not enforced)'}`);
+
+      // The prompt must state the bound in plain words; the appended JSON
+      // schema alone is not something the model counts against.
+      let auditPrompt = '';
+      await resolveSearchRoles({
+        jobPreferences: 'Only Product Manager roles, nothing else.',
+        profile: {}, careerData: '',
+        callText: async (prompt, options) => {
+          if (options.task === 'job-preference-interpretation') return rawPlan(['Product Manager']);
+          if (options.task === 'job-role-audit') {
+            auditPrompt = prompt;
+            return auditWithRationale('draft already covers the brief');
+          }
+          throw new Error(`unexpected task '${options.task}'`);
+        },
+      });
+      assert(auditPrompt.includes('150 words'),
+        'the job-role-audit prompt must state the rationale limit in plain words ("150 words"), not only inside the appended JSON schema');
+
+      return { realRejectedLengthAccepted: accepted.rationale.length, overBoundRejected: true, promptStatesWordLimit: true };
     },
   },
 ];
