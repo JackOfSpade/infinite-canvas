@@ -5,6 +5,7 @@ import {
   fetchRemoteOKJobs,
   fetchUSAJobs,
   fetchWeWorkRemotelyJobs,
+  makeTrickleCounter,
 } from '../../electron/extractors/apiExtractors.js';
 import { extractIndeedJobsFromHtml } from '../../electron/extractors/apiExtractors.js';
 import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
@@ -249,6 +250,108 @@ export default [
       assert(jobs.includes("source?.status === 'done' && Number.isSafeInteger(source.pageShapeFailures)")
         && jobs.includes('result.pageShapeFailures = (result.pageShapeFailures || 0) + pages;'), 'resume restores the saved count for finished sources');
       assert(jobs.includes('pageShapeFailures: data?.pageShapeFailures || 0,') && jobs.includes('pageShapeFailures: rows.reduce('), 'both source status writes save the count');
+    },
+  },
+  {
+    name: 'Pager trickle counter trips on the third quiet page, and a productive or tiny page restarts the streak',
+    run() {
+      // A page qualifies at >=5 rows carrying <=1 row new to its query. Two in a
+      // row is ordinary cross-page overlap; three means the pager is re-serving
+      // its offset and the walk is no longer making progress.
+      const tripped = makeTrickleCounter();
+      assert.equal(tripped.record(25, 1), null, 'recorded page 1: the walk is still advancing');
+      assert.equal(tripped.record(30, 1), null, 'recorded page 2: two quiet pages is overlap, not a stall');
+      const guard = tripped.record(25, 0);
+      assert.equal(guard.kind, 'pager-trickle');
+      assert.equal(guard.page, 3, 'page counts every page recorded, not just the quiet ones');
+      assert.equal(guard.pages, 3, 'three consecutive quiet pages');
+      assert.equal(guard.newRows, 2, 'the rows those three pages actually added, summed');
+      assert.ok(guard.detail.length > 0 && guard.detail.length <= 240, 'a short counts-only sentence');
+      assert.equal(/Engineer|https?:|Acme/u.test(guard.detail), false, 'no titles, companies or URLs');
+
+      const productive = makeTrickleCounter();
+      assert.equal(productive.record(25, 0), null);
+      assert.equal(productive.record(25, 1), null);
+      assert.equal(productive.record(25, 2), null, '2 new rows on one page is the pager still moving');
+      assert.equal(productive.record(25, 0), null);
+      assert.equal(productive.record(25, 1), null);
+      const afterProductivePage = productive.record(25, 1);
+      assert.equal(afterProductivePage.page, 6, 'the streak restarted at the page with 2 new rows');
+      assert.equal(afterProductivePage.pages, 3);
+      assert.equal(afterProductivePage.newRows, 2, 'only the rows inside the current streak');
+
+      const tinyPages = makeTrickleCounter();
+      assert.equal(tinyPages.record(25, 0), null);
+      assert.equal(tinyPages.record(4, 0), null, 'a page under 5 rows proves nothing about the pager');
+      assert.equal(tinyPages.record(25, 0), null);
+      assert.equal(tinyPages.record(25, 1), null);
+      const afterTinyPage = tinyPages.record(25, 1);
+      assert.equal(afterTinyPage.page, 5);
+      assert.equal(afterTinyPage.pages, 3);
+      assert.equal(afterTinyPage.newRows, 2);
+
+      // The thresholds are parameters, not constants: one quiet page is enough here.
+      const impatient = makeTrickleCounter({ pages: 1, maxNew: 0, minRows: 10 });
+      assert.equal(impatient.record(9, 0), null, '9 rows is under this counter\'s floor');
+      assert.equal(impatient.record(10, 0).kind, 'pager-trickle');
+    },
+  },
+  {
+    name: 'Dice: an unlimited walk adding ~1 row per page stops with a pager-trickle guard; an explicit allowance stays quiet',
+    async run() {
+      const pool = diceRows(1004);
+      const pageAt = start => ({ data: pool.slice(start, start + 1000), meta: { totalHits: 5000 } });
+      const pages = [pageAt(0), pageAt(1), pageAt(2), pageAt(3)];
+      let call = 0;
+      const options = {
+        interPageDelayMs: 0,
+        requestPage: async () => ({ ok: true, status: 200, json: pages[Math.min(call++, pages.length - 1)], warning: null }),
+      };
+      const result = await fetchDiceListings('engineer', '', null, null, null, options);
+      assert.equal(result.walkGuards.length, 1, 'one guard for the one walk');
+      const guard = result.walkGuards[0];
+      assert.equal(guard.kind, 'pager-trickle');
+      assert.equal(guard.source, 'dice');
+      assert.equal(guard.query, null, 'a fan-out query index is not this source\'s to name');
+      assert.equal(guard.page, 4, 'page 1 added 1,000 rows, so the streak began at page 2');
+      assert.equal(guard.pages, 3);
+      assert.equal(guard.newRows, 3);
+      assert.ok(guard.detail.length <= 240);
+      assert.ok(result.stopReasons.some(item => item.stopReason === 'pager-trickle'), 'the old envelope still names the stop');
+      assert.equal(result.truncated, true);
+
+      const limited = await fetchDiceListings('engineer', '', null, null, { jobsPerPlatform: 2 }, dicePage({ data: diceRows(5), meta: { totalHits: 100 } }));
+      assert.deepEqual(limited.walkGuards, [], 'an explicit allowance is the user\'s own boundary, not a guard');
+      assert.equal(limited.stopReasons[0].stopReason, 'jobs-per-platform');
+    },
+  },
+  {
+    name: 'USAJobs: an unlimited walk served ~1 new row per page stops on a pager-trickle guard instead of ending quietly',
+    async run() {
+      const row = id => ({ MatchedObjectId: String(id), MatchedObjectDescriptor: { PositionTitle: `IT Specialist ${id}`, PositionURI: `https://www.usajobs.gov/job/${id}`, OrganizationName: 'Agency', PositionLocation: [{ LocationName: 'Denver, CO' }], PositionRemuneration: [], PublicationStartDate: '2026-11-01', UserArea: { Details: { JobSummary: 'Work.' } } } });
+      const ids = from => Array.from({ length: 500 }, (_, i) => from + i);
+      const pageOf = keys => ({ SearchResult: { SearchResultCountAll: 5000, SearchResultItems: keys.map(row) } });
+      const pages = [
+        pageOf(ids(0)),
+        pageOf([...ids(1).slice(0, 499), 500]),
+        pageOf([...ids(2).slice(0, 499), 501]),
+        pageOf([...ids(3).slice(0, 499), 502]),
+      ];
+      const serve = url => {
+        const page = Number(new URL(url).searchParams.get('Page')) || 1;
+        return respond(pages[Math.min(page - 1, pages.length - 1)], { json: true });
+      };
+      const result = await withFetch(serve, () => fetchUSAJobs('it specialist', 'key', 'me@example.com', null, 30, ''));
+      assert.equal(result.stopReason, 'pager-trickle');
+      assert.equal(result.walkGuards.length, 1);
+      const guard = result.walkGuards[0];
+      assert.equal(guard.kind, 'pager-trickle');
+      assert.equal(guard.source, 'usajobs');
+      assert.equal(guard.query, null);
+      assert.equal(guard.page, 4);
+      assert.equal(guard.pages, 3);
+      assert.equal(guard.newRows, 3);
+      assert.equal(result.items.length, 2000, 'the retained rows are unchanged');
     },
   },
 ];

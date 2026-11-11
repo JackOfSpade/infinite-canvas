@@ -13,7 +13,7 @@ import { getLaunchCollisions } from './browserLaunchTelemetry.js';
 import { browserTabRestoreDiagnosticsMarkdown } from './browser/tabRestoreState.js';
 import { getStatusCacheSync, getVerifyTimingSummary } from './accounts.js';
 import { getRecentLogs } from '../logger.js';
-import { getJobsTelemetry } from './jobs.js';
+import { getJobsTelemetry, getJobsTelemetryForReport } from './jobs.js';
 import { getMarketplaceTelemetry } from './marketplace.js';
 import { getStatusCheckQueueDepth } from './statusCheckLock.js';
 import { getSharedProfileLockSnapshot } from './sharedProfileLock.js';
@@ -44,7 +44,7 @@ import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/
 import { findJobSearchBoardActiveRecoveryOwner } from '../../src/utils/jobBoardSearchSelection.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../src/utils/jobSearchDateWindow.js';
 import { isGoogleJobsInternalUrl, normalizeJobListingExternalUrl } from '../../src/utils/jobListingUrl.js';
-import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown } from './bugReport/jobsSnapshot.js';
+import { buildApplicationOutputReportSnapshot, buildJobBoardDiagnostics, buildJobCompletionAssessment, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, buildJobRecoverySnapshot, buildJobsConfigSnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, jobSourceHealthAlarmItems } from './bugReport/jobsSnapshot.js';
 import { buildMarketplacePipelineSnapshot } from './bugReport/marketplaceSnapshot.js';
 import { buildMarketplaceModuleRollup } from './bugReport/marketplaceModuleRollup.js';
 import { buildSellHubPriceDropRollup } from './bugReport/sellHubPriceDropRollup.js';
@@ -2851,6 +2851,14 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   try { pointerProbeMarkdown = buildPointerProbeMarkdown(frontEndState); }
   catch { pointerProbeMarkdown = ''; }
 
+  // The Scrape Alarms section must not say "None on record" while this same
+  // report's Job Search Pipeline already shows per-source health failures.
+  // Reduce live telemetry to site + known field/count text (never listing text).
+  let jobSourceHealth = [];
+  try {
+    const telemetryOwners = currentJobHubIds.size > 0 ? currentJobHubIds : currentNodeIds;
+    jobSourceHealth = jobSourceHealthAlarmItems(getJobsTelemetryForReport(telemetryOwners, reportWindowId)?.search);
+  } catch { jobSourceHealth = []; }
 
   let baseMarkdown = `At the end of your debug, assess whether a new bug-report filter code is needed. This occurs when even if the user used the "FULL" filter code, it would not have been enough reporting data to debug this issue smoothly. Every new diagnostic filter code must be included by FULL; a narrow code may still select just its relevant section.
 
@@ -2859,7 +2867,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
 ## Issue Description
 ${description}
 ${filterSummaryMarkdown}
-${scrapeAlarmsMarkdown()}
+${scrapeAlarmsMarkdown(undefined, jobSourceHealth)}
 ## Application State Summary
 - Nodes: ${sectionOmitted('nodes') ? '*(omitted by filter code)*' : (nodes ? nodes.length : 0)}
 - Edges: ${sectionOmitted('edges') ? '*(omitted by filter code)*' : (edges ? edges.length : 0)}

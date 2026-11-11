@@ -79,6 +79,59 @@ import {
   jobRelevanceEvidence,
 } from '../extractors/apiExtractors.js';
 import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, sourceHealthWarning } from './jobSourceHealth.js';
+
+// A walker reports a walk guard when it stopped a walk for lack of real progress
+// or at a safety backstop. That usually means the scraper needs a fix.
+export const WALK_GUARD_WARNING_CODE = 'collection-stalled';
+const WALK_GUARD_KINDS = new Set(['pager-trickle', 'page-backstop', 'job-backstop', 'reveal-stalled', 'reveal-backstop', 'detail-retry-cap']);
+const WALK_GUARD_DETAIL_LIMIT = 240;
+const WALK_GUARD_EVIDENCE_LIMIT = 600;
+const WALK_GUARD_SUGGESTION = 'The scraper stopped this walk so it could not run forever. Results from this site are incomplete and the scraper likely needs a fix. Send a bug report.';
+
+const walkGuardNumber = value => (value == null || value === '' || !Number.isFinite(Number(value))
+  ? null
+  : Math.max(0, Math.floor(Number(value))));
+const walkGuardText = (value, limit) => (value == null ? '' : String(value).slice(0, limit));
+
+export function sanitizeWalkGuards(guards, limit = 20) {
+  if (!Array.isArray(guards)) return [];
+  const out = [];
+  const cap = Math.max(0, Math.floor(Number(limit) || 0));
+  for (const guard of guards) {
+    if (out.length >= cap) break;
+    if (!guard || typeof guard !== 'object' || !WALK_GUARD_KINDS.has(guard.kind)) continue;
+    out.push({
+      kind: guard.kind,
+      source: walkGuardText(guard.source, 120),
+      query: walkGuardText(guard.query, 120),
+      page: walkGuardNumber(guard.page),
+      pages: walkGuardNumber(guard.pages),
+      newRows: walkGuardNumber(guard.newRows),
+      detail: walkGuardText(guard.detail, WALK_GUARD_DETAIL_LIMIT),
+    });
+  }
+  return out;
+}
+
+export function walkGuardWarning(sourceId, guards) {
+  const clean = sanitizeWalkGuards(guards, 20);
+  if (clean.length === 0) return null;
+  const seen = new Set();
+  const evidence = [];
+  for (const guard of clean) {
+    const key = `${guard.kind}\u0000${guard.query}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    evidence.push(guard.detail || guard.kind);
+  }
+  return {
+    code: WALK_GUARD_WARNING_CODE,
+    severity: 'warn',
+    shortLabel: 'Stopped early',
+    evidence: evidence.join('; ').slice(0, WALK_GUARD_EVIDENCE_LIMIT),
+    suggestion: WALK_GUARD_SUGGESTION,
+  };
+}
 import { fetchIndeedListingsBrowser, resolveIndeedPageBudgets, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
 import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, sanitizeJobSearchSourceWindows, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority } from './jobRunStaging.js';
@@ -586,6 +639,21 @@ export function narrowJobSearchSourceWindows(rawSourceWindows, runWindow, now = 
     out[sourceId] = effectiveJobSearchWindow(entry, null, null, clock);
   }
   return out;
+}
+
+/**
+ * A list walk the provider cut short (LinkedIn's 429 ends its query walk with
+ * stop reason `blocked`) still returns useful rows, so the card stays done. But
+ * the results it never reached are unobserved, not absent: the run manifest must
+ * keep it retryable, or its date bookmark advances past jobs nobody saw.
+ * A description throttle alone is not this case; the list was still walked.
+ */
+export function listWalkStoppedByProviderBlock(data, effectiveWarnings = []) {
+  if (!(Array.isArray(data?.jobs) && data.jobs.length > 0)) return false;
+  const reasons = data?.stopReasons instanceof Set ? [...data.stopReasons] : (Array.isArray(data?.stopReasons) ? data.stopReasons : []);
+  const stoppedBlocked = reasons.some(reason => (typeof reason === 'string' ? reason : reason?.stopReason) === 'blocked');
+  return stoppedBlocked && (Array.isArray(effectiveWarnings) ? effectiveWarnings : [])
+    .some(warning => warning?.severity === 'throttle' || warning?.severity === 'block');
 }
 
 /**
@@ -6058,6 +6126,12 @@ export function buildJobRunCompletionReceipt(runId, completedAt = Date.now(), te
         providerTotal: source?.providerTotal ?? source?.claimedTotal,
         truncated: source?.truncated === true,
         pagesWalked: source?.pagesWalked,
+        // Fixed contract for the bug report: dated cards the collection window
+        // dropped, and which field checks failed.
+        windowDropped: source?.windowDropped,
+        healthFailures: Array.isArray(source?.healthFailures)
+          ? source.healthFailures.slice(0, 8).map(({ field, rows, missing }) => ({ field, rows, missing }))
+          : undefined,
         relevanceDropped: source?.relevanceDropped,
         sponsoredDropped: source?.sponsoredDropped,
         cap: source?.cap,
@@ -8710,7 +8784,8 @@ async function queryFanOut(queries, fetcher, signal, concurrency = Infinity, min
   // `cap` remains for old callers/receipts, while `caps` preserves the real
   // union when different fan-out queries stopped at distinct finite limits.
   const cap = caps[0] || null;
-  return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace, stopReasons, pagesFetched, cap, caps, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
+  const walkGuards = sanitizeWalkGuards(results.flatMap(result => (Array.isArray(result?.walkGuards) ? result.walkGuards : [])), 20);
+  return { items, warning, gathered, providerGathered, providerTotal, truncated, crossQueryDuplicates, relevanceDropped, relevanceRejected, relevanceTrace, stopReasons, pagesFetched, cap, caps, walkGuards, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
 }
 
 // Keep the pacing/cancellation behavior observable without exposing the
@@ -8862,6 +8937,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const sourceCap = Array.isArray(result) ? null : (result?.cap ?? null);
       const sourceCaps = Array.isArray(result) ? [] : (Array.isArray(result?.caps) ? result.caps : []);
       const pagesFetched = Array.isArray(result) ? 0 : Math.max(0, Number(result?.pagesFetched) || 0);
+      const walkGuards = Array.isArray(result) ? [] : sanitizeWalkGuards(result?.walkGuards, 20);
       const pageShapeFailures = Array.isArray(result) ? 0 : (Number.isSafeInteger(result?.pageShapeFailures) && result.pageShapeFailures > 0 ? result.pageShapeFailures : 0);
       const jobs = rawJobs;
       const capDropped = 0;
@@ -8896,7 +8972,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
             && remoteFeedProvenance.some(entry => entry?.fanoutStopped === true));
         await stageSource({ sourceId, jobs, warning, retryablePartial });
       }
-      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
+      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace, walkGuards, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
     } catch (error) {
       // Ownership loss is pipeline-wide, not a source-level provider error.
       // Let the search handler return its stable resumeRunMissing/mismatch
@@ -13188,9 +13264,21 @@ Return a JSON object with four arrays of search query strings:
         if (Array.isArray(result.revealOutcomes)) {
           sourceResults[sourceId].revealOutcomes = result.revealOutcomes.slice(0, 20);
         }
+        if (Array.isArray(result.walkGuards)) {
+          sourceResults[sourceId].walkGuards = sanitizeWalkGuards([
+            ...(sourceResults[sourceId].walkGuards || []),
+            ...result.walkGuards,
+          ], 20);
+        }
         if (result.googleApplyCapture) sourceResults[sourceId].googleApplyCapture = result.googleApplyCapture;
         if (result.pageShapeFailures > 0) sourceResults[sourceId].pageShapeFailures = (sourceResults[sourceId].pageShapeFailures || 0) + result.pageShapeFailures;
         if (result.providerGathered != null) sourceResults[sourceId].providerGathered = result.providerGathered;
+        // Dated cards the walker dropped for being outside the collection
+        // window. They had a posted date, so the health check counts them.
+        if (result.windowDropped != null) {
+          sourceResults[sourceId].windowDropped =
+            (sourceResults[sourceId].windowDropped || 0) + Math.max(0, Number(result.windowDropped) || 0);
+        }
         if (result.truncated === true) sourceResults[sourceId].truncated = true;
         if (result.relevanceDropped != null) {
           sourceResults[sourceId].relevanceDropped = result.relevanceDropped;
@@ -13261,6 +13349,12 @@ Return a JSON object with four arrays of search query strings:
       if (res.providerTotal != null) sourceResults[res.sourceId].providerTotal = res.providerTotal;
       if (res.capDropped != null) sourceResults[res.sourceId].capDropped = res.capDropped;
       if (res.crossQueryDuplicates) sourceResults[res.sourceId].crossQueryDuplicates = res.crossQueryDuplicates;
+      if (Array.isArray(res.walkGuards)) {
+        sourceResults[res.sourceId].walkGuards = sanitizeWalkGuards([
+          ...(sourceResults[res.sourceId].walkGuards || []),
+          ...res.walkGuards,
+        ], 20);
+      }
       if (res.truncated) sourceResults[res.sourceId].truncated = true;
       if (res.pageShapeFailures > 0) sourceResults[res.sourceId].pageShapeFailures = (sourceResults[res.sourceId].pageShapeFailures || 0) + res.pageShapeFailures;
       if (res.pagesFetched != null) {
@@ -13437,10 +13531,12 @@ Return a JSON object with four arrays of search query strings:
       // scope is throttled. Keep the card non-fatal/done so those rows proceed,
       // but do not mark the recovery manifest clean: the provenance explicitly
       // says fan-out stopped and a future resume may fill the missing scope.
+      // A list walk the provider cut short (LinkedIn's 429) is the same case.
       const retryablePartialProviderFailure = sourceId === 'remoteok'
         && Array.isArray(data.remoteFeedProvenance)
         && data.remoteFeedProvenance.some(entry => entry?.fanoutStopped === true)
-        && effectiveWarnings.some(w => w?.severity === 'throttle');
+        && effectiveWarnings.some(w => w?.severity === 'throttle')
+        || listWalkStoppedByProviderBlock(data, effectiveWarnings);
 
       let status;
       if (hadInfoSkip)          status = 'skipped';
@@ -14089,6 +14185,10 @@ Return a JSON object with four arrays of search query strings:
       silentlyEmptySourceIds: skipProviderCollection ? [] : activeSourceIds.filter(sid => countryApplicableSourceIds.has(sid)
         && !(sourceResults[sid]?.jobs?.length) && !(sourceResults[sid]?.warnings?.length)),
       pageShapeFailures: Object.fromEntries(Object.entries(sourceResults).map(([sid, data]) => [sid, data?.pageShapeFailures || 0])),
+      // Both the walker's window drop and the central age filter kept rows with
+      // no parseable date and dropped dated ones, so the survivors skew undated.
+      datedOutsideWindowBySource: Object.fromEntries(Object.keys(sourceResults).map(sid => [sid,
+        Math.max(0, Number(sourceResults[sid]?.windowDropped) || 0) + Math.max(0, Number(ageBySource[sid]?.dropped) || 0)])),
     }).filter(item => !sourceHealthKnownStopped(item.source));
     for (const sid of new Set(sourceHealthFailures.map(item => item.source))) {
       const warning = sourceHealthWarning(sid, sourceHealthFailures);
@@ -14096,6 +14196,19 @@ Return a JSON object with four arrays of search query strings:
       const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], warnings: [], errors: 0, pagesWalked: 0, stopReasons: new Set() });
       result.warnings = [...(result.warnings || []), warning];
       result.healthFailures = sourceHealthFailures.filter(item => item.source === sid).map(({ field, rows, missing }) => ({ field, rows, missing }));
+      scrapeWarnings.push({ sourceId: sid, url: sourceFirstUrl[sid] || null, ...warning });
+      emitProgress({ nodeId, sourceId: sid, status: 'done', count: result.jobs?.length || 0, warning, completed: 1, total: 1 });
+    }
+    // A walk guard means a walker stopped a walk for lack of real progress or
+    // at a safety backstop. Surface it per source as a non-gating 'warn' so
+    // scoring of the rows already gathered continues. Never change the source
+    // manifest status here.
+    for (const sid of Object.keys(sourceResults)) {
+      const result = sourceResults[sid];
+      const warning = walkGuardWarning(sid, result?.walkGuards);
+      if (!warning) continue;
+      logger.error(`[Jobs][${nodeId}] Scrape walk stopped early for ${sid}: ${warning.evidence}`);
+      result.warnings = [...(result.warnings || []), warning];
       scrapeWarnings.push({ sourceId: sid, url: sourceFirstUrl[sid] || null, ...warning });
       emitProgress({ nodeId, sourceId: sid, status: 'done', count: result.jobs?.length || 0, warning, completed: 1, total: 1 });
     }
@@ -14194,6 +14307,7 @@ Return a JSON object with four arrays of search query strings:
       const data = sourceResults[sid] || { jobs: [], warnings: [] };
       const w = (data.warnings || []).find(x => x?.severity === 'block')
         || (data.warnings || []).find(x => x?.code === SOURCE_HEALTH_WARNING_CODE)
+        || (data.warnings || []).find(x => x?.code === WALK_GUARD_WARNING_CODE)
         || (data.warnings || []).find(x => x?.severity === 'info')
         || (data.warnings || [])[0] || null;
       bySource[sid] = {
@@ -14214,8 +14328,23 @@ Return a JSON object with four arrays of search query strings:
         bySource[sid].revealOutcomes = data.revealOutcomes.slice(0, 20);
       }
       if (data.googleApplyCapture) bySource[sid].googleApplyCapture = data.googleApplyCapture;
+      // Dated cards this source's page selection dropped for being outside the
+      // collection window, and what the health check flagged. Fixed contract:
+      // the bug report reads these names.
+      if (Number(data.windowDropped) > 0) {
+        bySource[sid].windowDropped = Math.max(0, Math.floor(Number(data.windowDropped)));
+      }
+      if (Array.isArray(data.healthFailures) && data.healthFailures.length > 0) {
+        bySource[sid].healthFailures = data.healthFailures
+          .slice(0, 8)
+          .map(({ field, rows, missing }) => ({ field, rows, missing }));
+      }
       if (data.pagesWalked > 0) {
         bySource[sid].pagesWalked = data.pagesWalked;
+      }
+      if (Array.isArray(data.walkGuards) && data.walkGuards.length > 0) {
+        bySource[sid].walkGuards = sanitizeWalkGuards(data.walkGuards, 8)
+          .map(({ kind, query, page, pages, newRows, detail }) => ({ kind, query, page, pages, newRows, detail }));
       }
       // API walkers can hit their finite request limit exactly, so their outer
       // merge has no post-fetch cap overflow to expose. Preserve the walker's

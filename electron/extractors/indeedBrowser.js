@@ -1123,6 +1123,14 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     let pagesWalked = 0;
     let autoPageBudgetReached = false;
     let explicitPageBudgetReached = false;
+    // Walks this run stopped on its own pager signals (trickle / Auto's page
+    // budget), one entry per stop. jobs.js merges them per source so a run
+    // stopped by a guard is never read as an exhausted one.
+    const walkGuards = [];
+    const pushWalkGuard = (guard) => {
+      if (walkGuards.length < 20) walkGuards.push(guard);
+      return guard;
+    };
     // A bounded per-query retrieval budget protects explicit small requests
     // from multiplying into a large crawl. It is deliberately distinct from
     // the user-visible platform cap, which is applied centrally only when the
@@ -1440,7 +1448,24 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           logger.warn(`[Indeed/Browser] onPageScraped threw (non-fatal): ${e?.message || e}`);
         }
         if (stopDecision?.stop) {
-          logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${stopDecision.detail || stopDecision.reason}`);
+          // A guard means the pager stopped advancing. That is a data-quality
+          // event, so it rides home on the result and is logged at warn; the
+          // plain stops (results exhausted, date window behind us) stay info.
+          if (stopDecision.guard) {
+            const guard = stopDecision.guard;
+            const entry = pushWalkGuard({
+              kind: guard.kind || 'pager-trickle',
+              source: 'indeed',
+              query: qi + 1,
+              page: Number.isFinite(Number(guard.page)) ? Number(guard.page) : p + 1,
+              pages: Number.isFinite(Number(guard.pages)) ? Number(guard.pages) : null,
+              newRows: Number.isFinite(Number(guard.newRows)) ? Number(guard.newRows) : null,
+              detail: String(guard.detail || stopDecision.detail || stopDecision.reason || '').slice(0, 240),
+            });
+            logger.warn(`[Indeed/Browser] q="${q}" p=${p + 1}: ${entry.detail}`);
+          } else {
+            logger.info(`[Indeed/Browser] q="${q}" p=${p + 1}: ${stopDecision.detail || stopDecision.reason}`);
+          }
           if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
@@ -1451,8 +1476,21 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         }
 
         if (p + 1 >= maxPages) {
-          if (isUnlimitedPages(limits)) autoPageBudgetReached = true;
-          else explicitPageBudgetReached = true;
+          // Auto's per-query page budget is a backstop, not a user choice, so it
+          // is recorded and logged; an explicit Pages value stops quietly.
+          if (isUnlimitedPages(limits)) {
+            autoPageBudgetReached = true;
+            const guard = pushWalkGuard({
+              kind: 'page-backstop',
+              source: 'indeed',
+              query: qi + 1,
+              page: p + 1,
+              pages: maxPages,
+              newRows: null,
+              detail: `hit Auto's ${maxPages}-page budget for this query on page ${p + 1}; ${pagesWalked} page(s) walked in the run`,
+            });
+            logger.warn(`[Indeed/Browser] q="${q}" ${guard.detail}`);
+          } else explicitPageBudgetReached = true;
           if (onPageJobs) await onPageJobs({ sourceId: 'indeed', query: q, queryIndex: queryIndexes[qi], page: p + 1, jobs: [], terminal: true });
           break;
         }
@@ -1619,6 +1657,10 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
         ...(explicitPageBudgetReached ? ['pages-per-platform'] : []),
       ],
       truncated: autoPageBudgetReached || explicitPageBudgetReached || queryRetrievalBudgetReached,
+      // Walks this run stopped on its own pager signals (trickle / Auto budget).
+      // jobs.js merges them per source; without them a guard-stopped run reads
+      // exactly like an exhausted one.
+      walkGuards,
       cap: autoPageBudgetReached
           ? { type: 'auto-pages-per-platform', limit: pageBudgets.reduce((sum, value) => sum + value, 0) }
           : explicitPageBudgetReached

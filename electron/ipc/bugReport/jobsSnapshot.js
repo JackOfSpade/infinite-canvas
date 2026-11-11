@@ -28,11 +28,12 @@ import { classifyUnparseableSalary, hasMojibake, mojibakeExcerpt } from './jobQu
 // import into electron/ from src/ is an established pattern (electron/ipc/
 // jobs.js line ~50 already does the same for this exact module).
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
-import { JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLimits.js';
+import { JOB_COLLECTION_AUTO_LABEL, JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits } from '../../../src/utils/jobCollectionLimits.js';
 import { consolidateBoardCascadeNodes, summarizeConsolidation } from '../../../src/utils/jobLocationConsolidation.js';
 import { classifyJobBoardSourceAdmission } from '../../../src/utils/jobBoardSourceAdmission.js';
 import { jobBoardPreferenceOverrideView } from '../../../src/utils/jobBoardPreferenceOverride.js';
 import { jobSearchNextAnchor, normalizeJobSearchInitialLookbackDays, resolveJobSearchDateWindow } from '../../../src/utils/jobSearchDateWindow.js';
+import { describeSourceHealthFailures } from '../../../src/utils/jobCollectionScopeCaveats.js';
 
 // Per-source "Scrape pace" rows for the Active Browser Scrape block. The line
 // itself is rendered by manualScraper's formatScrapePaceLine so the report and
@@ -52,6 +53,57 @@ export function renderScrapePaceLines(pace, now = Date.now()) {
     })
     .filter(Boolean)
     .map(line => `  - ${line}`);
+}
+
+/**
+ * Scrape Alarms entries for the current search's per-source health failures.
+ * Pure: takes jobs telemetry `search` (`{ bySource }`) and returns only a site
+ * id and the known-field/count description — never listing text.
+ */
+export function jobSourceHealthAlarmItems(search) {
+  const bySource = search?.bySource;
+  if (!bySource || typeof bySource !== 'object' || Array.isArray(bySource)) return [];
+  const items = [];
+  for (const [site, source] of Object.entries(bySource)) {
+    if (!Array.isArray(source?.healthFailures) || source.healthFailures.length === 0) continue;
+    const text = describeSourceHealthFailures(source.healthFailures);
+    if (text) items.push({ site, text });
+  }
+  return items;
+}
+
+/**
+ * Funnel parts that explain cards dropped before scoring, plus structured
+ * per-source health failures. Counts and known field names only; absent
+ * telemetry (older receipts) adds nothing.
+ */
+export function sourceReceiptWindowParts(source) {
+  const parts = [];
+  const windowDropped = nonnegativeCount(source?.windowDropped);
+  if (windowDropped != null && windowDropped > 0) {
+    parts.push(`${windowDropped} dated card(s) before the date window dropped in the scraper`);
+  }
+  if (Array.isArray(source?.healthFailures) && source.healthFailures.length > 0) {
+    const described = describeSourceHealthFailures(source.healthFailures);
+    if (described) parts.push(`health: ${described}`);
+  }
+  return parts;
+}
+
+// Detail-block re-probing counts two different things: `attempt` is the
+// cumulative probe total, while `maxAttempts` caps no-progress probes or
+// partial cycles. Printing them as `attempt=16/3` claimed a budget overrun that
+// never happened, so those phases render their own counters.
+const DETAIL_BLOCK_REPROBE_PHASES = new Set(['detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed']);
+
+export function formatDetailReprobeAttempt(event) {
+  if (!event || event.attempt == null) return null;
+  const max = event.maxAttempts != null ? `/${event.maxAttempts}` : '';
+  if (!DETAIL_BLOCK_REPROBE_PHASES.has(event.phase)) return `attempt=${event.attempt}${max}`;
+  const parts = [`probe=${event.attempt}`];
+  if (event.noProgressAttempts != null) parts.push(`no-progress=${event.noProgressAttempts}${max}`);
+  if (event.partialCycle != null) parts.push(`partial-cycle=${event.partialCycle}${max}`);
+  return parts.join(' ');
 }
 
 // Legacy/synthetic snapshots can still contain title-drop telemetry from older
@@ -178,11 +230,11 @@ function formatCollectionLimitsLine(collectionLimits) {
   if (!collectionLimits || typeof collectionLimits !== 'object') return null;
   const jobs = Number.isFinite(collectionLimits.jobsPerPlatform) && collectionLimits.jobsPerPlatform > 0
     ? `${Math.floor(collectionLimits.jobsPerPlatform)} job(s)/platform`
-    : `Auto: up to ${JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform} job(s)/platform`;
+    : `Auto jobs/platform: ${JOB_COLLECTION_AUTO_LABEL}`;
   const pages = Number.isFinite(collectionLimits.pagesPerPlatform) && collectionLimits.pagesPerPlatform > 0
     ? `${Math.floor(collectionLimits.pagesPerPlatform)} browser page(s)/search`
-    : `Auto: up to ${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery} browser page(s)/query, ${JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform}/platform`;
-  return `**Collection limits: ${jobs}; ${pages}** — set on this Job Search card for the run. The job limit is applied per platform; Auto divides its browser-page budget deterministically across generated queries. Explicit page depth applies to each generated browser query and to paginated API requests.`;
+    : `Auto browser pages: ${JOB_COLLECTION_AUTO_LABEL}`;
+  return `**Collection limits: ${jobs}; ${pages}** — set on this Job Search card for the run. The job limit is applied per platform. Explicit page depth applies to each generated browser query and to paginated API requests.`;
 }
 
 // JOBLINK is assembled synchronously on the main process from renderer-supplied
@@ -1086,6 +1138,7 @@ function formatLastRunReceipt(receiptState, currentNodeIds, livePipeline, label 
       const parts = [
         `${traversal} → ${retained ?? '?'} usable row(s) retained`,
         `${source.relevanceDropped} relevance-dropped`,
+        ...sourceReceiptWindowParts(source),
       ];
       if (unavailableDetailDropped != null && unavailableDetailDropped > 0) {
         parts.push(`${unavailableDetailDropped} confirmed-unavailable detail listing${unavailableDetailDropped === 1 ? '' : 's'} dropped`);
@@ -2691,8 +2744,8 @@ function durableRecoveryPage(value) {
 
 // This mirrors resolveBrowserPageBudgets without allocating an array sized by
 // an untrusted manifest. It is only used to explain the already-authoritative
-// resume plan: an explicit page limit applies to every query; Auto shares 40
-// pages, front-loading one extra page to earlier slots.
+// resume plan: an explicit page limit applies to every query; Auto gives each
+// query its own backstop.
 function recoveryQueryPageBudget(collectionLimits, queryCount, index) {
   const totalQueries = Math.max(0, Math.floor(Number(queryCount) || 0));
   if (totalQueries === 0 || index < 0 || index >= totalQueries) return null;
@@ -6932,9 +6985,26 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // (above) is the marker-appending idiom this file already uses elsewhere.
       // `suggestion` was never rendered by ANY report path, so the one sentence
       // stating what the run did with the affected rows was dropped every time.
-      const warningDetail = (warning) => {
+      const warningDetail = (warning, source) => {
         if (!warning) return '';
-        const evidence = warning.evidence ? 'detail recorded' : '';
+        // source-health-failed carries a structured per-field breakdown when
+        // this process recorded one. describeSourceHealthFailures emits only
+        // known field names and counts, so no listing text can leak; free-text
+        // `evidence` stays summarized as 'detail recorded' because it is
+        // unconstrained.
+        const healthFailures = warning.code === 'source-health-failed'
+          && Array.isArray(source?.healthFailures)
+          && source.healthFailures.length > 0
+          ? describeSourceHealthFailures(source.healthFailures)
+          : '';
+        // Walk guards are counts/shape only by contract, so render them instead
+        // of the opaque 'detail recorded' marker.
+        const guardEvidence = warning.code === 'collection-stalled' && Array.isArray(source?.walkGuards)
+          ? source.walkGuards
+            .map(g => `walk stopped early: ${g.kind} q${g.query ?? ''} p${g.page ?? ''} (${g.detail ?? ''})`)
+            .join('; ')
+          : '';
+        const evidence = healthFailures || guardEvidence || (warning.evidence ? 'detail recorded' : '');
         const suggestion = warning.suggestion ? 'suggestion recorded' : '';
         const affectedCount = Math.max(0, Math.floor(Number(warning.affectedCount) || 0));
         // Only description-detail-miss owns this compact aggregation contract.
@@ -6950,13 +7020,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const zeroExpectedSkip = entries
         .filter(([, v]) => v.count === 0 && v.warning && expectedSkipCodes.has(v.warning.code))
         .map(([k, v]) => {
-          return `${k} (${v.warning.code})${warningDetail(v.warning)}`;
+          return `${k} (${v.warning.code})${warningDetail(v.warning, v)}`;
         });
       const zeroWarn = entries
         .filter(([sourceId, v]) => v.count === 0 && v.warning && !expectedSkipCodes.has(v.warning.code)
           && !latestResolvedRecovery(t, sourceId, s.ts))
         .map(([k, v]) => {
-          return `${k} (${v.warning.code})${warningDetail(v.warning)}`;
+          return `${k} (${v.warning.code})${warningDetail(v.warning, v)}`;
         });
       const zeroTitleFiltered = entries
         .filter(([, v]) => v.count === 0 && !v.warning && Number(v.relevanceDropped || 0) > 0)
@@ -6986,10 +7056,19 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         .filter(([sourceId, v]) => v.count > 0 && v.warning && !expectedSkipCodes.has(v.warning.code)
           && !latestResolvedRecovery(t, sourceId, s.ts))
         .map(([k, v]) => {
-          return `${k} (${v.warning.code}${v.warning.severity ? `/${v.warning.severity}` : ''}, ${v.count} row(s) still returned)${warningDetail(v.warning)}`;
+          return `${k} (${v.warning.code}${v.warning.severity ? `/${v.warning.severity}` : ''}, ${v.count} row(s) still returned)${warningDetail(v.warning, v)}`;
         });
       if (nonZeroWarn.length) {
         lines.push(`  - ⚠️ returned results BUT flagged (partial success — check what the warning cost): ${nonZeroWarn.join(', ')}`);
+      }
+      // A source can carry walk guards while a stronger warning is the one
+      // shown above. List the guards on their own line so they are never hidden.
+      for (const [k, v] of entries) {
+        if (!Array.isArray(v.walkGuards) || v.walkGuards.length === 0) continue;
+        const guards = v.walkGuards
+          .map(g => `${g.kind} q${g.query ?? ''} p${g.page ?? ''} (${g.detail ?? ''})`)
+          .join('; ');
+        lines.push(`- ⚠️ \`${k}\` walk guard(s): walk stopped early: ${guards}`);
       }
     }
     // Per-source progress-event trail — the sequence of status/warning events the
@@ -7783,7 +7862,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           // so the generic field would only repeat it.
           e.itemIndex != null && e.phase !== 'panel-walk-interrupt' ? `card=${e.itemIndex}${e.itemTotal != null ? `/${e.itemTotal}` : ''}` : null,
           e.waitedMs != null ? `waited=${Math.round(e.waitedMs / 1000)}s` : null,
-          e.attempt != null ? `attempt=${e.attempt}${e.maxAttempts != null ? `/${e.maxAttempts}` : ''}` : null,
+          formatDetailReprobeAttempt(e),
           e.expanded != null ? `expanded=${e.expanded}${e.attempted != null ? `/${e.attempted}` : ''}` : null,
           (e.finalUrl || e.url) ? `url=${reportUrl(e.finalUrl || e.url, '(unrecorded)', 140)}` : null,
           e.bodyHead ? 'pageText=captured' : null,
@@ -7884,9 +7963,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           panelRateLimits > 0 ? `panel-http-429 ${panelRateLimits} (source throttle; walk stopped)` : null,
           panelHttpFailures > 0 ? `panel-http-other ${panelHttpFailures} (source response; walk stopped)` : null,
           panelPacing?.requestDelayMs
-            ? `panel-pace ${Math.round(Number(panelPacing.requestDelayMs) / 100) / 10}s${panelPacing.checkpointEvery && panelPacing.checkpointCooldownMs ? ` + ${Math.round(Number(panelPacing.checkpointCooldownMs) / 100) / 10}s/${panelPacing.checkpointEvery}` : ''}`
+            ? `panel-pace ${Math.round(Number(panelPacing.requestDelayMs) / 100) / 10}s${panelPacing.checkpointEvery && panelPacing.checkpointCooldownMs ? ` + ${Math.round(Number(panelPacing.checkpointCooldownMs) / 100) / 10}s/${panelPacing.checkpointEvery}` : ''}${panelPacing.windowMs && panelPacing.windowMax ? ` · max ${panelPacing.windowMax}/${Math.round(Number(panelPacing.windowMs) / 1000)}s` : ''}`
             : null,
           proactivePanelCooldowns > 0 ? `proactive-panel-cooldowns ${proactivePanelCooldowns}` : null,
+          Number(e.panelWindowWaits) > 0 ? `window-budget-waits ${Number(e.panelWindowWaits)} (${Math.round(Number(e.panelWindowWaitedMs || 0) / 1000)}s)` : null,
           panelRequestsIssued > 0 ? `panel-requests ${panelRequestsIssued}` : null,
           panelJsonResponses > 0 ? `same-request-json ${panelJsonPayloads}/${panelJsonResponses} usable` : null,
           panelJsonDescriptionFallbacks > 0 ? `json-description-fallback ${panelJsonDescriptionFallbacks}` : null,

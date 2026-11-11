@@ -6,7 +6,11 @@ const {
   buildJobTasks,
   capPlatformJobsAfterWindow,
   completedJobSourceIds,
+  listWalkStoppedByProviderBlock,
   narrowJobSearchSourceWindows,
+  sanitizeWalkGuards,
+  walkGuardWarning,
+  WALK_GUARD_WARNING_CODE,
 } = w4Jobs;
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -215,6 +219,78 @@ export default [
         activeSourceIds: ['indeed'],
         sourceStatuses: { indeed: 'skipped' },
       }).length === 0, 'a skipped source is not a completed collection');
+    },
+  },
+  {
+    name: 'job search source windows: a list walk the provider blocked is not a finished platform',
+    run() {
+      const throttle = [{ code: 'http-429', severity: 'throttle' }];
+      const rows = [{ title: 'Engineer' }];
+      assert(listWalkStoppedByProviderBlock({ jobs: rows, stopReasons: [{ query: 'q', stopReason: 'blocked' }] }, throttle) === true,
+        'LinkedIn API envelope: 429 ended the walk');
+      assert(listWalkStoppedByProviderBlock({ jobs: rows, stopReasons: new Set(['blocked']) }, throttle) === true,
+        'merged Set of plain reasons');
+      assert(listWalkStoppedByProviderBlock({ jobs: rows, stopReasons: new Set(['provider-page-limit']) }, throttle) === false,
+        'a throttle warning on a walk that reached its end is a description problem, not lost coverage');
+      assert(listWalkStoppedByProviderBlock({ jobs: rows, stopReasons: new Set(['blocked']) }, []) === false,
+        'no warning, no claim');
+      assert(listWalkStoppedByProviderBlock({ jobs: [], stopReasons: new Set(['blocked']) }, throttle) === false,
+        'no rows: the source is already an error, handled elsewhere');
+    },
+  },
+  {
+    name: 'job search source windows: walkGuardWarning surfaces guarded walks as a non-gating warning',
+    run: () => {
+      assert(walkGuardWarning('dice', []) === null, 'no guards must yield no warning');
+      assert(walkGuardWarning('dice', undefined) === null, 'missing guards must yield no warning');
+      assert(WALK_GUARD_WARNING_CODE === 'collection-stalled',
+        `warning code must be collection-stalled, got ${WALK_GUARD_WARNING_CODE}`);
+
+      const guard = {
+        kind: 'pager-trickle',
+        source: 'dice',
+        query: 'engineer',
+        page: '4',
+        pages: '9',
+        newRows: '0',
+        detail: 'next page added 0 new rows',
+      };
+      const warning = walkGuardWarning('dice', [guard]);
+      assert(warning !== null, 'one guard must yield a warning');
+      assert(warning.code === 'collection-stalled', `code must be collection-stalled, got ${warning.code}`);
+      assert(warning.severity === 'warn', `severity must be warn, got ${warning.severity}`);
+      assert(warning.shortLabel === 'Stopped early', `shortLabel must be "Stopped early", got ${warning.shortLabel}`);
+      assert(warning.evidence.includes(guard.detail), `evidence must contain the guard detail, got ${warning.evidence}`);
+      assert(warning.suggestion.includes('Send a bug report.'), 'suggestion must point at a bug report');
+
+      const deduped = walkGuardWarning('dice', [
+        guard,
+        { ...guard, detail: 'second identical kind/query guard' },
+      ]);
+      assert(deduped.evidence === guard.detail,
+        `identical kind+query guards must dedup to the first detail, got ${deduped.evidence}`);
+
+      const longGuards = Array.from({ length: 8 }, (_, index) => ({
+        kind: 'page-backstop',
+        query: `query-${index}`,
+        page: index,
+        detail: 'x'.repeat(200),
+      }));
+      const clipped = walkGuardWarning('dice', longGuards);
+      assert(clipped.evidence.length === 600,
+        `evidence must be clipped to 600 chars, got ${clipped.evidence.length}`);
+
+      const sanitized = sanitizeWalkGuards([
+        guard,
+        { kind: 'not-a-real-kind', detail: 'dropped' },
+        { kind: 'reveal-stalled', detail: 'y'.repeat(400) },
+      ], 20);
+      assert(sanitized.length === 2, `unknown kinds must be dropped, got ${sanitized.length}`);
+      assert(sanitized[0].page === 4, `page numbers must be coerced, got ${String(sanitized[0].page)}`);
+      assert(sanitized[1].detail.length === 240,
+        `detail must be clipped to 240 chars, got ${sanitized[1].detail.length}`);
+      assert(sanitizeWalkGuards(Array.from({ length: 25 }, () => guard), 20).length === 20,
+        'walk guard arrays must be capped at 20');
     },
   },
 ];

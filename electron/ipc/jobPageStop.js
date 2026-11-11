@@ -5,12 +5,14 @@
  *
  * Why this exists: the hub's page count is now "All" by default, so a walker no
  * longer stops because it counted to 10 — it stops because the DATA says there
- * is nothing worth fetching on the next page. Three terminal conditions:
+ * is nothing worth fetching on the next page. Four terminal conditions:
  *
  *   empty-page   A page extracted zero rows. Terminal and lossless — no results
  *                exist past an empty offset.
  *   age-window   The page is decisively OUTSIDE the hub's automatic date window.
  *   no-new-jobs  The pager has stopped advancing (every row already seen).
+ *   pager-trickle  Full pages keep re-serving old results while adding a token
+ *                new row, so the walk would otherwise page to the backstop.
  *
  * On the age rule and why it is NOT the date-cutoff heuristic that was removed
  * from jobs.js: boards serve RELEVANCE-sorted results, so posted dates are not
@@ -23,7 +25,7 @@
  * Unparseable dates never count as evidence, so a source that exposes no posted
  * date on its cards can never trip this rule (it stops on empty-page instead).
  *
- * no-new-jobs is gated on unlimited walks on purpose. A clamped pager (page
+ * no-new-jobs and pager-trickle are gated on unlimited walks on purpose. A clamped pager (page
  * param silently ignored → page 1 re-served forever) is only a hang risk when
  * there is no user-set ceiling, and a duplicate-page heuristic can false-positive
  * under relevance sort; with an explicit ceiling the old lossless behaviour
@@ -36,6 +38,14 @@ import { sourceJobKey } from '../../src/utils/jobIdentity.js';
 export const STOP_STREAK = 2;
 /** Dated rows a page needs before "no in-window rows" counts as evidence. */
 export const MIN_DATED_EVIDENCE = 3;
+/**
+ * Pager-trickle rule: TRICKLE_PAGES consecutive full pages (>= TRICKLE_MIN_ROWS
+ * rows) that each add at most TRICKLE_MAX_NEW fresh rows mean the pager is
+ * re-serving old results and the walk is not advancing.
+ */
+export const TRICKLE_PAGES = 3;
+export const TRICKLE_MAX_NEW = 1;
+export const TRICKLE_MIN_ROWS = 5;
 
 /**
  * @param {object}   opts
@@ -45,12 +55,16 @@ export const MIN_DATED_EVIDENCE = 3;
  * @param {function} opts.now         injectable clock (tests)
  * @returns {function(({items:any[],pageIndex:number})): {stop:boolean, reason?:string, detail?:string}}
  *          The returned function carries a `.stats` object for diagnostics.
+ *          pager-trickle also returns a shared `guard` record
+ *          ({kind, page, pages, newRows, detail}); walkers add source/query.
  */
 export function makeJobPageStop({ maxAgeDays = null, unlimited = false, sourceLabel = '', now = () => new Date() } = {}) {
   const days = Number(maxAgeDays) > 0 ? Math.floor(Number(maxAgeDays)) : null;
   const seenKeys = new Set();
   let outOfWindowStreak = 0;
   let staleStreak = 0;
+  let trickleStreak = 0;
+  let trickleFreshRows = 0;
 
   const stats = {
     pagesEvaluated: 0,
@@ -59,6 +73,7 @@ export function makeJobPageStop({ maxAgeDays = null, unlimited = false, sourceLa
     rowsDated: 0,
     outOfWindowPages: 0,
     stalePages: 0,
+    tricklePages: 0,
     stopReason: null,
   };
 
@@ -103,7 +118,7 @@ export function makeJobPageStop({ maxAgeDays = null, unlimited = false, sourceLa
       }
     }
 
-    // ── no-new-jobs (unlimited walks only) ───────────────────────────────────
+    // ── no-new-jobs / pager-trickle (unlimited walks only) ───────────────────
     if (unlimited) {
       let fresh = 0;
       for (const row of rows) {
@@ -124,6 +139,29 @@ export function makeJobPageStop({ maxAgeDays = null, unlimited = false, sourceLa
         }
       } else {
         staleStreak = 0;
+      }
+
+      // A full page that adds almost nothing new means the pager is re-serving
+      // old results; a walk down such a pager never honestly reaches the
+      // backstop. no-new-jobs above keeps precedence (it is evaluated first),
+      // and a fresh===0 page counts toward both streaks.
+      if (rows.length >= TRICKLE_MIN_ROWS && fresh <= TRICKLE_MAX_NEW) {
+        trickleStreak++;
+        trickleFreshRows += fresh;
+        stats.tricklePages++;
+        if (trickleStreak >= TRICKLE_PAGES) {
+          const detail = `${sourceLabel || 'source'} page ${pageIndex + 1}: ${TRICKLE_PAGES} consecutive pages each added at most ${TRICKLE_MAX_NEW} new job (${trickleFreshRows} in all) — the pager is re-serving old results`;
+          stats.stopReason = 'pager-trickle';
+          return {
+            stop: true,
+            reason: 'pager-trickle',
+            detail,
+            guard: { kind: 'pager-trickle', page: pageIndex + 1, pages: TRICKLE_PAGES, newRows: trickleFreshRows, detail },
+          };
+        }
+      } else {
+        trickleStreak = 0;
+        trickleFreshRows = 0;
       }
     }
 

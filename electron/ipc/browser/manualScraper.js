@@ -31,7 +31,7 @@ import { getGlassdoorLocId, saveGlassdoorLocId } from '../settings.js';
 import { CA_PROVINCES, normalizeLocationInput, pickGlassdoorLocation, US_STATES } from '../../../src/utils/jobLocation.js';
 import { sourceJobKey } from '../../../src/utils/jobIdentity.js';
 import { HARD_BLOCK_RETRY_WAIT_MS } from '../../../src/utils/jobSourceWarningPolicy.js';
-import { normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, resolvePageCeiling } from '../../../src/utils/jobCollectionLimits.js';
+import { JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits, resolveBrowserPageBudgets, resolveJobsPerPlatform, resolvePageCeiling } from '../../../src/utils/jobCollectionLimits.js';
 import { parseSalaryToNumeric } from '../../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake, stripHtmlToText } from '../../../src/utils/textEncoding.js';
 import { markManualSolveRequired } from '../scrapeVerification.js';
@@ -64,6 +64,16 @@ const CHALLENGE_HEARTBEAT_MAX_MS  = 600_000;
 // do — wait for a human. It also keeps the elapsed time moving on the source
 // card, which is the only place the user can see the wait is still theirs.
 const CHALLENGE_ACTIVITY_BEAT_MS = 30_000;
+// An unsolved wait past these marks gets an explicit, source-named warning and
+// the same line on the overlay. The heartbeat alone is invisible in the report:
+// it says "still waiting", not "nothing has happened for half an hour".
+export const CHALLENGE_ESCALATE_MS = [15 * 60_000, 30 * 60_000];
+
+// Auto/All resolves to the highest value a person can type, so a ceiling at or
+// above these is OUR safety net, not a limit the user chose. Hitting one is a
+// guard worth showing; an explicit number stays a quiet finish.
+export const UNLIMITED_PAGE_BACKSTOP = JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
+export const UNLIMITED_JOB_BACKSTOP = JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform;
 const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
 // Cloudflare can remove a solved Turnstile iframe before it either redirects or
 // re-renders the challenge. Do not mistake that short DOM transition for a final
@@ -121,6 +131,12 @@ export function detailBlockCooldownMs(reprobesSoFar) {
   return DETAIL_BLOCK_COOLDOWNS_MS[Math.min(index, DETAIL_BLOCK_COOLDOWNS_MS.length - 1)];
 }
 const DETAIL_BLOCK_MAX_REPROBES = 3;
+// Per-episode re-probes above bound ONE block; a walk that recovers and blocks
+// again can re-arm them for every page, which is what made a long source sit on
+// cooldowns until the walk ran out of pages. This is the per-SOURCE budget: once
+// it is gone, later pages keep their rows deferred exactly as they would at the
+// per-episode cap, and the walker files a 'detail-retry-cap' guard.
+export const DETAIL_BLOCK_MAX_TOTAL_REPROBES = 6;
 // Cards a cooldown re-probe may touch. MUST stay below DESC_STALE_THRESHOLD:
 // a silent throttle surfaces as panel timeouts, and that many in a row trips
 // abortWithError, which would turn an external rate limit into a bogus
@@ -796,7 +812,7 @@ export function manualPageCapForTasks(sourceTasks, collectionLimits) {
  * retain the small identity guard here as well so this safety boundary remains
  * correct when a provider repeats cards in a single extraction payload.
  */
-export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatform, collectionStartTimestamp) {
+export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatform, collectionStartTimestamp, stats = null) {
   const existingKeys = new Set((Array.isArray(existingJobs) ? existingJobs : [])
     .map(sourceJobKey));
   const unique = [];
@@ -807,6 +823,12 @@ export function selectManualSourcePageJobs(newJobs, existingJobs, jobsPerPlatfor
     unique.push(job);
   }
   const eligible = filterJobsByPostedSince(unique, collectionStartTimestamp);
+  // This window drop keeps undated cards and removes dated ones, so the rows it
+  // returns are biased. Count the drops for callers that measure `posted`.
+  if (stats && typeof stats === 'object') {
+    const prior = Number.isFinite(Number(stats.windowDropped)) ? Math.max(0, Number(stats.windowDropped)) : 0;
+    stats.windowDropped = prior + Math.max(0, unique.length - eligible.length);
+  }
   const limit = Number.isFinite(Number(jobsPerPlatform)) && Number(jobsPerPlatform) > 0
     ? Math.floor(Number(jobsPerPlatform))
     : Infinity;
@@ -1099,8 +1121,31 @@ const DESC_CONFIGS = {
     clickDelayMs: 4500,
     panelCooldownEvery: 8,
     panelCooldownMs: 12000,
+    // The click gap is not what trips the throttle. On 2026-11-11, at three
+    // times the August gap, Glassdoor still allowed only 11-13 requests before
+    // a 429, the same as at 1.5s. After a 429, 2 minutes' rest gave 0 of 4
+    // probes and 5 minutes gave 5 of 5 full recoveries. That is a request
+    // count in a window of about 3-5 minutes, so cap the count instead: at most
+    // 10 panel requests in any 5 minutes, across every page and query.
+    panelWindowMs: 300_000,
+    panelWindowMax: 10,
   },
 };
+
+/**
+ * How long to wait before the next panel request so a source stays under its
+ * rolling request budget. Drops timestamps that left the window from
+ * `requestTimes` in place. Returns 0 for a source with no budget.
+ */
+export function panelWindowWaitMs(sourceId, requestTimes, now = Date.now()) {
+  const cfg = DESC_CONFIGS[sourceId] || {};
+  const windowMs = Math.max(0, Number(cfg.panelWindowMs) || 0);
+  const max = Math.max(0, Math.floor(Number(cfg.panelWindowMax) || 0));
+  if (!windowMs || !max || !Array.isArray(requestTimes)) return 0;
+  while (requestTimes.length && now - requestTimes[0] >= windowMs) requestTimes.shift();
+  if (requestTimes.length < max) return 0;
+  return Math.max(0, requestTimes[requestTimes.length - max] + windowMs - now);
+}
 
 /**
  * Decide whether a source is permitted to open an individual posting while
@@ -1175,6 +1220,8 @@ export function descriptionPanelPacing(sourceId, requestsIssued = 0) {
     // checkpoint policy was absent just because this batch stopped early.
     checkpointCooldownMs,
     checkpointEvery: every || null,
+    windowMs: Math.max(0, Number(cfg.panelWindowMs) || 0) || null,
+    windowMax: Math.max(0, Math.floor(Number(cfg.panelWindowMax) || 0)) || null,
   };
 }
 
@@ -2953,6 +3000,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
   let challengeStartedAt       = 0; // when the current challenge wait began (for the heartbeat)
   let lastChallengeHeartbeat   = 0;
   let challengeHeartbeats      = 0; // log lines emitted for the current wait (drives the backoff)
+  let challengeEscalations     = 0; // CHALLENGE_ESCALATE_MS marks already announced for the current wait
   let lastChallengeBeatAt      = 0; // liveness beat, on its own un-backed-off cadence
   let cleanSince               = null; // tracks when page first went challenge-free
   let shownVerifiedOverlay     = false;
@@ -3137,6 +3185,7 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         lastChallengeHeartbeat = Date.now();
         lastChallengeBeatAt = Date.now();
         challengeHeartbeats = 0;
+        challengeEscalations = 0;
         // This source made the user manually solve something this run — feeds the
         // "manual-verification-first" scrape ordering (scrapeVerification.js). The
         // orchestrator records the outcome per source; we only flag it here.
@@ -3213,6 +3262,20 @@ async function waitForReady(page, sourceId, overlayBase, signal, resumeUrl = nul
         lastChallengeHeartbeat = Date.now();
         challengeHeartbeats++;
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for the user to solve the challenge (${formatChallengeElapsed(challengeElapsedMs)} elapsed)`);
+      }
+      // No timeout — but past 15 and 30 minutes the wait says out loud that it
+      // is still holding the walk, on the source card as well as in the log.
+      while (challengeEscalations < CHALLENGE_ESCALATE_MS.length
+        && challengeElapsedMs >= CHALLENGE_ESCALATE_MS[challengeEscalations]) {
+        const escalateMinutes = Math.round(CHALLENGE_ESCALATE_MS[challengeEscalations] / 60_000);
+        challengeEscalations++;
+        const escalation = `still waiting ${escalateMinutes}m for a human check on ${overlayBase.srcName} — complete it or press Reset`;
+        logger.warn(`[BrowserScraper] ${escalation}`);
+        await updateOverlay(page, {
+          ...overlayBase,
+          status: escalation,
+          challenge: true,
+        }).catch(() => {});
       }
       await new Promise(r => setTimeout(r, CONTENT_POLL_MS));
       continue;
@@ -4078,6 +4141,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             let descHeartbeatAt = Date.now();
             let descHeartbeats = 0;
             let descBeatAt = Date.now();
+            let descEscalations = 0;
             const descChallengeStart = Date.now();
             const descInputProbe = createChallengeInputProbe(page);
             await descInputProbe.poll();
@@ -4112,6 +4176,22 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
                 descHeartbeatAt = Date.now();
                 descHeartbeats++;
                 logger.info(`[BrowserScraper] ${overlayBase.srcName}: still waiting for description-expansion challenge solve (${descElapsedLabel} elapsed)`);
+              }
+              // Same escalation as the list-page wait: no timeout, but a wait
+              // this old is announced once per mark, in the log and on the card.
+              const descElapsedMs = Date.now() - descChallengeStart;
+              while (descEscalations < CHALLENGE_ESCALATE_MS.length
+                && descElapsedMs >= CHALLENGE_ESCALATE_MS[descEscalations]) {
+                const escalateMinutes = Math.round(CHALLENGE_ESCALATE_MS[descEscalations] / 60_000);
+                descEscalations++;
+                const escalation = `still waiting ${escalateMinutes}m for a human check on ${overlayBase.srcName} — complete it or press Reset`;
+                logger.warn(`[BrowserScraper] ${escalation}`);
+                await updateOverlay(page, {
+                  ...overlayBase,
+                  count: baseCount + i + 1,
+                  status: escalation,
+                  challenge: true,
+                }).catch(() => {});
               }
             }
             if (!solved) break;
@@ -4710,6 +4790,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
   let panelRateLimitCount = 0;
   let panelHttpFailureCount = 0;
   let panelRequestsIssued = 0;
+  let panelWindowWaits = 0;
+  let panelWindowWaitedMs = 0;
   // Network response events do not necessarily arrive before the next card's
   // pacing wait. Keep the issuing card so a late failure never gets assigned
   // to the card that was merely about to be opened.
@@ -4940,6 +5022,24 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     if (detail) panelJsonPayloads++;
     return detail;
   };
+  // Kept on the source's pacing object, so the budget spans every page and
+  // query of this source, not just this batch.
+  const panelWindowTimes = walkPlan?.detailPacing
+    ? (walkPlan.detailPacing.panelRequestTimes ||= [])
+    : [];
+  const waitForPanelWindow = async () => {
+    const waitMs = panelWindowWaitMs(sourceId, panelWindowTimes);
+    if (waitMs <= 0) return;
+    panelWindowWaits++;
+    panelWindowWaitedMs += waitMs;
+    await updateOverlay(page, {
+      ...overlayBase,
+      count: totalSoFar,
+      status: `Pausing ${Math.ceil(waitMs / 1000)}s to keep ${overlayBase.srcName} panel requests under its 5-minute limit…`,
+    }).catch(() => {});
+    await sleepUnlessAborted(waitMs + humanDelay(1500), signal);
+  };
+  const recordPanelRequest = () => { panelWindowTimes.push(Date.now()); };
   const waitForPanelPacing = async () => {
     const pacing = descriptionPanelPacing(sourceId, panelRequestsIssued);
     if (!pacing.checkpointDue || pacing.checkpointCooldownMs <= 0) return pacing;
@@ -5319,6 +5419,9 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       // window, including while this checkpoint is draining.  Re-check before
       // the next click so a late Google 429 never buys one extra request.
       if (await stopForLatePanelFailure(i, key, job.title)) break;
+      await waitForPanelWindow();
+      if (signal?.aborted) { interruptedAt ??= i + 1; break; }
+      if (page.isClosed()) break;
       if (sourceId === 'glassdoor') {
         glassdoorPanelHttpFailure = null;
         glassdoorPanelResponseDetails.delete(key);
@@ -5326,6 +5429,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
       }
       await page.mouse.move(clickTarget.x, clickTarget.y).catch(() => {});
       await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
+      recordPanelRequest();
       panelRequestsIssued++;
       lastPanelRequest = { startIndex: i, key, title: job.title };
       panelRequestContexts.set(key, lastPanelRequest);
@@ -5450,7 +5554,10 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
         // for a one-card batch: there may be no next loop iteration to notice
         // the throttle.
         if (await stopForGooglePanelRateLimit(i, key)) break;
+        await waitForPanelWindow();
+        if (signal?.aborted || page.isClosed()) break;
         await page.mouse.click(clickTarget.x, clickTarget.y, { delay: humanDelay(80) }).catch(() => {});
+        recordPanelRequest();
         panelRequestsIssued++;
         lastPanelRequest = { startIndex: i, key, title: job.title };
         panelRequestContexts.set(key, lastPanelRequest);
@@ -5701,6 +5808,8 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     panelHttpFailures: panelHttpFailureCount,
     panelRequestsIssued,
     proactivePanelCooldowns,
+    panelWindowWaits,
+    panelWindowWaitedMs,
     panelJsonResponses,
     panelJsonPayloads,
     panelJsonDescriptionFallbacks,
@@ -6269,6 +6378,68 @@ async function revealByTrustedWheel(page, cardSelector, steps = 12) {
 export const REVEAL_STABLE_PASSES = 5;
 
 /**
+ * A list that adds almost nothing over ten passes is trickling, not loading —
+ * Google can add one card per reveal action forever, which the plateau exit
+ * never catches and the iteration ceiling only catches hours later.
+ */
+export const REVEAL_LOW_GROWTH_PASSES = 10;
+export const REVEAL_LOW_GROWTH_SHARE = 0.05;
+export const REVEAL_LOW_GROWTH_MIN_START = 20;
+
+/**
+ * True when the last REVEAL_LOW_GROWTH_PASSES passes together added less than
+ * REVEAL_LOW_GROWTH_SHARE of the count at the start of that window, and that
+ * start count is big enough (>= 20) for the share to mean anything.
+ * `counts` is the card count observed after each pass, oldest first.
+ */
+export function revealLowGrowthStop(counts) {
+  if (!Array.isArray(counts) || counts.length < REVEAL_LOW_GROWTH_PASSES + 1) return false;
+  const window = counts
+    .slice(-(REVEAL_LOW_GROWTH_PASSES + 1))
+    .map(value => Math.max(0, Number.isFinite(value) ? value : 0));
+  const start = window[0];
+  if (start < REVEAL_LOW_GROWTH_MIN_START) return false;
+  return window[window.length - 1] - start < start * REVEAL_LOW_GROWTH_SHARE;
+}
+
+// ── Walk guards ───────────────────────────────────────────────────────────────
+// A source that stopped early because of a backstop, a trickle pager, a stalled
+// reveal or an exhausted retry budget used to look exactly like one that
+// finished. These are the fixed-shape records jobs.js turns into a visible
+// warning; counts only, never titles, URLs or listing text.
+export const WALK_GUARD_MAX = 20;
+export const WALK_GUARD_DETAIL_MAX_CHARS = 240;
+export const WALK_GUARD_KINDS = Object.freeze([
+  'pager-trickle',
+  'page-backstop',
+  'job-backstop',
+  'reveal-stalled',
+  'reveal-backstop',
+  'detail-retry-cap',
+]);
+
+const walkGuardNumber = value => (Number.isFinite(value) ? value : null);
+
+/** Append one guard in the shared shape. False when it was dropped. */
+export function appendWalkGuard(guards, entry) {
+  if (!Array.isArray(guards) || !entry || !WALK_GUARD_KINDS.includes(entry.kind)) return false;
+  if (guards.length >= WALK_GUARD_MAX) return false;
+  const detail = typeof entry.detail === 'string'
+    ? entry.detail.slice(0, WALK_GUARD_DETAIL_MAX_CHARS)
+    : null;
+  guards.push({
+    kind: entry.kind,
+    source: entry.source || null,
+    query: walkGuardNumber(entry.query),
+    page: walkGuardNumber(entry.page),
+    pages: walkGuardNumber(entry.pages),
+    newRows: walkGuardNumber(entry.newRows),
+    detail,
+  });
+  return true;
+}
+
+/**
  * Board-published "no more results" markers, checked during the reveal loop.
  *
  * Google keeps this node present on a ZERO-result page with empty text, so the
@@ -6305,6 +6476,9 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
   // scroll loop emitted NO telemetry at all and a reveal that plateaued at 30 of
   // ~96 cards was reported downstream as a clean `completed`.
   let exit = 'plateau';
+  // Card count after each pass, oldest first — the low-growth stop below reads
+  // a ten-pass window from it.
+  const passCounts = [];
   while (true) {
     if (signal?.aborted) { exit = 'aborted'; break; }
     // Ceiling on top of the "count stopped increasing" exit below. A source
@@ -6317,6 +6491,7 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
     }
     const raw   = await page.evaluate(extractorJS).catch(() => []);
     count = countDistinctJobs(raw);
+    passCounts.push(count);
     const target = Number.isFinite(jobsPerPlatform) ? Math.max(0, jobsPerPlatform - existingJobs) : null;
     await updateOverlay(page, {
       ...overlayBase,
@@ -6347,6 +6522,17 @@ async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, 
     } else {
       stableStreak = 0;
       prevCount = count;
+    }
+
+    // Trickle stop. A list that adds a few cards over ten passes is feeding on a
+    // marginal new item per action, so the plateau exit never fires and only the
+    // iteration ceiling would end it — hours later, with no sign it gave up.
+    // Plateau and end-of-list are proof and win when both apply.
+    if (revealLowGrowthStop(passCounts)) {
+      const gained = count - passCounts[passCounts.length - 1 - REVEAL_LOW_GROWTH_PASSES];
+      logger.warn(`[BrowserScraper] preloadContent(${sourceId}) reveal stalled: ${count} cards after ${iterations} passes — only ${gained} added over the last ${REVEAL_LOW_GROWTH_PASSES} passes`);
+      exit = 'reveal-stalled';
+      break;
     }
     if (isScroll) {
       if (sourceId === 'google') {
@@ -7273,6 +7459,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       const providerSeen = new Set();
       let sourceUnavailableDetailDropped = 0;
       let sourceBoardClosedDetailKept = 0;
+      // Cards this source's pages dropped only because their posted date fell
+      // before the collection window. They still HAD a date.
+      const sourceWindowDropStats = { windowDropped: 0 };
       // Every task for a source is built from the same persisted hub limits.
       // Keep the aggregate job limit at source scope so several role queries
       // cannot each consume a separate allowance.
@@ -7351,6 +7540,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // Keep one bounded outcome per executed query so the durable receipt can
       // later distinguish a real end marker from a no-growth plateau.
       const revealOutcomes         = [];
+      // Why this source stopped early despite a walk that looked healthy: a
+      // backstop, a trickle pager, a stalled reveal, an exhausted retry budget.
+      // Fixed shape, counts only — jobs.js turns these into a visible warning.
+      const walkGuards             = [];
 
       const displayIndex = sourceIndexBase + si + 1;
       const displayTotal = sourceTotal || sourceList.length;
@@ -7708,12 +7901,13 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // For scroll sources, pre-load content up to the per-query target
         // before running the extractor. Paginated sources skip this.
         if (SCROLL_SOURCES.has(sourceId)) {
+          const revealCeiling = task.options?.maxPages ?? resolvePageCeiling(null);
           const revealOutcome = await preloadContent(page, sourceId, task.extractorJS, overlayBase, signal, {
             // `??` not `||` — task.options.maxPages is already the resolved,
             // always-finite ceiling (resolvePageCeiling), but fall back to the
             // same backstop if a task was ever built without it so this never
             // silently reinstates the retired 10-page default.
-            maxPages: task.options?.maxPages ?? resolvePageCeiling(null),
+            maxPages: revealCeiling,
             jobsPerPlatform,
             existingJobs: allJobs.length,
           });
@@ -7723,6 +7917,24 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               queryTotal: sourceTasks.length,
               ...revealOutcome,
             });
+            // A reveal that stalled, or that only ended because our own pass
+            // ceiling ran out, leaves cards on the page: file a guard so the run
+            // cannot read as a complete list.
+            if (revealOutcome.exit === 'reveal-stalled') {
+              const stalledDetail = `Reveal stalled at ${revealOutcome.count} cards after ${revealOutcome.iterations} passes (under 5% growth over the last 10)`;
+              logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: ${stalledDetail}`);
+              appendWalkGuard(walkGuards, {
+                kind: 'reveal-stalled', source: sourceId, query: qi + 1,
+                page: null, pages: revealCeiling, newRows: revealOutcome.count, detail: stalledDetail,
+              });
+            } else if (revealOutcome.exit === 'iteration-ceiling' && revealCeiling >= UNLIMITED_PAGE_BACKSTOP) {
+              const revealBackstopDetail = `Reveal stopped at the ${revealCeiling}-pass backstop with ${revealOutcome.count} cards revealed`;
+              logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: ${revealBackstopDetail}`);
+              appendWalkGuard(walkGuards, {
+                kind: 'reveal-backstop', source: sourceId, query: qi + 1,
+                page: null, pages: revealCeiling, newRows: revealOutcome.count, detail: revealBackstopDetail,
+              });
+            }
           }
           if (signal?.aborted) { earlyExit = true; break; }
           await injectOverlay(page);
@@ -7763,7 +7975,19 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           // stale pager looping forever.
           const maxPages = task.options?.maxPages ?? resolvePageCeiling(null);
           if (pageNum > maxPages) {
-            logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit browser pages/query (${maxPages}) — stopping pagination`);
+            // At or above the Auto ceiling the limit is our own safety net, not
+            // a page count the user typed: reaching it is a give-up worth a
+            // warning. An explicit user limit finishes quietly, as it always did.
+            if (maxPages >= UNLIMITED_PAGE_BACKSTOP) {
+              const backstopDetail = `Stopped at the ${maxPages}-page browser backstop (Auto) with ${allJobs.length} rows`;
+              logger.warn(`[BrowserScraper] ${srcName} q${qi + 1} ${backstopDetail}`);
+              appendWalkGuard(walkGuards, {
+                kind: 'page-backstop', source: sourceId, query: qi + 1,
+                page: Math.max(1, pageNum - 1), pages: maxPages, newRows: allJobs.length, detail: backstopDetail,
+              });
+            } else {
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1} hit browser pages/query (${maxPages}) — stopping pagination`);
+            }
             hitPageCap = true;
             if (onPageJobs) await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: Math.max(1, pageNum - 1), jobs: [], terminal: true });
             break;
@@ -8183,6 +8407,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             allJobs,
             jobsPerPlatform,
             task.options?.collectionStartTimestamp,
+            sourceWindowDropStats,
           );
           const walkPlan = buildPhysicalCardWalkPlan(extracted, jobsToExpand);
           walkPlan.detailPacing = sourceDetailPacing;
@@ -8209,6 +8434,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           if (sourceDetailBlockCode && sourceDetailBlockAt > 0
             && sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES
             && sourceDetailPartialCycles < DETAIL_BLOCK_MAX_REPROBES
+            && sourceDetailReprobeTotal < DETAIL_BLOCK_MAX_TOTAL_REPROBES
             && jobsToExpand.length > 0 && !signal?.aborted) {
             const cooldownRemainingMs = detailBlockCooldownMs(Math.max(sourceDetailReprobes, sourceDetailPartialCycles)) - (Date.now() - sourceDetailBlockAt);
             if (cooldownRemainingMs > 0) {
@@ -8227,6 +8453,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             && (Date.now() - sourceDetailBlockAt) >= detailBlockCooldownMs(Math.max(sourceDetailReprobes, sourceDetailPartialCycles))
             && sourceDetailReprobes < DETAIL_BLOCK_MAX_REPROBES
             && sourceDetailPartialCycles < DETAIL_BLOCK_MAX_REPROBES
+            && sourceDetailReprobeTotal < DETAIL_BLOCK_MAX_TOTAL_REPROBES
             && jobsToExpand.length > 0
             && !signal?.aborted;
           const detailSkippedForBlock = Boolean(sourceDetailBlockCode) && !detailBlockReprobeDue;
@@ -8495,7 +8722,18 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
           logger.info(`[BrowserScraper] ${srcName} page ${pageNum}: ${enhanced.length} new jobs (${allJobs.length} total)`);
 
           if (allJobs.length >= jobsPerPlatform) {
-            logger.info(`[BrowserScraper] ${srcName} hit jobsPerPlatform (${jobsPerPlatform}) — stopping source`);
+            // Same rule as the page backstop: at the Auto ceiling this is our
+            // own cap, so it warns and files a guard instead of ending silently.
+            if (jobsPerPlatform >= UNLIMITED_JOB_BACKSTOP) {
+              const jobBackstopDetail = `Stopped at the ${jobsPerPlatform}-job backstop (Auto) on page ${pageNum} with ${allJobs.length} rows`;
+              logger.warn(`[BrowserScraper] ${srcName} ${jobBackstopDetail}`);
+              appendWalkGuard(walkGuards, {
+                kind: 'job-backstop', source: sourceId, query: qi + 1,
+                page: pageNum, pages: maxPages, newRows: allJobs.length, detail: jobBackstopDetail,
+              });
+            } else {
+              logger.info(`[BrowserScraper] ${srcName} hit jobsPerPlatform (${jobsPerPlatform}) — stopping source`);
+            }
             hitPerSourceCap = true;
             break;
           }
@@ -8525,7 +8763,26 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             logger.warn(`[BrowserScraper] ${srcName} onPageScraped threw (non-fatal): ${e?.message || e}`);
           }
           if (stopDecision?.stop) {
-            logger.info(`[BrowserScraper] ${srcName} q${qi + 1}: ${stopDecision.detail || stopDecision.reason}`);
+            const stopGuard = stopDecision.guard && typeof stopDecision.guard === 'object' && !Array.isArray(stopDecision.guard)
+              ? stopDecision.guard
+              : null;
+            if (stopGuard) {
+              // A stop the pager decided for us (makeJobPageStop's trickle
+              // guard) ends the walk early on purpose, so it is a warning with a
+              // guard, not another info line lost among the page log.
+              appendWalkGuard(walkGuards, {
+                ...stopGuard,
+                kind: stopGuard.kind || 'pager-trickle',
+                source: sourceId,
+                query: qi + 1,
+                page: stopGuard.page ?? pageNum,
+                pages: stopGuard.pages ?? maxPages,
+                newRows: stopGuard.newRows ?? allJobs.length,
+              });
+              logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: ${stopGuard.detail || stopDecision.detail || stopDecision.reason}`);
+            } else {
+              logger.info(`[BrowserScraper] ${srcName} q${qi + 1}: ${stopDecision.detail || stopDecision.reason}`);
+            }
             dataStopReason = stopDecision.reason || 'data-stop';
             recordManualScraperTelemetry({
               phase: 'page-stop',
@@ -8832,6 +9089,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             shortfallRetry,
           }
           : null;
+      // The source-wide description retry budget is spent: re-probing stops for
+      // the rest of this source, later rows keep exactly the deferred marking
+      // the per-episode cap gives them, and the run says so once.
+      // Only when the block was still on at the end: a sixth probe that
+      // recovered did not give up on anything.
+      if (sourceDetailReprobeTotal >= DETAIL_BLOCK_MAX_TOTAL_REPROBES && sourceDetailBlockCode) {
+        const keptDescriptionless = Math.max(0, sourceDetailUnenriched || 0);
+        const retryCapDetail = keptDescriptionless > 0
+          ? `Description retries gave up after ${DETAIL_BLOCK_MAX_TOTAL_REPROBES} tries; ${keptDescriptionless} rows kept without descriptions`
+          : `Description retries gave up after ${DETAIL_BLOCK_MAX_TOTAL_REPROBES} tries`;
+        logger.warn(`[BrowserScraper] ${srcName}: ${retryCapDetail}`);
+        appendWalkGuard(walkGuards, {
+          kind: 'detail-retry-cap', source: sourceId, query: null,
+          page: null, pages: null, newRows: keptDescriptionless || null, detail: retryCapDetail,
+        });
+      }
       const result = {
         id:          `${sourceId}-0`,
         sourceId,
@@ -8839,6 +9112,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         data:        allJobs,
         pagesWalked: sourcePagesWalked,
         stopReason,
+        // Fixed-shape records of the stops this walker chose for itself (page /
+        // job backstops, a trickle pager, a stalled reveal, an exhausted retry
+        // budget). jobs.js turns them into a visible warning; counts only.
+        walkGuards:  walkGuards.slice(0, WALK_GUARD_MAX),
         // Board-advertised total for this source, when it publishes a
         // trustworthy one (ZipRecruiter only — see readClaimedResultTotal).
         // Also gates only ZipRecruiter's bounded direct-page continuation when
@@ -8887,6 +9164,10 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         // pages are removed from `data`; preserve both figures for an honest
         // candidate-traversed → usable-row report.
         providerGathered: providerSeen.size,
+        // Dated cards this source's page selection dropped because they were
+        // outside the collection window. jobs.js feeds this to the health check
+        // as rows that HAD a posted date.
+        windowDropped: Math.max(0, Number(sourceWindowDropStats.windowDropped) || 0),
         unavailableDetailDropped: sourceUnavailableDetailDropped,
         // Rows an aggregator board reported closed but that stay in `data`, flagged
         // for the official-posting resolver. NOT part of unavailableDetailDropped.

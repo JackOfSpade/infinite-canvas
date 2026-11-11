@@ -1,11 +1,11 @@
 /**
  * User-configurable job-collection breadth, stored on the Job Search hub.
  *
- * A blank/null value is the safe **Auto** policy (kept as null on disk for
- * backwards compatibility):
- *   - at most 500 jobs per platform;
- *   - at most 10 pages for one generated query;
- *   - at most 40 browser pages for that platform across every generated query.
+ * A blank/null value is the **Auto** policy (kept as null on disk for
+ * backwards compatibility): no cap. A walk stops on the data instead — the
+ * source runs out of results, its pages fall outside the date window, or it
+ * stops serving new rows (makeJobPageStop in electron/ipc/jobPageStop.js).
+ * The numbers below are only backstops against a broken pager that never ends.
  *
  * A positive number remains an explicit user override. It may intentionally be
  * deeper than Auto and is never silently narrowed by Auto's aggregate budget.
@@ -24,15 +24,22 @@ export const JOB_COLLECTION_LIMITS_MAX = Object.freeze({
   pagesPerPlatform: 1_000,
 });
 
-/** The effective limits for a blank/null (Auto) collection policy. */
+/**
+ * Auto's backstops. Auto is meant to be unlimited, so these are the highest
+ * values a person could type, and queries no longer share one page budget.
+ * A capped Auto cut Indeed off at 18 pages across 9 queries on 2026-11-11.
+ */
 export const JOB_COLLECTION_AUTO_LIMITS = Object.freeze({
-  jobsPerPlatform: 500,
-  pagesPerQuery: 10,
-  pagesPerPlatform: 40,
+  jobsPerPlatform: JOB_COLLECTION_LIMITS_MAX.jobsPerPlatform,
+  pagesPerQuery: JOB_COLLECTION_LIMITS_MAX.pagesPerPlatform,
+  pagesPerPlatform: Number.POSITIVE_INFINITY,
 });
 
+/** How Auto reads to a person. Kept here so the card and the bug report agree. */
+export const JOB_COLLECTION_AUTO_LABEL = 'no limit; stops when results run out or leave the date window';
+
 // Compatibility name retained for callers/report fixtures that describe the
-// resolved no-number policy. It is no longer a pathological 1,000-page cap.
+// resolved no-number policy: Auto's per-query backstop.
 export const JOB_COLLECTION_PAGE_CEILING = JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
 
 function positiveInteger(value, fallback, maximum) {
@@ -104,9 +111,7 @@ export function resolveBrowserPageBudgets(limits, queryCount) {
 export function describeJobCollectionLimits(limits) {
   const { jobsPerPlatform, pagesPerPlatform } = normalizeJobCollectionLimits(limits);
   return {
-    jobs: jobsPerPlatform == null ? `auto (${JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform})` : String(jobsPerPlatform),
-    pages: pagesPerPlatform == null
-      ? `auto (${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery}/query, ${JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform}/platform)`
-      : String(pagesPerPlatform),
+    jobs: jobsPerPlatform == null ? `auto (${JOB_COLLECTION_AUTO_LABEL})` : String(jobsPerPlatform),
+    pages: pagesPerPlatform == null ? `auto (${JOB_COLLECTION_AUTO_LABEL})` : String(pagesPerPlatform),
   };
 }

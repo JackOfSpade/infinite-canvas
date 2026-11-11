@@ -632,6 +632,9 @@ function sanitizeReceiptSource(source = {}) {
   const cap = sanitizeReceiptSourceCap(source.cap);
   const caps = sanitizeReceiptSourceCaps(source.caps);
   const stopReason = sanitizeReceiptStopReason(source.stopReason);
+  const healthFailures = (Array.isArray(source.healthFailures) ? source.healthFailures : []).slice(0, 8)
+    .filter(item => typeof item?.field === 'string' && /^[a-z-]{1,24}$/u.test(item.field))
+    .map(item => ({ field: item.field, rows: receiptNumber(item.rows), missing: receiptNumber(item.missing) }));
   return {
     count: receiptNumber(source.count),
     providerGathered: receiptNumber(source.providerGathered),
@@ -664,6 +667,11 @@ function sanitizeReceiptSource(source = {}) {
       ? { pagesWalked: Math.min(RECEIPT_MAX_PAGES_WALKED, receiptNumber(source.pagesWalked)) }
       : {}),
     relevanceDropped: receiptNumber(source.relevanceDropped),
+    // Dated cards the collection window dropped inside the scraper. Without it the
+    // traversed → retained gap reads as unexplained loss.
+    ...(receiptNumber(source.windowDropped) > 0 ? { windowDropped: receiptNumber(source.windowDropped) } : {}),
+    // Which field checks failed, as known field names and counts only.
+    ...(healthFailures.length > 0 ? { healthFailures } : {}),
     ...(receiptNumber(source.sponsoredDropped) > 0 ? { sponsoredDropped: receiptNumber(source.sponsoredDropped) } : {}),
     ...(cap ? { cap } : {}),
     ...(caps.length > 0 ? { caps } : {}),

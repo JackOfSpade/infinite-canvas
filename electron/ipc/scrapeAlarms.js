@@ -104,8 +104,21 @@ export function listScrapeAlarms() {
   try { return sharedStore().list(); } catch { return []; }
 }
 
-/** For the bug report. It states what is on record, not a diagnosis. */
-export function scrapeAlarmsMarkdown(alarms = listScrapeAlarms()) {
-  if (!alarms.length) return '\n## Scrape Alarms\n- None on record.\n';
-  return `\n## Scrape Alarms\n${alarms.map(alarm => `- ${alarm.surface} / ${alarm.site}: ${alarm.what} (${alarm.bad} of ${alarm.attempts}) · last ${new Date(alarm.at).toISOString()} · first ${new Date(alarm.firstAt).toISOString()}`).join('\n')}\n`;
+/**
+ * For the bug report. It states what is on record, not a diagnosis.
+ * `jobSourceHealth` adds this process's live per-job-site failures (already
+ * reduced to known field names and counts by the caller) so a search whose
+ * report toast fired is never represented by "None on record" alone.
+ */
+export function scrapeAlarmsMarkdown(alarms = listScrapeAlarms(), jobSourceHealth = []) {
+  const jobLines = (Array.isArray(jobSourceHealth) ? jobSourceHealth : [])
+    .map(item => ({ site: text(item?.site), text: text(item?.text) }))
+    .filter(item => item.site && item.text)
+    .map(item => `- job site / ${item.site}: ${item.text} (this process's last search; full detail under Job Search Pipeline)`);
+  const alarmLines = (Array.isArray(alarms) ? alarms : [])
+    .map(alarm => `- ${alarm.surface} / ${alarm.site}: ${alarm.what} (${alarm.bad} of ${alarm.attempts}) · last ${new Date(alarm.at).toISOString()} · first ${new Date(alarm.firstAt).toISOString()}`);
+  if (!alarmLines.length && !jobLines.length) return '\n## Scrape Alarms\n- None on record.\n';
+  const lines = [...alarmLines, ...jobLines];
+  if (!alarmLines.length) lines.push('- No other alarms on record.');
+  return `\n## Scrape Alarms\n${lines.join('\n')}\n`;
 }

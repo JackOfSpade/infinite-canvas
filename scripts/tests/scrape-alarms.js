@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createScrapeAlarmStore, scrapeAlarmsMarkdown, scrapeShareBroken } from '../../electron/ipc/scrapeAlarms.js';
 import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
+import { formatDetailReprobeAttempt, jobSourceHealthAlarmItems, sourceReceiptWindowParts } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { describeSourceHealthFailures } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { scrapeAlarmToast } from '../../src/hooks/useScrapeAlarms.js';
 
@@ -81,6 +82,65 @@ export default [
       const failures = assessSourceHealth([], { pageShapeFailures: { weworkremotely: 2, remoteok: 0 } });
       assert.deepEqual(failures.map(item => [item.source, item.field, item.missing]), [['weworkremotely', 'page-shape', 2]]);
       assert.match(describeSourceHealthFailures(failures), /2 pages loaded, but no listings could be read from them/u);
+    },
+  },
+  {
+    name: 'Scrape alarms markdown: a live job-site health failure is shown instead of "None on record"',
+    run() {
+      assert.equal(scrapeAlarmsMarkdown([]), '\n## Scrape Alarms\n- None on record.\n', 'no-arg/no-item output is unchanged');
+      assert.equal(
+        scrapeAlarmsMarkdown([], [{ site: 'google', text: 'posted date missing on 118 of 133 listings (89%)' }]),
+        "\n## Scrape Alarms\n- job site / google: posted date missing on 118 of 133 listings (89%) (this process's last search; full detail under Job Search Pipeline)\n- No other alarms on record.\n",
+      );
+      const withStored = scrapeAlarmsMarkdown([
+        { surface: 'official posting reads', site: 'Employer pages', what: 'pages could not be read', attempts: 20, bad: 12, at: 0, firstAt: 0 },
+      ], [{ site: 'google', text: 'posted date missing on 118 of 133 listings (89%)' }]);
+      assert.ok(withStored.includes('- job site / google: posted date missing on 118 of 133 listings (89%)'), 'job-site line follows stored alarms');
+      assert.ok(!withStored.includes('No other alarms on record'), 'stored alarms already explain the section');
+    },
+  },
+  {
+    name: 'Job-site health items map structured failures and skip clean/absent sources',
+    run() {
+      assert.deepEqual(jobSourceHealthAlarmItems({
+        bySource: {
+          google: { healthFailures: [{ field: 'posted', rows: 133, missing: 118 }] },
+          indeed: { healthFailures: [] },
+          linkedin: {},
+          glassdoor: { windowDropped: 312 },
+        },
+      }), [{ site: 'google', text: 'posted date missing on 118 of 133 listings (89%)' }]);
+      assert.deepEqual(jobSourceHealthAlarmItems({ bySource: {} }), []);
+      assert.deepEqual(jobSourceHealthAlarmItems(undefined), [], 'older telemetry without bySource');
+    },
+  },
+  {
+    name: 'Source receipt funnel: window-dropped cards and health failures are named, absent telemetry adds nothing',
+    run() {
+      assert.deepEqual(sourceReceiptWindowParts({ windowDropped: 312 }),
+        ['312 dated card(s) before the date window dropped in the scraper']);
+      assert.deepEqual(sourceReceiptWindowParts({ healthFailures: [{ field: 'posted', rows: 133, missing: 118 }] }),
+        ['health: posted date missing on 118 of 133 listings (89%)']);
+      assert.deepEqual(sourceReceiptWindowParts({ windowDropped: 0, healthFailures: [] }), []);
+      assert.deepEqual(sourceReceiptWindowParts({}), [], 'older receipts have neither field');
+    },
+  },
+  {
+    name: 'Detail reprobe trail: cumulative probes are not printed as an attempt over the no-progress cap',
+    run() {
+      const formatted = formatDetailReprobeAttempt({ phase: 'detail-block-reprobe', attempt: 16, maxAttempts: 3, noProgressAttempts: 3 });
+      assert.equal(formatted, 'probe=16 no-progress=3/3');
+      assert.ok(!formatted.includes('attempt=16/3'));
+      assert.equal(
+        formatDetailReprobeAttempt({ phase: 'detail-block-reprobe-partial', attempt: 16, maxAttempts: 3, noProgressAttempts: 2, partialCycle: 2 }),
+        'probe=16 no-progress=2/3 partial-cycle=2/3',
+      );
+      assert.equal(
+        formatDetailReprobeAttempt({ phase: 'detail-block-reprobe-failed', attempt: 4, maxAttempts: 2, partialCycle: 2 }),
+        'probe=4 partial-cycle=2/2',
+      );
+      assert.equal(formatDetailReprobeAttempt({ phase: 'detail-image-fetch', attempt: 4, maxAttempts: 5 }), 'attempt=4/5');
+      assert.equal(formatDetailReprobeAttempt({ phase: 'detail-image-fetch' }), null);
     },
   },
 ];

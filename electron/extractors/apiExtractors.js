@@ -26,7 +26,7 @@ import { sourceJobKey, jobTitleCompanyLocationKey } from '../../src/utils/jobIde
 import { isPriceChartingApplicable, isAptDecoApplicable } from '../../src/utils/compSourceScope.js';
 import { parseSalaryToNumeric } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { decodeHtmlEntities, repairMojibake } from '../../src/utils/textEncoding.js';
-import { normalizeJobCollectionLimits, resolveJobsPerPlatform, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
+import { JOB_COLLECTION_AUTO_LIMITS, normalizeJobCollectionLimits, resolveJobsPerPlatform, resolvePageCeiling } from '../../src/utils/jobCollectionLimits.js';
 import { runRollingWorkers } from '../../src/utils/handoffScheduler.js';
 import { withListingClosed, withListingLiveness } from '../ipc/officialPostingBoardClosed.js';
 import { classifyListingLiveness, evidenceFromHtml, finalizeListingEvidence, listingLivenessPageProbe, LISTING_LIVENESS_RULES } from '../ipc/listingLiveness.js';
@@ -62,6 +62,65 @@ const API_TIMEOUT_SEEDS = {
 /** Resolve an API fetch timeout from its seed via the shared budget store. */
 function apiTimeout(key) {
   return resolveBudget(key, API_TIMEOUT_SEEDS[key] ?? 10000).timeoutMs;
+}
+
+// ── Walk guards ─────────────────────────────────────────────────────────────
+// A walk that stops because its pager stopped advancing, or because it ran into
+// Auto's backstop, is a data-quality event. Without a record the Search simply
+// looks like it gathered fewer jobs. Every API walker therefore returns a
+// `walkGuards` array on its result envelope (jobs.js merges them per source)
+// and logs each guard's detail at warn.
+const WALK_GUARD_MAX = 20;
+
+/** One counts-only guard. No titles, URLs or query text — numbers and words only. */
+function walkGuard(kind, { page = null, pages = null, newRows = null, detail = '' } = {}) {
+  return { kind, page, pages, newRows, detail: String(detail || '').slice(0, 240) };
+}
+
+/** Push a guard, capped so a pathological walk cannot inflate the envelope. */
+function pushWalkGuard(guards, guard) {
+  if (guards.length < WALK_GUARD_MAX) guards.push(guard);
+  return guard;
+}
+
+/**
+ * Pure "the pager has stopped advancing" detector. A page qualifies when it
+ * carried at least `minRows` rows but added no more than `maxNew` rows new to
+ * its query; any other page resets the streak. `pages` consecutive qualifying
+ * pages mean the offset is being re-served, so record() returns a guard from
+ * that page on — the caller decides to stop.
+ *
+ * Guard fields: `page` is the 1-based count of pages recorded, `pages` the
+ * qualifying streak length, `newRows` the rows those streak pages added.
+ */
+export function makeTrickleCounter({ pages = 3, maxNew = 1, minRows = 5 } = {}) {
+  const targetPages = Math.max(1, Math.floor(Number(pages)) || 3);
+  const allowedNew = Math.max(0, Math.floor(Number(maxNew)) || 0);
+  const minRowCount = Math.max(1, Math.floor(Number(minRows)) || 1);
+  let recorded = 0;
+  let streak = 0;
+  let streakNewRows = 0;
+  return {
+    record(pageRowCount, newRowCount) {
+      recorded += 1;
+      const rows = Number(pageRowCount) || 0;
+      const fresh = Number(newRowCount) || 0;
+      if (rows >= minRowCount && fresh <= allowedNew) {
+        streak += 1;
+        streakNewRows += fresh;
+      } else {
+        streak = 0;
+        streakNewRows = 0;
+      }
+      if (streak < targetPages) return null;
+      return walkGuard('pager-trickle', {
+        page: recorded,
+        pages: streak,
+        newRows: streakNewRows,
+        detail: `pager stopped advancing: ${streak} straight page(s) with <=${allowedNew} new row(s) each at ${minRowCount}+ rows; gave up after recorded page ${recorded}`,
+      });
+    },
+  };
 }
 
 
@@ -326,6 +385,9 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   // Per-query walk outcomes, so a ceiling-truncated source is distinguishable
   // from an exhausted one in the bug report (see the return value below).
   const queryStopReasons = [];
+  // Walks stopped by this source's own pager signals, one entry per stop. jobs.js
+  // merges these per source so a short gather is never mistaken for an exhausted one.
+  const walkGuards = [];
   // First pages that answered cleanly, and those among them with a real-sized body nothing could be read from.
   let firstPagesAnswered = 0;
   let firstPagesUnreadable = 0;
@@ -360,6 +422,9 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     const seenInThisQuery = new Set();
     let stopReason = null;
     let unproductiveStreak = 0;
+    // No user page/row cap is plumbed into this source, so this walk is always
+    // "unlimited" and the trickle counter is its repeating-page guard.
+    const trickle = makeTrickleCounter();
     for (let start = 0; ; start += 25) {
       if (signal?.aborted) break;
       const pacing = linkedInApiRequestPacing({ requestsIssued: apiRequestsIssued });
@@ -531,6 +596,16 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
         stopReason = pageStop;
         break;
       }
+      // The stops above are page-shaped evidence; this one is cumulative. A
+      // pager that keeps answering with cards already seen in THIS query would
+      // otherwise walk to the guest offset limit one paced request at a time.
+      const trickleGuard = trickle.record(cards.length, newToThisQuery);
+      if (trickleGuard) {
+        pushWalkGuard(walkGuards, { ...trickleGuard, source: 'linkedin', query: qi + 1 });
+        stopReason = 'pager-trickle';
+        logger.warn(`[LinkedIn API] Query ${qi + 1}/${queryList.length}: ${trickleGuard.detail}`);
+        break;
+      }
     }
     if (stopReason) queryStopReasons.push({ query, stopReason });
   }
@@ -548,6 +623,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     cancelled: !!signal?.aborted,
     gathered: allJobs.length,
     stopReasons: queryStopReasons,
+    walkGuards,
     cap: null,
     ...(mostFirstPagesUnreadable({ firstPages: firstPagesAnswered, unreadable: firstPagesUnreadable }) ? { pageShapeFailures: firstPagesUnreadable } : {}),
   };
@@ -1891,8 +1967,20 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
   // partial result set rather than the whole corpus.
   let truncatedByError = false;
   const pageDigests = new Set();
+  // Auto's page backstop. USAJobs had no page counter at all, so nothing but the
+  // row budget stood above a pager that kept serving fresh-looking pages. Same
+  // ceiling the other API walkers use; an explicit row allowance stays quiet.
+  const pageCeiling = resolvePageCeiling(null);
+  const autoRowBudget = JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform;
+  const autoRowWalk = !Number.isFinite(rowBudget) || rowBudget >= autoRowBudget;
+  // Rows already seen in THIS query, so the trickle counter measures what a page
+  // actually added instead of what it repeated.
+  const seenRowIds = new Set();
+  const trickle = makeTrickleCounter();
+  const walkGuards = [];
+  let stopReason = null;
 
-  for (let page = 1; ; page++) {
+  for (let page = 1; page <= pageCeiling; page++) {
     if (signal?.aborted) break;
     const params = new URLSearchParams({
       Keyword: query,
@@ -1955,22 +2043,72 @@ async function fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays,
       break;
     }
     pageDigests.add(pageDigest);
+    // Rows new to this query, for the trickle counter below. Counting only —
+    // repeated rows still flow into `rows` exactly as before.
+    let pageNewRows = 0;
+    for (const item of pageItems) {
+      const rowId = item?.MatchedObjectId || item?.MatchedObjectDescriptor?.PositionID || JSON.stringify(item);
+      if (seenRowIds.has(rowId)) continue;
+      seenRowIds.add(rowId);
+      pageNewRows++;
+    }
     rows.push(...pageItems);
     if (providerTotal != null && rows.length >= providerTotal) break;
     // Stop as soon as the user's per-platform allowance is satisfied. Walking
     // the provider's full corpus and slicing afterwards would fetch (and later
     // LLM-score) rows the user already said they did not want — JOB_SCORE_CAP is
     // Infinity, so every gathered row is scored. Infinity ("All") keeps walking.
-    if (rows.length >= rowBudget) break;
+    if (rows.length >= rowBudget) {
+      // Auto's row budget is a backstop, not a user choice: say so loudly. An
+      // explicit allowance reaching itself is the walk doing its job — quiet.
+      if (autoRowWalk) {
+        const guard = pushWalkGuard(walkGuards, {
+          ...walkGuard('job-backstop', {
+            page,
+            pages: pagesFetched,
+            newRows: rows.length,
+            detail: `hit Auto's ${autoRowBudget}-row budget on page ${page} after ${pagesFetched} page(s); gathered ${rows.length} row(s)`,
+          }),
+          source: 'usajobs',
+          query: null,
+        });
+        stopReason = 'job-backstop';
+        logger.warn(`[USAJobs] ${guard.detail}`);
+      }
+      break;
+    }
     if (pageItems.length < USAJOBS_RESULTS_PER_PAGE) break; // short page = last page
+    // The stops above win on the page they fire; these two are the walk's own
+    // guards, checked last so an existing stop reason keeps precedence.
+    const trickleGuard = trickle.record(pageItems.length, pageNewRows);
+    if (trickleGuard) {
+      pushWalkGuard(walkGuards, { ...trickleGuard, source: 'usajobs', query: null });
+      stopReason = 'pager-trickle';
+      logger.warn(`[USAJobs] ${trickleGuard.detail}`);
+      break;
+    }
+    if (page === pageCeiling) {
+      const guard = pushWalkGuard(walkGuards, {
+        ...walkGuard('page-backstop', {
+          page,
+          pages: pagesFetched,
+          newRows: pageNewRows,
+          detail: `hit the ${pageCeiling}-page backstop on page ${page} without the provider running out; gathered ${rows.length} row(s)`,
+        }),
+        source: 'usajobs',
+        query: null,
+      });
+      stopReason = 'page-ceiling';
+      logger.warn(`[USAJobs] ${guard.detail}`);
+    }
   }
 
-  return { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError, pageShapeFailures };
+  return { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError, pageShapeFailures, walkGuards, stopReason };
 }
 
 async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, location, rowBudget = Infinity) {
   const requestedAgeDays = Math.max(1, Math.floor(maxAgeDays || 30));
-  const { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError, pageShapeFailures } =
+  const { rows, providerTotal, warning, lastStatusOk, pagesFetched, truncatedByError, pageShapeFailures, walkGuards, stopReason } =
     await fetchUSAJobsPages(query, apiKey, email, signal, requestedAgeDays, location, rowBudget);
 
   if (!lastStatusOk && rows.length === 0) return { items: [], warning };
@@ -1989,6 +2127,9 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
     logger.info(`[USAJobs] 200 with SearchResultCountAll=0 for "${query}" — provider reports no matching federal postings`);
   } else if (providerTotal != null && rows.length < providerTotal) {
     const why = truncatedByError ? 'a page request failed mid-walk'
+      : stopReason === 'pager-trickle' ? 'the pager stopped advancing'
+      : stopReason === 'page-ceiling' ? `the ${pagesFetched}-page backstop was reached`
+      : stopReason === 'job-backstop' ? "Auto's row budget was reached"
       : Number.isFinite(rowBudget) && rows.length >= rowBudget ? 'the per-platform allowance was reached'
       : 'the walk ended early';
     logger.info(`[USAJobs] "${query}": gathered ${rows.length} of ${providerTotal} reported after ${pagesFetched} page(s) — ${why}`);
@@ -2007,6 +2148,10 @@ async function runUSAJobsSearch(query, apiKey, email, signal, maxAgeDays, locati
     truncated: truncatedByError,
     relevanceDropped: 0,
     relevanceRejected: [],
+    // Walks this query had to stop on its own signals (pager trickle, the page
+    // or row backstop). jobs.js merges them per source.
+    walkGuards,
+    stopReason,
     ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}),
   };
 }
@@ -3664,6 +3809,13 @@ export async function fetchDiceListings(query, location = '', signal = null, max
   let truncated = false;
   let stoppedByJobsLimit = false;
   let stoppedByExplicitPageLimit = false;
+  // Auto is unlimited, so nothing but these guards keeps a pager that re-serves
+  // its offset from burning the 1,000-page backstop one paced page at a time.
+  const walkGuards = [];
+  const trickle = makeTrickleCounter();
+  // Auto on both dimensions is the only "unlimited" Dice walk. An explicit Jobs
+  // or Pages setting is a boundary the user asked for, so it stops quietly.
+  const unlimitedWalk = limits.pagesPerPlatform == null && limits.jobsPerPlatform == null;
 
   for (let page = 1; page <= pageCeiling; page++) {
     if (signal?.aborted) throw new Error('Aborted');
@@ -3746,6 +3898,20 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       truncated = true;
       stoppedByJobsLimit = true;
       stopReasons.push({ page, stopReason: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform' });
+      // Auto's 10,000-row budget is a backstop, not a user choice: say so.
+      if (limits.jobsPerPlatform == null) {
+        const guard = pushWalkGuard(walkGuards, {
+          ...walkGuard('job-backstop', {
+            page,
+            pages: pagesFetched,
+            newRows: items.length,
+            detail: `hit Auto's ${rowBudget}-row budget on page ${page}; kept ${items.length} in-window row(s) after ${pagesFetched} page(s)`,
+          }),
+          source: 'dice',
+          query: null,
+        });
+        logger.warn(`[Dice API] ${guard.detail}`);
+      }
       break;
     }
     if (page === pageCeiling) {
@@ -3758,6 +3924,31 @@ export async function fetchDiceListings(query, location = '', signal = null, max
       // backstop as the same token as an explicit Pages setting would let the
       // former be excused as a configured collection boundary.
       stopReasons.push({ page, stopReason: stoppedByExplicitPageLimit ? 'pages-per-platform' : 'page-ceiling' });
+      // An explicit Pages value is the user's own boundary — quiet, as before.
+      if (!stoppedByExplicitPageLimit) {
+        const guard = pushWalkGuard(walkGuards, {
+          ...walkGuard('page-backstop', {
+            page,
+            pages: pagesFetched,
+            newRows: pageNewRows,
+            detail: `hit the ${pageCeiling}-page backstop on page ${page} without a short or empty page; kept ${items.length} in-window row(s)`,
+          }),
+          source: 'dice',
+          query: null,
+        });
+        logger.warn(`[Dice API] ${guard.detail}`);
+      }
+    }
+    // Last, so an existing stop above keeps precedence on this page: a pager
+    // adding ~1 new row per page has stopped advancing, whatever the page says.
+    if (truncated || !unlimitedWalk) continue;
+    const trickleGuard = trickle.record(jobs.length, pageNewRows);
+    if (trickleGuard) {
+      pushWalkGuard(walkGuards, { ...trickleGuard, source: 'dice', query: null });
+      truncated = true;
+      stopReasons.push({ page, stopReason: 'pager-trickle' });
+      logger.warn(`[Dice API] ${trickleGuard.detail}`);
+      break;
     }
   }
 
@@ -3778,6 +3969,9 @@ export async function fetchDiceListings(query, location = '', signal = null, max
     providerTotal,
     truncated,
     stopReasons,
+    // Walks this query stopped on its own signals: an advancing-less pager or
+    // Auto's page/row backstop. jobs.js merges these per source.
+    walkGuards,
     pagesFetched,
     cap: stoppedByJobsLimit
       ? { type: limits.jobsPerPlatform == null ? 'auto-jobs-per-platform' : 'jobs-per-platform', limit: rowBudget }

@@ -5,6 +5,9 @@ import { SOURCE_HEALTH_FAILED_CODE, describeSourceHealthFailures } from '../../s
  * field, and a later gate quietly discards them, so a whole site can vanish while every step reports success.
  * This compares each site's collected rows with what that site normally fills, before any gate drops them.
  *
+ * A collection window drops dated rows outside it and keeps undated ones, so the survivors look more undated than
+ * the site really is. The posted check therefore counts the dated rows the window dropped.
+ *
  * Limits come from what real searches filled on 2026-11-03: link, description, company and location were at 96-100%
  * on working sites. A posted date is often absent, on Google especially (38-70%).
  */
@@ -54,11 +57,13 @@ function rowsRepeatingAnotherEmployersDescription(list) {
 
 /**
  * @param {object[]} rows every row collected this run, before any description or scoring gate
- * @param {{ silentlyEmptySourceIds?: string[], pageShapeFailures?: Record<string, number> }} [options] sites searched that
- *   returned nothing and gave no warning of their own, and per-site counts of responses a fetcher could not read at all
+ * @param {{ silentlyEmptySourceIds?: string[], pageShapeFailures?: Record<string, number>,
+ *   datedOutsideWindowBySource?: Record<string, number> }} [options] sites searched that returned nothing and gave no
+ *   warning of their own, per-site counts of responses a fetcher could not read at all, and per-site counts of dated
+ *   rows the collection window dropped (they had a posted date)
  * @returns {Array<{ source: string, field: string, rows: number, missing: number, share: number, limit: number }>}
  */
-export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {} } = {}) {
+export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {}, datedOutsideWindowBySource = {} } = {}) {
   const bySource = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const source = text(row?.source).toLowerCase();
@@ -66,6 +71,11 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShap
     if (!bySource.has(source)) bySource.set(source, []);
     bySource.get(source).push(row);
   }
+  // Window-dropped rows had a posted date, so they count toward that check alone.
+  const datedOutsideWindow = source => {
+    const count = Number(datedOutsideWindowBySource?.[source]);
+    return Number.isFinite(count) && count > 0 ? count : 0;
+  };
   const failures = [];
   for (const [source, list] of bySource) {
     const repeats = rowsRepeatingAnotherEmployersDescription(list);
@@ -76,7 +86,11 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShap
     for (const check of FIELD_CHECKS) {
       const missing = list.filter(row => !check.present(row)).length;
       const limit = check.maxMissingShareBySource?.[source] ?? check.maxMissingShare ?? DEFAULT_MAX_MISSING_SHARE;
-      if (missing / list.length > limit) failures.push({ source, field: check.field, rows: list.length, missing, share: missing / list.length, limit });
+      // Rows the window dropped measured a date, so only the posted check may
+      // widen its denominator with them.
+      const measured = check.field === 'posted' ? list.length + datedOutsideWindow(source) : list.length;
+      const share = missing / measured;
+      if (share > limit) failures.push({ source, field: check.field, rows: measured, missing, share, limit });
     }
     if (SALARY_USUALLY_SHOWN.has(source) && !list.some(row => text(row?.salary))) {
       failures.push({ source, field: 'salary', rows: list.length, missing: list.length, share: 1, limit: 1 });

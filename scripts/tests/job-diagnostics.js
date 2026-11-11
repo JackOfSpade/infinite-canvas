@@ -9362,8 +9362,8 @@ export default [
           'the report must retain the exact card-owned collection limits used by the run');
         telemetry.search.collectionLimits = { jobsPerPlatform: null, pagesPerPlatform: null };
         const unboundedReport = buildJobsPipelineSnapshot(new Set(['collection-limit-diagnostics']), null, null);
-        assert(unboundedReport.includes('Collection limits: Auto: up to 500 job(s)/platform; Auto: up to 10 browser page(s)/query, 40/platform'),
-          'the report identifies Auto’s finite shared budgets');
+        assert(unboundedReport.includes('Collection limits: Auto jobs/platform: no limit; stops when results run out or leave the date window; Auto browser pages: no limit; stops when results run out or leave the date window'),
+          'the report says Auto has no cap and stops on the data');
         assert(unboundedReport.includes('dedup / age / history drops are by-design')
           && !unboundedReport.includes('title-relevance / dedup / age / history drops are by-design'),
         'a current provider-trust run does not imply title drops when none occurred');
@@ -15929,7 +15929,7 @@ export default [
           `the launch inputs survive the abort, got:\n${pipeline.slice(0, 1200)}`);
         telemetry.searchIntent.collectionLimits = { jobsPerPlatform: null, pagesPerPlatform: null };
         const unlimitedPipeline = buildJobsPipelineSnapshot(new Set([nodeId]), null, null);
-        assert(unlimitedPipeline.includes('Collection limits: Auto: up to 500 job(s)/platform; Auto: up to 10 browser page(s)/query, 40/platform'),
+        assert(unlimitedPipeline.includes('Collection limits: Auto jobs/platform: no limit; stops when results run out or leave the date window; Auto browser pages: no limit; stops when results run out or leave the date window'),
           `an active intent with blank controls must render the same Auto contract as a completed funnel, got:\n${unlimitedPipeline.slice(0, 1200)}`);
         assert(pipeline.includes('Last stage error: `recorded`')
           && !pipeline.includes('Node deleted'),

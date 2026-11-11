@@ -28,10 +28,10 @@ export default [
       const original = resolveIndeedPageBudgets(13, {}, null, false);
       const suffix = original.slice(5);
       const resumed = resolveIndeedPageBudgets(suffix.length, {}, suffix, true);
-      assert(original.reduce((sum, value) => sum + value, 0) === 40
+      assert(original.every(value => value === 1_000)
         && resumed.join(',') === suffix.join(',')
-        && resumed.reduce((sum, value) => sum + value, 0) === 24,
-      'a >4-query Continue preserves the original suffix allocation instead of redistributing Auto’s 40 pages');
+        && resumed.length === 8,
+      'a Continue keeps the original per-query Auto backstops for the remaining queries');
       const legacy = resolveIndeedPageBudgets(suffix.length, {}, null, true);
       assert(legacy.every(value => value === 1), 'a legacy Continue without stored allocations takes the conservative one-page-per-query path');
       const explicit = resolveIndeedPageBudgets(3, { pagesPerPlatform: 7 }, null, false);
@@ -40,20 +40,21 @@ export default [
       const wideOriginal = resolveIndeedPageBudgets(53, {}, null, false);
       const zeroBudgetSuffix = wideOriginal.slice(40);
       const wideResumed = resolveIndeedPageBudgets(zeroBudgetSuffix.length, {}, zeroBudgetSuffix, true);
-      assert(wideOriginal.reduce((sum, value) => sum + value, 0) === 40
-        && zeroBudgetSuffix.every(value => value === 0)
+      assert(wideOriginal.every(value => value === 1_000)
         && wideResumed.join(',') === zeroBudgetSuffix.join(','),
-      'a >40-query Auto Continue must retain its legitimate zero-page suffix instead of minting one fallback page per query');
+      'a >40-query Auto Continue keeps each remaining query’s own backstop; no query gets a zero-page budget');
+      // A stored zero allocation (from an older capped-Auto run) is still honored on Continue.
+      const legacyZeroSuffix = [0, 0, 0];
+      assert(resolveIndeedPageBudgets(3, {}, legacyZeroSuffix, true).join(',') === '0,0,0',
+        'a Continue of an older capped-Auto run keeps its stored zero-page suffix');
       const browserTasks = buildJobTasks(
         Array.from({ length: 53 }, (_, index) => `Role ${index + 1}`),
         21,
         { onlySources: new Set(['ziprecruiter']) },
       );
       const taskBudgets = browserTasks.map(task => task.options?.maxPages);
-      assert(taskBudgets.length === 53
-        && taskBudgets.reduce((sum, value) => sum + value, 0) === 40
-        && taskBudgets.slice(40).every(value => value === 0),
-      'Auto task planning must retain zero-budget suffixes so the manual scraper can skip them without exceeding its aggregate browser-page cap');
+      assert(taskBudgets.length === 53 && taskBudgets.every(value => value === 1_000),
+      'Auto task planning gives every generated query its own page backstop');
       const indeedSource = fs.readFileSync(path.resolve('electron/extractors/indeedBrowser.js'), 'utf8');
       const manualSource = fs.readFileSync(path.resolve('electron/ipc/browser/manualScraper.js'), 'utf8');
       assert(indeedSource.includes('value >= 0 && value <= 1_000')
@@ -91,10 +92,10 @@ export default [
         Array.from({ length: 53 }, (_value, index) => `q${index + 1}`),
         null,
       );
-      assert(zeroBudgetSuffix.indexes.length === 40
-        && zeroBudgetSuffix.indexes.at(-1) === 39
+      assert(zeroBudgetSuffix.indexes.length === 53
+        && zeroBudgetSuffix.indexes.at(-1) === 52
         && zeroBudgetSuffix.pageBudgets.every(value => value > 0),
-      'Indeed Auto resume omits its original zero-budget suffix instead of widening it into fresh work');
+      'Indeed Auto resume keeps every query, since no query starts with a zero-page budget any more');
     },
   },
 {
@@ -6350,8 +6351,9 @@ export default [
         && Number.isFinite(resolvePageCeiling({ pagesPerPlatform: 999 })),
       'resolvePageCeiling: ALWAYS returns a finite number, regardless of input shape');
       const describedDefault = describeJobCollectionLimits();
-      assert(describedDefault.jobs === 'auto (500)' && describedDefault.pages === 'auto (10/query, 40/platform)',
-        `describeJobCollectionLimits: default breadth must read as finite Auto, got ${JSON.stringify(describedDefault)}`);
+      assert(describedDefault.jobs === 'auto (no limit; stops when results run out or leave the date window)'
+        && describedDefault.pages === 'auto (no limit; stops when results run out or leave the date window)',
+        `describeJobCollectionLimits: default breadth must read as unlimited Auto, got ${JSON.stringify(describedDefault)}`);
       const describedExplicit = describeJobCollectionLimits({ jobsPerPlatform: 12, pagesPerPlatform: 3 });
       assert(describedExplicit.jobs === '12' && describedExplicit.pages === '3',
         `describeJobCollectionLimits: explicit numbers render as plain strings, got ${JSON.stringify(describedExplicit)}`);

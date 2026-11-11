@@ -1,5 +1,5 @@
 import React, { useId } from 'react';
-import { JOB_COLLECTION_AUTO_LIMITS, JOB_COLLECTION_LIMITS_MAX, normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
+import { JOB_COLLECTION_AUTO_LABEL, JOB_COLLECTION_LIMITS_MAX, normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 
 /** Compact, node-safe controls for the breadth of the next job search. */
 export function JobCollectionLimitsControl({ collectionLimits, setCollectionLimits, disabled = false }) {
@@ -50,8 +50,8 @@ export function JobCollectionLimitsControl({ collectionLimits, setCollectionLimi
           />
         </label>
       </div>
-      <p id={jobsHelpId} className="mt-1 text-[8px] leading-snug text-white/25">Blank = Auto (up to {JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform} jobs/platform).</p>
-      <p id={pagesHelpId} className="text-[8px] leading-snug text-white/25">Browser boards only. Blank = Auto (up to {JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery} pages/query, {JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform}/platform).</p>
+      <p id={jobsHelpId} className="mt-1 text-[8px] leading-snug text-white/25">Blank = Auto ({JOB_COLLECTION_AUTO_LABEL}).</p>
+      <p id={pagesHelpId} className="text-[8px] leading-snug text-white/25">Browser boards only. Blank = Auto ({JOB_COLLECTION_AUTO_LABEL}).</p>
     </fieldset>
   );
 }

@@ -3,9 +3,10 @@
 //     the isUnlimitedPages/resolvePageCeiling/describeJobCollectionLimits seams
 //     every walker/report must use instead of branching on null itself.
 //   - electron/ipc/jobPageStop.js: the data-driven "should we keep paging?"
-//     decision (empty-page / age-window / no-new-jobs) that replaced the old
-//     "walk to the ceiling" default.
+//     decision (empty-page / age-window / no-new-jobs / pager-trickle) that
+//     replaced the old "walk to the ceiling" default.
 import { assert } from './testHelpers.js';
+import { TRICKLE_MAX_NEW, TRICKLE_MIN_ROWS, TRICKLE_PAGES } from '../../electron/ipc/jobPageStop.js';
 import {
   JOB_COLLECTION_LIMITS_MAX,
   JOB_COLLECTION_AUTO_LIMITS,
@@ -127,8 +128,8 @@ export default [
     run: () => {
       const fourTasks = Array.from({ length: 4 }, () => ({ options: {} }));
       const auto = manualPageCapForTasks(fourTasks, { jobsPerPlatform: null, pagesPerPlatform: null });
-      assert(auto?.type === 'auto-pages-per-platform' && auto.limit === JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform,
-        'four generated browser queries report Auto’s aggregate 40-page source budget, not the per-query 10-page allocation');
+      assert(auto?.type === 'auto-pages-per-platform' && auto.limit === 4 * JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery,
+        'four generated browser queries each get Auto’s own per-query backstop; they no longer share one budget');
       const single = manualPageCapForTasks([{ options: {} }], {});
       assert(single?.limit === JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery,
         'a one-query Auto run reports its actually allocated ten-page budget');
@@ -197,11 +198,12 @@ export default [
         'blank → null resolves to the finite backstop, the exact round-trip a saved hub with an emptied input box goes through');
       assert(resolvePageCeiling({ pagesPerPlatform: 7 }) === 7, 'an explicit page count is its own ceiling');
       assert(isAutoJobCollection({}) && resolveJobsPerPlatform({}) === JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform,
-        'a saved null configuration resolves to the finite Auto job cap without migration');
+        'a saved null configuration resolves to the Auto job backstop without migration');
+      assert(JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform === 10_000 && JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery === 1_000,
+        'Auto backstops are the highest values a person can type, not a real cap');
       const budgets = resolveBrowserPageBudgets({}, 13);
-      assert(budgets.length === 13 && budgets.reduce((sum, n) => sum + n, 0) === JOB_COLLECTION_AUTO_LIMITS.pagesPerPlatform
-        && budgets[0] === 4 && budgets.slice(1).every(n => n === 3),
-      `Auto allocation must deterministically fit 40 pages across 13 queries, got ${budgets}`);
+      assert(budgets.length === 13 && budgets.every(n => n === JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery),
+      `Auto gives every one of 13 queries its own ${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery}-page backstop, got ${budgets}`);
 
       // resolvePageCeiling must NEVER hand a walker loop something non-finite,
       // for any shape of input a caller might pass it.
@@ -220,7 +222,8 @@ export default [
     name: 'describeJobCollectionLimits: Auto fields name finite effective budgets; explicit/clamped numbers stay plain',
     run: () => {
       const allDescribed = describeJobCollectionLimits({});
-      assert(allDescribed.jobs === `auto (${JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform})` && allDescribed.pages.includes(`${JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery}/query`),
+      assert(allDescribed.jobs === 'auto (no limit; stops when results run out or leave the date window)'
+        && allDescribed.pages === 'auto (no limit; stops when results run out or leave the date window)',
         `default breadth must read as Auto, got ${JSON.stringify(allDescribed)}`);
       const explicitDescribed = describeJobCollectionLimits({ jobsPerPlatform: 12, pagesPerPlatform: 3 });
       assert(explicitDescribed.jobs === '12' && explicitDescribed.pages === '3',
@@ -372,6 +375,113 @@ export default [
       ageA({ items: outPage, pageIndex: 0 }); // out-of-window streak = 1
       const ageB = makeJobPageStop({ maxAgeDays: 21, unlimited: false, sourceLabel: 'b', now: clock });
       assert(ageB({ items: outPage, pageIndex: 0 }).stop === false, 'a fresh instance must not inherit another instance\'s out-of-window streak');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'makeJobPageStop: pager-trickle stops an unlimited walk after THREE full pages that each add only one new job',
+    run: () => {
+      assert(TRICKLE_PAGES === 3 && TRICKLE_MAX_NEW === 1 && TRICKLE_MIN_ROWS === 5,
+        `pager-trickle thresholds are the agreed 3/1/5, got ${TRICKLE_PAGES}/${TRICKLE_MAX_NEW}/${TRICKLE_MIN_ROWS}`);
+      const stop = makeJobPageStop({ unlimited: true, sourceLabel: 'ziprecruiter', now: clock });
+      const base = Array.from({ length: 10 }, (_, i) => `t${i + 1}`);
+      const repeatNine = base.slice(0, 9).map(k => row(IN_WINDOW, k));
+      assert(stop({ items: base.map(k => row(IN_WINDOW, k)), pageIndex: 0 }).stop === false,
+        'a first page of ten fresh jobs is not a trickle');
+      assert(stop({ items: [...repeatNine, row(IN_WINDOW, 't11')], pageIndex: 1 }).stop === false,
+        'one full page adding a single new job is only a trickle streak of 1');
+      assert(stop({ items: [...repeatNine, row(IN_WINDOW, 't12')], pageIndex: 2 }).stop === false,
+        'two full pages adding a single new job each is only a trickle streak of 2');
+      const fourth = stop({ items: [...repeatNine, row(IN_WINDOW, 't13')], pageIndex: 3 });
+      assert(fourth.stop === true && fourth.reason === 'pager-trickle',
+        `a THIRD consecutive full page adding at most ${TRICKLE_MAX_NEW} new job must stop the walk, got ${JSON.stringify(fourth)}`);
+      assert(fourth.guard && fourth.guard.kind === 'pager-trickle' && fourth.guard.newRows === 3 && fourth.guard.page === 4,
+        `guard must be the shared {kind,page,pages,newRows,detail} record for the 4th page with 3 new rows, got ${JSON.stringify(fourth.guard)}`);
+      assert(fourth.guard.pages === TRICKLE_PAGES && fourth.guard.detail === fourth.detail,
+        'guard.pages is TRICKLE_PAGES and guard.detail mirrors the returned detail');
+      assert(fourth.guard.source === undefined && fourth.guard.query === undefined,
+        'guard carries no source/query fields — walkers add those themselves');
+      assert(fourth.detail.includes('ziprecruiter') && fourth.detail.includes('page 4:') && fourth.detail.includes('(3 in all)'),
+        `detail must name the source/page and the streak's new-row total, got ${fourth.detail}`);
+      assert(stop.stats.stopReason === 'pager-trickle' && stop.stats.tricklePages === TRICKLE_PAGES,
+        `stats must record the stop reason and ${TRICKLE_PAGES} trickle pages, got ${JSON.stringify(stop.stats)}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'makeJobPageStop: full pages adding TWO new jobs each never trip pager-trickle',
+    run: () => {
+      const stop = makeJobPageStop({ unlimited: true, sourceLabel: 'x', now: clock });
+      const base = Array.from({ length: 10 }, (_, i) => `u${i + 1}`);
+      const repeatEight = base.slice(0, 8).map(k => row(IN_WINDOW, k));
+      assert(stop({ items: base.map(k => row(IN_WINDOW, k)), pageIndex: 0 }).stop === false, 'first page is all fresh');
+      for (let i = 0; i < TRICKLE_PAGES + 2; i++) {
+        const page = [...repeatEight, row(IN_WINDOW, `u-new-${i}a`), row(IN_WINDOW, `u-new-${i}b`)];
+        const result = stop({ items: page, pageIndex: i + 1 });
+        assert(result.stop === false,
+          `a full page adding 2 new jobs is above TRICKLE_MAX_NEW and must reset the streak (pass ${i}), got ${JSON.stringify(result)}`);
+      }
+      assert(stop.stats.tricklePages === 0 && stop.stats.stopReason === null,
+        `no page qualified as a trickle page, got ${JSON.stringify(stop.stats)}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'makeJobPageStop: a page shorter than TRICKLE_MIN_ROWS does not count toward or continue the trickle streak',
+    run: () => {
+      const stop = makeJobPageStop({ unlimited: true, sourceLabel: 'x', now: clock });
+      const base = Array.from({ length: 10 }, (_, i) => `c${i + 1}`);
+      const repeatNine = base.slice(0, 9).map(k => row(IN_WINDOW, k));
+      assert(stop({ items: base.map(k => row(IN_WINDOW, k)), pageIndex: 0 }).stop === false, 'first page is all fresh');
+      const shortPage = [...base.slice(0, 3).map(k => row(IN_WINDOW, k)), row(IN_WINDOW, 'c11')];
+      assert(shortPage.length < TRICKLE_MIN_ROWS, 'fixture page must be shorter than TRICKLE_MIN_ROWS');
+      assert(stop({ items: shortPage, pageIndex: 1 }).stop === false, 'a short page never stops the walk on its own');
+      assert(stop.stats.tricklePages === 0, 'a page below TRICKLE_MIN_ROWS is not counted as a trickle page');
+      assert(stop({ items: [...repeatNine, row(IN_WINDOW, 'c12')], pageIndex: 2 }).stop === false, 'trickle streak = 1');
+      assert(stop({ items: [...repeatNine, row(IN_WINDOW, 'c13')], pageIndex: 3 }).stop === false,
+        'trickle streak = 2 — had the short page counted, this would already be 3 and stop here');
+      const fifth = stop({ items: [...repeatNine, row(IN_WINDOW, 'c14')], pageIndex: 4 });
+      assert(fifth.stop === true && fifth.reason === 'pager-trickle',
+        `the third FULL one-new-row page after the short page stops the walk, got ${JSON.stringify(fifth)}`);
+      assert(fifth.guard.page === 5 && fifth.guard.newRows === 3,
+        `only the three full pages feed the streak sum (1+1+1), got ${JSON.stringify(fifth.guard)}`);
+      return { ok: true };
+    },
+  },
+  {
+    name: 'makeJobPageStop: zero-new pages still stop as no-new-jobs, which keeps precedence over pager-trickle',
+    run: () => {
+      const stop = makeJobPageStop({ unlimited: true, sourceLabel: 'x', now: clock });
+      const base = Array.from({ length: 10 }, (_, i) => `d${i + 1}`);
+      const allRepeat = base.map(k => row(IN_WINDOW, k));
+      const repeatNine = base.slice(0, 9).map(k => row(IN_WINDOW, k));
+      assert(stop({ items: allRepeat, pageIndex: 0 }).stop === false, 'first page is all fresh');
+      assert(stop({ items: [...repeatNine, row(IN_WINDOW, 'd11')], pageIndex: 1 }).stop === false, 'trickle streak = 1');
+      assert(stop({ items: allRepeat, pageIndex: 2 }).stop === false,
+        'zero-new page: stale streak = 1 and trickle streak = 2 — neither rule has reached its own threshold');
+      const fourth = stop({ items: allRepeat, pageIndex: 3 });
+      assert(fourth.stop === true && fourth.reason === 'no-new-jobs',
+        `the SECOND consecutive zero-new page must stop as exactly no-new-jobs (trickle also hits 3 here), got ${JSON.stringify(fourth)}`);
+      assert(fourth.guard === undefined, 'no-new-jobs keeps its original return shape, with no guard');
+      assert(stop.stats.stopReason === 'no-new-jobs', 'stats.stopReason mirrors the precedence-safe reason');
+      return { ok: true };
+    },
+  },
+  {
+    name: 'makeJobPageStop: pager-trickle is gated on unlimited walks',
+    run: () => {
+      const stop = makeJobPageStop({ unlimited: false, sourceLabel: 'x', now: clock });
+      const base = Array.from({ length: 10 }, (_, i) => `e${i + 1}`);
+      const repeatNine = base.slice(0, 9).map(k => row(IN_WINDOW, k));
+      assert(stop({ items: base.map(k => row(IN_WINDOW, k)), pageIndex: 0 }).stop === false, 'first page is all fresh');
+      for (let i = 0; i < TRICKLE_PAGES + 2; i++) {
+        const page = [...repeatNine, row(IN_WINDOW, `e-new-${i}`)];
+        const result = stop({ items: page, pageIndex: i + 1 });
+        assert(result.stop === false && result.reason !== 'pager-trickle',
+          `a clamped pager (unlimited:false) must never return pager-trickle (pass ${i}), got ${JSON.stringify(result)}`);
+      }
+      assert(stop.stats.tricklePages === 0 && stop.stats.stopReason === null,
+        `limited walks track no trickle pages, got ${JSON.stringify(stop.stats)}`);
       return { ok: true };
     },
   },
