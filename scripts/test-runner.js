@@ -158,7 +158,11 @@ import job_search_locations from './tests/job-search-locations.js';
 import job_title_match from './tests/job-title-match.js';
 import job_posted_date from './tests/job-posted-date.js';
 import job_search_date_window from './tests/job-search-date-window.js';
+import job_search_source_windows_main from './tests/job-search-source-windows-main.js';
+import job_search_source_coverage from './tests/job-search-source-coverage.js';
 import job_board_provider from './tests/job-board-provider.js';
+import job_search_board_only from './tests/job-search-board-only.js';
+import job_search_paused_discard from './tests/job-search-paused-discard.js';
 import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
 import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
@@ -478,7 +482,11 @@ const testGroups = [
   ['job-title-match.js', job_title_match],
   ['job-posted-date.js', job_posted_date],
   ['job-search-date-window.js', job_search_date_window],
+  ['job-search-source-windows-main.js', job_search_source_windows_main],
+  ['job-search-source-coverage.js', job_search_source_coverage],
   ['job-board-provider.js', job_board_provider],
+  ['job-search-board-only.js', job_search_board_only],
+  ['job-search-paused-discard.js', job_search_paused_discard],
   ['job-fit-assessment.js', job_fit_assessment],
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],
   ['browser-launch-lock-regression.js', browser_launch_lock_regression],

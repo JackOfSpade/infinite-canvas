@@ -970,7 +970,8 @@ export default [
         && !jobSearchSource.includes('handleDiscardStaleManualAiRecovery')
         && staleRecoveryBanner.includes('const pausedManualAiRecovery = savedManualAiRecovery?.pausedByUser === true;')
         && staleRecoveryBanner.includes('This job search was stopped before source scraping began.')
-        && staleRecoveryBanner.includes('Clear career data is the only way to remove it.')
+        && staleRecoveryBanner.includes('onConfirm={handleDiscardManualAiRecovery}')
+        && !staleRecoveryBanner.includes('Clear career data is the only way to remove it.')
         && staleRecoveryBanner.includes('onClick={handleContinueManualAiRecovery}')
         && !staleRecoveryBanner.includes('Start fresh'),
       'an aged or user-paused manual-AI recovery retains its exact marker: its banner offers explicit Resume and identifies Clear career data as the only removal action');

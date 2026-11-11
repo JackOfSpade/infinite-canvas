@@ -4151,7 +4151,7 @@ export default [
       const rerun = search.slice(rerunStart, rerunEnd);
       assert(search.includes('store => isJobSearchConnectedToBoard(id, store.nodeLookup, store.edges)')
         && rerunStart >= 0 && rerunEnd > rerunStart
-        && !rerun.includes("deferDirectSearchToBoard('Direct re-run')")
+        && rerun.includes("deferDirectSearchToBoard('Direct re-run')")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Interrupted-run resume')) {")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Saved-scrape resume')) {")
         && search.includes("'Career-file drop'")

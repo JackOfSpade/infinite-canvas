@@ -884,7 +884,7 @@ export default [
       assert(bannerStart >= 0 && bannerEnd > bannerStart
         && banner.includes('const savedReanalysisManualAiRecovery = isSavedJobReanalysisManualAiResume(savedManualAiRecovery);')
         && banner.includes("savedReanalysisManualAiRecovery ? 'Saved-job re-analysis paused'")
-        && banner.includes('Continue re-evaluates those saved jobs only; it never starts a new scrape.')
+        && banner.includes('Your saved listings and revised Search Brief are retained. ${manualAiRecoveryNextStep}')
         && banner.indexOf("savedReanalysisManualAiRecovery ? 'Saved-job re-analysis paused'")
           < banner.indexOf("pausedManualAiRecovery ? 'Job search paused'"),
       'a paused re-analysis must visibly preserve its saved listings/brief and must not be described as a pre-scrape search pause');
@@ -3637,7 +3637,7 @@ export default [
       const searchRerunButton = button(search, 'handleRerun(); }}');
       assert(!searchRerunButton.includes('disabled'),
       'JobSearchNode.jsx Re-run Search button must carry no disabled prop at all (settingsFrozen or otherwise) — it is gated purely by conditional rendering');
-      assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    <button'),
+      assert(search.includes('{hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (\n                    managedByJobBoard ? (\n                      <button'),
       'JobSearchNode.jsx Re-run Search button must be gated on !controlsLocked and the absence of an incomplete checkpoint (not settingsFrozen) via conditional rendering, not a disabled prop');
       const searchClearButton = twoStep(search, 'onConfirm={handleClearCareerFiles}');
       assert(!searchClearButton.includes('disabled'),
@@ -5212,9 +5212,9 @@ export default [
         && bySource.includes('if (Array.isArray(data.caps))')
         && bySource.includes('bySource[sid].cap = { type: data.cap.type, limit: Math.floor(Number(data.cap.limit)) };'),
       'by-source serialization must retain finite API caps and matching outer-cap stop evidence');
-      assert(source.includes('const diceEffectivePageSize = normalizedCollectionLimits.jobsPerPlatform == null')
+      assert(source.includes('Math.min(sourceDiceEffectivePageSize, normalizedCollectionLimits.jobsPerPlatform)')
         && source.includes("' (limited by Jobs per platform)'")
-        && source.includes('server-side; ${dicePageSizeFact}'),
+        && source.includes('server-side; ${sourceDicePageSizeFact}'),
       'Dice date-bound diagnostics must describe the cap-sized API request rather than always claiming the 400/1000 default');
       return { fanOutPages: true, sourceCap: true };
     },

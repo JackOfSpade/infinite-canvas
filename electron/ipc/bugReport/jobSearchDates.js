@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { sanitizeJobSearchDateDiagnostics } from '../../../src/utils/jobSearchDateDiagnostics.js';
+import { normalizeSourceCoverage } from '../../../src/utils/jobSearchSourceCoverage.js';
 import { completionTimestampIso } from '../../../src/utils/completionTimestamp.js';
 
 function identifier(value) {
@@ -38,6 +39,16 @@ export function buildJobSearchDateHistory(nodes) {
       const data = node.data || {};
       lines.push(`- Hub \`${identifier(node.id)}\` · current last scraped ${timestamp(data.lastCompletedRunAt)} · current coverage start ${timestamp(data.lastSearchCoverageStartedAt)}.`);
       const history = sanitizeJobSearchDateDiagnostics(data.jobSearchDateDiagnostics);
+      // Per-platform bookmarks are what tells a partial run from a complete
+      // one: each platform id is a fixed public name, so the ids themselves are
+      // safe to print alongside their dates.
+      const sourceCoverage = normalizeSourceCoverage(data.sourceCoverage);
+      const coverageSourceIds = Object.keys(sourceCoverage).sort();
+      if (coverageSourceIds.length) {
+        lines.push(`  - Per-platform bookmarks: ${coverageSourceIds
+          .map(sourceId => `${sourceId} coverage start ${timestamp(sourceCoverage[sourceId].coverageStartedAt)} · completed ${timestamp(sourceCoverage[sourceId].completedAt)}`)
+          .join('; ')}.`);
+      }
       if (!history.length) {
         lines.push('  - Date decisions: not retained — older or missing diagnostics do not establish why this date was kept.');
         continue;

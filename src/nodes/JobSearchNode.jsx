@@ -11,7 +11,7 @@ import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
 import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
-import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES } from '../utils/constants';
+import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES, ALL_JOB_SOURCE_IDS } from '../utils/constants';
 import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
 // Same-run merges use dedupJobsAcrossSources/uniqueJobsAcrossSources — the
 // backend's location-aware cross-source dedup — so a posting that arrives
@@ -101,6 +101,13 @@ import {
   normalizeJobSearchInitialLookbackDays,
   resolveJobSearchDateWindow,
 } from '../utils/jobSearchDateWindow';
+import {
+  buildSourceCoverageCommitPatch,
+  latestSourceCompletedAt,
+  resolveJobSearchSourceWindows,
+  serializeJobSearchWindow,
+  sourcesBehindLatest,
+} from '../utils/jobSearchSourceCoverage';
 import { backgroundJobResumeRequest } from '../utils/workspaceStartupRecovery';
 import {
   canvasCareerImportCandidates,
@@ -140,18 +147,6 @@ const STATE_LABELS = {
 const PROCESSING_STATES = ['queued', 'parsing', 'interpreting-preferences', 'querying', 'searching', 'evaluating-preferences', 'scoring'];
 const BOARD_BUSY_SEARCH_STATES = new Set(PROCESSING_STATES);
 const SOURCE_CARD_DISMISS_GRACE_MS = 10_000;
-
-function serializedJobSearchWindow(window, anchorSource) {
-  return {
-    startTimestamp: window.startTimestamp,
-    anchorTimestamp: window.anchorTimestamp,
-    completionTimestamp: window.completionTimestamp,
-    capped: window.capped,
-    capReason: window.capReason,
-    providerLookbackDays: window.providerLookbackDays,
-    anchorSource,
-  };
-}
 
 function initialJobSearchLookbackDays(data) {
   // A canvas saved before this dedicated field existed may still have its
@@ -1544,15 +1539,28 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // resolution: a matching paused Board continuation still needs those
   // decisions to complete.
   const boardRecoveryOwnsActions = managedByJobBoard || !!activeBoardRecoveryOwnerKey;
+  // Product decision: the Job Board is the only way to start a job search. This
+  // card still compiles career files on its own, but every provider-facing
+  // action defers here — a connected card keeps pointing at its Board, and an
+  // unconnected card is told to connect one instead of scanning by itself.
   const deferDirectSearchToBoard = useCallback((trigger, description = null) => {
-    if (!isJobSearchConnectedToBoard(id, getNodes(), getEdges())) return false;
-    EventLogger.log(`[JobSearch][${id}] ${trigger} saved without scanning — connected Job Board owns search admission`);
-    addToast({
-      title: 'Run from Job Board',
-      description: description || 'Use Search selected & combine on the connected Job Board to run this module.',
-      type: 'info',
-      dedupeKey: `job-search-run-from-board:${id}`,
-    });
+    const connected = isJobSearchConnectedToBoard(id, getNodes(), getEdges());
+    EventLogger.log(connected
+      ? `[JobSearch][${id}] ${trigger} saved without scanning — connected Job Board owns search admission`
+      : `[JobSearch][${id}] ${trigger} saved without scanning — connect a Job Board to search`);
+    addToast(connected
+      ? {
+        title: 'Run from Job Board',
+        description: description || 'Use Search selected & combine on the connected Job Board to run this module.',
+        type: 'info',
+        dedupeKey: `job-search-run-from-board:${id}`,
+      }
+      : {
+        title: 'Connect a Job Board',
+        description: 'Searches run only from a Job Board. Connect this Job Search to a Job Board, then use Search selected & combine.',
+        type: 'info',
+        dedupeKey: `job-search-run-from-board:${id}`,
+      });
     return true;
   }, [addToast, getEdges, getNodes, id]);
   const completeJobRun = useCallback(async (
@@ -1626,6 +1634,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           && normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt) != null;
         const patch = {};
         if (existing?.runId === runId) patch.terminalFinalizationRecovery = null;
+        const pendingSourceCoverage = node?.data?.pendingSourceCoverage;
+        // Platforms that finished this run advance even when the hub itself is
+        // a partial collection (another platform was blocked); the hub
+        // watermark above stays put in that case. Read PRE-patch `node.data`
+        // so unfinished/disabled platforms keep their own older bookmarks.
+        const commitsSourceCoverage = terminalStatus === 'completed'
+          && pendingSourceCoverage?.runId === runId
+          && (!admittedCareerSnapshotId
+            || pendingSourceCoverage?.careerSnapshotId === admittedCareerSnapshotId);
+        if (commitsSourceCoverage) {
+          Object.assign(patch, buildSourceCoverageCommitPatch(node?.data, {
+            ...pendingSourceCoverage,
+            knownSourceIds: ALL_JOB_SOURCE_IDS,
+          }, id));
+          patch.pendingSourceCoverage = null;
+        }
         if (commitsSuccessfulCollection) {
           patch.lastCompletedRunAt = normalizeCompletionTimestamp(pendingCompletion.collectionCompletedAt);
           patch.lastSearchCoverageStartedAt = normalizeCompletionTimestamp(
@@ -1737,6 +1761,23 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Fence the removal to this exact run so an interleaved successor can
       // never lose its own pending completion.
       if (runId) {
+        // Same arithmetic as the full-collection branch below, so a partial
+        // finish still advances the platforms that did finish over exactly the
+        // interval their walk covered.
+        const partialCollectionCompletedAt = normalizeCompletionTimestamp(searchResult?.collectionCompletedAt)
+          ?? Date.now();
+        const partialCollectionStartedAt = normalizeCompletionTimestamp(searchResult?.collectionStartedAt)
+          ?? normalizeCompletionTimestamp(searchResult?.searchWindow?.startTimestamp)
+          ?? partialCollectionCompletedAt;
+        const partialSourceCoverage = Array.isArray(searchResult?.completedSourceIds)
+          ? {
+            runId,
+            careerSnapshotId: admittedCareerSnapshotId,
+            collectionStartedAt: partialCollectionStartedAt,
+            collectionCompletedAt: partialCollectionCompletedAt,
+            completedSourceIds: searchResult.completedSourceIds,
+          }
+          : null;
         updateGlobal(id, (node) => {
           if (!canPublish(node)) return null;
           return {
@@ -1752,8 +1793,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                 ? 'user-finished-partial' : 'unfinished-sources',
             }),
             ...(node?.data?.pendingCollectionCompletion?.runId === runId
-              ? { pendingCollectionCompletion: null }
+              ? { pendingCollectionCompletion: null, pendingSourceCoverage: null }
               : {}),
+            // ...but the platforms that DID finish this run keep their own
+            // bookmarks even though the hub watermark must not advance.
+            ...(partialSourceCoverage ? { pendingSourceCoverage: partialSourceCoverage } : {}),
           };
         });
       }
@@ -1784,6 +1828,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? searchResult.searchWindow
           : null,
       },
+      // Per-platform bookmarks staged alongside the hub receipt: the terminal
+      // commit advances only the platforms that actually finished.
+      ...(Array.isArray(searchResult?.completedSourceIds)
+        ? {
+          pendingSourceCoverage: {
+            runId,
+            careerSnapshotId: admittedCareerSnapshotId,
+            collectionStartedAt,
+            collectionCompletedAt,
+            completedSourceIds: searchResult.completedSourceIds,
+          },
+        }
+        : {}),
     }));
   }, [canCommitAnalysisOperation, getNode, id, updateGlobal]);
   const retryTerminalFinalization = useCallback(async (descriptor, cancelled = () => false) => {
@@ -1985,24 +2042,52 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // instead of trusting the render that enqueued the request.
   const platformsVerifyingRef = useRef(platformsVerifying);
   platformsVerifyingRef.current = platformsVerifying;
-  const lastCompletedRunAtText = formatCompletionTimestamp(data.lastCompletedRunAt);
+  const lastCompletedRunAtText = formatCompletionTimestamp(latestSourceCompletedAt(data));
+  // Per-platform bookmarks let one platform lag the hub's newest completion
+  // (it was blocked, or switched off for a run). Name those platforms and the
+  // oldest of their resume dates: that is the day the next run re-scrapes them
+  // from, and everything else simply continues from its own newer bookmark.
+  const behindSources = sourcesBehindLatest(data, id, enabledSourceIds);
+  const catchUpText = (() => {
+    if (behindSources.length === 0) return null;
+    const names = behindSources.map(entry => JOB_SOURCE_BY_ID[entry.sourceId]?.name || entry.sourceId);
+    const oldestStart = Math.min(...behindSources.map(entry => entry.coverageStartedAt));
+    const oldestText = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
+      .format(new Date(oldestStart));
+    return `${names.join(', ')} from ${oldestText}`;
+  })();
   // Use the same compatibility resolver as the run itself so an older canvas
   // whose only surviving anchor is its saved window continues automatically
   // from that boundary after upgrading.
   const hasRetainedSearchHistory = jobSearchHistoricalAnchor(data, id).timestamp != null;
   const canChooseInitialLookback = hubState === 'empty' && !hasRetainedSearchHistory;
+  // The run itself covers the broadest per-platform window, so preview that
+  // one; `nextJobSearchWindow` stays for callers that only need the hub anchor.
   const upcomingSearchWindow = nextJobSearchWindow(data, id);
+  const upcomingSourceWindows = resolveJobSearchSourceWindows(
+    data,
+    id,
+    enabledSourceIds,
+    new Date(),
+    initialJobSearchLookbackDays(data),
+  );
+  const upcomingBroadestWindow = upcomingSourceWindows.runWindow;
+  const upcomingWindowStarts = new Set([
+    upcomingBroadestWindow.startTimestamp,
+    ...Object.values(upcomingSourceWindows.sourceWindows).map(window => window.startTimestamp),
+  ]);
+  const upcomingWindowsDiffer = upcomingWindowStarts.size > 1;
   const upcomingSearchBoundary = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' })
-    .format(upcomingSearchWindow.window.startDate);
+    .format(new Date(upcomingBroadestWindow.startTimestamp));
   const nextSearchWindowDescription = `from ${upcomingSearchBoundary}${
-    upcomingSearchWindow.window.capped
+    upcomingBroadestWindow.capped
       ? upcomingSearchWindow.anchor.timestamp == null
         ? ` (${initialJobSearchLookbackDays(data)}-day first scan)`
         : ' (365-day safety cap)'
       : upcomingSearchWindow.anchor.source === 'legacy-run-start'
         ? ' (safe legacy overlap)'
         : ''
-  }`;
+  }${upcomingWindowsDiffer ? ' (only catching-up platforms go back that far)' : ''}`;
 
   useEffect(() => {
     if (data.inputLocked || data.careerData || data.resumeProfile || data.filePath) {
@@ -2703,6 +2788,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       clearOwnQueueMarker();
       EventLogger.log(
         `[JobSearch][${id}] USAJobs background search dropped because a connected Job Board owns search admission.`,
+      );
+      return;
+    }
+    // Product decision: only a Job Board starts a search. This refresh is an
+    // automatic credentials/continuation retry with no Board run behind it, so
+    // an unconnected card must not contact the provider either.
+    if (!boardConnectionOwnsRefresh()) {
+      pendingUSAJobsRefreshRef.current = false;
+      clearOwnQueueMarker();
+      EventLogger.log(
+        `[JobSearch][${id}] USAJobs background search dropped because searches run only from a Job Board.`,
       );
       return;
     }
@@ -4670,6 +4766,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (isJobWorkflowDeletionPending(id)) {
       return searchRunOutcome('cancelled', { error: 'This Job Search is pending deletion.' });
     }
+    // Backstop: the Job Board is the only way to start a job search. Every
+    // provider-facing caller (auto-start, drop follow-up, recovery resume,
+    // manual-AI resume, …) funnels through here, so refusing before the first
+    // IPC/side effect is what guarantees an unconnected card never scans.
+    if (!queueManagedByBoard) {
+      EventLogger.log(`[JobSearch][${id}] Direct search refused — searches run only from a Job Board`);
+      return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });
+    }
     if (!queueManagedByBoard) {
       const durableBoardOwner = findJobSearchBoardActiveRecoveryOwner(
         id,
@@ -4990,20 +5094,35 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           error: 'Select at least one job platform before running the search.',
         });
       }
+      // Recovery replays the exact window frozen before the interruption. A
+      // fresh run resolves one window per platform: the broadest of them is
+      // what the run must cover so no finished platform is re-scraped and no
+      // unfinished platform misses a day, while `sourceSearchWindows` tells the
+      // main process where each platform actually resumes from.
+      const resolvedSourceWindows = recoveredPreSearchContext
+        ? null
+        : resolveJobSearchSourceWindows(
+          laneTurnData,
+          currentId,
+          runActiveEnabledSourceIds,
+          new Date(),
+          initialJobSearchLookbackDays(laneTurnData),
+        );
+      const runSourceSearchWindows = resolvedSourceWindows
+        ? resolvedSourceWindows.sourceWindows
+        : null;
       const completionAnchor = recoveredPreSearchContext
         ? {
           timestamp: recoveredPreSearchContext.searchWindow.anchorTimestamp,
           source: 'manual-ai-recovery',
         }
-        : jobSearchNextAnchor(laneTurnData, currentId);
+        : resolvedSourceWindows.runAnchor;
       const resolvedSearchWindow = recoveredPreSearchContext
         ? recoveredPreSearchContext.searchWindow
-        : resolveJobSearchDateWindow(
-          completionAnchor.timestamp,
-          new Date(),
-          initialJobSearchLookbackDays(laneTurnData),
-        );
-      const runSearchWindow = serializedJobSearchWindow(resolvedSearchWindow, completionAnchor.source);
+        : resolvedSourceWindows.runWindow;
+      const runSearchWindow = recoveredPreSearchContext
+        ? serializeJobSearchWindow(resolvedSearchWindow, completionAnchor.source)
+        : resolvedSearchWindow;
       EventLogger.log(
         `[JobSearch][${currentId}] Search window start=${new Date(runSearchWindow.startTimestamp).toISOString()}`
         + ` anchor=${completionAnchor.source} capped=${runSearchWindow.capped ? 'yes' : 'no'}`,
@@ -5129,6 +5248,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // fresh run deliberately abandons any failed predecessor, while the
         // durable successful anchor above remains unchanged.
         pendingCollectionCompletion: null,
+        // Retained `sourceCoverage` is module history (like
+        // `lastCompletedRunAt`), so only the transient staging is dropped here.
+        pendingSourceCoverage: null,
         partialCollectionRunId: null,
         // A previous collection-only/Test Mode completion is terminal, but its
         // unscored provenance belongs only to that generation. Clear it at the
@@ -5569,6 +5691,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // process nevertheless receives the immutable original boundary and
         // recomputes only its relative provider horizon at dispatch time.
         manualAiPreSearchRecovery: recoveredPreSearchContext,
+        // Per-platform resume points for this fresh run. Recovery replays the
+        // frozen hub window instead, so it sends nothing here.
+        sourceSearchWindows: runSourceSearchWindows,
         runOrigin,
         profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile',
         ...(providerPhaseOnly ? { providerPhaseOnly: true } : {}),
@@ -8980,6 +9105,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — saved checkpoint is available for Resume`);
       return;
     }
+    // Product decision: a Job Search card never starts a provider search by
+    // itself, and connecting a Board is not a search trigger either. The
+    // standalone launch below is retired for good; the latch is deliberately
+    // not consumed so a Board-managed run still owns this persisted path.
+    const standaloneAutoStartRetired = true;
+    if (standaloneAutoStartRetired) {
+      EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — searches run only from a Job Board`);
+      return;
+    }
     if (managedByJobBoard || activeBoardRecoveryOwnerKey) {
       EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — connected Job Board owns search admission`);
       return;
@@ -9883,6 +10017,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       manualAiResume: null,
       terminalFinalizationRecovery: null,
       pendingCollectionCompletion: null,
+      // Transient per-platform staging only; durable `sourceCoverage` is module
+      // history and survives every reset.
+      pendingSourceCoverage: null,
       partialCollectionRunId: null,
       aiSkipped: false, collectionOnly: false, testMode: false,
       resultDisposition: null,
@@ -10271,6 +10408,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (isJobWorkflowDeletionPending(id)) {
       return searchRunOutcome('cancelled', { error: 'This Job Search is pending deletion.' });
     }
+    // A failed-compile retry is not a search. Keep the compile (files only, no
+    // provider contact) and refuse the scan, because searches run only from a
+    // connected Job Board.
+    if (!queueManagedByBoard && runOrigin === 'career-compilation-retry') {
+      compileRetainedCareerFiles();
+      return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });
+    }
+    if (!queueManagedByBoard && deferDirectSearchToBoard('Direct re-run')) {
+      return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });
+    }
     // A fresh path must never clear the card's visible state before the IPC
     // conflict check gets a chance to protect an owned checkpoint. Resume or
     // Finish with saved listings is the only continuation; Clear career data
@@ -10397,7 +10544,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         boardRecoveryClaim,
       });
     }
-  }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, getEdges, getNode, getNodes, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, platformsVerifying, resumeOffer]);
+  }, [data.locked, data.filePath, data.filePaths, data.careerFilePaths, data.resumeProfile, id, addToast, compileRetainedCareerFiles, deferDirectSearchToBoard, getEdges, getNode, getNodes, startProcessingWithProfile, updateGlobal, activeEnabledSourceIds, platformsVerifying, resumeOffer]);
 
   const cancelBoardRun = useCallback(async ({
     orchestratorNodeId,
@@ -12637,6 +12784,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       retryOperation: null,
       retryOperationFor: null,
       pendingCollectionCompletion: null,
+      pendingSourceCoverage: null,
       partialCollectionRunId: null,
       // Date history is module history, not career-derived data. Replacement
       // files or a changed Search Brief continue from this retained boundary.
@@ -12701,8 +12849,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         addToast({
           title: 'Scrape Cleared',
           description: retainedLastScanDate
-            ? 'Career data and the last scan date were kept — Re-scan for New Jobs continues from that date.'
-            : 'Career data was kept — Re-scan for New Jobs when you are ready.',
+            ? 'Career data and the last scan date were kept — search from the connected Job Board to continue from that date.'
+            : 'Career data was kept — search from the connected Job Board when you are ready.',
           type: 'info',
         });
       } else {
@@ -13825,6 +13973,50 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     EventLogger.log(`[JobSearch][${id}] User continued saved manual AI run ${resume.runId}`);
   }, [canvasFilePath, getEdges, getNode, getNodes, id]);
 
+  // Discard is the card-level exit from a saved handoff: the marker hides
+  // Clear career data, and searches start only from a Job Board. It retires
+  // the durable run and forgets the marker — nothing else.
+  const manualAiDiscardBusyRef = useRef(false);
+  const [manualAiDiscardBusy, setManualAiDiscardBusy] = useState(false);
+  const handleDiscardManualAiRecovery = useCallback(async () => {
+    const marker = getNode(id)?.data?.manualAiResume;
+    const runId = marker?.runId;
+    if (!runId || manualAiDiscardBusyRef.current) return;
+    manualAiDiscardBusyRef.current = true;
+    setManualAiDiscardBusy(true);
+    try {
+      // The ledger must acknowledge the cancellation before the card forgets
+      // the run, so a Discard can never orphan a live backend task.
+      await settleManualAiRetirement({ runId, marker,
+        retirementReason: 'user-discarded', requireCancellationAck: true });
+      updateGlobal(id, node => {
+        const current = node?.data || {};
+        if (current?.manualAiResume?.runId !== runId) return null;
+        // A pre-search attempt leaves its window and run id in the hub; drop
+        // those only when they still point at this exact discarded attempt.
+        return current.jobRunId === runId
+          ? { manualAiResume: null, searchWindow: null, jobRunId: null }
+          : { manualAiResume: null };
+      });
+      EventLogger.log(`[JobSearch][${id}] User discarded paused manual-AI handoff run=${runId}`);
+      addToast({
+        title: 'Paused search discarded',
+        description: 'Career files and scan history were kept.',
+        type: 'info',
+      });
+    } catch (error) {
+      EventLogger.error(`[JobSearch][${id}] Could not discard paused manual-AI handoff:`, error);
+      addToast({
+        title: 'Could not discard',
+        description: error?.message || String(error),
+        type: 'error',
+      });
+    } finally {
+      manualAiDiscardBusyRef.current = false;
+      if (isMountedRef.current) setManualAiDiscardBusy(false);
+    }
+  }, [addToast, getNode, id, isMountedRef, settleManualAiRetirement, updateGlobal]);
+
   const restartCareerCompilationBusyRef = useRef(false);
   const [restartCareerCompilationBusy, setRestartCareerCompilationBusy] = useState(false);
   const handleRestartCareerCompilation = useCallback(async () => {
@@ -14401,6 +14593,13 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     : null;
   const careerResumeStillChecking = !!careerResumeExplanation && (careerResumeCurrentStatus?.state || 'checking') === 'checking';
   const manualAiRecoveryThroughBoard = boardRecoveryOwnsActions && !careerResumeExplanation;
+  // A saved handoff hides Clear career data while it exists, so every
+  // non-career variant names the only two real ways out: the Job Board that
+  // owns search admission, or Discard. Never "Clear career data is the only
+  // way" — that control is unreachable here.
+  const manualAiRecoveryNextStep = managedByJobBoard
+    ? 'Continue it with Search selected & combine on the connected Job Board, or Discard it.'
+    : 'Connect a Job Board to continue it, or Discard it.';
   const manualAiRecoveryBanner = showManualAiRecoveryBanner ? (
     <div className="m-2 p-2 rounded-md bg-amber-500/10 border border-amber-500/30" onPointerDown={(e) => e.stopPropagation()}>
       <div className="text-amber-200/90 text-[11px] font-medium leading-snug">
@@ -14408,32 +14607,58 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       </div>
       <div className="text-amber-200/60 text-[10px] leading-snug mt-0.5">
         {manualAiRecoveryThroughBoard
-          ? 'Your saved work is retained. Choose Continue saved AI handoff or Retry recovery on the connected Job Board to continue.'
+          ? 'Your saved work is retained. Choose Continue saved AI handoff or Retry recovery on the connected Job Board to continue, or Discard it here.'
           : careerResumeExplanation
           ? `${careerResumeExplanation.body} Restart career compilation re-reads your career files and starts fresh AI compilation and audits. Your saved jobs are kept.`
           : savedReanalysisManualAiRecovery
-          ? 'Your saved listings and revised Search Brief are retained. Continue re-evaluates those saved jobs only; it never starts a new scrape.'
+          ? `Your saved listings and revised Search Brief are retained. ${manualAiRecoveryNextStep}`
           : pausedManualAiRecovery
-          ? 'This job search was stopped before source scraping began. Continue resumes its saved handoff and original date window; it never starts a new scan. Clear career data is the only way to remove it.'
+          ? `This job search was stopped before source scraping began. Its saved handoff and original date window are kept and no new scan is started. ${manualAiRecoveryNextStep}`
           : savedScrapeManualAiRecovery
-            ? 'Provider collection is safely saved. Continue resumes the exact scoring handoff; it never starts a new scrape. Clear career data is the only way to remove it.'
+            ? `Provider collection and its exact scoring handoff are safely saved. ${manualAiRecoveryNextStep}`
             : agedManualAiRecovery
-              ? 'This saved AI handoff is older than 24 hours or its age could not be verified. Continue resumes its exact checkpoint and original date window; it never starts a new scan.'
-              : 'This AI handoff was interrupted. Continue resumes its exact saved checkpoint; restarting the app never submits it silently.'}
+              ? `This saved AI handoff is older than 24 hours or its age could not be verified. Its exact checkpoint and original date window are kept. ${manualAiRecoveryNextStep}`
+              : `This AI handoff was interrupted. Continue resumes its exact saved checkpoint; restarting the app never submits it silently. ${manualAiRecoveryNextStep}`}
       </div>
-      {!manualAiRecoveryThroughBoard && <div className="flex gap-1.5 mt-1.5">
-        <button
-          className="nodrag px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400 disabled:cursor-default disabled:opacity-50"
-          onPointerDown={(e) => e.stopPropagation()}
-          onClick={handleContinueManualAiRecovery}
-          disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath || careerResumeStillChecking}
-        >{careerResumeExplanation ? 'Continue saved compilation' : 'Continue'}</button>
-        {careerResumeExplanation && <button type="button"
-          className="nodrag px-2 py-0.5 rounded text-[10px] border border-amber-500/40 text-amber-200 disabled:opacity-50"
-          onClick={handleRestartCareerCompilation}
-          disabled={baseControlsLocked || manualAiRecoveryActionBusy || restartCareerCompilationBusy || !canvasFilePath || !careerResumePaths.length}
-        >Restart career compilation</button>}
-      </div>}
+      <div className="flex gap-1.5 mt-1.5">
+        {careerResumeExplanation ? (
+          <>
+            <button
+              className="nodrag px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400 disabled:cursor-default disabled:opacity-50"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={handleContinueManualAiRecovery}
+              disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath || careerResumeStillChecking}
+            >Continue saved compilation</button>
+            <button type="button"
+              className="nodrag px-2 py-0.5 rounded text-[10px] border border-amber-500/40 text-amber-200 disabled:opacity-50"
+              onClick={handleRestartCareerCompilation}
+              disabled={baseControlsLocked || manualAiRecoveryActionBusy || restartCareerCompilationBusy || !canvasFilePath || !careerResumePaths.length}
+            >Restart career compilation</button>
+          </>
+        ) : (
+          <>
+            {/* A card-level Continue only points at the Job Board that owns
+                search admission — never a second direct search path. */}
+            {managedByJobBoard && !manualAiRecoveryThroughBoard && <button
+              className="nodrag px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/80 text-black hover:bg-amber-400 disabled:cursor-default disabled:opacity-50"
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => deferDirectSearchToBoard('Saved handoff continue')}
+              disabled={baseControlsLocked || manualAiRecoveryActionBusy || !canvasFilePath}
+            >Continue</button>}
+            {/* The marker hides Clear career data, so Discard is the card's
+                own way out of a paused handoff. It retires the run only. */}
+            <TwoStepConfirmButton
+              label="Discard"
+              confirmLabel="Click again to discard"
+              onConfirm={handleDiscardManualAiRecovery}
+              title="Discard this paused search. Career files, scan dates and saved jobs are kept."
+              className="px-2 py-0.5 rounded text-[10px] border border-amber-500/40 text-amber-200 disabled:cursor-default disabled:opacity-50"
+              armedClassName="px-2 py-0.5 rounded text-[10px] border border-amber-400/70 bg-amber-500/25 text-amber-100 disabled:cursor-default disabled:opacity-50"
+              disabled={baseControlsLocked || manualAiDiscardBusy || !canvasFilePath}
+            />
+          </>
+        )}
+      </div>
     </div>
   ) : null;
 
@@ -14631,7 +14856,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                           ? 'Saved search recovered — continue its analysis from the Job Board'
                           : 'Ready — run it from the connected Job Board, or clear these files')
                         : 'A Job Board recovery is settling. Direct search controls return when it finishes or is cancelled.')
-                      : 'Re-scan with these files, or clear them to search with different ones'}</p>
+                      : managedByJobBoard
+                        ? 'Re-scan with these files, or clear them to search with different ones'
+                        : 'Connect a Job Board to search, or clear these files to choose different ones'}</p>
                   {(careerCompilationFailed || careerCompilationUnstarted) && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
                     <button
                       type="button"
@@ -14643,14 +14870,20 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                     </button>
                   )}
                   {hasRunnableCareerInput && !controlsLocked && !boardRecoveryOwnsActions && !resumeOffer?.incomplete && (
-                    <button
-                      type="button"
-                      className="nodrag mt-3 px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 text-[10px] border border-blue-500/20 transition-colors"
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => { e.stopPropagation(); handleRerun(); }}
-                    >
-                      {hasReusableCareerProfile ? 'Re-scan for New Jobs' : 'Run Search'}
-                    </button>
+                    managedByJobBoard ? (
+                      <button
+                        type="button"
+                        className="nodrag mt-3 px-3 py-1 rounded-full bg-blue-500/15 text-blue-300 hover:bg-blue-500/25 text-[10px] border border-blue-500/20 transition-colors"
+                        onPointerDown={(e) => e.stopPropagation()}
+                        onClick={(e) => { e.stopPropagation(); handleRerun(); }}
+                      >
+                        {hasReusableCareerProfile ? 'Re-scan for New Jobs' : 'Run Search'}
+                      </button>
+                    ) : (
+                      /* Searches start only from a Job Board — say so instead of
+                         offering a control that would refuse the click. */
+                      <p className="mt-1.5 text-white/25 text-[10px] text-center">Connect a Job Board to search.</p>
+                    )
                   )}
                   {/* Not gated on hasReusableCareerProfile — a partially-wedged
                       identity (locked with no parsed profile) is exactly the
@@ -14683,6 +14916,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
                   replacement files automatically continue from that date. */}
               {!!lastCompletedRunAtText && (
                 <p className="text-white/35 text-[9px] mt-1">Last scraped: {lastCompletedRunAtText}</p>
+              )}
+              {!!catchUpText && (
+                <p className="text-white/35 text-[9px] mt-1">Catching up: {catchUpText}</p>
               )}
               {!platformsVerifying && <div
                 className="nodrag mt-4 w-full flex flex-col items-stretch gap-1.5 text-[10px] text-white/40"
@@ -14931,8 +15167,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               rerunOutcome={data.rerunOutcome || null}
               reanalysisNotice={data.reanalysisNotice || null}
               resultDisposition={data.resultDisposition || null}
-              lastCompletedRunAt={data.lastCompletedRunAt || null}
+              lastCompletedRunAt={latestSourceCompletedAt(data) || null}
               nextSearchWindowDescription={nextSearchWindowDescription}
+              catchUpText={catchUpText}
             />
             {savedAnalysisPanel && (
               <div className="w-full px-3 pb-3" onPointerDown={(e) => e.stopPropagation()}>

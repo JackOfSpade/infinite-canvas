@@ -130,15 +130,16 @@ export function JobSearchDoneState({
   verifyDone = 0,
   verifyTotal = 0,
   // A connected Job Board owns its coordinated scan/combine transaction. This
-  // card remains the source editor and exposes an explicit standalone re-scan
-  // whenever no durable Board recovery currently owns it.
+  // card remains the source editor, but a search — including a re-scan — runs
+  // only from that Board.
   managedByJobBoard = false,
   // A disconnected Board can retain a durable recovery plan while it finishes
   // cancellation or rollback. It owns launch actions, but is deliberately not
   // presented as a live connection.
   boardRecoveryPending = false,
-  // Action props
-  onRerun = null,
+  // Action props. The re-scan handler is derived below from `managedByJobBoard`,
+  // so an unconnected card never offers a standalone re-scan.
+  onRerun: onRerunAction = null,
   // Reassesses the saved listings only; it does not scrape or run the
   // duplicate/seen-job search path again.
   onReanalyze = null,
@@ -222,6 +223,11 @@ export function JobSearchDoneState({
   resultDisposition = null,
   lastCompletedRunAt = null,
   nextSearchWindowDescription = 'from the last completed scan date',
+  // Per-platform bookmarks can lag the hub's newest completion. The hub
+  // formats this line ("Glassdoor, Indeed from Nov 1") because only it can see
+  // the enabled platforms and their per-platform coverage; the done state just
+  // shows it beside "Last scraped".
+  catchUpText = null,
 }) {
   const { addToast } = useToast();
   const preferencesHelpId = useId();
@@ -237,6 +243,10 @@ export function JobSearchDoneState({
   // duplicated here rather than imported to avoid a circular import between
   // the two modules — JobSearchNode.jsx already imports this file).
   const settingsFrozen = !!(resolvedRolesMeta && typeof resolvedRolesMeta === 'object');
+  // Searches run only from a Job Board. Without one connected there is no
+  // standalone re-scan to offer, so the handler is withheld entirely and every
+  // `onRerun` gate below stays false.
+  const onRerun = managedByJobBoard ? onRerunAction : null;
   const [setupOpen, setSetupOpen] = useState(() => !settingsFrozen);
   const lastCompletedRunAtText = formatCompletionTimestamp(lastCompletedRunAt);
   // `testMode` is retained only for old persisted hubs. New runs record the
@@ -302,6 +312,11 @@ export function JobSearchDoneState({
       {lastCompletedRunAtText && (
         <p className="text-white/35 text-[9px] mt-0.5">
           Last scraped: {lastCompletedRunAtText}
+        </p>
+      )}
+      {catchUpText && (
+        <p className="text-white/35 text-[9px] mt-0.5">
+          Catching up: {catchUpText}
         </p>
       )}
 

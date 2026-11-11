@@ -978,8 +978,13 @@ async function readManifestFromFiles(files) {
     const collectionCompletedAt = manifestTimestamp(rawCollectionCompletedAt);
     const collectionDisposition = normalizeJobRunCollectionDisposition(rawCollectionDisposition);
     const recoveryDisposition = normalizeJobRunRecoveryDisposition(rawRecoveryDisposition);
-    const { searchWindow: rawSearchWindow, ...otherInputs } = inputs;
+    const {
+      searchWindow: rawSearchWindow,
+      sourceSearchWindows: rawSourceSearchWindows,
+      ...otherInputs
+    } = inputs;
     const searchWindow = sanitizeJobSearchWindow(rawSearchWindow);
+    const sourceSearchWindows = sanitizeJobSearchSourceWindows(rawSourceSearchWindows);
     return {
       ...otherManifest,
       ...(collectionCompletedAt != null ? { collectionCompletedAt } : {}),
@@ -991,6 +996,7 @@ async function readManifestFromFiles(files) {
         jobPreferences: sanitizeJobPreferences(inputs.jobPreferences),
         jobPreferencePlan: sanitizeJobPreferencePlan(inputs.jobPreferencePlan),
         ...(searchWindow ? { searchWindow } : {}),
+        ...(Object.keys(sourceSearchWindows).length > 0 ? { sourceSearchWindows } : {}),
       },
     };
   } catch {
@@ -1277,12 +1283,39 @@ export function sanitizeJobSearchWindow(value) {
   };
 }
 
+const JOB_SEARCH_SOURCE_WINDOW_KEY = /^[a-z0-9_-]{1,40}$/;
+const JOB_SEARCH_MAX_SOURCE_WINDOWS = 25;
+
+/**
+ * Normalize the renderer's per-source search windows. Only plain objects with
+ * source-safe own keys survive; each value is validated by the same boundary
+ * sanitizer as the run window, so a malformed entry can never reach dispatch.
+ * These windows may only NARROW the run window (see the main-process narrowing
+ * step); this sanitizer is deliberately shape-only.
+ */
+export function sanitizeJobSearchSourceWindows(value) {
+  const out = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return out;
+  let seen = 0;
+  for (const key of Object.keys(value)) {
+    if (seen >= JOB_SEARCH_MAX_SOURCE_WINDOWS) break;
+    if (typeof key !== 'string' || !JOB_SEARCH_SOURCE_WINDOW_KEY.test(key)) continue;
+    const window = sanitizeJobSearchWindow(value[key]);
+    if (!window) continue;
+    out[key] = window;
+    seen++;
+  }
+  return out;
+}
+
 /**
  * Begin a run: write a fresh manifest (stage='searching') and truncate any prior
  * staging file. `runId`/`startedAt` are passed in (callers stamp time, since the
  * test runner forbids Date.now()). Returns the manifest, or null if no canvas.
  */
-async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, careerSnapshotId = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [], operationAuthority = null, __testOnlyAllowUnpinned = false }) {
+async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], profileFingerprint = null, careerSnapshotId = null, jobPreferences = '', jobPreferencePlan = null, canonicalLocation = '', searchWindow = null, sourceSearchWindows = null, maxAgeDays = null, collectionLimits = null, nodeId = null, sourceIds = [], operationAuthority = null, __testOnlyAllowUnpinned = false }) {
   const ownerNodeId = normalizeNodeId(nodeId);
   const files = runFilesForCanvas(canvasFilePath, ownerNodeId);
   if (!files) return null;
@@ -1310,6 +1343,7 @@ async function startRunRaw(canvasFilePath, { runId, startedAt, queries = [], pro
       jobPreferencePlan: sanitizeJobPreferencePlan(jobPreferencePlan),
       canonicalLocation,
       searchWindow: sanitizeJobSearchWindow(searchWindow),
+      sourceSearchWindows: sanitizeJobSearchSourceWindows(sourceSearchWindows),
       maxAgeDays,
       collectionLimits,
       nodeId: ownerNodeId,

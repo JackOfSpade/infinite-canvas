@@ -188,6 +188,10 @@ export function buildJobHubScrapeClearPatch(data, {
     retryOperation: null,
     retryOperationFor: null,
     pendingCollectionCompletion: null,
+    // Only the transient per-platform staging is cleared. Durable
+    // `sourceCoverage` is module history, like `materializedSearchHistory`
+    // below, and must survive Clear Scrape.
+    pendingSourceCoverage: null,
     partialCollectionRunId: null,
     terminalFinalizationRecovery: null,
     manualAiResume: null,

@@ -81,7 +81,7 @@ import {
 import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, sourceHealthWarning } from './jobSourceHealth.js';
 import { fetchIndeedListingsBrowser, resolveIndeedPageBudgets, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority } from './jobRunStaging.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, sanitizeJobSearchSourceWindows, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority } from './jobRunStaging.js';
 import { beginJobContinuation, checkpointJobContinuationResult, claimJobContinuation, clearJobContinuations, completeJobContinuation, listJobContinuations, pauseJobContinuations, publishJobContinuationParentUpdate, readJobContinuationResult, releaseJobContinuationExecution, retireTerminalJobContinuations, validateJobContinuationAuthority } from './jobContinuation.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution, validateJobBoardRunExecution } from './jobBoardRunLease.js';
 import { loadJobsHistory, stageDisplayedJobsHistory, finalizeDisplayedJobsHistory, dedupAgainstHistory, historyPathForCanvas } from './jobsHistory.js';
@@ -563,6 +563,63 @@ export function effectiveJobSearchWindow(searchWindow, maxAgeDays, runStartedAt 
     ...persisted,
     providerLookbackDays: elapsedHorizon,
   };
+}
+
+/**
+ * Narrow the renderer's per-source windows against the authoritative run
+ * window. A platform that finished last time may legitimately get a NEWER start
+ * than the run window, but it can never reach outside it. The provider horizon
+ * is recomputed at dispatch time by `effectiveJobSearchWindow` so a delayed run
+ * neither gains nor loses rows relative to its frozen boundary.
+ */
+export function narrowJobSearchSourceWindows(rawSourceWindows, runWindow, now = new Date()) {
+  const run = serializableJobSearchWindow(runWindow);
+  if (!run) return {};
+  const clock = now instanceof Date ? new Date(now.getTime()) : new Date(now);
+  const nowTimestamp = clock.getTime();
+  const sanitized = sanitizeJobSearchSourceWindows(rawSourceWindows);
+  const out = {};
+  for (const [sourceId, entry] of Object.entries(sanitized)) {
+    if (!Number.isFinite(entry?.startTimestamp)) continue;
+    if (entry.startTimestamp < run.startTimestamp) continue;
+    if (entry.startTimestamp > nowTimestamp) continue;
+    out[sourceId] = effectiveJobSearchWindow(entry, null, null, clock);
+  }
+  return out;
+}
+
+/**
+ * The platforms whose collection genuinely finished this run. A source that
+ * hit a page or job cap is still complete: the cap is a deliberate breadth
+ * choice, not an unobserved remainder. Exported for the renderer-visible
+ * "finished" set that seeds the next run's per-source windows.
+ */
+export function completedJobSourceIds({
+  activeSourceIds = [],
+  sourceStatuses = null,
+  gatingSourceIds = [],
+  intentionallyUnfinishedSourceIds = [],
+  loginBlockedSourceIds = [],
+  countryApplicableSourceIds = null,
+} = {}) {
+  const toSet = (value) => (value instanceof Set ? value : new Set(Array.isArray(value) ? value : []));
+  const statuses = sourceStatuses && typeof sourceStatuses === 'object' ? sourceStatuses : {};
+  const gating = toSet(gatingSourceIds);
+  const intentional = toSet(intentionallyUnfinishedSourceIds);
+  const blocked = toSet(loginBlockedSourceIds);
+  const countryRestricted = countryApplicableSourceIds == null
+    ? null
+    : toSet(countryApplicableSourceIds);
+  const out = [];
+  for (const sourceId of toSet(activeSourceIds)) {
+    if (statuses[sourceId] !== 'done') continue;
+    if (gating.has(sourceId)) continue;
+    if (intentional.has(sourceId)) continue;
+    if (blocked.has(sourceId)) continue;
+    if (countryRestricted && !countryRestricted.has(sourceId)) continue;
+    out.push(sourceId);
+  }
+  return out;
 }
 
 function sameFreshJobSearchBoundary(left, right) {
@@ -8058,6 +8115,8 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     startPageBySource = null,
     startPageBySourceQuery = null,
     collectionStartTimestamp = null,
+    maxAgeDaysBySource = null,
+    collectionStartTimestampBySource = null,
   } = opts;
   const limits = normalizeJobCollectionLimits(collectionLimits);
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
@@ -8114,7 +8173,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
   const extractors = {
     ziprecruiter:    { extractor: ZIPRECRUITER_EXTRACTOR, config: ZIPRECRUITER_CONFIG, paginates: true,
                        urlPaginated: true, // first URL can jump to an arbitrary page → supports per-page resume
-                       urlFn: (q, page) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}${locParam('location')}&days=${days}` },
+                       urlFn: (q, page, sourceDays = days) => `https://www.ziprecruiter.com/jobs-search${page > 0 ? `/${page + 1}` : ''}?search=${encodeURIComponent(q)}${locParam('location')}&days=${sourceDays}` },
     // Glassdoor migrated to Next.js with infinite-scroll "Show more" pagination —
     // the old ?p=N URL param is silently ignored (every "page" returns page 1).
     // One URL load + the configured page count minus one button clicks replaces the old N-page walk.
@@ -8130,7 +8189,10 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
                        // source never under-fetches the requested window; the
                        // global client filter trims the extra tail. Above its
                        // largest bucket, omit fromAge and rely on the client.
-                       urlFn: (q) => `https://${glassdoorHost}/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${glassdoorDays ? `&fromAge=${glassdoorDays}` : ''}`,
+                       urlFn: (q, _page, sourceDays = days) => {
+                         const bucket = sourceDays === days ? glassdoorDays : glassdoorPostedBucket(sourceDays);
+                         return `https://${glassdoorHost}/Job/jobs.htm?sc.keyword=${encodeURIComponent(q)}${bucket ? `&fromAge=${bucket}` : ''}`;
+                       },
                        loadMoreSelector: '[data-test="load-more"]' },
     // Google Jobs: single-page scroll-loaded panel (ibp=htl;jobs). No pagination —
     // scroll logic is handled by SCROLL_SOURCES in manualScraper.js. Does not throw
@@ -8163,6 +8225,23 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
     if (!ACTIVE_SOURCE_ID_SET.has(sourceId)) continue;
     if (onlySources && !onlySources.has(sourceId)) continue; // resume: skip already-'done' sources
     const querySubset = queries;
+    // Per-source date windows narrow the run's own window. A platform with no
+    // entry uses the run values verbatim (the pre-feature behaviour), and the
+    // Glassdoor bucket is recomputed from THIS source's days so a narrower
+    // window never asks the board for a wider fromAge than it must.
+    const requestedSourceDays = maxAgeDaysBySource && Object.hasOwn(maxAgeDaysBySource, sourceId)
+      ? Number(maxAgeDaysBySource[sourceId])
+      : NaN;
+    const sourceDays = Number.isFinite(requestedSourceDays) && requestedSourceDays > 0
+      ? Math.max(1, Math.floor(requestedSourceDays))
+      : days;
+    const requestedSourceStart = collectionStartTimestampBySource
+      && Object.hasOwn(collectionStartTimestampBySource, sourceId)
+      ? Number(collectionStartTimestampBySource[sourceId])
+      : NaN;
+    const sourceCollectionStartTimestamp = Number.isFinite(requestedSourceStart)
+      ? requestedSourceStart
+      : collectionStartTimestamp;
 
     // One task per query. `id` stays `${sourceId}-${n}` so `res.id.replace(/-\d+$/,'')`
     // still maps a result back to its source. A multi-page source runs as a SINGLE
@@ -8191,7 +8270,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
       // Do not even open a browser tab for a URL-paginated query whose durable
       // cursor has exhausted its original per-query allocation.
       if (urlPaginated && queryPlan?.durable === true && startPage > queryPageBudget) continue;
-      const base = { id: `${sourceId}-${queryIndex}`, sourceId, url: urlFn(q, startPage - 1), extractorJS: extractor, query: q, queryIndex };
+      const base = { id: `${sourceId}-${queryIndex}`, sourceId, url: urlFn(q, startPage - 1, sourceDays), extractorJS: extractor, query: q, queryIndex };
       // Glassdoor's location filter needs a numeric locId (its locKeyword text is
       // ignored). The scraper resolves it in-browser (CF-gated) just before nav and
       // appends &locId=&locT= to the URL — see resolveGlassdoorLocId.
@@ -8223,7 +8302,7 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
       // (outOfWindowStreak/staleStreak/seenKeys) must never be shared across
       // queries or sources, or one query's early rows would silently poison
       // another's stop decision.
-      const onPageScraped = makeJobPageStop({ maxAgeDays: days, unlimited: unlimitedPages, sourceLabel: sourceId });
+      const onPageScraped = makeJobPageStop({ maxAgeDays: sourceDays, unlimited: unlimitedPages, sourceLabel: sourceId });
       if (paginates) {
         base.options = {
           ...config,
@@ -8239,11 +8318,11 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
           // unconsumed portion and never extends Auto beyond 40/source.
           maxPages: queryPageBudget,
           unlimitedPages,
-          maxAgeDays: days,
+          maxAgeDays: sourceDays,
           collectionLimits: limits,
-          collectionStartTimestamp,
+          collectionStartTimestamp: sourceCollectionStartTimestamp,
           startPageNum: startPage,
-          nextUrl: (page) => urlFn(q, page),
+          nextUrl: (page) => urlFn(q, page, sourceDays),
           onPageScraped,
           pageDelayMs: PAGE_DELAY_MS,
           ...(loadMoreSelector ? { loadMoreSelector } : {}),
@@ -8256,9 +8335,9 @@ export function buildJobTasks(queries, maxAgeDays, opts = {}, location = '', col
           ...config,
           maxPages: queryPageBudget,
           unlimitedPages,
-          maxAgeDays: days,
+          maxAgeDays: sourceDays,
           collectionLimits: limits,
-          collectionStartTimestamp,
+          collectionStartTimestamp: sourceCollectionStartTimestamp,
           onPageScraped,
         };
       }
@@ -8345,7 +8424,28 @@ export function capPlatformJobsAfterWindow(jobs, postedSince, jobsPerPlatform, {
   now = new Date(),
 } = {}) {
   const candidates = Array.isArray(jobs) ? jobs : [];
-  const windowEligible = filterJobsByPostedSince(candidates, postedSince, now);
+  // `postedSince` is either the run's single inclusive boundary (the historic
+  // behaviour, byte-identical output) or a resolver so each platform applies its
+  // OWN boundary. The resolver path filters per source group with the same
+  // helper, then re-projects onto the original candidate order so downstream
+  // first-wins provenance and per-source stats are unchanged.
+  let windowEligible;
+  if (typeof postedSince === 'function') {
+    const bySource = new Map();
+    for (const job of candidates) {
+      const sourceId = String(job?.source || '?');
+      const group = bySource.get(sourceId) || [];
+      group.push(job);
+      bySource.set(sourceId, group);
+    }
+    const eligible = new Set();
+    for (const [sourceId, group] of bySource) {
+      for (const job of filterJobsByPostedSince(group, postedSince(sourceId), now)) eligible.add(job);
+    }
+    windowEligible = candidates.filter(job => eligible.has(job));
+  } else {
+    windowEligible = filterJobsByPostedSince(candidates, postedSince, now);
+  }
   const limit = Number.isFinite(Number(jobsPerPlatform)) && Number(jobsPerPlatform) > 0
     ? Math.floor(Number(jobsPerPlatform))
     : Infinity;
@@ -8626,7 +8726,7 @@ export function __queryFanOutForTests(queries, fetcher, signal, options = {}) {
 
 export const __fetchHttpSourcesForTests = (...args) => fetchHttpSources(...args);
 
-async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null) {
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null, maxAgeDaysBySource = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
   // bypassed the trail and were invisible in bug reports (exactly the sources
@@ -8638,6 +8738,14 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   // on the old .env config.
   const { usajobsApiKey: apiKey, usajobsEmail: email } = getJobsSettings();
   const days = Math.max(1, Math.floor(maxAgeDays || DEFAULT_MAX_AGE_DAYS));
+  // A platform with its own (narrower) window uses ITS horizon for the server-side
+  // request; every other platform keeps the run window verbatim.
+  const daysForSource = (sourceId) => {
+    const requested = maxAgeDaysBySource && Object.hasOwn(maxAgeDaysBySource, sourceId)
+      ? Number(maxAgeDaysBySource[sourceId])
+      : NaN;
+    return Number.isFinite(requested) && requested > 0 ? Math.max(1, Math.floor(requested)) : days;
+  };
   const limits = normalizeJobCollectionLimits(collectionLimits);
   // This is a per-query retrieval budget, not the final source aggregate. The
   // source fan-out retains each query's bounded result so the central exact
@@ -8655,7 +8763,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   // concurrent with each other AND with the serialized browser driver. Indeed is
   // NOT here (it is browser-based and runs in the search-jobs browser driver).
   const apiTasks = [
-    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, days, location, ({ completed, count, detail }) => {
+    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, daysForSource('linkedin'), location, ({ completed, count, detail }) => {
       // Intermediate heartbeat during LinkedIn's multi-minute paced walk — without
       // this the pre-loop 'searching' stamp below is the only event LinkedIn ever
       // emits until it fully resolves, which reads as a stale/hung task in a bug
@@ -8667,7 +8775,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
     }) },
     // USAJobs now walks its pager to the provider's own reported total, which
     // for a broad keyword is ~1000 rows rather than the old single 150-row page.
-    { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, days, location, usajobsRowBudget), s, Infinity, 0, 'USAJobs API') },
+    { sourceId: 'usajobs',       fn: (s) => queryFanOut(queries, (q, sig) => fetchUSAJobs(q, apiKey, email, sig, daysForSource('usajobs'), location, usajobsRowBudget), s, Infinity, 0, 'USAJobs API') },
     { sourceId: 'remoteok',      fn: (s) => fetchRemoteOKJobs(queries, s, wholeFeedGeoTerms) },
     { sourceId: 'weworkremotely',fn: (s) => fetchWeWorkRemotelyJobs(queries, s, wholeFeedGeoTerms) },
     { sourceId: 'dice',          fn: async (s) => {
@@ -8680,7 +8788,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       // only fetch descriptions for jobs that will actually be scored/shown.
       await warmDiceApiKey(s);
       logger.info(`[Dice API] Fan-out starting: ${queries.length} queries, 350ms interval`);
-      return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, days, limits), s, 4, 350, 'Dice API');
+      return queryFanOut(queries, (q, sig) => fetchDiceListings(q, location, sig, daysForSource('dice'), limits), s, 4, 350, 'Dice API');
     }},
   ].filter(task => ACTIVE_SOURCE_ID_SET.has(task.sourceId) && (!onlySources || onlySources.has(task.sourceId)));
 
@@ -11611,7 +11719,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, careerSnapshotId, operationAuthority = null, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, providerPhaseOnly: requestedProviderPhaseOnly = false, boardRecoveryClaim = null, profileFingerprint = null, manualAiPreSearchRecovery = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, careerSnapshotId, operationAuthority = null, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, sourceSearchWindows = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, providerPhaseOnly: requestedProviderPhaseOnly = false, boardRecoveryClaim = null, profileFingerprint = null, manualAiPreSearchRecovery = null, runOrigin, profileInputMode }, signal) => {
     // Provider collection deliberately has no raw profile argument.  Still
     // validate the pinned approved snapshot at this final admission boundary:
     // a deleted/replaced snapshot cannot keep an old query bundle running.
@@ -11749,6 +11857,33 @@ Return a JSON object with four arrays of search query strings:
       ? normalizedInitialLookbackDays
       : null;
     let ageDays = activeSearchWindow.providerLookbackDays;
+    // Per-platform windows may only NARROW the run window, and they belong to the
+    // renderer's fresh selection: recoveries and the Board bootstrap keep the run
+    // window for every platform exactly as before.
+    let activeSourceSearchWindows = (recoveredPreSearchWindow || backgroundBoardProviderBootstrap)
+      ? {}
+      : narrowJobSearchSourceWindows(sourceSearchWindows, activeSearchWindow);
+    const sourceWindowFor = (sourceId) => (
+      activeSourceSearchWindows && Object.hasOwn(activeSourceSearchWindows, sourceId)
+        ? activeSourceSearchWindows[sourceId]
+        : activeSearchWindow
+    );
+    const ageDaysFor = (sourceId) => {
+      const sourceDays = Number(sourceWindowFor(sourceId)?.providerLookbackDays);
+      return Number.isFinite(sourceDays) && sourceDays > 0 ? sourceDays : activeSearchWindow.providerLookbackDays;
+    };
+    const postedSinceFor = (sourceId) => {
+      const boundary = Number(sourceWindowFor(sourceId)?.startTimestamp);
+      return Number.isFinite(boundary) ? boundary : activeSearchWindow.startTimestamp;
+    };
+    // Plain-object maps for the per-platform option builders (empty when the run
+    // has no per-source windows, which restores the historic single window).
+    const ageDaysBySource = () => Object.fromEntries(
+      Object.entries(activeSourceSearchWindows || {}).map(([id, window]) => [id, window.providerLookbackDays]),
+    );
+    const postedSinceBySource = () => Object.fromEntries(
+      Object.entries(activeSourceSearchWindows || {}).map(([id, window]) => [id, window.startTimestamp]),
+    );
     let activeJobPreferences = typeof jobPreferences === 'string' ? jobPreferences.slice(0, 4000) : '';
     let activeJobPreferencePlan = normalizeJobPreferencePlan(jobPreferencePlan || jobPreferencesInterpretation);
     const normalizedRunOrigin = resume
@@ -11984,6 +12119,13 @@ Return a JSON object with four arrays of search query strings:
           prior.manifest?.startedAt,
         );
         ageDays = activeSearchWindow.providerLookbackDays;
+        // Restore the per-platform boundaries this run persisted. They were
+        // already narrowed before being written, but narrow again against the
+        // restored run window so a tampered/legacy manifest cannot widen it.
+        activeSourceSearchWindows = narrowJobSearchSourceWindows(
+          priorInputs.sourceSearchWindows,
+          activeSearchWindow,
+        );
         // A recovery continues the exact preferences that governed the
         // interrupted search. Editing the hub does not silently reinterpret
         // staged rows; the next explicit search uses the edit.
@@ -12281,6 +12423,7 @@ Return a JSON object with four arrays of search query strings:
       queryStrings: Array.isArray(queries) ? queries.slice(0, 12) : [],
       selectedSourceIds: activeSourceIds.slice(0, 25),
       searchWindow: activeSearchWindow,
+      sourceSearchWindows: activeSourceSearchWindows,
       appliedInitialLookbackDays,
       maxAgeDays: ageDays,
       collectionLimits: normalizedCollectionLimits,
@@ -12307,6 +12450,8 @@ Return a JSON object with four arrays of search query strings:
       onlySources: requestedRunnableSourceScope,
       ...(resumeStartPages ? { startPageBySourceQuery: resumeStartPages } : {}),
       collectionStartTimestamp: activeSearchWindow.startTimestamp,
+      maxAgeDaysBySource: ageDaysBySource(),
+      collectionStartTimestampBySource: postedSinceBySource(),
     }, location, normalizedCollectionLimits, countryScope);
     const tasks = candidateTasks.filter(task => runnableSourceScope.has(task.sourceId));
 
@@ -12468,6 +12613,7 @@ Return a JSON object with four arrays of search query strings:
         jobPreferences: activeJobPreferences,
         jobPreferencePlan: activeJobPreferencePlan,
         searchWindow: activeSearchWindow,
+        sourceSearchWindows: activeSourceSearchWindows,
         // Compatibility for app versions that can read this manifest but do
         // not yet understand its exact searchWindow object.
         maxAgeDays: ageDays,
@@ -12656,9 +12802,9 @@ Return a JSON object with four arrays of search query strings:
       emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, completed: 0, total: queryTotal });
       let indeedResult;
       try {
-        const r = await fetchIndeedListingsBrowser(indeedPlan.queries, combinedSignal, ageDays, null, (detail) => {
+        const r = await fetchIndeedListingsBrowser(indeedPlan.queries, combinedSignal, ageDaysFor('indeed'), null, (detail) => {
           emitProgress({ nodeId, sourceId: 'indeed', status: 'searching', count: 0, detail, completed: getCompletedQueriesFromDetail(detail, queryTotal), total: queryTotal });
-        }, indeedPlan.startPages, stageOnPage, location, normalizedCollectionLimits, indeedPlan.pageBudgets, true, activeIndeedIndexes, activeSearchWindow.startTimestamp);
+        }, indeedPlan.startPages, stageOnPage, location, normalizedCollectionLimits, indeedPlan.pageBudgets, true, activeIndeedIndexes, postedSinceFor('indeed'));
         await afterSearchProviderResult('indeed', r);
         await assertSearchCurrent();
         // Observation of the session the scrape actually ran with — survives
@@ -12899,7 +13045,7 @@ Return a JSON object with four arrays of search query strings:
           }, async (sourceId, result) => {
             await afterSearchProviderResult(sourceId, result);
             await assertSearchCurrent();
-          }),
+          }, ageDaysBySource()),
         ];
         [browserOut, httpResults] = await Promise.all(gatherBranches);
       }
@@ -13216,7 +13362,7 @@ Return a JSON object with four arrays of search query strings:
     // before the central date/dedup funnel ever saw them.
     const platformCap = capPlatformJobsAfterWindow(
       countryEligible,
-      activeSearchWindow.startTimestamp,
+      (sourceId) => postedSinceFor(sourceId),
       resolveJobsPerPlatform(normalizedCollectionLimits),
     );
     const autoJobsPerPlatform = normalizedCollectionLimits.jobsPerPlatform == null;
@@ -14204,26 +14350,32 @@ Return a JSON object with four arrays of search query strings:
     // date-bound diagnostic must show that effective request size rather than
     // its usual 400/1000 default, or a bounded run falsely looks like it
     // over-pulled a full page.
-    const diceDefaultPageSize = diceBucket ? 400 : 1000;
-    const diceEffectivePageSize = normalizedCollectionLimits.jobsPerPlatform == null
-      ? diceDefaultPageSize
-      : Math.min(diceDefaultPageSize, normalizedCollectionLimits.jobsPerPlatform);
-    const dicePageSizeFact = `pageSize ${diceEffectivePageSize}${normalizedCollectionLimits.jobsPerPlatform != null ? ' (limited by Jobs per platform)' : ''}`;
-    const clientDateBoundary = new Date(activeSearchWindow.startTimestamp).toISOString();
     const dateBounds = Object.fromEntries(activeSourceIds.map((id) => {
-      let detail = `client exact ≥ ${clientDateBoundary}`;
-      if (id === 'dice') detail = diceBucket
-        ? `filters.postedDate=${diceBucket} (server-side; ${dicePageSizeFact}); client exact ≥ ${clientDateBoundary}`
-        : `client exact ≥ ${clientDateBoundary} (${ageDays}d provider request ∉ Dice's 1/3/7-day buckets; ${dicePageSizeFact})`;
-      else if (id === 'glassdoor') detail = glassdoorBucket
-        ? `fromAge=${glassdoorBucket} (server bucket rounded up); client exact ≥ ${clientDateBoundary}`
-        : `client exact ≥ ${clientDateBoundary} (${ageDays}d provider request exceeds Glassdoor's 30-day server bucket)`;
-      else if (id === 'ziprecruiter') detail = `days=${ageDays}; client exact ≥ ${clientDateBoundary}`;
-      else if (id === 'indeed') detail = `fromage=${ageDays}; client exact ≥ ${clientDateBoundary}`;
-      else if (id === 'linkedin') detail = `f_TPR=r${ageDays * 86400}; client exact ≥ ${clientDateBoundary}`;
-      else if (id === 'usajobs') detail = ageDays <= 60
-        ? `DatePosted=${ageDays}; client exact ≥ ${clientDateBoundary}`
-        : `client exact ≥ ${clientDateBoundary} (${ageDays}d provider request exceeds USAJobs' 60-day DatePosted limit)`;
+      // Each platform reports the horizon/boundary IT was dispatched with; a
+      // source without its own window is byte-identical to the run-level text.
+      const sourceAgeDays = ageDaysFor(id);
+      const sourceDateBoundary = new Date(postedSinceFor(id)).toISOString();
+      const sourceDiceBucket = sourceAgeDays === ageDays ? diceBucket : dicePostedBucket(sourceAgeDays);
+      const sourceGlassdoorBucket = sourceAgeDays === ageDays
+        ? glassdoorBucket
+        : glassdoorPostedBucket(sourceAgeDays);
+      const sourceDiceEffectivePageSize = sourceDiceBucket ? 400 : 1000;
+      const sourceDicePageSizeFact = `pageSize ${normalizedCollectionLimits.jobsPerPlatform == null
+        ? sourceDiceEffectivePageSize
+        : Math.min(sourceDiceEffectivePageSize, normalizedCollectionLimits.jobsPerPlatform)}${normalizedCollectionLimits.jobsPerPlatform != null ? ' (limited by Jobs per platform)' : ''}`;
+      let detail = `client exact ≥ ${sourceDateBoundary}`;
+      if (id === 'dice') detail = sourceDiceBucket
+        ? `filters.postedDate=${sourceDiceBucket} (server-side; ${sourceDicePageSizeFact}); client exact ≥ ${sourceDateBoundary}`
+        : `client exact ≥ ${sourceDateBoundary} (${sourceAgeDays}d provider request ∉ Dice's 1/3/7-day buckets; ${sourceDicePageSizeFact})`;
+      else if (id === 'glassdoor') detail = sourceGlassdoorBucket
+        ? `fromAge=${sourceGlassdoorBucket} (server bucket rounded up); client exact ≥ ${sourceDateBoundary}`
+        : `client exact ≥ ${sourceDateBoundary} (${sourceAgeDays}d provider request exceeds Glassdoor's 30-day server bucket)`;
+      else if (id === 'ziprecruiter') detail = `days=${sourceAgeDays}; client exact ≥ ${sourceDateBoundary}`;
+      else if (id === 'indeed') detail = `fromage=${sourceAgeDays}; client exact ≥ ${sourceDateBoundary}`;
+      else if (id === 'linkedin') detail = `f_TPR=r${sourceAgeDays * 86400}; client exact ≥ ${sourceDateBoundary}`;
+      else if (id === 'usajobs') detail = sourceAgeDays <= 60
+        ? `DatePosted=${sourceAgeDays}; client exact ≥ ${sourceDateBoundary}`
+        : `client exact ≥ ${sourceDateBoundary} (${sourceAgeDays}d provider request exceeds USAJobs' 60-day DatePosted limit)`;
       return [id, detail];
     }));
     // Location observability: the raw user input ("denvr"), the corrected param
@@ -14502,6 +14654,32 @@ Return a JSON object with four arrays of search query strings:
     await assertSearchCurrent();
     const completedAt = Date.now();
     const pausedSourceIds = [...finalGatingSourceIds];
+    // Platforms whose collection genuinely finished, read from THIS run's
+    // manifest so a "done" that only ever reached disk still counts. A missing or
+    // mismatched manifest yields no completions — the next run then keeps the run
+    // window for every platform rather than trusting an unproven boundary.
+    let completedSourceIds = [];
+    if (canvasFilePath) {
+      try {
+        const finalState = await readRunState(canvasFilePath, Date.now(), { nodeId });
+        if (finalState?.manifest?.runId === activeRunId) {
+          const sourceStatuses = {};
+          for (const [id, source] of Object.entries(finalState.manifest.sources || {})) {
+            sourceStatuses[id] = source?.status || 'pending';
+          }
+          completedSourceIds = completedJobSourceIds({
+            activeSourceIds,
+            sourceStatuses,
+            gatingSourceIds: finalGatingSourceIds,
+            intentionallyUnfinishedSourceIds,
+            loginBlockedSourceIds,
+            countryApplicableSourceIds,
+          });
+        }
+      } catch {
+        completedSourceIds = [];
+      }
+    }
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
       // A source-level gate is a settled partial gather, not a completed
@@ -14553,6 +14731,8 @@ Return a JSON object with four arrays of search query strings:
       // set rather than the narrower loginBlockedSourceIds preflight subset.
       hasUnfinishedSources: finalGatingSourceIds.size > 0,
       intentionallyUnfinishedSourceIds,
+      sourceSearchWindows: activeSourceSearchWindows,
+      completedSourceIds,
     };
     } catch (error) {
       if (isJobOperationSupersededError(error)) return searchSupersededResult();

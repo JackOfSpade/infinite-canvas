@@ -5748,7 +5748,7 @@ export default [
       const completionDateStart = source.indexOf('const lastCompletedRunAtText =');
       const completionDateEnd = source.indexOf('\n\n  useEffect', completionDateStart);
       const completionDate = source.slice(completionDateStart, completionDateEnd);
-      assert(completionDate.includes('formatCompletionTimestamp(data.lastCompletedRunAt)')
+      assert(completionDate.includes('formatCompletionTimestamp(latestSourceCompletedAt(data))')
         && emptyState.includes('!!lastCompletedRunAtText && (')
         && !emptyState.includes('!!lastCompletedRunAtText && hasCareerIdentity'),
       'a valid persisted completion timestamp renders on a virgin/cleared empty hub without a career-identity gate');
@@ -5809,7 +5809,7 @@ export default [
         && collectionWriter.includes("searchResult?.collectionDisposition === 'user-finished-partial'")
         && collectionWriter.includes('|| searchResult?.hasUnfinishedSources === true')
         && collectionWriter.includes('pendingCollectionCompletion?.runId === runId')
-        && collectionWriter.includes('? { pendingCollectionCompletion: null }')
+        && collectionWriter.includes('? { pendingCollectionCompletion: null, pendingSourceCoverage: null }')
         && collectionWriter.includes('partialCollectionRunId: runId')
         && collectionWriter.includes('partialCollectionRunId: null')
         && collectionWriter.includes('pendingCollectionCompletion: {')

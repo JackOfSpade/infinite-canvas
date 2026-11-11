@@ -116,6 +116,7 @@ const RESULT_RESET_KEYS = [
   'preferenceCareerSnapshotId', 'scoringCareerSnapshotId', 'savedJobsRescore', 'errorMessage',
   'rerunOutcome', 'rerunNotice', 'reanalysisNotice', 'testModeNote', 'queuedModuleRun',
   'analysisOperation', 'retryOperation', 'retryOperationFor', 'pendingCollectionCompletion',
+  'pendingSourceCoverage',
   'partialCollectionRunId', 'terminalFinalizationRecovery', 'manualAiResume', 'dragHover',
   'savedJobsCareerClearedAt',
   'jobAnalysisClearedAt', 'jobAnalysisClearedRunId',
