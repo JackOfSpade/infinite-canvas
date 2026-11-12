@@ -2503,7 +2503,7 @@ export default [
         titles: ['Wave Target'],
         callText: async (_prompt, options) => {
           calls.push({ task: options.task });
-          return { verdicts: [] };
+          return { remove: [], unsure: [] };
         },
       });
       assert(calls.length === 1 && calls[0].task === 'job-role-screen-batch',

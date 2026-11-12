@@ -161,16 +161,16 @@ const TASK_MAX_TOKENS = {
   // can spend materially more thinking tokens than the visible JSON implies.
   'job-role-audit': 4096,
   // The ONLY high-row-count task here. `job-role-screen-batch` prompts pack
-  // as many rows as fit the shared BATCH_OUTPUT_TOKEN_BUDGET. Each emits
-  // one tiny row per job — `{"index":199,"outcome":"mismatch","reason":"registered nurse role"}` is
-  // about 20 tokens, and 'match'/'unclear' rows carry an empty reason and cost
-  // ~13 — but 200 of them still far exceed the flat 'default' 2048 this task
-  // silently fell through to before it was registered here, which truncated
-  // the reply and failed the whole screen — inverting the point of screening on titles (see
-  // screenJobRolesByTitle in jobPreferences.js: the batch is large precisely
-  // so one handoff covers the pool). Provisioned at roughly double the
-  // all-mismatch worst case: 1,024 + 48 tokens per row.
+  // as many rows as fit the shared BATCH_OUTPUT_TOKEN_BUDGET. The reply lists
+  // only removed and unsure indexes (a few tokens each, kept rows cost
+  // nothing), but this is a ceiling, not spend: it stays at the old
+  // one-object-per-row provisioning (1,024 + 48 tokens per row) so a reply is
+  // never truncated. The flat 'default' 2048 this task once fell through to
+  // truncated the reply and failed the whole screen.
   'job-role-screen-batch':     ({ itemCount = 0 } = {}) =>
+    Math.min(BATCH_OUTPUT_TOKEN_BUDGET, 1024 + Math.max(0, itemCount) * 48),
+  // At most ROLE_SNIPPET_SCREEN_MAX_ROWS rows, same grouped-removal reply.
+  'job-role-snippet-screen-batch': ({ itemCount = 0 } = {}) =>
     Math.min(BATCH_OUTPUT_TOKEN_BUDGET, 1024 + Math.max(0, itemCount) * 48),
   'default':                   2048,
 };

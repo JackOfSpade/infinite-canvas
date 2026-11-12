@@ -43,6 +43,7 @@ export const KNOWN_TASKS = new Set([
   'job-preference-research-batch-assessment',
   'job-role-audit',
   'job-role-screen-batch',
+  'job-role-snippet-screen-batch',
   // The fallback bucket resolveTask() lands on for an unmapped/absent task.
   // It is a real member here so that passing task:'default' explicitly is not
   // itself reported as "unmapped"; getKnownTaskIds() filters it back out

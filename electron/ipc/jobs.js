@@ -200,6 +200,7 @@ import { carryListingAlternates, collectListingAlternates, restoreListingAlterna
 import { getListingLivenessCalibrationStore } from './listingLivenessCalibration.js';
 import { boardClosedRetirement, boardClosedSetAside, boardClosedTelemetryBlock, officialPostingOutranksClosedPage, preferOpenRows, scoreSafeRowsWithBoardClosed, settleBoardClosedRows } from './officialPostingBoardClosed.js';
 import { blankJobPreferencePlan, interpretJobPreferences, evaluateJobPreferences, reapplyStoredJobPreferences, researchDeferredJobPreferences, isValidJobPreferencePlanSubmission, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle } from './jobPreferences.js';
+import { getJobRoleScreenVerdictStore } from './jobRoleScreenVerdicts.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 
@@ -7007,6 +7008,7 @@ export function mergeRoleScreenedJobs(jobs, roleScreen) {
     const verdict = {
       outcome,
       reason: outcome === 'mismatch' ? String(rawVerdict.reason || '').trim().slice(0, 300) : '',
+      ...(['saved', 'title', 'snippet'].includes(rawVerdict.via) ? { via: rawVerdict.via } : {}),
     };
     if (outcome !== 'mismatch') kept.push({ ...job, roleScreen: verdict });
   }
@@ -11479,6 +11481,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
         titles: backstopTitles,
         signal,
         callText: callLLMText,
+        verdictStore: getJobRoleScreenVerdictStore(),
         meta: backstopMeta,
       });
       // Rebuild IN PLACE from verdictsByIndex (absolute into the array passed
@@ -11494,7 +11497,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       });
       screenedJobs = next.filter((_job, at) => !droppedAt.has(at));
       backstopDropped = droppedAt.size;
-      logger.info(`[Jobs] Backstop AI role screen: ${unscreened.length} late row(s) not covered by the run's bulk screen, dropped ${backstopDropped}.`);
+      logger.info(`[Jobs] Backstop AI role screen: ${unscreened.length} late row(s) not covered by the run's bulk screen, dropped ${backstopDropped} (saved ${Number(backstop?.counts?.saved) || 0}, title-checked ${Number(backstop?.counts?.titleChecked) || 0}, snippet-checked ${Number(backstop?.counts?.snippetChecked) || 0}).`);
     }
     backstopLateArrivals = unscreened.length;
     const result = await evaluateJobPreferences({
@@ -13779,6 +13782,7 @@ Return a JSON object with four arrays of search query strings:
         titles: roleScreenTitles,
         signal: combinedSignal,
         callText: callLLMText,
+        verdictStore: getJobRoleScreenVerdictStore(),
         meta: roleScreenMeta,
       });
       await assertSearchCurrent();
@@ -13799,9 +13803,13 @@ Return a JSON object with four arrays of search query strings:
       // screen has no token set, so the only checkable evidence for a drop is
       // the reason it gave for that specific listing.
       roleDroppedSamples = roleScreenDropped.slice(0, 8).map(job => ({ title: job?.title || '', source: job?.source || '?', reason: job?.roleScreen?.reason || '' }));
+      const steps = roleScreen?.counts || {};
+      const stepLog = `saved ${Number(steps.saved) || 0}, title-checked ${Number(steps.titleChecked) || 0}, snippet-checked ${Number(steps.snippetChecked) || 0} (snippet dropped ${Number(steps.snippetDropped) || 0}${steps.snippetFailed ? ', snippet step FAILED: unsure jobs kept' : ''})`;
       if (roleDropped > 0) {
         const bySourceLog = Object.entries(roleDroppedBySource).map(([sid, n]) => `${sid}:${n}`).join(', ');
-        logger.info(`[Jobs][${nodeId}] AI role screen [${roleScreenTitles.join(' | ')}]: kept ${roleScreened.length}, dropped ${roleDropped} (${bySourceLog})`);
+        logger.info(`[Jobs][${nodeId}] AI role screen [${roleScreenTitles.join(' | ')}]: kept ${roleScreened.length}, dropped ${roleDropped} (${bySourceLog}); ${stepLog}`);
+      } else {
+        logger.info(`[Jobs][${nodeId}] AI role screen [${roleScreenTitles.join(' | ')}]: kept ${roleScreened.length}, dropped 0; ${stepLog}`);
       }
     }
 

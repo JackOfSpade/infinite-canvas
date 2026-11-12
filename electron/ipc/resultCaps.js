@@ -324,6 +324,18 @@ export const ROLE_SCREEN_MAX_ROWS = Math.floor(
   (BATCH_OUTPUT_TOKEN_BUDGET - ROLE_SCREEN_BASE_TOKENS) / ROLE_SCREEN_ROW_TOKENS,
 );
 
+// ── Role snippet screen rows ────────────────────────────────────────────────
+// The second role-screen step sees only the jobs the title pass marked unsure,
+// each with the opening of its description. Input, not output, bounds it:
+// ROLE_SNIPPET_SCREEN_CHARS per job keeps a full batch near 20k input tokens,
+// about a tenth of the full listing evaluation's per-job evidence. The text is
+// the description's plain opening — never extracted or cleaned — so a posting
+// that opens with company boilerplate may still be judged unsure and kept.
+export const ROLE_SNIPPET_SCREEN_MAX_ROWS = 50;
+export const ROLE_SNIPPET_SCREEN_CHARS = 1500;
+// Shorter than this, the opening adds nothing the title did not already say.
+export const ROLE_SNIPPET_SCREEN_MIN_CHARS = 200;
+
 // ── Batched compensation-assessment budgets ─────────────────────────────────
 // One structured cohort row needs its own compact evidence extraction, while
 // every listing in that cohort needs one exact indexed verdict.  Keep this

@@ -82,14 +82,14 @@ export default [
     // asserts the cost guarantee (zero AI calls for an empty title list or an
     // empty pool) and the no-mutation contract (matching attachAssessments'
     // own spread-not-mutate convention).
-    name: 'REGRESSION FIX1: screenJobRolesByTitle fails OPEN -- only an explicit "mismatch" verdict drops a job; unclear/missing/malformed all keep it',
+    name: 'REGRESSION FIX1: screenJobRolesByTitle fails OPEN -- only an explicit removal drops a job; unsure/unmentioned/malformed all keep it',
     run: async () => {
       const jobs = [
         { title: 'Product Manager', company: 'Acme' }, // match
         { title: 'Warehouse Associate', company: 'Acme' }, // mismatch -> dropped
-        { title: 'Senior Product Manager', company: 'Acme' }, // unclear -> kept
-        { title: 'Product Lead', company: 'Acme' }, // MISSING verdict entirely -> kept
-        { title: 'Product Owner', company: 'Acme' }, // malformed/unknown outcome string -> kept
+        { title: 'Senior Product Manager', company: 'Acme' }, // unsure, no description -> kept
+        { title: 'Product Lead', company: 'Acme' }, // never mentioned -> kept
+        { title: 'Product Owner', company: 'Acme' }, // only named by malformed indexes -> kept
       ];
       Object.freeze(jobs);
       jobs.forEach(job => Object.freeze(job));
@@ -99,13 +99,12 @@ export default [
         callText: async (_prompt, options) => {
           assert(options.task === 'job-role-screen-batch', `expected task 'job-role-screen-batch', got '${options.task}'`);
           return {
-            verdicts: [
-              { index: 0, outcome: 'match', reason: '' },
-              { index: 1, outcome: 'mismatch', reason: 'warehouse role' },
-              { index: 2, outcome: 'unclear', reason: '' },
-              // index 3: no verdict returned for this index at all.
-              { index: 4, outcome: 'not-a-real-outcome', reason: 'gibberish' },
+            remove: [
+              { reason: 'warehouse role', indexes: [1] },
+              { reason: 'gibberish', indexes: ['4', 4.5, -1, 99] },
+              'not a group',
             ],
+            unsure: [2, 'x'],
           };
         },
       });
@@ -116,8 +115,8 @@ export default [
         `fail-open contract violated -- expected ${JSON.stringify(expectedAccepted)}, got ${JSON.stringify(acceptedTitles)}`);
       assert(result.droppedJobs.length === 1 && result.droppedJobs[0].title === 'Warehouse Associate',
         'only the explicit mismatch verdict may drop a job');
-      assert(result.counts.dropped === 1 && result.counts.accepted === 4 && result.counts.unclear === 3,
-        `counts must reflect fail-open (real unclear + missing-verdict + malformed-outcome all count as unclear), got ${JSON.stringify(result.counts)}`);
+      assert(result.counts.dropped === 1 && result.counts.accepted === 4 && result.counts.unclear === 1 && result.counts.snippetChecked === 0,
+        `counts must reflect fail-open (unmentioned and malformed rows are kept; an unsure row without a description skips the snippet step), got ${JSON.stringify(result.counts)}`);
       assert(!result.acceptedJobs.some(j => j.roleScreen.reason), 'a kept job must never carry a mismatch reason');
       assert(result.droppedJobs[0].roleScreen.reason === 'warehouse role', 'a dropped job must carry its mismatch reason');
 
@@ -152,7 +151,7 @@ export default [
           peakBatches = Math.max(peakBatches, activeBatches);
           await new Promise(resolve => setTimeout(resolve, options.hints.batch === 1 ? 5 : 0));
           activeBatches -= 1;
-          return { verdicts: Array.from({ length: options.hints.itemCount }, (_, index) => ({ index, outcome: 'match', reason: '' })) };
+          return { remove: [], unsure: [] };
         },
       });
       assert(peakBatches === 3
@@ -182,7 +181,7 @@ export default [
     // same outcome) must still apply exactly as if sent once -- the fix must
     // not turn every repeated index into a free pass for a genuinely
     // mismatched job.
-    name: 'REGRESSION (bulk role screen dup-index handling): a CONTRADICTORY duplicate verdict for one index collapses to unclear (kept); an AGREEING duplicate still applies normally',
+    name: 'REGRESSION (bulk role screen dup-index handling): an index both removed and marked unsure is kept; an index in two removal groups is still removed',
     run: async () => {
       const jobs = [
         { title: 'Product Manager', company: 'Acme' }, // index 0: contradictory duplicate (match then mismatch)
@@ -191,27 +190,258 @@ export default [
       const result = await screenJobRolesByTitle({
         jobs, titles: ['Product Manager'],
         callText: async () => ({
-          verdicts: [
-            { index: 0, outcome: 'match', reason: '' },
-            { index: 0, outcome: 'mismatch', reason: 'a later spurious verdict' },
-            { index: 1, outcome: 'mismatch', reason: 'warehouse role' },
-            { index: 1, outcome: 'mismatch', reason: 'warehouse role, restated' },
+          remove: [
+            { reason: 'a spurious removal', indexes: [0] },
+            { reason: 'warehouse role', indexes: [1] },
+            { reason: 'warehouse role, restated', indexes: [1] },
           ],
+          unsure: [0],
         }),
       });
 
       const byTitle = title => [...result.acceptedJobs, ...result.droppedJobs].find(j => j.title === title);
       assert(byTitle('Product Manager').roleScreen.outcome === 'unclear',
-        `a CONTRADICTORY duplicate verdict for the same index must collapse to 'unclear' rather than let the later 'mismatch' silently overrule the earlier 'match', got ${byTitle('Product Manager').roleScreen.outcome}`);
+        `an index both removed and marked unsure must collapse to 'unclear', got ${byTitle('Product Manager').roleScreen.outcome}`);
       assert(result.acceptedJobs.some(j => j.title === 'Product Manager'),
         'a contradictory duplicate must resolve to KEPT (unclear is fail-open), not dropped -- old last-wins behavior dropped this job');
 
       assert(byTitle('Warehouse Associate').roleScreen.outcome === 'mismatch',
-        `an AGREEING duplicate verdict (both copies name the same outcome) must still apply normally, got ${byTitle('Warehouse Associate').roleScreen.outcome}`);
+        `an index named by two removal groups must still be removed, got ${byTitle('Warehouse Associate').roleScreen.outcome}`);
+      assert(byTitle('Warehouse Associate').roleScreen.reason === 'warehouse role', 'a removal keeps its first group\'s reason');
       assert(result.droppedJobs.some(j => j.title === 'Warehouse Associate'),
         'an agreeing duplicate mismatch must still drop the job -- the dup-index fix must not turn every repeated index into a free pass');
 
       return { contradictoryCollapsesToUnclear: true, agreeingDuplicateStillApplies: true };
+    },
+  },
+  {
+    // The three-step ladder: saved verdicts skip the AI, identical
+    // title+company rows are sent once, and only unsure rows WITH a usable
+    // description reach the snippet step, which can remove them but never
+    // removes a row it does not name.
+    name: 'role screen ladder: saved verdicts skip the AI, duplicates are sent once, only unsure rows with a description reach the snippet step',
+    run: async () => {
+      const longText = 'Install and repair residential roofing, frame walls and pour concrete footings on job sites. '.repeat(5);
+      const jobs = [
+        { title: 'Carpenter', company: 'BuildCo' }, // saved mismatch: no AI
+        { title: 'Product Manager', company: 'Acme' }, // title: kept (unmentioned)
+        { title: 'Product Manager', company: 'Acme' }, // duplicate of the row above: sent once
+        { title: 'Associate', company: 'Mystery', description: longText }, // unsure -> snippet removes
+        { title: 'Specialist II', company: 'Mystery', description: longText }, // unsure -> snippet keeps
+        { title: 'Consultant', company: 'Mystery', description: 'short' }, // unsure, no usable description -> kept, no snippet
+        { title: 'Registered Nurse', company: 'Hospital' }, // title: removed
+      ];
+      const lookups = []; const records = [];
+      const verdictStore = {
+        lookup: async (key, titles) => { lookups.push({ key, titles }); return new Map([['carpenter', { outcome: 'mismatch', reason: 'construction trades' }]]); },
+        record: async (key, answers) => { records.push({ key, answers }); return { saved: 0, forgotten: 0 }; },
+      };
+      const calls = [];
+      const result = await screenJobRolesByTitle({
+        jobs, titles: ['Product Manager'], verdictStore,
+        callText: async (prompt, options) => {
+          calls.push({ task: options.task, itemCount: options.hints.itemCount, prompt });
+          if (options.task === 'job-role-screen-batch') {
+            // Rows sent: PM@Acme(0), Associate(1), Specialist II(2), Consultant(3), Nurse(4)
+            return { remove: [{ reason: 'nursing', indexes: [4] }], unsure: [1, 2, 3] };
+          }
+          assert(options.task === 'job-role-snippet-screen-batch', `unexpected task ${options.task}`);
+          // Rows sent: Associate(0), Specialist II(1)
+          return { remove: [{ reason: 'construction labour', indexes: [0] }] };
+        },
+      });
+      assert(calls.length === 2, `expected one title call and one snippet call, got ${JSON.stringify(calls.map(c => c.task))}`);
+      assert(calls[0].itemCount === 5 && !calls[0].prompt.includes('Carpenter'),
+        `the title call must skip the saved title and send duplicate title+company rows once, got ${calls[0].itemCount}`);
+      assert(!calls[0].prompt.includes('Install and repair'), 'the title call must never carry description text');
+      assert(calls[1].itemCount === 2 && calls[1].prompt.includes('Install and repair') && !calls[1].prompt.includes('Consultant'),
+        'the snippet call must carry only unsure rows that have a usable description');
+      const outcome = title => [...result.acceptedJobs, ...result.droppedJobs].filter(j => j.title === title).map(j => `${j.roleScreen.outcome}/${j.roleScreen.via}/${j.roleScreen.reason}`);
+      assert(JSON.stringify(outcome('Carpenter')) === JSON.stringify(['mismatch/saved/construction trades']), `saved verdict, got ${outcome('Carpenter')}`);
+      assert(JSON.stringify(outcome('Product Manager')) === JSON.stringify(['match/title/', 'match/title/']), `duplicate rows share one answer, got ${outcome('Product Manager')}`);
+      assert(JSON.stringify(outcome('Associate')) === JSON.stringify(['mismatch/snippet/construction labour']), `snippet removal, got ${outcome('Associate')}`);
+      assert(JSON.stringify(outcome('Specialist II')) === JSON.stringify(['unclear/title/']), `snippet keeps unnamed rows, got ${outcome('Specialist II')}`);
+      assert(JSON.stringify(outcome('Consultant')) === JSON.stringify(['unclear/title/']), `no description keeps the row, got ${outcome('Consultant')}`);
+      assert(JSON.stringify(outcome('Registered Nurse')) === JSON.stringify(['mismatch/title/nursing']), `title removal, got ${outcome('Registered Nurse')}`);
+      assert(result.counts.saved === 1 && result.counts.titleChecked === 5 && result.counts.snippetChecked === 2 && result.counts.snippetDropped === 1 && result.counts.dropped === 3
+        && result.counts.snippetFailed === false,
+        `step counts, got ${JSON.stringify(result.counts)}`);
+      // Only title-pass answers are offered for saving, one per row sent.
+      assert(records.length === 1 && records[0].key === lookups[0].key && records[0].answers.length === 6
+        && !records[0].answers.some(a => a.title === 'carpenter'),
+      `title-pass answers (not saved hits) must be offered to the store, got ${JSON.stringify(records)}`);
+      const associate = records[0].answers.find(a => a.title === 'associate');
+      assert(associate.outcome === 'unclear', 'the store receives the title-pass answer, never the snippet answer');
+      // The store's two-employer rule needs the employer of every answered row.
+      const answerCompanies = new Set(records[0].answers.map(a => a.company));
+      assert(answerCompanies.has('Hospital') && answerCompanies.has('Acme') && answerCompanies.has('Mystery'),
+        `every recorded answer must carry its row's company string, got ${JSON.stringify([...answerCompanies])}`);
+
+      // A broken store never breaks the screen.
+      const broken = { lookup: async () => { throw new Error('disk'); }, record: async () => { throw new Error('disk'); } };
+      const survived = await screenJobRolesByTitle({ jobs: [{ title: 'Carpenter', company: 'X' }], titles: ['Product Manager'], verdictStore: broken,
+        callText: async () => ({ remove: [], unsure: [] }) });
+      assert(survived.acceptedJobs.length === 1, 'an unreadable verdict store must fall back to asking the AI');
+      return { ladder: true };
+    },
+  },
+  {
+    // FAIL-OPEN FIX: a snippet provider failure used to reject the whole
+    // screen, losing an entire search's roles. Doubt keeps jobs, so only rows a
+    // finished snippet batch already removed may stay removed; everything else
+    // is kept and the run reports counts.snippetFailed. Cancellation is
+    // different: an aborted caller signal still stops the run.
+    name: 'role screen: a failed snippet pass keeps every row it did not remove (counts.snippetFailed), but an aborted caller signal still rejects',
+    run: async () => {
+      const longText = 'Install and repair residential roofing, frame walls and pour concrete footings on job sites. '.repeat(5);
+      const jobs = [
+        { title: 'Associate', company: 'Mystery', description: longText },
+        { title: 'Specialist II', company: 'Mystery', description: longText },
+      ];
+      const tasks = [];
+      const result = await screenJobRolesByTitle({
+        jobs, titles: ['Product Manager'],
+        callText: async (prompt, options) => {
+          tasks.push(options.task);
+          if (options.task === 'job-role-screen-batch') return { remove: [], unsure: [0, 1] };
+          assert(options.task === 'job-role-snippet-screen-batch', `unexpected task ${options.task}`);
+          throw new Error('snippet provider down');
+        },
+      });
+      assert(JSON.stringify(tasks) === JSON.stringify(['job-role-screen-batch', 'job-role-snippet-screen-batch']),
+        `both passes must be attempted, got ${JSON.stringify(tasks)}`);
+      assert(result.droppedJobs.length === 0 && result.acceptedJobs.length === 2,
+        `a failed snippet pass must resolve with every row kept, got counts=${JSON.stringify(result.counts)}`);
+      assert(result.acceptedJobs.every(job => job.roleScreen.outcome === 'unclear' && job.roleScreen.via === 'title'),
+        `rows the snippet pass never judged stay unclear (kept), got ${JSON.stringify(result.acceptedJobs.map(job => job.roleScreen))}`);
+      assert(result.counts.snippetFailed === true,
+        `counts.snippetFailed must be true when the snippet pass throws, got ${JSON.stringify(result.counts)}`);
+
+      // A caller abort is cancellation, not doubt: it must still reject.
+      const controller = new AbortController();
+      let rejected = null;
+      try {
+        await screenJobRolesByTitle({
+          jobs: [{ title: 'Associate', company: 'Mystery', description: longText }], titles: ['Product Manager'],
+          signal: controller.signal,
+          callText: async (prompt, options) => {
+            if (options.task === 'job-role-screen-batch') return { remove: [], unsure: [0] };
+            controller.abort();
+            throw new Error('snippet call aborted by caller');
+          },
+        });
+      } catch (error) {
+        rejected = error;
+      }
+      assert(rejected !== null && /abort/i.test(String(rejected && rejected.message)),
+        `an aborted caller signal must still reject the screen, got ${rejected && rejected.message}`);
+
+      // Nothing to screen still reports the flag, always false.
+      const empty = await screenJobRolesByTitle({ jobs: [], titles: ['Product Manager'], callText: async () => ({ remove: [], unsure: [] }) });
+      assert(empty.counts.snippetFailed === false, 'the empty-input counts carry snippetFailed: false');
+      const noSnippetPass = await screenJobRolesByTitle({ jobs: [{ title: 'Associate', company: 'Mystery' }], titles: ['Product Manager'], callText: async () => ({ remove: [], unsure: [] }) });
+      assert(noSnippetPass.counts.snippetChecked === 0 && noSnippetPass.counts.snippetFailed === false,
+        'a screen with no snippet pass reports snippetFailed: false');
+      return { snippetFailureKeptRows: true, abortStillRejects: true };
+    },
+  },
+  {
+    name: 'role screen verdict store: saves only agreeing match/mismatch titles, keys by target list, evicts least recently used',
+    run: async () => {
+      const nodeFs = await import('node:fs/promises');
+      const nodeOs = await import('node:os');
+      const nodePath = await import('node:path');
+      const { createJobRoleScreenVerdictStore, roleScreenTargetsKey, normalizeRoleScreenTitle } = await import('../../electron/ipc/jobRoleScreenVerdicts.js');
+      const dir = await nodeFs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'ic-role-verdicts-'));
+      try {
+        assert(normalizeRoleScreenTitle('  Senior   CARPENTER ') === 'senior carpenter', 'titles are lowercased with spaces collapsed');
+        const keyA = roleScreenTargetsKey(['Product Manager', 'Product Owner']);
+        assert(keyA === roleScreenTargetsKey(['product owner', ' Product  Manager']), 'the target key ignores order, case and spacing');
+        const keyB = roleScreenTargetsKey(['Data Analyst']);
+        assert(keyA !== keyB, 'a different target list is a different key');
+        const store = createJobRoleScreenVerdictStore(dir, { maxEntries: 50 });
+        await store.record(keyA, [
+          { title: 'carpenter', outcome: 'mismatch', reason: 'construction trades', company: 'BuildCo' },
+          { title: 'carpenter', outcome: 'mismatch', reason: 'construction trades', company: 'BuildCo' },
+          { title: 'associate', outcome: 'mismatch', reason: 'legal', company: 'LawFirm' },
+          { title: 'associate', outcome: 'match', reason: '', company: 'LawFirm' }, // disagreement: not saved
+          { title: 'consultant', outcome: 'unclear', reason: '', company: 'BuildCo' }, // unsure: not saved
+          { title: 'product manager', outcome: 'match', reason: 'stray', company: 'Acme' },
+        ], { now: 1 });
+        // Agreeing answers are saved, but a mismatch seen at ONE employer is
+        // pending: replaying it would drop that title at every other employer
+        // with no AI look, which is exactly the bug the two-employer rule fixes.
+        const hitsA = await store.lookup(keyA, ['carpenter', 'associate', 'consultant', 'product manager'], { now: 2 });
+        assert(JSON.stringify([...hitsA.entries()]) === JSON.stringify([['product manager', { outcome: 'match', reason: '' }]]),
+          `only agreeing match/mismatch titles are saved, and a one-employer mismatch is not a hit yet, got ${JSON.stringify([...hitsA.entries()])}`);
+        assert(!hitsA.has('carpenter'), 'a title removed at a single company must not be replayed at any other company');
+        assert(hitsA.get('product manager').outcome === 'match' && hitsA.get('product manager').reason === '',
+          'a match is returned immediately and carries no reason');
+        assert((await store.lookup(keyB, ['carpenter'])).size === 0, 'verdicts never carry across a different target list');
+
+        // The same employer twice -- here spelled with different case and
+        // spacing -- is still ONE employer, so 'carpenter' stays pending.
+        await store.record(keyA, [{ title: 'carpenter', outcome: 'mismatch', reason: 'construction trades', company: '  buildco ' }], { now: 2.5 });
+        assert((await store.lookup(keyA, ['carpenter'], { now: 2.5 })).size === 0,
+          'the same company twice must not count as two distinct employers');
+
+        // A second, genuinely different employer settles it.
+        await store.record(keyA, [{ title: 'carpenter', outcome: 'mismatch', reason: 'construction trades', company: 'Timber Yard' }], { now: 3 });
+        const twoEmployers = await store.lookup(keyA, ['carpenter'], { now: 3 });
+        assert(twoEmployers.get('carpenter')?.outcome === 'mismatch' && twoEmployers.get('carpenter').reason === 'construction trades',
+          `a mismatch seen at two distinct employers is a hit, got ${JSON.stringify([...twoEmployers.entries()])}`);
+
+        // The fingerprints live in the row tuple, so they survive a restart.
+        const reloaded = createJobRoleScreenVerdictStore(dir, { maxEntries: 50 });
+        assert((await reloaded.lookup(keyA, ['carpenter'], { now: 4 })).size === 1,
+          'verdicts survive a restart, company fingerprints included');
+
+        // A keep always wins: a later match replaces the saved mismatch.
+        await reloaded.record(keyA, [{ title: 'carpenter', outcome: 'match', reason: '', company: 'Timber Yard' }], { now: 5 });
+        const matchHit = (await createJobRoleScreenVerdictStore(dir, { maxEntries: 50 }).lookup(keyA, ['carpenter'], { now: 6 })).get('carpenter');
+        assert(matchHit?.outcome === 'match', `a match answer replaces a stored mismatch, got ${JSON.stringify(matchHit)}`);
+
+        // LRU eviction, made falsifiable: 'alpha' is inserted FIRST but touched
+        // (looked up) after 'beta' and 'gamma', so recency and insertion order
+        // disagree. A stable sort by insertion order alone keeps the last three
+        // inserted (beta, gamma, delta) and evicts alpha; correct recency
+        // eviction keeps alpha and evicts beta, whose last use is oldest.
+        const lruDir = await nodeFs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'ic-role-verdicts-lru-'));
+        try {
+          const lru = createJobRoleScreenVerdictStore(lruDir, { maxEntries: 3 });
+          await lru.record(keyA, [{ title: 'alpha', outcome: 'match', reason: '', company: 'A' }], { now: 10 });
+          await lru.record(keyA, [{ title: 'beta', outcome: 'match', reason: '', company: 'B' }], { now: 20 });
+          await lru.record(keyA, [{ title: 'gamma', outcome: 'match', reason: '', company: 'C' }], { now: 30 });
+          assert((await lru.lookup(keyA, ['alpha'], { now: 40 })).size === 1, 'the older-inserted entry is readable at a later time');
+          await lru.record(keyA, [{ title: 'delta', outcome: 'match', reason: '', company: 'D' }], { now: 50 });
+          const survivors = await createJobRoleScreenVerdictStore(lruDir, { maxEntries: 3 }).lookup(keyA, ['alpha', 'beta', 'gamma', 'delta'], { now: 60 });
+          assert(survivors.has('alpha'),
+            `the recently-used entry must survive eviction even though it was inserted first, got ${JSON.stringify([...survivors.keys()].sort())}`);
+          assert(!survivors.has('beta'),
+            `the least recently used entry must be evicted -- a stable insertion-order sort would have kept it and dropped alpha instead, got ${JSON.stringify([...survivors.keys()].sort())}`);
+          assert(survivors.has('gamma') && survivors.has('delta'), 'the other two entries stay');
+        } finally {
+          await nodeFs.rm(lruDir, { recursive: true, force: true });
+        }
+
+        // A version-1 file cannot express the two-employer rule, so it is
+        // ignored entirely: a valid key holding even a 'match' row must not
+        // come back (version 2 would have returned it).
+        const v1Dir = await nodeFs.mkdtemp(nodePath.join(nodeOs.tmpdir(), 'ic-role-verdicts-v1-'));
+        try {
+          const v1Store = createJobRoleScreenVerdictStore(v1Dir, { maxEntries: 50 });
+          const v1Key = roleScreenTargetsKey(['Site Manager']);
+          assert(v1Store.file.endsWith('job-role-screen-verdicts.json'), `unexpected store file path ${v1Store.file}`);
+          await nodeFs.writeFile(v1Store.file, `${JSON.stringify({ version: 1, entries: [['k', 'mismatch', 'x', 1], [`${v1Key}\u0001nurse`, 'match', '', 1]] })}\n`, 'utf8');
+          const fromV1 = await v1Store.lookup(v1Key, ['nurse']);
+          assert(fromV1.size === 0, `a version-1 store file must be ignored, got ${JSON.stringify([...fromV1.entries()])}`);
+        } finally {
+          await nodeFs.rm(v1Dir, { recursive: true, force: true });
+        }
+        return { store: true };
+      } finally {
+        await nodeFs.rm(dir, { recursive: true, force: true });
+      }
     },
   },
   {

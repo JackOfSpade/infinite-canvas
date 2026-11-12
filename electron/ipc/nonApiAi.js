@@ -3239,7 +3239,7 @@ export const WORKER_RELEASE_ONE_TASKS = Object.freeze([
   'career-profile-compile', 'career-profile-clean', 'career-profile-audit-completeness', 'career-profile-audit-grounding',
   'career-profile-audit-attribution', 'career-profile-audit-metrics', 'career-profile-audit-skills',
   'career-profile-audit-conflicts', 'career-profile-repair',
-  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
+  'job-location-consolidation-confirmation', 'job-role-audit', 'job-role-screen-batch', 'job-role-snippet-screen-batch', 'job-scoring', 'job-gap-review', 'application-edit-recurrence',
   'job-taxonomy-classify-batch', 'job-taxonomy-plan', 'platform-fit-assessment',
   'price-synthesis-batch',
   'marketplace-hub-scan-batch',

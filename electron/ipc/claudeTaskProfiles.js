@@ -14,6 +14,9 @@ export const profile = (model, effort, tools = '', options = {}) => Object.freez
 
 export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-role-screen-batch': profile('haiku', 'low'),
+  // Same judgment as the title pass with a short description opening added;
+  // untested on real prompts yet (docs/ai-model-selection.md).
+  'job-role-snippet-screen-batch': profile('haiku', 'low'),
   'job-taxonomy-plan': profile('haiku', 'low'),
   'job-listing-liveness': profile('haiku', 'low'),
   'platform-fit-assessment': profile('haiku', 'low'),
