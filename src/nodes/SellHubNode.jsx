@@ -663,6 +663,108 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     return () => { disposed = true; };
   }, [canvasFilePath, id, updateGlobal]);
 
+  // A restart in 'comps-ready' restores the warnings but NOT the comp cards.
+  // The save sanitizer drops comp-source cards whose hub was still transient
+  // ('researching') when the canvas autosaved — exactly what happens when the
+  // run then paused with sources blocked and the app quit before the next
+  // autosave. Re-spawn ONLY the missing warned cards, seeded from the persisted
+  // warning, so the paused hub reopens looking the way the user left it
+  // (blocked cards with Solve/Skip still actionable) instead of "sources
+  // blocked" with nothing to act on. Existing cards are never touched: this is
+  // a gap filler, not a clean slate.
+  const ensureBlockedCompSourceCards = useCallback((scrapeWarnings) => {
+    // One card per source; the first warning wins (same collapsing rule as
+    // normalizeCompWarnings — one card retry re-runs that source everywhere).
+    const bySourceId = new Map();
+    for (const warning of (Array.isArray(scrapeWarnings) ? scrapeWarnings : [])) {
+      if (!warning?.sourceId || bySourceId.has(warning.sourceId)) continue;
+      bySourceId.set(warning.sourceId, warning);
+    }
+    if (bySourceId.size === 0) return;
+    const existingSourceIds = new Set(
+      getNodes()
+        .filter(n => n.type === 'compsourcecard' && n.data?.hubId === id)
+        .map(n => n.data?.sourceId),
+    );
+    const missing = [...bySourceId.values()].filter(w => !existingSourceIds.has(w.sourceId));
+    if (missing.length === 0) return;
+
+    const hubPos = getNode(id)?.position || { x: 0, y: 0 };
+    // Same circle layout as spawnCompSourceCards, so a re-spawned card lands
+    // where the live paused view had it (its index in ACTIVE_COMP_SOURCES).
+    const count  = ACTIVE_COMP_SOURCES.length;
+    const HUB_W = 280, HUB_H = 240;     // approx hub footprint while researching
+    const CARD_W = 140, CARD_H = 48;
+    const radius = radialRadius({ count, cardW: CARD_W, cardH: CARD_H, hubW: HUB_W, hubH: HUB_H });
+    const cx = hubPos.x + HUB_W / 2;
+    const cy = hubPos.y + HUB_H / 2;
+    const stamp = Date.now();
+
+    const newNodes = missing.map((warning) => {
+      const index = ACTIVE_COMP_SOURCES.findIndex(s => s.id === warning.sourceId);
+      // Unknown/retired source id: keep the warning actionable with a safe
+      // fallback card entry (same approach as Job Search's helper).
+      const source = index >= 0 ? ACTIVE_COMP_SOURCES[index] : {
+        id: warning.sourceId,
+        name: warning.sourceId,
+        letter: (warning.sourceId[0] || '?').toUpperCase(),
+        color: '#f59e0b',
+        domain: '',
+      };
+      const angle = ((index >= 0 ? index : 0) / count) * 2 * Math.PI - Math.PI / 2;
+      return {
+        id: `comp-${id}-${source.id}-${stamp}`,
+        type: 'compsourcecard',
+        position: {
+          x: cx + Math.cos(angle) * radius - CARD_W / 2,
+          y: cy + Math.sin(angle) * radius - CARD_H / 2,
+        },
+        data: {
+          sourceId: source.id,
+          name:     source.name,
+          letter:   source.letter,
+          color:    source.color,
+          domain:   source.domain,
+          hubId:    id,
+          ephemeral: true,
+          // The card primes its progress from persistedProgress, and the live
+          // progress event for a blocked source already fired before this card
+          // existed — no event will arrive on reload. Seed the shape a live
+          // warned card holds: terminal 'done' so the buttons render, the FULL
+          // warning (chip text, resume/openSecondTab flags…), the Solve url, and
+          // count when the warning carries one.
+          persistedProgress: {
+            status: 'done',
+            warning: { ...warning },
+            url: warning.url || null,
+            ...(warning.count != null ? { count: warning.count } : {}),
+          },
+        },
+      };
+    });
+
+    // Same edge style as spawnCompSourceCards: route each hub→card edge to the
+    // hub's nearest side.
+    const newEdges = newNodes.map(n => ({
+      id: `edge-${id}-${n.id}`,
+      source: id,
+      target: n.id,
+      ...pickEdgeHandles(
+        { x: n.position.x + CARD_W / 2, y: n.position.y + CARD_H / 2 },
+        { x: cx,                        y: cy                       },
+      ),
+      ...structuralEdge('rgba(245,158,11,0.5)'),
+    }));
+
+    if (addElementsGlobally) {
+      addElementsGlobally(id, newNodes, newEdges, 'sibling');
+    } else {
+      addNodes(newNodes);
+      addEdges(newEdges);
+    }
+    EventLogger.log(`[SellHub][${id}] Re-spawned ${missing.length} blocked comp-source card(s) to resolve: ${missing.map(w => w.sourceId).join(', ')}`);
+  }, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges]);
+
   // Replay terminal receipts without repeating their AI/network work. Receipts
   // created in this process remain until a later launch observes the canvas
   // already contains the result; only that later observation acknowledges the
@@ -684,6 +786,12 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           errorMessage: null,
         });
       }
+      // The sidecar keeps the warnings, but the canvas dropped their cards (the
+      // hub was mid-'researching' at the last autosave), which would reopen
+      // this pause as "sources blocked" with nothing to Solve. Rebuild ONLY the
+      // missing warned cards; idempotent, so it is also the right call when the
+      // saved canvas already has this hub in 'comps-ready'.
+      ensureBlockedCompSourceCards(recovery.scrapeWarnings);
       return; // deliberate human pause; never auto-synthesize
     }
     const terminalResult = recovery.result;
@@ -716,7 +824,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       hubStateRef.current = 'priced';
       updateGlobal(id, { ...terminalResult, marketplaceRunResume: appliedRecovery });
     }
-  }, [canvasFilePath, data.locked, data.marketplaceRunResume, data.pricing, data.product, hubState, id, recoveryHydrated, updateGlobal]);
+  }, [canvasFilePath, data.locked, data.marketplaceRunResume, data.pricing, data.product, hubState, id, recoveryHydrated, updateGlobal, ensureBlockedCompSourceCards]);
 
   // Auto-start analysis if images were dropped (must come after startAnalysis is declared
   // — referencing it earlier would hit the const TDZ on first render).

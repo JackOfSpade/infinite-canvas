@@ -4256,7 +4256,7 @@ export default [
         && !search.slice(resumeActionableStart, resumeActionableEnd).includes('resumable !== false')
         && search.includes('const shouldShowSavedAnalysisPanel = !!savedAnalysisMeta && !showUnfinishedRunBanner;')
         && savedPanel.includes('{boardRecoveryOwnsActions && (')
-        && savedPanel.includes('To resume these saved jobs, choose Resume & combine on the connected Job Board.')
+        && savedPanel.includes('To resume these saved jobs, use the main action button on the connected Job Board.')
         && savedPanel.includes('Saved results remain available while Job Board recovery finishes.')
         && !savedPanel.includes('Saved results are kept for reference.')
         && !savedPanel.includes('Start searches from the connected Job Board with Search selected & combine.')
@@ -5073,6 +5073,59 @@ export default [
         'Clear and unmount must remove the Board queue entry and roll back only the source module whose Board-owned turn is active');
       }
       return { selection: 'live allow-list', queueOwner: 'jobboard', nestedLeaseBypassed: true };
+    },
+  },
+  {
+    name: 'Quitting from a paused sources-ready Job Search preserves the whole Solve web',
+    run() {
+      const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
+      const resetStart = search.indexOf('const resetHandler = useCallback');
+      const resetEnd = search.indexOf('// Non-API scoring is controlled', resetStart);
+      // The quit-preservation branch lives inside resetHandler; slice exactly
+      // that body so the guards below cannot be satisfied by unrelated code.
+      const reset = search.slice(resetStart, resetEnd);
+      const pauseStart = reset.indexOf('const exactStoppedRun = stoppedOffer?.found === true');
+      const cleanupAt = reset.indexOf('cleanupAllJobChildren();', pauseStart);
+      const preserve = reset.slice(pauseStart, cleanupAt);
+      const resetProgressAt = preserve.indexOf('resetSourceProgress({ rejectUntilNextReset: true });');
+      assert(resetStart >= 0 && resetEnd > resetStart && pauseStart >= 0 && cleanupAt > pauseStart,
+        'the quit-preservation guards must live inside resetHandler, between the exact-run check and the job-child cleanup');
+      assert(preserve.includes("const gatheredUniverseAtPauseRequest = resetData?.hubState === 'sources-ready'")
+        && preserve.includes('Array.isArray(resetData?.pendingJobs)')
+        && preserve.includes('Array.isArray(pendingJobsRef.current)'),
+      'the guard must capture the gathered universe before any reset: a sources-ready hub, pending rows at the pause request, or a live pending-jobs ref');
+      assert(preserve.includes('const keepSourcesReadyOnQuit = lifecycleQuit === true\n          && exactStoppedRun === true\n          && gatheredUniverseAtPauseRequest;'),
+        'the preservation guard must be conditioned on a lifecycle quit AND the exact stopped run AND the gathered universe');
+      assert(reset.slice(cleanupAt - 40, cleanupAt + 40).includes('if (!keepSourcesReadyOnQuit) cleanupAllJobChildren();'),
+        'a lifecycle quit must keep every mounted source card, so cleanupAllJobChildren is gated on the guard');
+      const keepBranchStart = preserve.indexOf('if (keepSourcesReadyOnQuit) {');
+      const keepBranchEnd = preserve.indexOf('} else {', keepBranchStart);
+      assert(keepBranchStart >= 0 && keepBranchEnd > keepBranchStart
+        && resetProgressAt > keepBranchEnd,
+      'the preservation branch must come before the destructive reset branch, which still owns resetSourceProgress');
+      const keepBranch = preserve.slice(keepBranchStart, keepBranchEnd);
+      const resetBranch = preserve.slice(keepBranchEnd, resetProgressAt + 60);
+      assert(keepBranch.includes("hubStateRef.current = 'sources-ready';")
+        && !keepBranch.includes('pendingJobsRef.current = null')
+        && !keepBranch.includes('scrapeWarningsRef.current =')
+        && !keepBranch.includes('jobRunIdRef.current =')
+        && !keepBranch.includes('setActiveResumeCheckpoint(null)'),
+      'the preservation branch keeps the paused hub state, pending rows, warnings and run id instead of clearing them');
+      assert(resetBranch.includes('pendingJobsRef.current = null;')
+        && resetBranch.includes('resetSourceProgress({ rejectUntilNextReset: true });'),
+      'every other Stop path still clears pending rows and resets per-source progress');
+      assert(preserve.includes('...(keepSourcesReadyOnQuit ? {')
+        && preserve.includes("hubState: 'sources-ready',")
+        && preserve.includes('pendingJobs: Array.isArray(live.pendingJobs)')
+        && preserve.includes('scrapeWarnings: Array.isArray(live.scrapeWarnings)'),
+      'the persisted patch must write back the paused hub state, pending rows and warnings so a restart reopens the same Solve web');
+      const afterCleanup = reset.slice(cleanupAt, reset.indexOf('return { success: true, settled: true };', cleanupAt));
+      assert(afterCleanup.indexOf('setResumeOffer(stoppedOffer);') >= 0
+        && afterCleanup.indexOf('setResumeOffer(stoppedOffer);') < afterCleanup.indexOf('if (!keepSourcesReadyOnQuit) {')
+        && afterCleanup.indexOf('if (!keepSourcesReadyOnQuit) {') < afterCleanup.indexOf("title: 'Job Search Stopped',")
+        && afterCleanup.includes('if (lifecycleQuit) await settlePreFenceCanvasBatches();'),
+      'a quitting app still offers the stopped resume state and settles the canvas batches, but skips the toast that would vanish with the window');
+      return { guard: 'keepSourcesReadyOnQuit', lifecycleQuit: true, exactStoppedRun: true };
     },
   },
   {

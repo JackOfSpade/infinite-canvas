@@ -2886,5 +2886,51 @@ export default [
       'node deletion and Clear Canvas discover autosave-gap sidecars and durably abandon them');
       return { abortPending: true, resetOrdered: true, nativePaused: true, deletionTombstoned: true };
     },
+  },
+  {
+    name: 'marketplace restart safety: a comps-ready pause re-spawns its blocked comp-source cards after a restart',
+    run: () => {
+      const hub = fs.readFileSync(path.join(process.cwd(), 'src/nodes/SellHubNode.jsx'), 'utf8');
+
+      // (1) The helper seeds a card with exactly what a live blocked card holds,
+      // and only for warned sources that have no card yet for this hub.
+      const helperStart = hub.indexOf('const ensureBlockedCompSourceCards = useCallback');
+      assert(helperStart >= 0, 'SellHubNode declares an ensureBlockedCompSourceCards helper');
+      const helperEndMarker = '}, [id, getNode, getNodes, addElementsGlobally, addNodes, addEdges]);';
+      const helperEnd = hub.indexOf(helperEndMarker, helperStart);
+      assert(helperEnd > helperStart, 'the blocked-comp helper is a self-contained useCallback');
+      const helper = hub.slice(helperStart, helperEnd + helperEndMarker.length);
+      assert(helper.includes("n.type === 'compsourcecard' && n.data?.hubId === id"),
+        'the helper inspects existing comp-source cards of THIS hub before spawning');
+      assert(helper.includes('const missing = [...bySourceId.values()].filter(w => !existingSourceIds.has(w.sourceId));'),
+        'only warned sources with no existing card are spawned (gap filling, not a clean slate)');
+      assert(helper.includes('persistedProgress: {')
+        && helper.includes("status: 'done'")
+        && helper.includes('warning: { ...warning }')
+        && helper.includes('url: warning.url || null'),
+        'the re-spawned card is seeded with a terminal status, the full warning and the Solve url');
+      assert(!helper.includes('cleanupCompSourceCards'),
+        'the helper never calls cleanupCompSourceCards, so existing cards survive');
+      assert(helper.includes("type: 'compsourcecard'") && helper.includes('ephemeral: true')
+        && helper.includes("hubId:    id"),
+        'spawned cards carry the same fields as spawnCompSourceCards');
+      assert(helper.includes('pickEdgeHandles(') && helper.includes("...structuralEdge('rgba(245,158,11,0.5)')"),
+        'spawned edges use the same hub->card routing and style as spawnCompSourceCards');
+      assert(helper.includes('addElementsGlobally(id, newNodes, newEdges, \'sibling\')')
+        && helper.includes('addNodes(newNodes)') && helper.includes('addEdges(newEdges)'),
+        'spawns go through addElementsGlobally with the addNodes/addEdges fallback');
+
+      // (2) The only call site is the comps-ready replay branch, so no other
+      // phase, a locked hub, or a pre-hydration render can resurrect the cards.
+      const branchStart = hub.indexOf("if (recovery.phase === 'comps-ready') {");
+      const branchEnd = hub.indexOf('return; // deliberate human pause', branchStart);
+      assert(branchStart >= 0 && branchEnd > branchStart, 'the comps-ready replay branch exists');
+      const branch = hub.slice(branchStart, branchEnd);
+      assert(branch.includes('ensureBlockedCompSourceCards(recovery.scrapeWarnings);'),
+        'restoring comps-ready (and an already-comps-ready hub) refills the blocked comp cards from the sidecar warnings');
+      assert((hub.split('ensureBlockedCompSourceCards(recovery.scrapeWarnings)').length - 1) === 1,
+        'exactly one recovery call site: never for other phases, a locked hub, or before hydration');
+      return { compRespawnSeeded: true, compRespawnGapOnly: true, compRespawnCompsReadyOnly: true };
+    },
   }
 ];

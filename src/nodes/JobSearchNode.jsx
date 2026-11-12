@@ -9780,6 +9780,22 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           ? reanalysisRestoreAtPauseRequest.patch
           : null;
         const pausedReanalysis = !!pausedReanalysisRestore;
+        // Quitting the app must not destroy the Solve state the person was
+        // looking at. Mirror savedWorkflowQuitPausePatch in
+        // utils/quitWorkflowPause.js: a lifecycle quit of this exact stopped
+        // run keeps the gathered universe (the source spider web with its
+        // Solve buttons, pendingJobs, warnings and run id) instead of applying
+        // the destructive user-Stop reset below. Every other Stop path — a
+        // user Stop, a non-quit pause, a run without an exact checkpoint, and
+        // the re-analysis restore — keeps today's behavior.
+        const transientUniverseAtPauseRequest = typeof TRANSIENT_PROCESSING_HUB_STATES !== 'undefined'
+          && TRANSIENT_PROCESSING_HUB_STATES.includes(resetData?.hubState);
+        const gatheredUniverseAtPauseRequest = resetData?.hubState === 'sources-ready'
+          || (transientUniverseAtPauseRequest && Array.isArray(resetData?.pendingJobs))
+          || Array.isArray(pendingJobsRef.current);
+        const keepSourcesReadyOnQuit = lifecycleQuit === true
+          && exactStoppedRun === true
+          && gatheredUniverseAtPauseRequest;
         if (exactStoppedRun) {
           if (
             acknowledgement?.ok !== true
@@ -9804,20 +9820,29 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
         const hasPreviousResults = pausedReanalysis || Array.isArray(resetData.scoredJobs)
           && resetData.scoredJobs.length > 0;
-        pendingJobsRef.current = null;
-        gatheredCountRef.current = hasPreviousResults
-          ? (pausedReanalysisRestore?.gatheredCount ?? resetData.gatheredCount ?? 0)
-          : 0;
-        setActiveResumeCheckpoint(null);
-        scrapeWarningsRef.current = pausedReanalysis
-          ? (Array.isArray(pausedReanalysisRestore?.scrapeWarnings) ? pausedReanalysisRestore.scrapeWarnings : [])
-          : [];
-        terminalSourceWarningProjectionRef.current.clear();
-        sourceWarningOverridesDuringSearchRef.current.clear();
-        hubStateRef.current = hasPreviousResults ? 'done' : 'empty';
-        jobRunIdRef.current = resetData.jobRunId || null;
-        cancelCleanSourceCardDismiss();
-        resetSourceProgress({ rejectUntilNextReset: true });
+        if (keepSourcesReadyOnQuit) {
+          // The app is quitting from a paused Solve web: leave pendingJobs,
+          // scrapeWarnings, the terminal projections and the run id exactly as
+          // they were. Only the pending auto-dismiss is cancelled so no source
+          // card can hide itself on the way out.
+          hubStateRef.current = 'sources-ready';
+          cancelCleanSourceCardDismiss();
+        } else {
+          pendingJobsRef.current = null;
+          gatheredCountRef.current = hasPreviousResults
+            ? (pausedReanalysisRestore?.gatheredCount ?? resetData.gatheredCount ?? 0)
+            : 0;
+          setActiveResumeCheckpoint(null);
+          scrapeWarningsRef.current = pausedReanalysis
+            ? (Array.isArray(pausedReanalysisRestore?.scrapeWarnings) ? pausedReanalysisRestore.scrapeWarnings : [])
+            : [];
+          terminalSourceWarningProjectionRef.current.clear();
+          sourceWarningOverridesDuringSearchRef.current.clear();
+          hubStateRef.current = hasPreviousResults ? 'done' : 'empty';
+          jobRunIdRef.current = resetData.jobRunId || null;
+          cancelCleanSourceCardDismiss();
+          resetSourceProgress({ rejectUntilNextReset: true });
+        }
         updateGlobal(id, (node) => {
           if (lifecycleQuit && !isQuitPauseCurrent()) return null;
           const live = node?.data || resetData;
@@ -9895,17 +9920,35 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             // when that state legitimately has zero scored rows but retains a
             // large preference candidate pool for a revised Search Brief.
             ...(pausedReanalysis ? { hubState: 'done', queuedModuleRun: null } : {}),
+            // Quitting keeps the paused universe exactly as the person left
+            // it, so a restart reopens the same Solve web instead of an empty
+            // hub. The base patch above still clears the transient error and
+            // queue fields, and the exact-run recovery marker still applies.
+            ...(keepSourcesReadyOnQuit ? {
+              hubState: 'sources-ready',
+              pendingJobs: Array.isArray(live.pendingJobs)
+                ? live.pendingJobs
+                : (Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : null),
+              scrapeWarnings: Array.isArray(live.scrapeWarnings)
+                ? live.scrapeWarnings
+                : (Array.isArray(scrapeWarningsRef.current) ? scrapeWarningsRef.current : []),
+              jobRunId: live.jobRunId ?? resetData.jobRunId ?? null,
+            } : {}),
           };
         });
-        cleanupAllJobChildren();
+        if (!keepSourcesReadyOnQuit) cleanupAllJobChildren();
 
         if (exactStoppedRun) {
           setResumeOffer(stoppedOffer);
-          addToast({
-            title: 'Job Search Stopped',
-            description: `${stoppedOffer.gatheredCount || 0} saved listing${stoppedOffer.gatheredCount === 1 ? '' : 's'} are ready to Resume.`,
-            type: 'info',
-          });
+          if (!keepSourcesReadyOnQuit) {
+            // The app is quitting, so an in-app toast would vanish with the
+            // window; the preserved source cards are the real affordance.
+            addToast({
+              title: 'Job Search Stopped',
+              description: `${stoppedOffer.gatheredCount || 0} saved listing${stoppedOffer.gatheredCount === 1 ? '' : 's'} are ready to Resume.`,
+              type: 'info',
+            });
+          }
           // The exact job-run ledger is already published above. Retiring its
           // older manual-AI handoff is housekeeping only, never a reason to
           // leave the card processing or remove the Resume affordance.
@@ -14568,7 +14611,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       {boardRecoveryOwnsActions && (
         <div className="mt-2 text-[9px] leading-snug text-white/35">
           {managedByJobBoard
-            ? 'To resume these saved jobs, choose Resume & combine on the connected Job Board.'
+            ? 'To resume these saved jobs, use the main action button on the connected Job Board.'
             : 'Saved results remain available while Job Board recovery finishes.'}
         </div>
       )}

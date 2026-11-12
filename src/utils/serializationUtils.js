@@ -737,6 +737,15 @@ export function sanitizeNodesForSave(nodes) {
   // stripped — persisting its warned cards would orphan Solve buttons over a
   // hub that no longer knows about the run (and the staging sidecar's Resume
   // banner is the real recovery path there). Hub gone entirely → same drop.
+  //
+  // A hub whose saved state is exactly 'sources-ready' is the exception: that
+  // state survives the reload intact, so its whole source web persists — the
+  // clean done/skipped cards as well as the warned ones. Warning-only kept the
+  // Solve buttons alive but flattened the paused spider web into a handful of
+  // red cards, so a restart no longer showed the sources the person had
+  // already finished. This applies only to jobsourcecard cards owned by such a
+  // hub; comp-source cards, hub-less cards and cards whose hub went away or is
+  // being saved mid-run keep the older warned-only behavior.
   const hubStateById = new Map();
   for (const n of nodes) {
     if (n.type === 'jobhub' || n.type === 'sellhub') hubStateById.set(n.id, n.data?.hubState || 'empty');
@@ -750,10 +759,14 @@ export function sanitizeNodesForSave(nodes) {
       const p = n.data?.persistedProgress;
       const keepWarned = p?.warning || p?.status === 'error';
       const hubId = n.data?.hubId;
-      const keep = !!keepWarned && (
+      const hubState = hubId && hubStateById.has(hubId) ? hubStateById.get(hubId) : null;
+      // A sources-ready hub keeps its whole Solve web, so its clean (done or
+      // skipped) cards persist next to the warned ones.
+      const keepPausedSourceWeb = n.type === 'jobsourcecard' && hubState === 'sources-ready';
+      const keep = keepPausedSourceWeb || (!!keepWarned && (
         !hubId // not hub-owned — keep the old behavior
-        || (hubStateById.has(hubId) && !TRANSIENT_PROCESSING_HUB_STATES.includes(hubStateById.get(hubId)))
-      );
+        || (hubStateById.has(hubId) && !TRANSIENT_PROCESSING_HUB_STATES.includes(hubState))
+      ));
       if (!keep) {
         changed = true;
         continue;

@@ -1358,6 +1358,11 @@ export default [
         // the reload: a mid-run hub resets to 'empty' (its warned cards would
         // orphan Solve buttons), and a deleted hub leaves nothing to act on.
         { id: 'paused-blocked-source', type: 'jobsourcecard', position: { x: 5, y: 5 }, data: { hubId: 'paused-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } }, _boardRollbackProgressRestore: { nonce: 'renderer-only', retiredJobRunId: 'old-run' } } },
+        // A sources-ready hub keeps its whole Solve web across the reload, so
+        // even a clean (done/skipped) card of that hub persists — otherwise a
+        // restart would show only the red blocked cards instead of the web the
+        // person was working in.
+        { id: 'paused-clean-source', type: 'jobsourcecard', position: { x: 10, y: 10 }, data: { hubId: 'paused-hub', persistedProgress: { status: 'done' } } },
         { id: 'midrun-blocked-source', type: 'jobsourcecard', position: { x: 6, y: 6 }, data: { hubId: 'hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
         { id: 'orphan-blocked-source', type: 'jobsourcecard', position: { x: 7, y: 7 }, data: { hubId: 'deleted-hub', persistedProgress: { status: 'error', warning: { code: 'captcha' } } } },
         { id: 'marketplace-note', type: 'marketplacecard', position: { x: 8, y: 8 }, data: { platformId: 'ebay', notes: 'Lower price on Monday' } },
@@ -1410,6 +1415,8 @@ export default [
       assert(sanitized.some(n => n.id === 'blocked-source'), 'Serialization sanitizes transient state: blocked source card should persist');
       const pausedBlockedSource = sanitized.find(n => n.id === 'paused-blocked-source');
       assert(pausedBlockedSource && !('_boardRollbackProgressRestore' in pausedBlockedSource.data), 'Serialization: warned card of a sources-ready hub persists without its renderer-only Board rollback receipt');
+      const pausedCleanSource = sanitized.find(n => n.id === 'paused-clean-source');
+      assert(pausedCleanSource && pausedCleanSource.data.hubId === 'paused-hub', 'Serialization: clean (done) source card of a sources-ready hub persists so the paused Solve web survives a reload');
       assert(!sanitized.some(n => n.id === 'midrun-blocked-source'), 'Serialization: warned card of a mid-run hub (resets to empty) is dropped, not orphaned');
       assert(!sanitized.some(n => n.id === 'orphan-blocked-source'), 'Serialization: warned card whose hub is gone is dropped');
       const pausedHub = sanitized.find(n => n.id === 'paused-hub');
@@ -1422,17 +1429,17 @@ export default [
       const nestedReanalyzingHub = sanitizedGroup.data.canvasData.nodes.find(n => n.id === 'inner-reanalyzing-hub');
       assert(nestedReanalyzingHub.data.hubState === 'done' && nestedReanalyzingHub.data.scoredJobs.length === 1 && !('pendingJobs' in nestedReanalyzingHub.data),
         'Serialization restores interrupted re-analysis in nested canvases too');
-      assert(!sanitizedGroup.data.canvasData.nodes.some(n => n.id === 'inner-clean-source')
+      assert(sanitizedGroup.data.canvasData.nodes.some(n => n.id === 'inner-clean-source')
         && sanitizedGroup.data.canvasData.nodes.some(n => n.id === 'inner-blocked-source')
-        && sanitizedGroup.data.canvasData.edges.length === 1
-        && sanitizedGroup.data.canvasData.edges[0].id === 'inner-keep-edge',
-      'Serialization prunes nested edges to dropped ephemeral cards while preserving edges between surviving nested nodes');
+        && sanitizedGroup.data.canvasData.edges.map(edge => edge.id).sort().join(',')
+          === 'inner-dropped-edge,inner-keep-edge',
+      'Serialization keeps a clean source card of a nested sources-ready hub and its edge, so the nested Solve web persists instead of being pruned to the warned cards');
       // Load applies the same recursive sanitizer, so a second pass must leave
       // the nested edge topology stable rather than resurrecting an orphan.
       const reloadedGroup = sanitizeNodesForSave(sanitized).find(n => n.id === 'group');
-      assert(reloadedGroup.data.canvasData.edges.length === 1
-        && reloadedGroup.data.canvasData.edges[0].id === 'inner-keep-edge',
-      'Serialization load recovery keeps the already-pruned nested edge list stable');
+      assert(reloadedGroup.data.canvasData.edges.map(edge => edge.id).sort().join(',')
+        === 'inner-dropped-edge,inner-keep-edge',
+      'Serialization load recovery keeps the preserved nested sources-ready edge list stable');
       const stableNestedCanvas = [{
         id: 'stable-group', type: 'group', data: {
           canvasData: {
