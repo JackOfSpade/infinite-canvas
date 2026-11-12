@@ -219,7 +219,7 @@ export default [
           await bundle.module.act(async () => { press(window, window.document.body, 'Enter', { ctrlKey: true }); await flush(); });
           assert(nextCalls === 1 && window.document.activeElement === window.document.querySelector('textarea'), 'next-question shortcut must unlock a card-only display and focus question entry');
           const css = fs.readFileSync(path.resolve('src/interview-window/interviewWindow.css'), 'utf8');
-          assert(css.includes('.spoken-answer h2') && css.includes('font-size: 24px') && css.includes('.spoken-bullets') && css.includes('font-size: 18px'), 'headline and spoken bullets must use glanceable type sizes');
+          assert(css.includes('.spoken-answer h2') && css.includes('font-size: 20px') && css.includes('.spoken-bullets') && css.includes('font-size: 16px'), 'headline and spoken bullets must use glanceable type sizes');
         } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
       });
     },
@@ -337,7 +337,7 @@ export default [
           await bundle.module.act(async () => { button(window, 'Copy cues').click(); await flush(); });
           assert(window.document.body.textContent.includes('Select the saved cues and press ⌘/Ctrl+C.') && !window.document.body.textContent.includes('private clipboard failure'), 'clipboard refusal must show a fast path-free manual action');
           const css = fs.readFileSync(path.resolve('src/interview-window/interviewWindow.css'), 'utf8');
-          assert(css.includes(':focus-visible') && css.includes('position: sticky') && css.includes('.evidence-card p { font-size: 17px'), 'compact reading must keep visible keyboard focus, readable active cue, and reachable controls while scrolling');
+          assert(css.includes(':focus-visible') && css.includes('position: sticky') && css.includes('.evidence-card p { font-size: 15px'), 'compact reading must keep visible keyboard focus, readable active cue, and reachable controls while scrolling');
           assert(!window.document.querySelector('main').hasAttribute('aria-live'), 'reference content must not all be announced again when a cue changes');
         } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
       });
@@ -463,7 +463,7 @@ export default [
               });
               assert(followUps.length === before + 1 && followUps[before] === value && nextCalls === 0, 'same-tick shortcuts must invoke the dedicated follow-up API exactly once without advancing');
               assert(input.disabled && input.value === value && window.document.querySelector(headingSelector) && window.document.querySelector('.evidence-rail'), 'a pending follow-up must retain the typed text, answer, and rail');
-              assert(window.document.querySelector('#interview-follow-up-help').textContent.includes('⌘/Ctrl+Enter') && window.document.querySelector('nav + .keyboard-help').textContent.includes('follow-up'), 'local and global keyboard help must explain the follow-up shortcut');
+              assert(window.document.querySelector('#interview-follow-up-help').textContent.includes('⌘/Ctrl+Enter') && window.document.querySelector('.interview-more .answer-shortcuts').textContent.includes('follow-up'), 'local and global keyboard help must explain the follow-up shortcut');
               await bundle.module.act(async () => { resolveFollowUp(display); await flush(); });
               assert(!window.document.querySelector('#interview-follow-up') && window.document.activeElement === window.document.querySelector(headingSelector), 'successful shortcut submission must close the field and focus the returned answer');
             }
@@ -821,6 +821,56 @@ export default [
             assert(window.document.querySelector('[aria-label="Saved evidence rail"]') && !window.document.querySelector('[role="alert"]'), 'a successful Retry must not leave the earlier load error over the rail');
           } finally { await bundle.module.act(async () => root.unmount()); }
         } finally { await bundle.dispose(); }
+      });
+    },
+  },
+  {
+    name: 'interview window render: the pin toggle lives in the header, opens checked and drives main',
+    async run() {
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/interview-window/InterviewWindowApp.jsx'), {});
+        const calls = [];
+        // Hold the brief so the page's own default is what the header shows first.
+        window.interviewAPI = { getBrief: () => new Promise(() => {}), onBriefUpdated: () => () => undefined, close: async () => true,
+          submitQuestion: async () => DISPLAY, nextQuestion: async () => DISPLAY,
+          setAlwaysOnTop: async value => { calls.push(value); return true; } };
+        const root = bundle.module.createRoot(window.document.getElementById('root'));
+        try {
+          await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.InterviewWindowApp)); await flush(); });
+          const pin = window.document.querySelector('header .pin');
+          const box = pin?.querySelector('input[type=checkbox]');
+          const close = [...window.document.querySelectorAll('header button')].find(item => item.textContent === 'Close');
+          assert(pin && box && pin.closest('header') === window.document.querySelector('header') && pin.parentElement === close?.parentElement, 'the pin must be a header control beside Close');
+          assert(box.checked === true, 'a companion opens pinned');
+          assert(box.getAttribute('aria-label') === 'Keep this window on top' && pin.textContent.includes('Keep this window on top'), 'the pin keeps the accessible "Keep this window on top" label');
+          await bundle.module.act(async () => { box.click(); await flush(); });
+          assert(box.checked === false && calls.join() === 'false', 'unpinning asks main to drop the pin');
+          await bundle.module.act(async () => { box.click(); await flush(); });
+          assert(box.checked === true && calls.join() === 'false,true', 'pinning again asks main to restore it');
+        } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
+      });
+    },
+  },
+  {
+    name: 'interview window render: reference material collects into one collapsed More section and the typed replacement form collapses behind its own summary',
+    async run() {
+      await withDom(async window => {
+        const bundle = await bundleComponent(path.resolve('src/interview-window/InterviewWindowApp.jsx'), {});
+        window.interviewAPI = { getBrief: async () => DISPLAY, onBriefUpdated: () => () => undefined, close: async () => true, submitQuestion: async () => DISPLAY,
+          nextQuestion: async () => DISPLAY, setAlwaysOnTop: async () => true, setLatencyMode: async () => DISPLAY };
+        const root = bundle.module.createRoot(window.document.getElementById('root'));
+        try {
+          await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.InterviewWindowApp)); await flush(); });
+          const more = window.document.querySelector('.interview-more');
+          assert(more && more.tagName === 'DETAILS' && more.open === false && more.querySelector('summary').textContent === 'More', 'reference material must sit in one collapsed More section');
+          assert(more.querySelector('#interview-answer-layout') && more.querySelector('.interview-briefing')
+            && more.querySelector('.answer-shortcuts') && more.querySelector('.call-audio-privacy') && more.querySelector('.call-audio-guidance'),
+          'the More section must hold the answer layout control, the briefing, the shortcut hints and the listening privacy/permissions text');
+          assert(![...window.document.querySelectorAll('#interview-answer-layout, .interview-briefing, .call-audio-guidance, .answer-shortcuts')].some(node => !more.contains(node)), 'those reference controls must not remain in the glanceable page body');
+          const typed = window.document.querySelector('.typed-question-details');
+          assert(typed && typed.tagName === 'DETAILS' && typed.open === false && typed.querySelector('summary').textContent === 'Type a different question', 'the typed replacement form must start collapsed while an answer is showing');
+          assert(typed.querySelector('#interview-manual-question') && typed.querySelector('label[for="interview-manual-question"]'), 'the collapsed typed replacement form keeps its label and textarea');
+        } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
       });
     },
   },

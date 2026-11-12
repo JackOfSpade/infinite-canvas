@@ -1,12 +1,12 @@
 :root { color-scheme: dark; }
-.interview-window { box-sizing: border-box; min-width: 360px; min-height: 100vh; margin: 0 auto; padding: 16px; color: #f5f3ff; background: #111018; font: 14px/1.45 Inter, ui-sans-serif, system-ui, sans-serif; }
+.interview-window { box-sizing: border-box; min-width: 320px; min-height: 100vh; margin: 0 auto; padding: 12px; color: #f5f3ff; background: #111018; font: 13px/1.4 Inter, ui-sans-serif, system-ui, sans-serif; }
 .interview-window *, .interview-window *::before, .interview-window *::after { box-sizing: border-box; }
 .interview-window header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; border-bottom: 1px solid #36304a; padding-bottom: 12px; }
-.interview-window h1 { margin: 0; font-size: 17px; line-height: 1.2; }.interview-window h3 { margin: 14px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #c4b5fd; }.interview-window p { margin: 8px 0; }
+.interview-window h1 { margin: 0; font-size: 15px; line-height: 1.2; }.interview-window h3 { margin: 14px 0 4px; font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: #c4b5fd; }.interview-window p { margin: 8px 0; }
 .interview-window button { border: 1px solid #51486b; border-radius: 7px; padding: 7px 9px; color: #f5f3ff; background: #252034; cursor: pointer; font: inherit; }.interview-window button:hover { background: #342b4c; }.interview-window button:disabled { cursor: not-allowed; opacity: .45; }
 .interview-window :is(button, textarea, input, select, summary, h2):focus-visible { outline: 2px solid #c4b5fd; outline-offset: 3px; }
 .all-cues { margin-top: 12px; }.all-cues summary { cursor: pointer; color: #ddd6fe; font-size: 13px; }
-.interview-window h2 { margin: 0 0 5px; font-size: 12px; color: #c4b5fd; letter-spacing: .05em; }.interview-ready { color: #86efac; font-size: 11px; }.keyboard-help { color: #c9c3d7; font-size: 12px; }.interview-window p, .evidence-rail em { overflow-wrap: anywhere; }.evidence-card p { font-size: 17px; line-height: 1.5; }.evidence-card small { color: #c9c3d7; }.prepared-questions { display: grid; gap: 6px; }.prepared-questions button { text-align: left; }.question-actions { display: flex; flex-wrap: wrap; gap: 7px; }.interview-window .follow-up-form textarea { min-height: 70px; }
+.interview-window h2 { margin: 0 0 5px; font-size: 12px; color: #c4b5fd; letter-spacing: .05em; }.interview-ready { color: #86efac; font-size: 11px; }.keyboard-help { color: #c9c3d7; font-size: 12px; }.interview-window p, .evidence-rail em { overflow-wrap: anywhere; }.evidence-card p { font-size: 15px; line-height: 1.45; }.evidence-card small { color: #c9c3d7; }.prepared-questions { display: grid; gap: 6px; }.prepared-questions button { text-align: left; }.question-actions { display: flex; flex-wrap: wrap; gap: 7px; }.interview-window .follow-up-form textarea { min-height: 70px; }
 .eyebrow { margin: 0; color: #a78bfa; font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }.interview-window form { display: grid; gap: 8px; margin-top: 14px; }.interview-window textarea { width: 100%; min-height: 110px; resize: vertical; border: 1px solid #625b77; border-radius: 8px; padding: 9px; color: inherit; background: #181521; font: inherit; }
 .locked-question, .evidence-card, .interview-warning, .interview-load-error { margin: 14px 0; border: 1px solid #4d4268; border-radius: 9px; padding: 10px; background: #1b1727; }.interview-warning, .interview-load-error { border-color: #a16207; background: #2c210e; color: #fef3c7; }
 .evidence-rail { display: grid; gap: 7px; margin: 14px 0; padding: 0; list-style: none; }.evidence-rail button { display: grid; width: 100%; grid-template-columns: 26px 1fr; column-gap: 8px; text-align: left; }.evidence-rail span { grid-row: span 3; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 999px; background: #393149; }.evidence-rail strong, .evidence-rail em, .evidence-rail small { min-width: 0; }.evidence-rail em { color: #f5f3ff; font-style: normal; }.evidence-rail small { color: #b8b1c8; }.evidence-rail [data-rail-state="current"] button { border-color: #a78bfa; background: #33264f; box-shadow: 0 0 0 1px #a78bfa55; }.evidence-rail [data-rail-state="current"] span { background: #8b5cf6; }.evidence-rail [data-rail-state="completed"] button { opacity: .78; }.evidence-rail [data-rail-state="upcoming"] button { opacity: .58; }
@@ -14,8 +14,8 @@
 @media (max-width: 380px) { .interview-window { padding: 12px; }.interview-window header { gap: 8px; }.interview-window h1 { font-size: 15px; } }
 @media (prefers-reduced-motion: reduce) { .interview-window *, .interview-window *::before, .interview-window *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; } }
 .spoken-answer { margin: 14px 0; border: 1px solid #7c6aa4; border-radius: 10px; padding: 14px; background: #201a30; }
-.interview-window .spoken-answer h2 { margin: 8px 0 14px; color: #faf8ff; font-size: 24px; line-height: 1.3; letter-spacing: 0; overflow-wrap: anywhere; }
-.spoken-bullets { display: grid; gap: 12px; margin: 0; padding-left: 20px; font-size: 18px; line-height: 1.45; }
+.interview-window .spoken-answer h2 { margin: 6px 0 10px; color: #faf8ff; font-size: 20px; line-height: 1.28; letter-spacing: 0; overflow-wrap: anywhere; }
+.spoken-bullets { display: grid; gap: 9px; margin: 0; padding-left: 18px; font-size: 16px; line-height: 1.42; }
 .answer-stage { display: block; color: #c4b5fd; font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
 .spoken-example { margin-top: 14px; padding-top: 3px; border-top: 1px solid #4d4268; }.spoken-example p { font-size: 16px; }
 .answer-evidence, .answer-consistency { margin-top: 14px; color: #d8d0e7; font-size: 12px; }.answer-evidence summary, .answer-consistency summary { cursor: pointer; }
@@ -230,3 +230,35 @@
 .interview-window .glance-why summary { cursor: pointer; color: #c4b5fd; }
 .interview-window .glance-why p { margin: 6px 0 0; }
 /* Practice mode: one compact row; the chip is the glanceable status. */
+
+/* Compact companion (~380px wide): one glancable column for a live call. */
+.interview-window { max-width: 100%; padding: 12px 12px 16px; }
+.interview-window header { align-items: center; gap: 8px; padding-bottom: 6px; }
+.interview-window header .header-title { display: flex; flex: 1 1 auto; flex-wrap: wrap; align-items: baseline; gap: 0 6px; min-width: 0; }
+.interview-window header .eyebrow { margin: 0; font-size: 10px; }
+.interview-window header h1 { font-size: 15px; line-height: 1.15; }
+.interview-window header .interview-ready { margin: 0; font-size: 10px; }
+.interview-window .header-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
+.interview-window .header-actions button { padding: 5px 8px; font-size: 12px; }
+.interview-window .pin { display: inline-flex; align-items: center; gap: 4px; margin: 0; padding: 0; color: #c9c3d7; font-size: 10px; line-height: 1.2; white-space: nowrap; }
+.interview-window .pin input { width: 13px; height: 13px; margin: 0; accent-color: #a78bfa; }
+.interview-window nav { gap: 5px; padding: 6px 0; }
+.interview-window nav button, .interview-window .question-actions button { padding: 5px 7px; font-size: 12px; }
+.interview-window .locked-question, .interview-window .evidence-card { margin: 10px 0; padding: 8px 10px; }
+.interview-window .evidence-rail { gap: 5px; margin: 10px 0; }
+.interview-window .spoken-answer { margin: 10px 0; padding: 10px 12px; }
+.interview-window .spoken-example p { font-size: 14px; }
+.interview-window .answer-evidence, .interview-window .answer-consistency { margin-top: 10px; }
+.interview-window form { gap: 6px; margin-top: 10px; }
+.interview-window textarea { min-height: 72px; padding: 7px; }
+.interview-window .call-audio-live { padding: 6px 8px; }
+.interview-window .call-audio-privacy { margin: 0 0 4px; font-size: 11px; }
+.interview-window .typed-question-details, .interview-window .interview-more { margin-top: 10px; border-top: 1px solid #36304a; padding-top: 8px; }
+.interview-window .typed-question-details > summary, .interview-window .interview-more > summary { cursor: pointer; color: #ddd6fe; font-size: 12px; font-weight: 600; }
+.interview-window .interview-more > * + * { margin-top: 8px; }
+.interview-window .interview-more .answer-layout-control { margin: 8px 0 0; }
+.interview-window .interview-more .interview-briefing { margin-top: 8px; padding-top: 8px; }
+.interview-window .typed-question-details .typed-question-fallback { margin-top: 6px; border-top: 0; padding-top: 0; }
+.interview-window .interview-more .keyboard-help { margin: 4px 0; font-size: 11px; }
+@media (max-width: 380px) { .interview-window { padding: 10px 10px 14px; }.interview-window header h1 { font-size: 14px; } }
+.interview-window header h1, .interview-window header .eyebrow, .interview-window header .interview-ready { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

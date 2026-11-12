@@ -11,6 +11,15 @@ const GLANCE_ERRORS = Object.freeze({
 const IDLE = { status: 'idle', transcript: '', question: '', errorCode: null, message: '' };
 const AUDIO_FAILED = 'Listening is unavailable. Try Listen again, or type the question below.';
 
+// Reference-only copy: the live strip stays glanceable, so the privacy line and
+// the permissions guidance live in the window's collapsed "More" section.
+export function CallAudioExtras() {
+  return <>
+    <p className="call-audio-privacy">System output only · microphone excluded · on-device transcription</p>
+    <details className="call-audio-guidance"><summary>Listening &amp; permissions</summary><p>Listen automatically advances cards when it detects a new interviewer question. It hears other apps too; pause unrelated media. Your call’s playback and microphone keep working normally.</p><p>First use may download Apple’s English speech model before listening starts. Audio and transcript stay on this Mac and are cleared when listening stops.</p><p>If macOS asks, allow Infinite Canvas / Interview Audio Helper in System Settings → Privacy &amp; Security → Screen &amp; System Audio Recording. The screen category also covers this output-audio tap; no screen images are recorded. Enable access and retry Listen. If macOS requires a restart, keep typing and restart later.</p></details>
+  </>;
+}
+
 export default function CallAudioPanel({ onDisplay }) {
   const [audio, setAudio] = useState(IDLE);
   const [usingQuestion, setUsingQuestion] = useState(false);
@@ -18,9 +27,26 @@ export default function CallAudioPanel({ onDisplay }) {
   const actionVersion = useRef(0);
   const alive = useRef(true);
   const using = useRef(false);
+  const autoStarted = useRef(false);
   const panel = useRef(null);
   const liveStrip = useRef(null);
   const running = audio.status === 'starting' || audio.status === 'listening';
+
+  // The one start path: the Listen button, the automatic start on mount and a
+  // retry all go through here so their pending/answering states match.
+  const setCapture = async stop => {
+    const version = ++actionVersion.current;
+    setUseError('');
+    setAudio(stop ? IDLE : { ...IDLE, status: 'starting' });
+    try {
+      const api = window.interviewAPI;
+      if (typeof (stop ? api?.stopListening : api?.startListening) !== 'function') throw new Error('unavailable');
+      const value = await (stop ? api.stopListening() : api.startListening());
+      if (alive.current && version === actionVersion.current && value) setAudio(value);
+    } catch {
+      if (alive.current && version === actionVersion.current) setAudio({ ...IDLE, status: 'error', message: AUDIO_FAILED });
+    }
+  };
 
   useEffect(() => {
     alive.current = true;
@@ -32,7 +58,17 @@ export default function CallAudioPanel({ onDisplay }) {
       if (alive.current) setAudio(value || IDLE);
     });
     Promise.resolve().then(() => api?.getListeningState?.()).then(value => {
-      if (alive.current && !receivedUpdate && version === actionVersion.current && value) setAudio(value);
+      if (!alive.current || receivedUpdate || version !== actionVersion.current) return;
+      const initial = value || IDLE;
+      setAudio(initial);
+      // A companion opened for a live call is already listening. This happens
+      // exactly once on mount: a Stop, an error or any earlier user action
+      // retires it, and a missing capture API stays silently idle so typing
+      // still works.
+      if (initial.status === 'idle' && !autoStarted.current && typeof api?.startListening === 'function') {
+        autoStarted.current = true;
+        void setCapture(false);
+      }
     }).catch(() => { /* Listening is optional; a status lookup never blocks typing. */ });
     return () => {
       alive.current = false;
@@ -67,19 +103,10 @@ export default function CallAudioPanel({ onDisplay }) {
     return () => { observer?.disconnect(); window.removeEventListener('resize', measure); };
   });
 
-  const toggle = async () => {
-    const stop = running;
-    const version = ++actionVersion.current;
-    setUseError('');
-    setAudio(stop ? IDLE : { ...IDLE, status: 'starting' });
-    try {
-      const api = window.interviewAPI;
-      if (typeof (stop ? api?.stopListening : api?.startListening) !== 'function') throw new Error('unavailable');
-      const value = await (stop ? api.stopListening() : api.startListening());
-      if (alive.current && version === actionVersion.current && value) setAudio(value);
-    } catch {
-      if (alive.current && version === actionVersion.current) setAudio({ ...IDLE, status: 'error', message: AUDIO_FAILED });
-    }
+  const toggle = () => {
+    // An explicit Listen or Stop ends the automatic start for this page.
+    autoStarted.current = true;
+    return setCapture(running);
   };
 
   const useQuestion = async () => {
@@ -116,7 +143,5 @@ export default function CallAudioPanel({ onDisplay }) {
     {audio.transcript && <div className="call-audio-preview"><p className="call-audio-transcript" aria-label="Live transcript" title={audio.transcript}>{lastTranscriptLine}</p><button type="button" className="call-audio-use" disabled={usingQuestion || !audio.question} onClick={useQuestion}>{usingQuestion ? 'Checking transcript…' : 'Use this question'}</button></div>}
     {useError && <p className="call-audio-error" role="alert">{useError}</p>}
     </div>
-    <p className="call-audio-privacy">System output only · microphone excluded · on-device transcription</p>
-    <details className="call-audio-guidance"><summary>Listening & permissions</summary><p>Listen automatically advances cards when it detects a new interviewer question. It hears other apps too; pause unrelated media. Your call’s playback and microphone keep working normally.</p><p>First use may download Apple’s English speech model before listening starts. Audio and transcript stay on this Mac and are cleared when listening stops.</p><p>If macOS asks, allow Infinite Canvas / Interview Audio Helper in System Settings → Privacy & Security → Screen & System Audio Recording. The screen category also covers this output-audio tap; no screen images are recorded. Enable access and retry Listen. If macOS requires a restart, keep typing and restart later.</p></details>
   </section>;
 }

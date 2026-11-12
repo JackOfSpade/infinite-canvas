@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import './interviewWindow.css';
 import { interviewIgnoredMessage, interviewSubmitErrorMessage, SESSION_ENDED_MESSAGE } from './submitError.js';
-import CallAudioPanel from './CallAudioPanel.jsx';
+import CallAudioPanel, { CallAudioExtras } from './CallAudioPanel.jsx';
 import ComingUp from './ComingUp.jsx';
 import { InterviewQaBadges } from '../components/InterviewQaBadges';
 
@@ -31,6 +31,12 @@ const LOAD_FAILED_MESSAGE = 'The interview window could not load its prepared br
 const EXTENSION_CAUTION = 'Optional, bring in only if you can back it with an example';
 const followUpContextKey = display => JSON.stringify([display?.answerCard?.id || null,
   display?.question || display?.plan?.question || display?.answerCard?.question || '']);
+
+// A control that lives inside a collapsed disclosure must open it before it can
+// be focused or read: the typed replacement draft and its errors use this.
+function revealDetails(element) {
+  element?.closest?.('details')?.setAttribute('open', '');
+}
 
 function List({ title, items }) {
   if (!Array.isArray(items) || !items.length) return null;
@@ -122,7 +128,7 @@ export function InterviewWindowApp() {
   const [question, setQuestion] = useState('');
   const [error, setError] = useState('');
   const [errorTarget, setErrorTarget] = useState(null);
-  const [alwaysOnTop, setAlwaysOnTop] = useState(false);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(true);
   const [loadingFailed, setLoadingFailed] = useState(false);
   const [pending, setPending] = useState(false);
   const [copyStatus, setCopyStatus] = useState('');
@@ -231,7 +237,7 @@ export function InterviewWindowApp() {
     if (pending) return;
     const promoted = preservePromotionFocus.current;
     preservePromotionFocus.current = false;
-    if (restoreTypedDraftFocus.current && typedDraftInput.current) { typedDraftInput.current.focus(); restoreTypedDraftFocus.current = false; return; }
+    if (restoreTypedDraftFocus.current && typedDraftInput.current) { revealDetails(typedDraftInput.current); typedDraftInput.current.focus(); restoreTypedDraftFocus.current = false; return; }
     if (promoted) return;
     if (brief && !hasResponse && !brief.preview) questionInput.current?.focus();
     // An automatic card must not pull focus away from a question being typed.
@@ -243,7 +249,7 @@ export function InterviewWindowApp() {
   useEffect(() => {
     // A rejected request restores focus only after React re-enables the input.
     // The request counter also handles immediately repeated identical errors.
-    if (!pending) { retryInput.current?.focus(); retryInput.current = null; }
+    if (!pending) { revealDetails(retryInput.current); retryInput.current?.focus(); retryInput.current = null; }
   }, [pending, focusRequest]);
 
   const submitQuestion = async (value, isFollowUp = false, replaceCurrent = false) => {
@@ -354,7 +360,7 @@ export function InterviewWindowApp() {
   };
 
   return <main className={`interview-window${supported || mainCard ? ' has-answer' : ''}`} data-answer-layout={layoutMode}>
-    <header><div><p className="eyebrow">{brief?.briefing?.role?.company || 'Interview companion'}{brief?.briefing?.role?.title ? ` · ${brief.briefing.role.title}` : ''}</p><h1>{mainCard || (hasPreparedAnswers && !hasResponse) ? 'Prepared interview answers' : 'Saved career evidence'}</h1>{brief && <p className={`interview-ready${brief.matching?.approximate ? ' approximate-match' : ''}`} role="status">{brief.matching?.method === 'manual' ? 'Prepared answer selected' : brief.matching?.approximate ? 'Approximate · fallback matching' : 'AI selects your prepared answer'}</p>}</div><button type="button" onClick={() => window.interviewAPI?.close?.()}>Close</button></header>
+    <header><div className="header-title"><p className="eyebrow">{brief?.briefing?.role?.company || 'Interview companion'}{brief?.briefing?.role?.title ? ` · ${brief.briefing.role.title}` : ''}</p><h1>{mainCard || (hasPreparedAnswers && !hasResponse) ? 'Prepared interview answers' : 'Saved career evidence'}</h1>{brief && <p className={`interview-ready${brief.matching?.approximate ? ' approximate-match' : ''}`} role="status">{brief.matching?.method === 'manual' ? 'Prepared answer selected' : brief.matching?.approximate ? 'Approximate · fallback matching' : 'AI selects your prepared answer'}</p>}</div><div className="header-actions"><label className="pin" title="Keep this window on top"><input type="checkbox" checked={alwaysOnTop} onChange={toggleAlwaysOnTop} aria-label="Keep this window on top" />Keep this window on top</label><button type="button" onClick={() => window.interviewAPI?.close?.()}>Close</button></div></header>
     <div className="preview-announcement" aria-live="polite" aria-atomic="true">{previewAnnouncement}</div>
     {!brief && !loadingFailed && <p>Loading prepared brief…</p>}
     {!brief && loadingFailed && <section className="interview-load-error" role="alert"><p>{error || LOAD_FAILED_MESSAGE}</p><button type="button" onClick={retryLoad}>Retry</button><button type="button" onClick={() => window.interviewAPI?.close?.()}>Close</button></section>}
@@ -370,12 +376,10 @@ export function InterviewWindowApp() {
       {!mainCard && plan.missingComponents?.length > 0 && <p className="interview-warning" role="status">Saved evidence does not document: {plan.missingComponents.map(item => componentLabels[item] || item).join(', ')}. Do not fill that gap from this rail.</p>}
       {!mainCard && active && <section className="evidence-card" aria-label="Current saved cue"><h2 ref={answerHeading} tabIndex={-1}>{active.label}</h2><p>{active.cue}</p>{active.roleAttribution && <small>{active.roleAttribution}</small>}</section>}
       {supported && <nav aria-label={answerCard ? 'Answer controls' : 'Evidence controls'}>{!answerCard && <><button type="button" onClick={() => setStep(value => Math.max(0, value - 1))} disabled={step === 0}>Previous</button><button type="button" onClick={() => setStep(value => Math.min(plan.steps.length - 1, value + 1))} disabled={step === plan.steps.length - 1}>Next</button></>}{(answerCard || plan?.steps?.length > 0) && <button type="button" disabled={pending} onClick={() => { followUpContext.current = followUpContextKey(displayedBrief.current); setFollowUpOpen(true); setFollowUpNotice(''); setError(''); }}>Follow-up</button>}<button type="button" disabled={pending} onClick={() => nextQuestion()}>Next question</button><button type="button" onClick={copyCues}>{answerCard ? 'Copy answer' : 'Copy cues'}</button></nav>}
-      {supported && <p className="keyboard-help">{!answerCard && '↑/↓: move cue · '}⌘/Ctrl+Enter: {followUpOpen ? 'submit a focused, filled follow-up; otherwise next question' : 'next question'}</p>}
       {copyStatus && <p role="status" className="keyboard-help">{copyStatus}</p>}
       {followUpOpen && <form className="follow-up-form" aria-busy={pending} onSubmit={event => { event.preventDefault(); void submitQuestion(followUp, true); }}><label htmlFor="interview-follow-up">Follow-up on this example</label><textarea id="interview-follow-up" ref={followUpInput} value={followUp} disabled={pending} onChange={event => setFollowUp(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing && !event.repeat) { event.preventDefault(); void submitQuestion(followUp, true); } }} placeholder="What did you learn?" maxLength="2000" aria-describedby="interview-follow-up-help" /><p id="interview-follow-up-help" className="keyboard-help">Uses this saved example. For a different topic, choose Next question. Enter: find evidence · ⌘/Ctrl+Enter: find evidence when filled, next question when empty · Shift+Enter: new line</p>{error && errorTarget === 'followUp' && <p role="alert">{error}</p>}<button type="submit" disabled={pending}>{pending ? 'Finding saved evidence…' : 'Find follow-up evidence'}</button><button type="button" disabled={pending} onClick={() => { followUpContext.current = null; setFollowUpOpen(false); setError(''); answerHeading.current?.focus(); }}>Cancel follow-up</button></form>}
       {plan?.steps?.length > 0 && <details className="all-cues"><summary>All saved cues ({plan.steps.length})</summary><ol className="evidence-rail" aria-label="Saved evidence rail">{plan.steps.slice(0, 6).map((item, index) => <li key={item.id} aria-current={index === step ? 'step' : undefined} data-rail-state={index < step ? 'completed' : index === step ? 'current' : 'upcoming'}><button type="button" onClick={() => setStep(index)}><span>{index + 1}</span><strong>{item.label}</strong><em>{item.cue}</em><small>{item.roleAttribution}</small></button></li>)}</ol></details>}
     </>}
-    {brief && <div className="answer-layout-control"><label htmlFor="interview-answer-layout">Answer layout</label><select id="interview-answer-layout" value={brief.matching?.mode || 'auto'} onChange={setLatencyMode} disabled={typeof window.interviewAPI?.setLatencyMode !== 'function'}><option value="auto">Automatic</option><option value="recall">Recall</option></select>{brief.matching?.mode === 'auto' && layoutMode === 'continuation' && <span className="keyboard-help">Matching is taking longer · keep-going cues</span>}</div>}
     {brief && <CallAudioPanel onDisplay={receiveDisplay} />}
     {brief && !hasResponse && <>
       <form onSubmit={submit} aria-busy={pending}><label htmlFor="interview-question">Current question</label><textarea id="interview-question" ref={questionInput} value={question} disabled={pending} onChange={event => setQuestion(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing && !event.repeat) { event.preventDefault(); void submitQuestion(question); } }} placeholder="Type or paste the interviewer’s question" maxLength="2000" aria-describedby="interview-question-help" /><p id="interview-question-help" className="keyboard-help">Enter: {hasPreparedAnswers ? 'find answer' : 'find evidence'} · Shift+Enter: new line</p><button type="submit" disabled={pending}>{pending ? hasPreparedAnswers ? 'Finding prepared answer…' : 'Finding saved evidence…' : hasPreparedAnswers ? 'Find prepared answer' : 'Find saved evidence'}</button>{error && <p role="alert">{error}</p>}</form>
@@ -383,9 +387,13 @@ export function InterviewWindowApp() {
         : likelyQuestions.length > 0 && <section className="prepared-questions" aria-label="Likely questions"><h3>Likely questions</h3>{likelyQuestions.map((item, index) => <button key={index} type="button" disabled={pending} onClick={() => submitQuestion(item)}>{item}</button>)}</section>}
     </>}
     {brief && hasResponse && preparedCards.length > 0 && <section className="other-prepared-answers" aria-label="Other prepared answers"><h3>Other prepared answers</h3><div className={`prepared-answer-picker${scopedQuestions ? ' grouped' : ''}`}>{scopedQuestions ? <PreparedQuestionGroups cards={preparedCards} company={brief.briefing?.role?.company} selectedId={answerCard?.id} onSelect={selectPreparedCard} /> : preparedCards.map(card => <button key={card.id} type="button" aria-pressed={answerCard?.id === card.id} onClick={() => selectPreparedCard(card)}>{card.question}</button>)}</div></section>}
-    {brief && hasResponse && <form className="typed-question-fallback" aria-label="Type a different question" aria-busy={pending} onSubmit={event => { event.preventDefault(); if (typedDraft.trim()) void submitQuestion(typedDraft, false, true); }}><label htmlFor="interview-manual-question">Type a different question</label><textarea id="interview-manual-question" ref={typedDraftInput} value={typedDraft} disabled={pending} onChange={event => setTypedDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing && !event.repeat) { event.preventDefault(); if (typedDraft.trim()) void submitQuestion(typedDraft, false, true); } }} placeholder="Typing is always available" maxLength="2000" aria-describedby="interview-manual-question-help" /><p id="interview-manual-question-help" className="keyboard-help">Enter: replace the current question · Shift+Enter: new line</p>{error && errorTarget === 'replacement' && <p role="alert">{error}</p>}<button type="submit" disabled={pending || !typedDraft.trim()}>{pending ? 'Checking question…' : 'Use typed question'}</button></form>}
-    <Briefing briefing={brief?.briefing} />
-    <label className="pin"><input type="checkbox" checked={alwaysOnTop} onChange={toggleAlwaysOnTop} /> Keep this window on top</label>
+    {brief && hasResponse && <details className="typed-question-details"><summary>Type a different question</summary><form className="typed-question-fallback" aria-label="Type a different question" aria-busy={pending} onSubmit={event => { event.preventDefault(); if (typedDraft.trim()) void submitQuestion(typedDraft, false, true); }}><label htmlFor="interview-manual-question">Type a different question</label><textarea id="interview-manual-question" ref={typedDraftInput} value={typedDraft} disabled={pending} onChange={event => setTypedDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && !event.nativeEvent.isComposing && !event.repeat) { event.preventDefault(); if (typedDraft.trim()) void submitQuestion(typedDraft, false, true); } }} placeholder="Typing is always available" maxLength="2000" aria-describedby="interview-manual-question-help" /><p id="interview-manual-question-help" className="keyboard-help">Enter: replace the current question · Shift+Enter: new line</p>{error && errorTarget === 'replacement' && <p role="alert">{error}</p>}<button type="submit" disabled={pending || !typedDraft.trim()}>{pending ? 'Checking question…' : 'Use typed question'}</button></form></details>}
+    <details className="interview-more"><summary>More</summary>
+      {supported && <p className="keyboard-help answer-shortcuts">{!answerCard && '↑/↓: move cue · '}⌘/Ctrl+Enter: {followUpOpen ? 'submit a focused, filled follow-up; otherwise next question' : 'next question'}</p>}
+      {brief && <div className="answer-layout-control"><label htmlFor="interview-answer-layout">Answer layout</label><select id="interview-answer-layout" value={brief.matching?.mode || 'auto'} onChange={setLatencyMode} disabled={typeof window.interviewAPI?.setLatencyMode !== 'function'}><option value="auto">Automatic</option><option value="recall">Recall</option></select>{brief.matching?.mode === 'auto' && layoutMode === 'continuation' && <span className="keyboard-help">Matching is taking longer · keep-going cues</span>}</div>}
+      <Briefing briefing={brief?.briefing} />
+      <CallAudioExtras />
+    </details>
   </main>;
 }
 

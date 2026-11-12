@@ -706,10 +706,18 @@ export function createInterviewWindowController({
       return { ok: true, reused: true };
     }
     const child = new BrowserWindow({
-      width: 440, height: 680, minWidth: 360, minHeight: 480, resizable: true, parent: owner, modal: false, show: false,
+      width: 380, height: 560, minWidth: 320, minHeight: 380, resizable: true, modal: false, show: false,
       title: 'Interview Helper', backgroundColor: '#111018',
       webPreferences: { preload: preloadPath, nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
+    // A glanceable companion for a live call: pinned above everything at the
+    // floating level, present on every workspace (including full-screen call
+    // apps) and hidden from screen sharing/recording so the interviewer never
+    // sees it. It is deliberately unparented so it cannot follow the canvas
+    // window when that one minimizes or hides.
+    child.setAlwaysOnTop?.(true, 'floating');
+    child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+    child.setContentProtection?.(true);
     const session = {
       owner, ownerId, child, display, brief, snapshotId: args.snapshotId, nodeId: args.nodeId,
       briefRecordId: args.briefRecordId, bundle: prepared.bundle, answerBank: prepared.answerBank,
@@ -718,8 +726,9 @@ export function createInterviewWindowController({
       anchorPlan: display.plan?.status === 'supported' ? args.plan : null,
       parentPlanFingerprint: incomingPlanFingerprint, dismissedPlanFingerprint: null, pendingParent: null,
       // The pin is native-window state that outlives the child page; main
-      // records it so a reloaded page can restore its checkbox.
-      alwaysOnTop: false,
+      // records it so a reloaded page can restore its checkbox. A companion
+      // opens pinned, so the native and recorded truth start at true.
+      alwaysOnTop: true,
       latencyMode: 'auto', matcher: null, matcherKey: null, questionAbort: null, questionOrigin: null,
       // closing: the window began closing ('close' precedes the abort Electron
       // reports for a pending load). crashed: its renderer process died.
@@ -1044,7 +1053,17 @@ export function createInterviewWindowController({
   const setAlwaysOnTop = (event, value) => {
     const session = getForChild(event?.sender);
     if (!session || typeof value !== 'boolean') return false;
-    session.child.setAlwaysOnTop?.(value);
+    // Pinning restores the glanceable overlay level (above full-screen call
+    // apps); unpinning stops being always-on-top and leaves the current
+    // workspace only. Content protection is never relaxed: the interviewer
+    // must not see this window either way.
+    if (value) {
+      session.child.setAlwaysOnTop?.(true, 'floating');
+      session.child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+    } else {
+      session.child.setAlwaysOnTop?.(false);
+      session.child.setVisibleOnAllWorkspaces?.(false);
+    }
     session.alwaysOnTop = value;
     return true;
   };

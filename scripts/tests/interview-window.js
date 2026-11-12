@@ -116,7 +116,9 @@ class FakeWindow extends EventEmitter {
   focus() { this.focused = true; }
   show() { this.shown = true; }
   close() { if (this.destroyed) return; this.emit('close'); this.destroyed = true; this.emit('closed'); }
-  setAlwaysOnTop(value) { this.alwaysOnTop = value; }
+  setAlwaysOnTop(value, level) { this.alwaysOnTop = value; this.alwaysOnTopLevel = level; }
+  setVisibleOnAllWorkspaces(value, options) { this.visibleOnAllWorkspaces = value; this.visibleOnAllWorkspacesOptions = options; }
+  setContentProtection(value) { this.contentProtection = value; }
 }
 
 function makeController({ authorized = true, additionalOwners = [], loadBundle = async args => ({ artifactId: args.artifactId, applicationArtifactDigest: 'd'.repeat(64) }), storedBrief = brief(), loadPreparedBrief, loadSnapshot = async () => profile() } = {}) {
@@ -255,8 +257,11 @@ export default [
       const result = await controller.launch({ sender: owner.webContents }, args);
       assert(result.ok && !result.reused && controller.sessionCount() === 1, 'authorized owner should create one child session');
       const child = [...controller.sessions.values()][0].child;
-      assert(child.options.parent === owner && child.options.modal === false && child.options.width === 440
-        && child.options.title === 'Interview Helper' && child.options.backgroundColor === '#111018', 'child must be a compact non-modal owned window with its ready-state visual shell');
+      assert(child.options.parent === undefined && child.options.modal === false && child.options.width === 380 && child.options.height === 560
+        && child.options.minWidth === 320 && child.options.minHeight === 380 && child.options.resizable === true
+        && child.options.title === 'Interview Helper' && child.options.backgroundColor === '#111018', 'child must be a compact resizable unparented non-modal window with its ready-state visual shell');
+      assert(child.alwaysOnTop === true && child.alwaysOnTopLevel === 'floating' && child.visibleOnAllWorkspaces === true
+        && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true && child.contentProtection === true, 'a companion must open pinned at the floating level, on every workspace including full-screen spaces, and hidden from screen sharing');
       assert(child.options.webPreferences.nodeIntegration === false && child.options.webPreferences.contextIsolation && child.options.webPreferences.sandbox, 'child must receive hardened narrow web preferences');
       assert(child.webContents.__isInterviewHelperRenderer === true && controller.isInterviewChildWebContents(child.webContents), 'child must be marked for app-wide main-process guards before navigation');
       const display = controller.getBrief({ sender: child.webContents });
@@ -528,7 +533,7 @@ export default [
       await controller.launch({ sender: owner.webContents }, different);
       // get-brief additionally reports the main-owned pin; it is not part of the rail.
       const { alwaysOnTop: pinned, ...shown } = controller.getBrief({ sender: child.webContents });
-      assert(pinned === false && stableJson(shown) === lockedRail, 'null or different parent relaunches must preserve a supported child-created rail until Next question');
+      assert(pinned === true && stableJson(shown) === lockedRail, 'null or different parent relaunches must preserve a supported child-created rail until Next question');
     },
   },
   {
@@ -1007,10 +1012,11 @@ export default [
       args.plan = null;
       await controller.launch({ sender: owner.webContents }, args);
       const child = [...controller.sessions.values()][0].child;
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === false, 'a fresh companion is not pinned');
-      assert(controller.setAlwaysOnTop({ sender: owner.webContents }, true) === false && !child.alwaysOnTop && controller.getBrief({ sender: child.webContents }).alwaysOnTop === false, 'only the child may pin its own window');
-      assert(controller.setAlwaysOnTop({ sender: child.webContents }, 'yes') === false && !child.alwaysOnTop && controller.getBrief({ sender: child.webContents }).alwaysOnTop === false, 'only a boolean is accepted');
-      assert(controller.setAlwaysOnTop({ sender: child.webContents }, true) === true && child.alwaysOnTop === true, 'the child pins its own window');
+      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'a fresh companion opens pinned');
+      assert(controller.setAlwaysOnTop({ sender: owner.webContents }, true) === false && child.alwaysOnTop === true && controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'only the child may change its own pin');
+      assert(controller.setAlwaysOnTop({ sender: child.webContents }, 'yes') === false && child.alwaysOnTop === true && controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'only a boolean is accepted');
+      assert(controller.setAlwaysOnTop({ sender: child.webContents }, true) === true && child.alwaysOnTop === true && child.alwaysOnTopLevel === 'floating'
+        && child.visibleOnAllWorkspaces === true && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true, 're-pinning restores the floating level and all-workspace visibility');
       // A reloaded page asks again and must see the native truth, whatever its React state was.
       assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'get-brief must report the pin after a page reload');
       const submitted = await controller.submitQuestion({ sender: child.webContents }, 'How did you improve onboarding conversion?');
@@ -1019,7 +1025,11 @@ export default [
       assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === true, 'the pin survives Next question');
       assert(!('alwaysOnTop' in submitted) && !('alwaysOnTop' in advanced) && child.webContents.sent.every(item => !('alwaysOnTop' in item.value)), 'the pin is read on get-brief only, never added to submit, next or brief-updated payloads');
       controller.setAlwaysOnTop({ sender: child.webContents }, false);
-      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === false && child.alwaysOnTop === false, 'unpinning is reflected too');
+      assert(controller.getBrief({ sender: child.webContents }).alwaysOnTop === false && child.alwaysOnTop === false && child.alwaysOnTopLevel === undefined
+        && child.visibleOnAllWorkspaces === false && child.contentProtection === true, 'unpinning drops always-on-top and workspace visibility while content protection stays on');
+      controller.setAlwaysOnTop({ sender: child.webContents }, true);
+      assert(child.alwaysOnTop === true && child.alwaysOnTopLevel === 'floating' && child.visibleOnAllWorkspaces === true
+        && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true && child.contentProtection === true, 'pinning again restores the floating overlay without ever relaxing content protection');
       assert(controller.getBrief({ sender: owner.webContents }) === null, 'the canvas still cannot read the child display');
     },
   },

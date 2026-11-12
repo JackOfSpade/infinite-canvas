@@ -87,7 +87,7 @@ export default [
     name: 'interview call audio UI: capture errors leave the locked answer and typed replacement fully usable',
     async run() {
       const calls = [];
-      await withInterview({ getBrief: async () => ANSWER, startListening: async () => { throw new Error('private /Users/example/audio-file'); }, nextQuestion: async () => { calls.push('next'); return EMPTY; }, submitQuestion: async value => { calls.push(value); return { ...ANSWER, question: value, plan: { ...ANSWER.plan, question: value } }; } }, async ({ window, act, updateAudio }) => {
+      await withInterview({ getBrief: async () => ANSWER, getListeningState: () => new Promise(() => {}), startListening: async () => { throw new Error('private /Users/example/audio-file'); }, nextQuestion: async () => { calls.push('next'); return EMPTY; }, submitQuestion: async value => { calls.push(value); return { ...ANSWER, question: value, plan: { ...ANSWER.plan, question: value } }; } }, async ({ window, act, updateAudio }) => {
         await act(() => button(window, 'Listen').click());
         assert(window.document.querySelector('.call-audio-error')?.textContent.includes('Listening is unavailable') && !window.document.body.textContent.includes('/Users/'), 'a rejected IPC must show a fixed path-free capture error');
         const permission = 'Allow system audio access in System Settings, then retry Listen.';
@@ -239,6 +239,36 @@ export default [
         assert(window.document.querySelector('.call-audio-live [role="alert"]')?.textContent === message, 'stopping capture must not silently discard the explanation for an explicit question request');
         assert(window.document.querySelector('.evidence-card') === card && input.value === 'An unfinished typed draft', 'an ignored question after Stop must retain the locked card and unfinished draft');
         assert(button(window, 'Listen') && !button(window, 'Stop listening'), 'the ignored request result must not restore audio capture');
+      });
+    },
+  },
+  {
+    name: 'interview call audio UI: an idle companion starts listening once on mount and never restarts after Stop',
+    async run() {
+      let starts = 0;
+      await withInterview({ startListening: async () => { starts += 1; return LISTENING; } }, async ({ window, act }) => {
+        await act(async () => { await flush(); });
+        assert(starts === 1 && button(window, 'Stop listening') && !button(window, 'Listen'), 'an idle companion must already be listening when the call begins');
+        await act(async () => { await flush(); });
+        assert(starts === 1 && button(window, 'Stop listening'), 'a re-render must not start a second capture');
+        await act(() => button(window, 'Stop listening').click());
+        assert(button(window, 'Listen') && starts === 1, 'Stop must leave the panel idle without starting capture again');
+        await act(async () => { await flush(); });
+        assert(starts === 1 && !window.document.querySelector('[aria-label="Live transcript"]'), 'an explicit Stop retires the automatic start for the rest of the page');
+      });
+    },
+  },
+  {
+    name: 'interview call audio UI: a failed automatic start is not retried and the Listen button still works',
+    async run() {
+      let starts = 0;
+      await withInterview({ getBrief: async () => ANSWER, startListening: async () => { starts += 1; throw new Error('not authorized'); } }, async ({ window, act }) => {
+        await act(async () => { await flush(); });
+        assert(starts === 1 && window.document.querySelector('.call-audio-error')?.textContent.includes('Listening is unavailable'), 'an unavailable automatic start must explain itself exactly once');
+        await act(async () => { await flush(); });
+        assert(starts === 1 && button(window, 'Listen'), 'an error must not trigger another automatic start');
+        await act(() => button(window, 'Listen').click());
+        assert(starts === 2, 'the Listen button must still reach the capture API after an error');
       });
     },
   },
