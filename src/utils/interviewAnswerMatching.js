@@ -105,3 +105,23 @@ export function matchInterviewAnswerCard(question, bank) {
   if (!matches.length || (matches[1] && matches[0].score - matches[1].score < Math.max(8, matches[0].score * 0.15))) return null;
   return matches[0].card;
 }
+
+/**
+ * Exact-only lookup for the Q&A editor preview: the live window tries this
+ * comparison (same normalized question or variant) before any AI matching.
+ * Matches are keyed by card object identity because Foundation and Company
+ * cards may legitimately share a stored id.
+ */
+export function exactInterviewAnswerMatch(question, cards) {
+  const normalized = normalizedQuestion(question);
+  if (!normalized) return { status: 'empty' };
+  const matches = new Map();
+  for (const card of Array.isArray(cards) ? cards : []) {
+    if (!card || typeof card !== 'object') continue;
+    const texts = [card.question, ...(Array.isArray(card.variants) ? card.variants : [])];
+    if (texts.some(text => typeof text === 'string' && normalizedQuestion(text) === normalized)) matches.set(card, card);
+  }
+  if (!matches.size) return { status: 'none' };
+  if (matches.size === 1) return { status: 'match', card: matches.values().next().value };
+  return { status: 'ambiguous', cards: [...matches.values()] };
+}

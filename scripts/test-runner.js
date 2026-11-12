@@ -245,6 +245,7 @@ import interview_speculative_replay from './tests/interview-speculative-replay.j
 import interview_answer_extensions from './tests/interview-answer-extensions.js';
 import interview_answer_sections_render from './tests/interview-answer-sections-render.js';
 import interview_prepared_picker_render from './tests/interview-prepared-picker-render.js';
+import interview_qa_card_preview_render from './tests/interview-qa-card-preview-render.js';
 import interview_answer_entailment from './tests/interview-answer-entailment.js';
 import interview_spoken_claims from './tests/interview-spoken-claims.js';
 import interview_question_fit from './tests/interview-question-fit.js';
@@ -570,6 +571,7 @@ const testGroups = [
   ['interview-answer-extensions.js', interview_answer_extensions],
   ['interview-answer-sections-render.js', interview_answer_sections_render],
   ['interview-prepared-picker-render.js', interview_prepared_picker_render],
+  ['interview-qa-card-preview-render.js', interview_qa_card_preview_render],
   ['interview-answer-entailment.js', interview_answer_entailment],
   ['interview-spoken-claims.js', interview_spoken_claims],
   ['interview-question-fit.js', interview_question_fit],

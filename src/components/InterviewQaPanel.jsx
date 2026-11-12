@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { updateModalCount } from './modalStack';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { InterviewQaBadges } from './InterviewQaBadges';
+import { InterviewCardPreview, InterviewQaMatchTester } from './InterviewQaCardPreview';
 
 const buttonClass = 'rounded-md border border-[var(--border-main)] px-2 py-1 text-xs hover:bg-blue-500/10 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-blue-400';
 const inputClass = 'mt-1 w-full rounded-md border border-[var(--border-main)] bg-[var(--bg-input)] px-2 py-1.5 text-xs text-[var(--text-main)]';
@@ -43,6 +44,7 @@ function CardForm({ card, scope, onSave, onCancel, busy }) {
         <button type="button" className={buttonClass} onClick={() => field('extensions', [...draft.extensions, { id: `user-${Date.now()}-${++nextExtension.current}`, text: '' }])}>Add extension</button>
       </fieldset>
       {error && <p role="alert" className="text-xs text-amber-500">{error}</p>}
+      <section aria-label="Interview card preview" className="space-y-2"><h4 className="text-xs font-medium">On the interview card</h4><InterviewCardPreview card={draft} scope={scope} /></section>
       <div className="flex gap-2"><button type="submit" className={buttonClass}>Save</button><button type="button" className={buttonClass} onClick={onCancel}>Cancel</button></div>
     </fieldset>
   </form>;
@@ -114,6 +116,7 @@ function QaDialog({ qa, error, loading, reload, mutate, busy, readOnly, onClose 
     <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={trap} className="flex max-h-[90vh] w-[720px] max-w-full flex-col rounded-xl border border-[var(--border-main)] bg-[var(--bg-node)] text-[var(--text-main)] shadow-2xl">
       <header className="flex items-center justify-between border-b border-[var(--border-main)] p-4"><h2 id={titleId} className="text-base font-semibold">Edit Q&A</h2><button ref={closeRef} type="button" className={buttonClass} disabled={busy} onClick={onClose}>Close</button></header>
       <div className="space-y-6 overflow-y-auto p-4">
+        <InterviewQaMatchTester foundationCards={qa.foundation.cards} companyCards={qa.company.cards} company={qa.company.company} />
         {readOnly && <p className="text-xs text-[var(--text-muted)]">Q&A editing is disabled while this helper is locked or preparing.</p>}
         {loading && <p role="status" className="text-xs">Loading Q&A…</p>}
         {error && <p role="alert" className="text-xs text-amber-500">{error} <button type="button" className={buttonClass} disabled={loading || busy} onClick={reload}>Retry loading Q&A</button></p>}
