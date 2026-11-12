@@ -180,22 +180,6 @@ async function withUndoHarness(fn) {
   });
 }
 
-async function withBundledProbe(fn) {
-  const directory = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'ic-interview-helper-render-'));
-  const entry = path.join(directory, 'InterviewHelperProbe.jsx');
-  const controller = new AbortController();
-  let bundle;
-  try {
-    await fsPromises.writeFile(entry, PROBE_SOURCE(path.resolve('src/nodes/InterviewHelperNode.jsx'), path.resolve('src/contexts/CanvasNavigationContext.jsx')));
-    bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
-    return await fn(bundle);
-  } finally {
-    controller.abort();
-    await bundle?.dispose();
-    await fsPromises.rm(directory, { recursive: true, force: true });
-  }
-}
-
 // React's controlled-input event plugin detects DOM support while its bundled
 // module initializes. Build/import this particular probe after JSDOM is live
 // so textarea input is exercised through the real React event path.
@@ -263,7 +247,7 @@ function within(root, label) {
 
 const QA_SETUP_TESTS = [
   {
-    name: 'interview helper render: application combobox lists, filters and selects a folder by keyboard, fills an empty URL and enables Prepare',
+    name: 'interview helper render: application combobox lists, filters and selects a folder by keyboard and adopts the bundle URL',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const updates = []; const listCalls = []; const selectCalls = [];
@@ -273,14 +257,12 @@ const QA_SETUP_TESTS = [
           listInterviewApplicationFolders: async args => { listCalls.push(args); return { root: '/Applied Jobs', folders: FOLDERS }; },
           selectInterviewApplicationFolder: async args => { selectCalls.push(args); return { ...publicBundle(), jobUrl: JOB_URL }; },
         };
-        const root = await mount(bundle, window, { nodes: sourceNodes(), onPersist: patch => updates.push(patch) });
+        const root = await mount(bundle, window, { nodes: sourceNodes(), initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A } }, onPersist: patch => updates.push(patch) });
         try {
           await settle(bundle);
           assert(button(window, 'Prepare interview brief').disabled, 'Prepare must stay disabled until an application is selected');
           assert(window.document.body.textContent.includes('Fills empty answers; existing answers are kept.'), 'the fill-only note must appear near Prepare');
-          const emptyUrl = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { emptyUrl.focus(); emptyUrl.blur(); await flush(); });
-          assert(!window.document.body.textContent.includes('Enter a valid http or https job listing URL'), 'leaving an untouched empty URL field must not show an error');
+          assert(!window.document.querySelector('[aria-label="Original job listing URL"]'), 'the editable job URL field must be gone; the bundle URL is the only source');
           const combobox = window.document.querySelector('[role="combobox"]');
           assert(combobox && combobox.getAttribute('aria-expanded') === 'false', 'the application combobox must start collapsed');
           await bundle.module.act(async () => { combobox.click(); await flush(); });
@@ -302,8 +284,8 @@ const QA_SETUP_TESTS = [
           assert(selectCalls.length === 1 && selectCalls[0].nodeId === 'interview-helper' && selectCalls[0].token === 'tok-discord', 'Enter must select the folder token');
           const bundlePatch = updates.find(patch => patch.interviewHelperApplicationBundle);
           assert(bundlePatch?.interviewHelperApplicationBundle.artifactId === BUNDLE_ID && bundlePatch.interviewHelperApplicationBundle.digest === BUNDLE_DIGEST, 'the folder bundle must persist like the picker bundle');
-          assert(bundlePatch.interviewHelperJobUrl === JOB_URL, 'an empty job URL must be filled from main');
-          assert(window.document.querySelector('[aria-label="Original job listing URL"]').value === JOB_URL, 'the URL field must show the filled URL');
+          assert(bundlePatch.interviewHelperJobUrl === JOB_URL, 'the bundle job URL must be persisted');
+          assert(!window.document.querySelector('[aria-label="Original job listing URL"]'), 'no editable job URL field may remain');
           assert(combobox.getAttribute('aria-expanded') === 'false', 'selection must close the listbox');
           assert(!button(window, 'Prepare interview brief').disabled, 'Prepare must enable once career data and application are ready');
         } finally { await bundle.module.act(async () => root.unmount()); }
@@ -311,7 +293,7 @@ const QA_SETUP_TESTS = [
     },
   },
   {
-    name: 'interview helper render: application combobox keeps an existing URL, closes on Escape and shows empty states',
+    name: 'interview helper render: application combobox overwrites a saved URL, closes on Escape and shows empty states',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const updates = []; let reply = { root: null, folders: [], reason: 'canvas-unsaved' };
@@ -344,8 +326,8 @@ const QA_SETUP_TESTS = [
           await bundle.module.act(async () => { option.click(); await flush(); });
           await settle(bundle, 6);
           const bundlePatch = updates.find(patch => patch.interviewHelperApplicationBundle);
-          assert(bundlePatch && !('interviewHelperJobUrl' in bundlePatch), 'a saved URL must never be replaced by the folder URL');
-          assert(window.document.querySelector('[aria-label="Original job listing URL"]').value === existing, 'the URL field must keep the saved URL');
+          assert(bundlePatch?.interviewHelperJobUrl === 'https://jobs.example.test/other', 'selecting a bundle must overwrite a previously saved job URL with the bundle job URL');
+          assert(!window.document.querySelector('[aria-label="Original job listing URL"]'), 'no editable job URL field may remain');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },
@@ -362,7 +344,7 @@ const QA_SETUP_TESTS = [
           completeNonApiAiRun: async () => ({ absent: true }),
           loadInterviewQa: async args => { loads.push(args); return qaFixture(); },
         };
-        const root = await mount(bundle, window, { nodes: sourceNodes(), initialData: { interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } } });
+        const root = await mount(bundle, window, { nodes: sourceNodes(), initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } } });
         try {
           await settle(bundle);
           assert(loads.length >= 1 && loads.every(call => call.nodeId === 'interview-helper'), 'Q&A must load for this node on mount');
@@ -481,14 +463,19 @@ export default [
     });
   } },
   {
-    name: 'interview helper render: empty state requires an approved Job Search snapshot',
+    name: 'interview helper render: no Job Search career source UI remains and legacy job-search data loads nothing',
     async run() {
       await withDomBundledProbe(async (bundle, window) => withConsoleCollector(async entries => {
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: null }) };
-        const root = await mount(bundle, window);
+        const loads = [];
+        window.electronAPI = { loadInterviewHelperCareerSnapshot: async args => { loads.push(args); return { snapshot: null }; } };
+        const root = await mount(bundle, window, { nodes: sourceNodes(), initialData: { interviewHelperCareerMode: 'job-search', interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A } });
         try {
-          assert(text(window).includes('Add a Job Search module with an approved career snapshot'), 'node must show the no-snapshot empty state');
-          assert(!window.document.querySelector('[aria-label="Paste or type the interviewer question"]'), 'node must not offer retrieval without a source snapshot');
+          const body = window.document.body.textContent;
+          assert(!body.includes('Job Search'), `the Job Search career source must be gone from the node, got ${body}`);
+          assert(!window.document.querySelector('[aria-label="Career source for Interview Helper"]'), 'no Job Search snapshot selector may remain');
+          assert(!body.includes('Use latest Job Search snapshot'), 'no Job Search refresh action may remain');
+          assert(!window.document.querySelector('[aria-label="Paste or type the interviewer question"]'), 'node must not offer retrieval without imported career files');
+          assert(loads.length === 0, `legacy job-search data must not load any career snapshot, got ${JSON.stringify(loads)}`);
           assert(entries.length === 0, 'empty state must render silently');
         } finally {
           await bundle.module.act(async () => root.unmount());
@@ -501,25 +488,34 @@ export default [
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const updates = [];
-        let pickerResult = { cancelled: true };
+        let selectReply = { cancelled: true };
         window.electronAPI = {
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
-          selectInterviewApplicationBundle: async () => pickerResult,
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: async () => { if (selectReply instanceof Error) throw selectReply; return selectReply; },
           loadInterviewApplicationBundle: async () => publicBundle(),
         };
         const root = await mount(bundle, window, { nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
         try {
           await bundle.module.act(async () => { await flush(); });
-          await bundle.module.act(async () => { button(window, 'Choose application bundle').click(); await flush(); });
+          const choose = async () => {
+            const combobox = window.document.querySelector('[role="combobox"]');
+            await bundle.module.act(async () => { combobox.click(); await flush(); });
+            await settle(bundle);
+            const option = window.document.querySelector('[role="option"]');
+            await bundle.module.act(async () => { option.click(); await flush(); });
+            await settle(bundle, 6);
+          };
+          await choose();
           assert(!text(window).includes('could not be read'), 'picker cancellation must remain quiet');
-          pickerResult = publicBundle();
-          await bundle.module.act(async () => { button(window, 'Choose application bundle').click(); await flush(); });
+          selectReply = publicBundle();
+          await choose();
           const bundlePatch = updates.find(item => item.patch.interviewHelperApplicationBundle);
-          assert(bundlePatch?.patch.interviewHelperApplicationBundle?.artifactId === BUNDLE_ID, 'picker must persist the opaque artifact id');
+          assert(bundlePatch?.patch.interviewHelperApplicationBundle?.artifactId === BUNDLE_ID, 'the picker must persist the opaque artifact id');
           assert(!JSON.stringify(bundlePatch.patch).includes('listingText') && !JSON.stringify(bundlePatch.patch).includes('Application.html'), 'bundle projection must never persist source text or paths');
-          pickerResult = Promise.reject(new Error('read failed'));
-          await bundle.module.act(async () => { button(window, 'Replace application bundle').click(); await flush(); });
-          assert(text(window).includes('could not be read'), 'a picker/read failure must be visible and recoverable');
+          selectReply = new Error('read failed');
+          await choose();
+          assert(text(window).includes('read failed'), 'a folder read failure must be visible and recoverable');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
       await withDomBundledProbe(async (bundle, window) => {
@@ -541,7 +537,8 @@ export default [
         window.electronAPI = {
           getPathForFile: file => file.name === 'career.md' ? '/private/candidate/career.md' : '',
           parseCareerData: async args => { parseArgs = args; return pendingParse.promise; },
-          selectInterviewApplicationBundle: async () => publicBundle(),
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: async () => publicBundle(),
           completeNonApiAiRun: async () => ({ cleared: true }),
         };
         const root = await mount(bundle, window, { onPersist: (patch, next) => updates.push({ patch, next }) });
@@ -558,7 +555,9 @@ export default [
           assert(!bubbledToCanvas, 'career-file drops must not bubble to the canvas document-drop handler');
           // A separate bundle picker must not cancel an in-flight career
           // compilation merely because both actions update setup state.
-          await bundle.module.act(async () => { button(window, 'Choose application bundle').click(); await flush(); pendingParse.resolve({ success: true, careerSnapshotId: SNAPSHOT_A, fingerprint: 'fingerprint', profile: { identity: { name: 'Private Candidate' } }, careerData: 'raw private source' }); await flush(); });
+          await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); pendingParse.resolve({ success: true, careerSnapshotId: SNAPSHOT_A, fingerprint: 'fingerprint', profile: { identity: { name: 'Private Candidate' } }, careerData: 'raw private source' }); await flush(); });
           const persisted = JSON.stringify(updates.map(item => item.patch));
           assert(!persisted.includes('/private/candidate/career.md') && !persisted.includes('Private Candidate') && !persisted.includes('raw private source'), 'career import persistence must contain no path, profile, or raw source');
           assert(updates.some(item => item.patch.interviewHelperCareerFilenames?.[0] === 'career.md'), 'only a safe filename may be retained');
@@ -568,7 +567,7 @@ export default [
     },
   },
   {
-    name: 'interview helper render: direct import clears a Job Search pin and can switch back',
+    name: 'interview helper render: direct import clears a legacy Job Search pin and stays removable',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const updates = [];
@@ -580,7 +579,7 @@ export default [
           loadInterviewApplicationBundle: async () => publicBundle(),
         };
         const root = await mount(bundle, window, {
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
+          initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
           nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }),
         });
         try {
@@ -590,8 +589,7 @@ export default [
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
           const importing = updates.find(item => item.patch.interviewHelperCareerMode === 'import');
           assert(importing?.patch.interviewHelperSourceNodeId === null && importing.patch.interviewHelperSourceSnapshotId === null, 'starting an independent import must clear the old Job Search source pin');
-          const select = window.document.querySelector('[aria-label="Career source for Interview Helper"]');
-          assert(select.value === '', 'the Job Search selector must not show a stale source while an independent import is active');
+          assert(!window.document.querySelector('[aria-label="Career source for Interview Helper"]'), 'the Job Search selector must be gone');
           assert(window.document.querySelector('[aria-label="Clear imported career source"]'), 'an approved direct import must provide an explicit accessible removal action');
           await bundle.module.act(async () => { window.document.querySelector('[aria-label="Clear imported career source"]').click(); await flush(); });
           assert(updates.some(item => item.patch.interviewHelperCareerMode === 'none'
@@ -601,12 +599,7 @@ export default [
             && item.patch.interviewHelperJobUrl === undefined
             && item.patch.interviewHelperApplicationBundle === undefined),
           'clearing an imported source must remove only import/dependent state while preserving URL and bundle setup');
-          await bundle.module.act(async () => {
-            select.value = 'job-source';
-            select.dispatchEvent(new window.Event('change', { bubbles: true }));
-            await flush();
-          });
-          assert(updates.some(item => item.patch.interviewHelperCareerMode === 'job-search' && item.patch.interviewHelperSourceNodeId === 'job-source' && item.patch.interviewHelperSourceSnapshotId === SNAPSHOT_A), 'the selector must still permit explicitly switching back to Job Search');
+          assert(!updates.some(item => item.patch.interviewHelperCareerMode === 'job-search'), 'an import must never switch the helper back to a Job Search source');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },
@@ -662,11 +655,10 @@ export default [
           prepareInterviewBrief: async args => { preparationArgs = args; return { brief: publicBrief(), briefRecordId: BRIEF_RECORD_ID }; },
           completeNonApiAiRun: async () => ({ absent: true }),
         };
-        const preparationRoot = await mount(bundle, window, { nodeId, initialData: { interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes() });
+        const preparationRoot = await mount(bundle, window, { nodeId, initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperJobUrl: JOB_URL }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); button(window, 'Prepare interview brief').click(); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
           assert(preparationArgs?.nodeId === nodeId && preparationArgs.manualAiRunId.length <= 160, 'preparation must reach IPC with a bounded run id even for a 160-character node id');
         } finally { await bundle.module.act(async () => preparationRoot.unmount()); }
       });
@@ -683,20 +675,22 @@ export default [
           prepareInterviewBrief: async () => pending.promise,
           launchInterviewWindow: async args => { launches.push(args); },
         };
-        const root = await mount(bundle, window, { initialData: { interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
+        const root = await mount(bundle, window, { initialData: { interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); });
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
-          await bundle.module.act(async () => { setInput(window, url, 'https://jobs.example.test/changed'); pending.resolve({ brief: publicBrief() }); await flush(); });
+          // Removing the bundle clears the canonical URL, which must fence the
+          // in-flight preparation so its late response cannot land.
+          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
+          await bundle.module.act(async () => { pending.resolve({ brief: publicBrief() }); await flush(); });
           assert(!updates.some(item => item.patch.interviewHelperPreparation?.briefId === publicBrief().briefId), 'a late preparation response must not resurrect a stale brief after URL invalidation');
+          assert(updates.some(item => item.patch.interviewHelperJobUrl === null), 'removing the bundle must clear the job URL binding');
           const binding = `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`;
           await bundle.module.act(async () => {
             // Inject an already validated public brief only through the probe's
             // normal persistence callback path, emulating a completed request.
-            const replacement = updates.find(item => item.next.interviewHelperJobUrl === 'https://jobs.example.test/changed');
-            assert(replacement, 'fixture must commit the changed URL');
+            const replacement = updates.find(item => item.next.interviewHelperJobUrl === null);
+            assert(replacement, 'fixture must commit the cleared URL');
           });
           // Relaunch coverage uses a fresh prepared mount below; this instance
           // specifically proves late async preparation cannot overwrite it.
@@ -707,7 +701,7 @@ export default [
         const launches = [];
         const ready = publicBrief();
         window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => publicBundle(), loadInterviewPreparedBrief: async () => ({ brief: ready }), launchInterviewWindow: async args => { launches.push(args); } };
-        const root = await mount(bundle, window, { initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}` }, nodes: sourceNodes() });
+        const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}` }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
           const launch = button(window, 'Launch interview view');
@@ -733,7 +727,7 @@ export default [
         await withDomBundledProbe(async (bundle, window) => {
           const ready = publicBrief();
           window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => publicBundle(), loadInterviewPreparedBrief: async () => ({ brief: ready, answerBankAvailable: bankAvailable, answerCardCount: 16 }), launchInterviewWindow: async () => undefined };
-          const root = await mount(bundle, window, { initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`, interviewHelperAnswerCardCount: 20 }, nodes: sourceNodes() });
+          const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST }, interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID, interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`, interviewHelperAnswerCardCount: 20 }, nodes: sourceNodes() });
           try {
             await bundle.module.act(async () => { await flush(); await flush(); });
             const panel = window.document.querySelector('[aria-label="Interview preparation ready"]');
@@ -760,7 +754,7 @@ export default [
           loadInterviewPreparedBrief: async () => pending.promise,
         };
         const root = await mount(bundle, window, { initialData: {
-          interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+          interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
           interviewHelperJobUrl: JOB_URL,
           interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
           interviewHelperPreparation: ready, interviewHelperPreparationRecordId: BRIEF_RECORD_ID,
@@ -776,73 +770,13 @@ export default [
     },
   },
   {
-    name: 'interview helper render: authoritative async snapshot loads a locked rail, supports navigation, and shows truthful no-fit',
-    async run() {
-      await withDomBundledProbe(async (bundle, window) => withConsoleCollector(async entries => {
-        const pending = deferred();
-        const updates = [];
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: () => pending.promise };
-        const root = await mount(bundle, window, { nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
-        try {
-          assert(window.document.querySelector('[role="status"]')?.textContent.includes('Loading the pinned career snapshot'), 'source selection must visibly wait for its authoritative async snapshot');
-          await bundle.module.act(async () => {
-            pending.resolve({ snapshot: snapshot() });
-            await flush();
-          });
-          const textarea = window.document.querySelector('[aria-label="Paste or type the interviewer question"]');
-          assert(textarea && !textarea.disabled, 'authoritative snapshot completion must enable question input');
-          assert(textarea.maxLength === 2000, 'canvas question entry must enforce the same 2,000-character boundary as the interview window');
-          await bundle.module.act(async () => { setTextarea(window, textarea, `How did you improve onboarding conversion? ${'x'.repeat(2000)}`); await flush(); });
-          assert(button(window, 'Find grounded evidence').disabled, 'an oversized canvas question must not create a rail the interview window would reject');
-          assert(updates.some(item => item.patch.interviewHelperSourceSnapshotId === SNAPSHOT_A), 'sole source must be persisted with its exact immutable snapshot pin');
-
-          const question = 'How did you improve onboarding conversion and build the analytics dashboard?';
-          const expected = buildInterviewPlan({ question, profile: snapshot(), snapshotId: SNAPSHOT_A });
-          assert(expected.status === 'supported' && expected.steps.length >= 2, 'fixture must produce a navigable grounded rail');
-          await bundle.module.act(async () => { setTextarea(window, textarea, question); await flush(); });
-          const find = button(window, 'Find grounded evidence');
-          assert(find && !find.disabled, `supported question must enable retrieval (value=${textarea.value})`);
-          await bundle.module.act(async () => { find.click(); await flush(); });
-          const rail = window.document.querySelector('[aria-label="Locked interview answer rail"]');
-          assert(rail, 'supported question must render a locked rail');
-          assert(text(window).includes(expected.analysis.transcript), 'locked rail must render the extracted question');
-          assert(text(window).includes('Role: Product Manager · Acme'), 'locked rail must show role attribution from the authoritative snapshot');
-          const initialRailItems = [...rail.querySelectorAll('[aria-label="All grounded interview evidence"] > li')];
-          const initialRailText = initialRailItems.map(item => item.textContent);
-          assert(initialRailItems.length === expected.steps.length, 'complete stable rail must show every selected cue without a View all interaction');
-          assert(initialRailText.every((item, index) => item.includes(expected.steps[index].cue)), 'visible rail must preserve every exact cue in finished plan order');
-          assert(initialRailItems.filter(item => item.getAttribute('aria-current') === 'step').length === 1 && initialRailItems[0].getAttribute('aria-current') === 'step', 'first thought must be the sole accessible current rail item');
-          assert(!button(window, 'View all'), 'complete rail must not hide future steps behind an obsolete toggle');
-          const previous = window.document.querySelector('[aria-label="Previous interview thought"]');
-          const next = window.document.querySelector('[aria-label="Next interview thought"]');
-          assert(previous.disabled && !next.disabled, 'rail must expose disabled previous and enabled next controls at the first thought');
-          await bundle.module.act(async () => { next.click(); await flush(); });
-          const movedRailItems = [...rail.querySelectorAll('[aria-label="All grounded interview evidence"] > li')];
-          assert(movedRailItems.map(item => item.textContent).join('\n') === initialRailText.join('\n'), 'previous/current/upcoming movement must not reorder or replace the fixed rail text');
-          assert(movedRailItems.filter(item => item.getAttribute('aria-current') === 'step').length === 1 && movedRailItems[1].getAttribute('aria-current') === 'step', 'next control must move the accessible current marker without hiding any cue');
-
-          await bundle.module.act(async () => { button(window, 'Next question').click(); await flush(); });
-          const nextTextarea = window.document.querySelector('[aria-label="Paste or type the interviewer question"]');
-          await bundle.module.act(async () => { setTextarea(window, nextTextarea, 'How do you negotiate a real-estate lease?'); await flush(); });
-          await bundle.module.act(async () => { button(window, 'Find grounded evidence').click(); await flush(); });
-          assert(text(window).includes('No matching example appears in saved career data'), 'unsupported question must display the truthful no-fit message');
-          assert(!text(window).includes('closest real example'), 'unsupported state must not fabricate or suggest a weak saved match');
-          assert(!window.document.querySelector('[aria-label="Locked interview answer rail"]'), 'unsupported question must not render a fabricated rail');
-          assert(entries.length === 0, `async rail interaction must stay silent: ${entries.map(entry => entry.args.join(' ')).join(' | ')}`);
-        } finally {
-          await bundle.module.act(async () => root.unmount());
-        }
-      }));
-    },
-  },
-  {
-    name: 'interview helper render: Job Search snapshot pins remain stable until explicitly refreshed',
+    name: 'interview helper render: an imported snapshot pin stays stable and never falls back to Job Search',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const original = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: snapshot(), snapshotId: SNAPSHOT_A });
         assert(original.status === 'supported', 'fixture must provide a saved supported rail');
         const initialData = {
-          interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+          interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
           interviewHelperJobUrl: JOB_URL,
           interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
           interviewHelperPreparation: publicBrief(), interviewHelperPreparationRecordId: BRIEF_RECORD_ID,
@@ -860,101 +794,26 @@ export default [
         try {
           await bundle.module.act(async () => { await flush(); });
           assert(loadedSnapshotIds.includes(SNAPSHOT_A)
-            && window.document.querySelector('[aria-label="Locked interview answer rail"]')
-            && text(window).includes('newer approved snapshot')
-            && !updates.some(item => item.patch.interviewHelperSourceSnapshotId === SNAPSHOT_B || item.patch.interviewHelperLockedPlan === null),
-          'a newer Job Search snapshot must not silently replace the saved pin or clear prepared state');
+            && !text(window).includes('Job Search')
+            && !updates.some(item => item.patch.interviewHelperCareerMode === 'job-search'),
+          'an imported snapshot pin must stay active and nothing may fall back to a Job Search source');
+          assert(!window.document.querySelector('[aria-label="Locked interview answer rail"]') && !window.document.querySelector('[aria-label="Paste or type the interviewer question"]'),
+            'the typed question rail is gone from the canvas helper; questions are captured by the interview view');
           await bundle.module.act(async () => { button(window, 'Launch interview view').click(); await flush(); });
-          assert(launches[0]?.snapshotId === SNAPSHOT_A && launches[0]?.plan?.snapshotId === SNAPSHOT_A, 'the launched interview view must use the same saved snapshot as the canvas rail');
-          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Use latest Job Search snapshot"]').click(); await flush(); });
-          assert(updates.some(item => item.patch.interviewHelperSourceSnapshotId === SNAPSHOT_B
-            && item.patch.interviewHelperPreparation === null
-            && item.patch.interviewHelperLockedPlan === null),
-          'the explicit latest-snapshot action must atomically repin and clear dependent preparation and rail state');
+          assert(launches[0]?.snapshotId === SNAPSHOT_A && launches[0]?.plan === null, 'the launched interview view must use the pinned import snapshot and carry no canvas rail');
+          assert(loadedSnapshotIds.every(requested => requested === SNAPSHOT_A), 'only the pinned import snapshot may be requested');
         } finally { await bundle.module.act(async () => root.unmount()); }
-
-        const missingUpdates = [];
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async ({ snapshotId: requested }) => ({ snapshot: snapshot(requested) }) };
-        const missingRoot = await mount(bundle, window, { initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: original, interviewHelperCurrentStep: 0 }, nodes: [], onPersist: (patch, next) => missingUpdates.push({ patch, next }) });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          assert(text(window).includes('source is no longer on this canvas')
-            && window.document.querySelector('[aria-label="Locked interview answer rail"]')
-            && window.document.querySelector('[aria-label="Clear selected Job Search source"]')
-            && !window.document.querySelector('[aria-label="Use latest Job Search snapshot"]')
-            && !missingUpdates.some(item => item.patch.interviewHelperLockedPlan === null),
-          'a missing source must retain its rail, offer clearing the saved pin, and not offer a dead latest-snapshot action');
-        } finally { await bundle.module.act(async () => missingRoot.unmount()); }
 
         const noneLoads = [];
         window.electronAPI = { loadInterviewHelperCareerSnapshot: async ({ snapshotId: requested }) => { noneLoads.push(requested); return { snapshot: snapshot(requested) }; } };
         const noneRoot = await mount(bundle, window, {
-          initialData: { interviewHelperCareerMode: 'none', interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: original, interviewHelperCurrentStep: 0 },
+          initialData: { interviewHelperCareerMode: 'none', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperLockedPlan: original, interviewHelperCurrentStep: 0 },
           nodes: sourceNodes(),
         });
         try {
           await bundle.module.act(async () => { await flush(); });
-          assert(noneLoads.length === 0 && !window.document.querySelector('[aria-label="Locked interview answer rail"]'), 'an explicit no-source mode must ignore stale legacy source ids and never load their snapshot');
+          assert(noneLoads.length === 0, 'an explicit no-source mode must ignore stale legacy source ids and never load their snapshot');
         } finally { await bundle.module.act(async () => noneRoot.unmount()); }
-      });
-    },
-  },
-  {
-    name: 'interview helper render: tampered persisted rail is rejected against canonical snapshot recomputation',
-    async run() {
-      await withBundledProbe(async bundle => withDom(async window => withConsoleCollector(async entries => {
-        const canonical = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: snapshot(), snapshotId: SNAPSHOT_A });
-        const tampered = structuredClone(canonical);
-        tampered.steps[0].cue = 'Invented success metric that is absent from career data.';
-        const updates = [];
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }) };
-        const root = await mount(bundle, window, {
-          nodes: sourceNodes(),
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: tampered, interviewHelperCurrentStep: 0 },
-          onPersist: (patch, next) => updates.push({ patch, next }),
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          assert(!text(window).includes('Invented success metric'), 'tampered cue must never be displayed');
-          assert(!window.document.querySelector('[aria-label="Locked interview answer rail"]'), 'tampered persisted plan must be rejected rather than rendered');
-          assert(updates.some(item => item.patch.interviewHelperLockedPlan === null && item.patch.interviewHelperCurrentStep === 0), 'invalid plan must be cleared after authoritative recomputation');
-          assert(entries.length === 0, 'tamper rejection render must stay silent');
-        } finally {
-          await bundle.module.act(async () => root.unmount());
-        }
-      })));
-    },
-  },
-  {
-    name: 'interview helper render: locked rails retain ordinary line breaks and disclose unsupported requested parts',
-    async run() {
-      await withDomBundledProbe(async (bundle, window) => {
-        const newlineProfile = profile();
-        newlineProfile.achievements[0].claim = 'Improved onboarding conversion\nwith a simpler setup flow.';
-        const newlinePlan = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: newlineProfile, snapshotId: SNAPSHOT_A });
-        assert(newlinePlan.status === 'supported' && newlinePlan.steps.some(step => step.cue.includes('\n')), 'fixture must create a canonical cue with an ordinary line break');
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: { snapshotId: SNAPSHOT_A, profile: newlineProfile } }) };
-        const newlineRoot = await mount(bundle, window, {
-          nodes: sourceNodes(),
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: newlinePlan, interviewHelperCurrentStep: 0 },
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          const rail = window.document.querySelector('[aria-label="Locked interview answer rail"]');
-          assert(rail && rail.textContent.includes('Improved onboarding conversion\nwith a simpler setup flow.'), 'canonical career cues with tabs or line breaks must remain renderable');
-        } finally { await bundle.module.act(async () => newlineRoot.unmount()); }
-
-        const warningPlan = buildInterviewPlan({ question: 'What decision did you make to improve onboarding and what did you learn?', profile: profile(), snapshotId: SNAPSHOT_A });
-        assert(warningPlan.status === 'supported' && warningPlan.missingComponents.includes('decision') && warningPlan.missingComponents.includes('lesson'), 'fixture must contain documented missing requested components');
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }) };
-        const warningRoot = await mount(bundle, window, {
-          nodes: sourceNodes(),
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: warningPlan, interviewHelperCurrentStep: 0 },
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          assert(text(window).includes('Saved evidence does not document: decision/trade-off, lesson learned. Do not fill that gap from this rail.'), 'canvas rails must disclose missing decision/outcome/lesson evidence without invention');
-        } finally { await bundle.module.act(async () => warningRoot.unmount()); }
       });
     },
   },
@@ -963,7 +822,7 @@ export default [
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const base = runId => ({
-          interviewHelperCareerMode: 'job-search', interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+          interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
           interviewHelperJobUrl: JOB_URL,
           interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
           interviewHelperPreparation: { status: 'failed', error: 'Retryable worker interruption.' },
@@ -983,36 +842,19 @@ export default [
             await action(updates, completions);
           } finally { await bundle.module.act(async () => root.unmount()); }
         };
-        await mountCase('interview-helper:prepare:interview-helper:clear-url', async (updates, completions) => {
-          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Clear saved job listing URL"]').click(); await flush(); });
-          assert(completions[0] === 'interview-helper:prepare:interview-helper:clear-url'
-            && updates.some(item => item.patch.interviewHelperJobUrl === null && item.patch.interviewHelperPreparation === null),
-          'clearing a URL must retire a settled preparation recovery before invalidating it');
-        });
         await mountCase('interview-helper:prepare:interview-helper:remove-bundle', async (updates, completions) => {
           await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
           assert(completions[0] === 'interview-helper:prepare:interview-helper:remove-bundle'
-            && updates.some(item => item.patch.interviewHelperApplicationBundle === null && item.patch.interviewHelperPreparation === null),
-          'removing a bundle must retire a settled preparation recovery before clearing its opaque reference');
+            && updates.some(item => item.patch.interviewHelperApplicationBundle === null && item.patch.interviewHelperJobUrl === null && item.patch.interviewHelperPreparation === null),
+          'removing a bundle must retire a settled preparation recovery before clearing its opaque reference and job URL');
         });
         await mountCase('interview-helper:prepare:interview-helper:clear-source', async (updates, completions) => {
-          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Clear selected Job Search source"]').click(); await flush(); });
+          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Clear imported career source"]').click(); await flush(); });
           assert(completions[0] === 'interview-helper:prepare:interview-helper:clear-source'
-            && updates.some(item => item.patch.interviewHelperCareerMode === 'none' && item.patch.interviewHelperSourceNodeId === null && item.patch.interviewHelperSourceSnapshotId === null && item.patch.interviewHelperPreparation === null),
-          'clearing a Job Search source must retire the preparation recovery and persist an explicit no-source state');
+            && updates.some(item => item.patch.interviewHelperCareerMode === 'none' && item.patch.interviewHelperCareerCompilation === null && item.patch.interviewHelperCareerSnapshotId === null && item.patch.interviewHelperPreparation === null),
+          'clearing an imported source must retire the preparation recovery and persist an explicit no-source state');
         });
 
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }), loadInterviewApplicationBundle: async () => publicBundle() };
-        const updates = [];
-        const revertRoot = await mount(bundle, window, { initialData: base('interview-helper:prepare:interview-helper:revert'), nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
-        try {
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          url.focus();
-          const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-          descriptor.set.call(url, 'https://jobs.example.test/draft');
-          await bundle.module.act(async () => { url.dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'draft' })); await flush(); button(window, 'Revert edit').click(); await flush(); });
-          assert(url.value === JOB_URL && !updates.some(item => item.patch.interviewHelperJobUrl === 'https://jobs.example.test/draft'), 'reverting an unsaved URL edit must restore the persisted value without replacing it');
-        } finally { await bundle.module.act(async () => revertRoot.unmount()); }
       });
     },
   },
@@ -1028,13 +870,12 @@ export default [
         };
         const root = await mount(bundle, window, {
           nodes: sourceNodes(),
-          initialData: { interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
+          initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
           onPersist: (patch, next) => updates.push({ patch, next }),
         });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); button(window, 'Prepare interview brief').click(); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
           const failure = updates.find(item => item.patch.interviewHelperPreparation?.status === 'failed');
           assert(failure?.patch.interviewHelperPreparation?.error === 'Preparation did not complete. Resume or change setup to try again.'
             && !JSON.stringify(failure?.patch).includes(rawError)
@@ -1080,36 +921,6 @@ export default [
     },
   },
   {
-    name: 'interview helper render: malformed, deep, extra, and cyclic persisted rails are cleared without rendering',
-    async run() {
-      const canonical = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: snapshot(), snapshotId: SNAPSHOT_A });
-      const malformed = { status: 'supported', snapshotId: SNAPSHOT_A, steps: [{}] };
-      const extra = { ...structuredClone(canonical), unrecognizedPayload: { rawProfile: profile() } };
-      const deep = { ...structuredClone(canonical), unrecognizedPayload: {} };
-      let cursor = deep.unrecognizedPayload;
-      for (let index = 0; index < 20_000; index += 1) { cursor.child = {}; cursor = cursor.child; }
-      const cyclic = structuredClone(canonical);
-      cyclic.analysis = cyclic;
-      for (const [name, lockedPlan] of [['malformed', malformed], ['extra', extra], ['deep', deep], ['cyclic', cyclic]]) {
-        await withDomBundledProbe(async (bundle, window) => withConsoleCollector(async entries => {
-          const updates = [];
-          window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }) };
-          const root = await mount(bundle, window, {
-            nodes: sourceNodes(),
-            initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: lockedPlan, interviewHelperCurrentStep: 0 },
-            onPersist: (patch, next) => updates.push({ patch, next }),
-          });
-          try {
-            await bundle.module.act(async () => { await flush(); });
-            assert(!window.document.querySelector('[aria-label="Locked interview answer rail"]'), `${name} plan must never render`);
-            assert(updates.some(item => item.patch.interviewHelperLockedPlan === null && item.patch.interviewHelperCurrentStep === 0), `${name} plan must be cleared without canonicalizing hostile nested state`);
-            assert(entries.length === 0, `${name} plan rejection must stay silent`);
-          } finally { await bundle.module.act(async () => root.unmount()); }
-        }));
-      }
-    },
-  },
-  {
     name: 'interview helper render: a stale terminal response is retired once, and failed cleanup remains retryable',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
@@ -1128,13 +939,11 @@ export default [
             return { cleared: true };
           },
         };
-        const root = await mount(bundle, window, { initialData: { interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
+        const root = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); });
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
-          await bundle.module.act(async () => { setInput(window, url, 'https://jobs.example.test/changed'); await flush(); });
+          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
           assert(completions.length === 0, 'input invalidation must not retire an in-flight manual worker before its response is terminal');
           await bundle.module.act(async () => { pending.resolve({ brief: publicBrief() }); await flush(); });
           assert(completions.length === 1, 'a terminal stale response must be retired exactly once');
@@ -1224,8 +1033,6 @@ export default [
         const root = await mount(bundle, window, {
           initialData: {
             interviewHelperCareerMode: 'job-search',
-            interviewHelperSourceNodeId: 'job-source',
-            interviewHelperSourceSnapshotId: SNAPSHOT_A,
             interviewHelperCareerGeneration: 'restored-career-generation',
             interviewHelperCareerCompilation: { version: 1, status: 'failed', manualAiRunId: careerRunId },
             interviewHelperPreparation: { status: 'failed', error: 'Saved worker interruption.' },
@@ -1327,12 +1134,11 @@ export default [
           const drop = new window.Event('drop', { bubbles: true });
           Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
           await bundle.module.act(async () => { target.dispatchEvent(drop); await flush(); });
-          const source = window.document.querySelector('[aria-label="Career source for Interview Helper"]');
+          assert(!window.document.querySelector('[aria-label="Career source for Interview Helper"]'), 'the Job Search source selector must be gone');
           await bundle.module.act(async () => {
-            source.value = 'job-source-2';
-            source.dispatchEvent(new window.Event('change', { bubbles: true }));
+            window.document.querySelector('[aria-label="Clear imported career source"]').click();
             await flush();
-            assert(careerCompletions.length === 0, 'switching away must not retire a genuinely local compiling worker before it settles');
+            assert(careerCompletions.length === 0, 'clearing the source must not retire a genuinely local compiling worker before it settles');
             careerPending.reject(new Error('terminal compilation rejection'));
             await flush();
           });
@@ -1346,13 +1152,12 @@ export default [
           prepareInterviewBrief: async () => stalePending.promise,
           completeNonApiAiRun: async runId => { staleCompletions.push(runId); return { cleared: true }; },
         };
-        const staleRoot = await mount(bundle, window, { initialData: { interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes() });
+        const staleRoot = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); button(window, 'Prepare interview brief').click(); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
           await bundle.module.act(async () => {
-            setInput(window, url, 'https://jobs.example.test/changed');
+            window.document.querySelector('[aria-label="Remove selected application bundle"]').click();
             assert(staleCompletions.length === 0, 'changing input must not retire a genuinely local preparing worker before it settles');
             stalePending.reject(new Error('terminal preparation rejection'));
             await flush();
@@ -1367,11 +1172,10 @@ export default [
           prepareInterviewBrief: async () => currentPending.promise,
           completeNonApiAiRun: async runId => { currentCompletions.push(runId); return { cleared: true }; },
         };
-        const currentRoot = await mount(bundle, window, { initialData: { interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes() });
+        const currentRoot = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); button(window, 'Prepare interview brief').click(); currentPending.reject(new Error('retryable preparation rejection')); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); currentPending.reject(new Error('retryable preparation rejection')); await flush(); });
           assert(currentCompletions.length === 0, 'a current rejected preparation must retain its resumable worker identity');
           assert(button(window, 'Resume preparation') && !button(window, 'Resume preparation').disabled, 'a current rejected preparation must remain resumable');
         } finally { await bundle.module.act(async () => currentRoot.unmount()); }
@@ -1397,14 +1201,8 @@ export default [
           nodes: sourceNodes(), onPersist: (patch, next) => careerUpdates.push({ patch, next }),
         });
         try {
-          const source = window.document.querySelector('[aria-label="Career source for Interview Helper"]');
-          await bundle.module.act(async () => {
-            source.value = 'job-source';
-            source.dispatchEvent(new window.Event('change', { bubbles: true }));
-            await flush();
-          });
-          assert(careerCompletions.length === 1 && careerCompletions[0] === careerRunId, 'switching from a failed career import must retire its resumable worker');
-          assert(careerUpdates.some(item => item.patch.interviewHelperCareerMode === 'job-search' && item.patch.interviewHelperCareerCompilation === null && Array.isArray(item.patch.interviewHelperCareerFilenames) && item.patch.interviewHelperCareerFilenames.length === 0), 'switching sources must clear the retired career receipt so later imports are not filename-blocked');
+          assert(!window.document.querySelector('[aria-label="Career source for Interview Helper"]'), 'a failed import must not expose a Job Search source switch');
+          assert(careerCompletions.length === 0, 'an idle failed import must not retire its worker before a new drop arrives');
         } finally { await bundle.module.act(async () => careerRoot.unmount()); }
 
         const discardRunId = 'interview-helper:compile:interview-helper:discard';
@@ -1436,7 +1234,7 @@ export default [
         } finally { await bundle.module.act(async () => discardRoot.unmount()); }
 
         const failedPrep = (suffix, status = 'failed') => ({
-          interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+          interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
           interviewHelperJobUrl: JOB_URL,
           interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
           interviewHelperPreparation: { status, error: 'Retryable worker interruption.' },
@@ -1448,7 +1246,8 @@ export default [
           window.electronAPI = {
             loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
             loadInterviewApplicationBundle: async () => publicBundle(),
-            selectInterviewApplicationBundle: async () => picked,
+            listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+            selectInterviewApplicationFolder: async () => picked,
             getPathForFile: file => file.name === 'career.md' ? '/private/candidate/career.md' : '',
             parseCareerData: async () => ({ success: false, error: 'new career run is separately resumable' }),
             completeNonApiAiRun: async runId => { completions.push(runId); return { cleared: true }; },
@@ -1465,16 +1264,17 @@ export default [
           suffix: 'url',
           status: 'preparing',
           action: async () => {
-            const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-            await bundle.module.act(async () => { setInput(window, url, 'https://jobs.example.test/changed'); await flush(); });
+            await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
           },
-          assertion: updates => assert(updates.some(item => item.patch.interviewHelperJobUrl === 'https://jobs.example.test/changed' && item.patch.interviewHelperPreparation === null), 'URL replacement must clear preparation only after retirement'),
+          assertion: updates => assert(updates.some(item => item.patch.interviewHelperJobUrl === null && item.patch.interviewHelperPreparation === null), 'clearing the bundle URL must clear preparation only after retirement'),
         });
         await runAbandonmentCase({
           suffix: 'bundle',
           picked: publicBundle('9'.repeat(64), '8'.repeat(64)),
           action: async () => {
-            await bundle.module.act(async () => { button(window, 'Replace application bundle').click(); await flush(); });
+            await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+            await settle(bundle);
+            await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
           },
           assertion: updates => assert(updates.some(item => item.patch.interviewHelperApplicationBundle?.artifactId === '9'.repeat(64) && item.patch.interviewHelperPreparation === null), 'bundle replacement must clear preparation only after retirement'),
         });
@@ -1506,7 +1306,7 @@ export default [
         };
         const root = await mount(bundle, window, {
           initialData: {
-            interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+            interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
             interviewHelperJobUrl: JOB_URL,
             interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
             interviewHelperPreparation: { status: 'failed', error: 'Retryable worker interruption.' },
@@ -1526,87 +1326,33 @@ export default [
     },
   },
   {
-    name: 'interview helper render: URL and bundle changes preserve the independent career rail',
+    name: 'interview helper render: bundle changes preserve the independent career data',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const updates = [];
-        const rail = buildInterviewPlan({ question: 'How did you improve onboarding conversion?', profile: profile(), snapshotId: SNAPSHOT_A });
         window.electronAPI = {
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
           loadInterviewApplicationBundle: async () => publicBundle(),
-          selectInterviewApplicationBundle: async () => publicBundle(),
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: async () => publicBundle(),
         };
         const root = await mount(bundle, window, {
           initialData: {
-            interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+            interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
             interviewHelperJobUrl: 'https://jobs.example.test/original',
             interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
-            interviewHelperLockedPlan: rail, interviewHelperCurrentStep: 0,
           },
           nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }),
         });
         try {
           await bundle.module.act(async () => { await flush(); });
-          assert(window.document.querySelector('[aria-label="Locked interview answer rail"]'), 'fixture must render the independent career rail before setup changes');
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => { setInput(window, url, JOB_URL); await flush(); button(window, 'Replace application bundle').click(); await flush(); });
-          assert(window.document.querySelector('[aria-label="Locked interview answer rail"]'), 'unrelated URL and bundle setup changes must not clear the saved career rail');
-          assert(!updates.some(item => item.patch.interviewHelperLockedPlan === null), 'URL/bundle updates must clear only preparation state, never career evidence');
-        } finally { await bundle.module.act(async () => root.unmount()); }
-      });
-    },
-  },
-  {
-    name: 'interview helper render: canonical-order rail disclosure remains visible',
-    async run() {
-      await withDomBundledProbe(async (bundle, window) => {
-        const rail = buildInterviewPlan({ question: 'Tell me about yourself.', profile: profile(), snapshotId: SNAPSHOT_A });
-        assert(rail.status === 'supported' && rail.message, 'fixture must create the canonical-order disclosure rail');
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }) };
-        const root = await mount(bundle, window, {
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperLockedPlan: rail, interviewHelperCurrentStep: 0 },
-          nodes: sourceNodes(),
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          assert(text(window).includes(rail.message), 'a canvas rail must show the no-unsaved-ranking disclosure attached to its canonical plan');
-        } finally { await bundle.module.act(async () => root.unmount()); }
-      });
-    },
-  },
-  {
-    name: 'interview helper render: an uncommitted URL draft does not discard a completed brief for unchanged saved inputs',
-    async run() {
-      await withDomBundledProbe(async (bundle, window) => {
-        const pending = deferred(); const updates = []; const completions = [];
-        window.electronAPI = {
-          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
-          loadInterviewApplicationBundle: async () => publicBundle(),
-          loadInterviewPreparedBrief: async () => ({ brief: publicBrief() }),
-          prepareInterviewBrief: async () => pending.promise,
-          completeNonApiAiRun: async runId => { completions.push(runId); return { cleared: true }; },
-        };
-        const root = await mount(bundle, window, {
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
-          nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }),
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
-          const url = window.document.querySelector('[aria-label="Original job listing URL"]');
-          await bundle.module.act(async () => {
-            // A draft edit only: no focusout/commit while the worker finishes.
-            const descriptor = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-            descriptor.set.call(url, `${JOB_URL}x`);
-            url.dispatchEvent(new window.InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'x' }));
-            await flush();
-          });
-          await bundle.module.act(async () => { pending.resolve({ brief: publicBrief(), briefRecordId: BRIEF_RECORD_ID }); await flush(); await flush(); });
-          await bundle.module.act(async () => { button(window, 'Revert edit').click(); await flush(); await flush(); });
-          assert(updates.some(item => item.patch.interviewHelperPreparation?.briefId === publicBrief().briefId), 'a brief for unchanged committed inputs must persist even while a URL draft is dirty');
-          const final = updates.at(-1).next;
-          assert(final.interviewHelperPreparationRunId == null && final.interviewHelperPreparation?.status !== 'preparing', 'the node must not keep a preparing receipt for a retired run');
-          assert(completions.length === 1 && !button(window, 'Resume preparation'), 'the run is retired once, after its brief was saved');
+          assert(text(window).includes('Independent career snapshot ready'), 'fixture must show the imported career data before setup changes');
+          await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          assert(updates.some(item => item.patch.interviewHelperJobUrl === null), 'choosing another bundle must rewrite the job URL from the chosen bundle');
+          assert(text(window).includes('Independent career snapshot ready'), 'bundle setup changes must not clear the imported career data');
+          assert(!updates.some(item => Object.hasOwn(item.patch, 'interviewHelperCareerSnapshotId') || Object.hasOwn(item.patch, 'interviewHelperCareerMode')), 'bundle updates must clear only preparation state, never career evidence');
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },
@@ -1629,7 +1375,7 @@ export default [
             };
             const root = await mount(bundle, window, {
               initialData: {
-                interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL,
+                interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL,
                 interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
                 interviewHelperPreparation: status === 'failed' ? { status, error: 'Retryable worker interruption.' } : { status },
                 interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`,
@@ -1653,30 +1399,6 @@ export default [
     },
   },
   {
-    name: 'interview helper render: a rail its own verifier would reject is never persisted and is explained',
-    async run() {
-      await withDomBundledProbe(async (bundle, window) => {
-        const formatted = snapshot();
-        formatted.profile.achievements[0].claim = `Improved onboarding conversion with a simpler set${String.fromCodePoint(0xAD)}up flow.`;
-        const updates = [];
-        window.electronAPI = { loadInterviewHelperCareerSnapshot: async () => ({ snapshot: formatted }) };
-        const root = await mount(bundle, window, {
-          initialData: { interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A },
-          nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }),
-        });
-        try {
-          await bundle.module.act(async () => { await flush(); });
-          const textarea = window.document.querySelector('[aria-label="Paste or type the interviewer question"]');
-          await bundle.module.act(async () => { setTextarea(window, textarea, 'How did you improve onboarding conversion?'); await flush(); });
-          await bundle.module.act(async () => { button(window, 'Find grounded evidence').click(); await flush(); await flush(); });
-          assert(!updates.some(item => item.patch.interviewHelperLockedPlan), 'an unverifiable rail must not be persisted and then silently erased');
-          const status = [...window.document.querySelectorAll('[role="status"]')].map(item => item.textContent).join(' ');
-          assert(/cannot display safely/u.test(status), 'the user must be told why no rail appeared');
-        } finally { await bundle.module.act(async () => root.unmount()); }
-      });
-    },
-  },
-  {
     name: 'interview helper render: a locked-rail launch refusal is explained while other launch failures stay generic',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
@@ -1689,7 +1411,7 @@ export default [
         };
         const root = await mount(bundle, window, {
           initialData: {
-            interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A,
+            interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A },
             interviewHelperJobUrl: JOB_URL,
             interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
             interviewHelperPreparation: publicBrief(), interviewHelperPreparationRecordId: BRIEF_RECORD_ID,
@@ -1772,13 +1494,14 @@ export default [
         window.electronAPI = {
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
           loadInterviewApplicationBundle: async () => publicBundle(),
-          selectInterviewApplicationBundle: () => picker.promise,
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: () => picker.promise,
           prepareInterviewBrief: () => prep.promise,
           completeNonApiAiRun: async runId => { completions.push(runId); return { cleared: true }; },
         };
         const root = await mount(bundle, window, {
           initialData: {
-            interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL,
+            interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL,
             interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
           },
           nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }),
@@ -1788,7 +1511,9 @@ export default [
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
           const runId = updates.map(item => item.patch.interviewHelperPreparationRunId).find(Boolean);
           assert(/^interview-helper:prepare:/u.test(runId || ''), 'prepare must record its durable run id');
-          await bundle.module.act(async () => { button(window, 'Replace application bundle').click(); await flush(); });
+          await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
           await bundle.module.act(async () => { prep.reject(new Error('worker interrupted')); await flush(); await flush(); await flush(); });
           assert(updates.some(item => item.patch.interviewHelperPreparation?.status === 'failed' && item.patch.interviewHelperPreparationRunId === runId), 'the interrupted prepare must leave a resumable recovery while the picker is open');
           await bundle.module.act(async () => { picker.resolve(publicBundle('9'.repeat(64), '8'.repeat(64))); await flush(); await flush(); await flush(); });
@@ -1808,12 +1533,13 @@ export default [
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
           loadInterviewApplicationBundle: async () => publicBundle(),
           loadInterviewPreparedBrief: async () => ({ brief: publicBrief() }),
-          selectInterviewApplicationBundle: async () => publicBundle(),
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: async () => ({ ...publicBundle(), jobUrl: JOB_URL }),
           launchInterviewWindow: async () => undefined,
         };
         const root = await mount(bundle, window, {
           initialData: {
-            interviewHelperSourceNodeId: 'job-source', interviewHelperSourceSnapshotId: SNAPSHOT_A, interviewHelperJobUrl: JOB_URL,
+            interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL,
             interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST },
             interviewHelperPreparation: publicBrief(), interviewHelperPreparationRecordId: BRIEF_RECORD_ID,
             interviewHelperPreparationInputBinding: `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`,
@@ -1824,7 +1550,9 @@ export default [
           await bundle.module.act(async () => { await flush(); await flush(); });
           assert(button(window, 'Launch interview view'), 'fixture must start with a ready brief');
           const before = updates.length;
-          await bundle.module.act(async () => { button(window, 'Replace application bundle').click(); await flush(); await flush(); await flush(); });
+          await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); await flush(); await flush(); });
           assert(!updates.slice(before).some(item => item.patch.interviewHelperPreparation === null || item.patch.interviewHelperPreparationRecordId === null), 'an identical bundle must not clear the finished brief');
           assert(button(window, 'Launch interview view'), 'the finished brief must still be launchable after re-picking the same bundle');
         } finally { await bundle.module.act(async () => root.unmount()); }
@@ -2103,6 +1831,89 @@ export default [
         d.expect('hubc1', 'a further undo at the oldest state changes nothing');
         await d.step(() => d.api.redo());
         assert(d.visible().includes('A'), `redo returns to the state with A, got ${d.visible()}`);
+      });
+    },
+  },
+  {
+    name: 'interview helper render: canvas career-drop events compile only this helper and ignore foreign or empty drops',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const parsePaths = [];
+        window.electronAPI = { parseCareerData: async args => { parsePaths.push(args.filePaths); return { success: false, error: 'retryable' }; } };
+        const root = await mount(bundle, window, { nodes: [] });
+        try {
+          await bundle.module.act(async () => { await flush(); });
+          const fire = async detail => bundle.module.act(async () => {
+            window.document.dispatchEvent(new window.CustomEvent('canvas-file-nodes-dropped-on-hub', { detail }));
+            await flush(); await flush();
+          });
+          await fire({ hubId: 'other-helper', hubType: 'interviewhelper', files: [{ nodeId: 'n1', filePath: '/private/candidate/other.md', filename: 'other.md' }], mode: 'career-files' });
+          await fire({ hubId: 'interview-helper', hubType: 'jobboard', files: [{ nodeId: 'n2', filePath: '/private/candidate/wrong-hub.md', filename: 'wrong-hub.md' }], mode: 'career-files' });
+          await fire({ hubId: 'interview-helper', hubType: 'interviewhelper', files: [{ nodeId: 'n3', filePath: '   ', filename: 'blank.md' }], mode: 'career-files' });
+          assert(parsePaths.length === 0, `foreign hub ids, foreign hub types and blank paths must be ignored, got ${JSON.stringify(parsePaths)}`);
+          await fire({ hubId: 'interview-helper', hubType: 'interviewhelper', files: [{ nodeId: 'n4', filePath: '/private/candidate/canvas-career.md', filename: 'canvas-career.md' }], mode: 'career-files' });
+          assert(parsePaths.length === 1 && parsePaths[0][0] === '/private/candidate/canvas-career.md', `the drop must compile exactly the dropped career file, got ${JSON.stringify(parsePaths)}`);
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: setup shows no Job Search source or Finder bundle button and the bundle URL always wins',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = [];
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: async () => ({ ...publicBundle(), jobUrl: JOB_URL }),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+        };
+        const root = await mount(bundle, window, {
+          initialData: { interviewHelperJobUrl: 'https://jobs.example.test/saved-before', interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
+          nodes: sourceNodes(), onPersist: patch => updates.push(patch),
+        });
+        try {
+          await settle(bundle);
+          assert(!window.document.querySelector('[aria-label="Career source for Interview Helper"]'), 'no Job Search source selector may remain');
+          assert(!text(window).includes('Choose application bundle') && !text(window).includes('Replace application bundle'), 'the Finder bundle button must be gone');
+          assert(!text(window).includes('Or choose an application bundle manually'), 'the manual Finder bundle copy must be gone');
+          assert(!window.document.querySelector('[aria-label="Original job listing URL"]'), 'the editable job URL field must be gone');
+          const combobox = window.document.querySelector('[role="combobox"]');
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          await settle(bundle, 6);
+          assert(updates.some(patch => patch.interviewHelperJobUrl === JOB_URL), `choosing a bundle must overwrite the saved job URL with the bundle URL, got ${JSON.stringify(updates.map(patch => patch.interviewHelperJobUrl))}`);
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: a bundle without a job posting link explains why preparation stays disabled',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = [];
+        window.electronAPI = {
+          loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+          listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+          selectInterviewApplicationFolder: async () => publicBundle(),
+          loadInterviewApplicationBundle: async () => publicBundle(),
+        };
+        const root = await mount(bundle, window, {
+          initialData: { interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } },
+          nodes: sourceNodes(), onPersist: patch => updates.push(patch),
+        });
+        try {
+          await settle(bundle);
+          const combobox = window.document.querySelector('[role="combobox"]');
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          await settle(bundle, 6);
+          assert(text(window).includes('This application has no job posting link, so preparation cannot research it. Regenerate the application, then choose it again.'), 'a bundle without a job URL must explain that preparation cannot research it');
+          assert(button(window, 'Prepare interview brief').disabled, 'preparation must stay disabled without a canonical job URL');
+          assert(updates.some(patch => patch.interviewHelperJobUrl === null), 'a bundle without a URL must clear the previously saved job URL');
+        } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },
   },

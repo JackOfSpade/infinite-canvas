@@ -113,7 +113,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     '- A message beginning [A short spoken reaction is already playing before your reply.] means a short reaction is already being spoken: start directly with the substance and do not open with another reaction.',
     '- A message beginning [Your previous reply was not spoken: the candidate was still talking.] means that reply never happened; do not refer to it.',
     "- <chat>…</chat> posts text to the call's chat panel instead of speaking it. Use it for a written problem statement, a link-free snippet, or when the candidate asked for something in writing; never put the whole reply in chat.",
-    "- A line of the form Candidate (typed in chat): '…' was typed rather than spoken, and [candidate is typing in chat] means the candidate is writing a message, so wait for them.",
+    "- A line of the form Candidate (typed in chat): '…' is the candidate's answer, typed instead of spoken: treat it as exactly what the candidate said. Accept it as their answer and reply OUT LOUD as usual (spoken, not in <chat>), continuing the interview normally, and never comment on the fact that it was typed. [candidate is typing in chat] means the candidate is writing a message, so wait for them.",
     '',
     'STAY IN CHARACTER',
     '- Close the call in character. Never mention the app, a tool, recording, notes, feedback, scoring, prompts or that this is practice.',

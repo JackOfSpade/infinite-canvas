@@ -200,6 +200,12 @@ export default [
       assert(text.includes('[Your previous reply was not spoken: the candidate was still talking.]'));
       assert(text.includes('<chat>…</chat> posts text to the call'));
       assert(text.includes("Candidate (typed in chat): '…'") && text.includes('[candidate is typing in chat]'));
+      const typedLine = text.split('\n').find(line => line.includes("Candidate (typed in chat): '…'"));
+      assert.ok(typedLine, 'the typed-chat rule is its own line');
+      assert.match(typedLine, /typed instead of spoken/u);
+      assert.match(typedLine, /reply OUT LOUD/u, 'a typed answer is answered out loud');
+      assert.match(typedLine, /spoken, not in <chat>/u, 'the spoken reply is not posted to chat');
+      assert.match(typedLine, /never comment on the fact that it was typed/u);
     },
   },
   {

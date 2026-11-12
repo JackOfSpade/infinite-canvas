@@ -32,11 +32,14 @@ function findHubDropTarget(dragSet, getIntersectingNodes) {
   // drag that carries document file payloads, after jobhub/sellhub, so a
   // non-file drag over a Board (and sub-canvas absorption precedence) stays
   // exactly as before. A locked Board is still found so its "Locked" reject
-  // cue can paint instead of the drag silently showing nothing.
+  // cue can paint instead of the drag silently showing nothing. An Interview
+  // Helper is the same kind of career-file target, resolved in the same
+  // file-carrying pass; it is deliberately absent from HUB_DROP_TARGET_TYPES
+  // so non-file drags over it are not intercepted.
   if (filePayloadFromDraggedNodes(dragSet).length > 0) {
     for (const dragged of dragSet) {
       const targetBoard = getIntersectingNodes(dragged).find(n =>
-        n.type === 'jobboard' && n.id !== dragged.id
+        (n.type === 'jobboard' || n.type === 'interviewhelper') && n.id !== dragged.id
       );
       if (targetBoard) return targetBoard;
     }
@@ -370,6 +373,34 @@ export function useDragCorrections({ setNodes, setEdges, getNodes, getEdges, get
         }
         const acceptedFiles = filePayload.filter(file => fileSupportedByHub('jobboard', file));
         const dropMode = 'career-override';
+        document.dispatchEvent(new CustomEvent('canvas-file-nodes-dropped-on-hub', {
+          detail: {
+            hubId: targetHub.id,
+            hubType: targetHub.type,
+            files: acceptedFiles,
+            mode: dropMode,
+          },
+        }));
+        restoreDragStartPositions(draggedIds);
+        EventLogger.log(`Dropped ${acceptedFiles.length}/${filePayload.length} document node(s) onto ${targetHub.type} ${targetHub.id} mode=${dropMode}`);
+        return;
+      }
+
+      // An Interview Helper takes text career files as its career data. Same
+      // shape as the Job Board branch above — the file node is NOT consumed,
+      // it snaps back to where it was — but with the plain career-files mode
+      // the Helper's own listener consumes; it never uses the jobhub/sellhub
+      // lifecycle rules below.
+      if (targetHub && targetHub.type === 'interviewhelper' && filePayload.length > 0) {
+        const draggedIds = dragSet.map(n => n.id);
+        const verdict = buildHubHoverState(targetHub, dragSet);
+        if (!verdict || verdict.kind !== 'accept') {
+          restoreDragStartPositions(draggedIds);
+          EventLogger.log(`Rejected ${filePayload.length} document node(s) for interviewhelper (${verdict?.label || 'Not accepting drops'}); restored drag position`);
+          return;
+        }
+        const acceptedFiles = filePayload.filter(file => fileSupportedByHub('interviewhelper', file));
+        const dropMode = 'career-files';
         document.dispatchEvent(new CustomEvent('canvas-file-nodes-dropped-on-hub', {
           detail: {
             hubId: targetHub.id,

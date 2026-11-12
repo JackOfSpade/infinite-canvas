@@ -33,7 +33,7 @@ export function fileSupportedByHub(hubType, file) {
   const names = [file?.filename, file?.filePath].filter(value => typeof value === 'string');
   // Career data is plain text only: the real path must be .txt or .md.
   // A Job Board's career override uses the identical career-text rule.
-  if (hubType === 'jobhub' || hubType === 'jobboard') {
+  if (hubType === 'jobhub' || hubType === 'jobboard' || hubType === 'interviewhelper') {
     return !names.some(isAppBundlePathOrName) && isCareerTextFileName(file?.filePath);
   }
   if (hubType === 'sellhub') return isProductImageFile(file);
@@ -65,6 +65,15 @@ export function buildHubHoverState(targetHub, dragSet) {
       return { kind: 'reject', label: 'Text files only (.txt, .md)' };
     }
     return jobBoardCareerDropVerdict(targetHub.data);
+  }
+  // An Interview Helper takes canvas career files (text only, never .app) as
+  // its career data; the whole selection must be text, so a mixed drop cannot
+  // promise "Use as career data".
+  if (targetHub.type === 'interviewhelper') {
+    if (acceptedFiles.length !== filePayload.length) {
+      return { kind: 'reject', label: 'Text files only (.txt, .md)' };
+    }
+    return { kind: 'accept', label: 'Use as career data' };
   }
   // Job Search refuses a whole drop that holds any non-text file, so the cue
   // must not promise "Use as resume" for a mixed selection.

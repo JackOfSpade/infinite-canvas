@@ -1,14 +1,8 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Mic, Copy } from 'lucide-react';
+import { Mic } from 'lucide-react';
 
-// The hub side of practice mode: starts the Claude-chat mock interview and
-// shows the written feedback that comes back through the practice connector.
-const STATUS_TEXT = Object.freeze({
-  armed: 'Interview in progress in your Claude chat · waiting for feedback',
-  finished: 'Feedback received',
-  expired: 'The last practice session expired before feedback arrived',
-  cancelled: 'The last practice session was cancelled',
-});
+// The hub side of practice mode: starts the in-app local voice practice call and
+// lists past calls so a recorded call can be replayed with its feedback.
 const KIND_LABELS = Object.freeze({ 'small-talk': 'Small talk', curveball: 'Curveball', 'off-topic': 'Off-topic', 'follow-up': 'Follow-up', 'questions-for-interviewer': 'Your questions', closing: 'Closing', other: 'Moment' });
 
 const scoreTone = score => (typeof score !== 'number' ? 'text-white/50' : score >= 8 ? 'text-emerald-200' : score >= 5 ? 'text-amber-100' : 'text-red-200');
@@ -42,41 +36,10 @@ export function FeedbackView({ feedback }) {
 }
 
 export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, ready, disabled }) {
-  const [view, setView] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState(null);
-  const [copied, setCopied] = useState(false);
-  const [historyIndex, setHistoryIndex] = useState(-1);
   const [practiceBusy, setPracticeBusy] = useState(false);
   const [pastCalls, setPastCalls] = useState([]);
   const [pastNotice, setPastNotice] = useState(null);
   const api = typeof window !== 'undefined' ? window.electronAPI : null;
-
-  const reload = useCallback(async () => {
-    if (!api?.loadInterviewPractice) return;
-    try { const result = await api.loadInterviewPractice({ nodeId }); if (result && result.success !== false) setView(result); } catch { /* keep the last view */ }
-  }, [api, nodeId]);
-  useEffect(() => {
-    const timer = setTimeout(() => { void reload(); }, 0);
-    const unsubscribe = api?.onInterviewPracticeUpdated ? api.onInterviewPracticeUpdated(event => { if (event?.nodeId === nodeId) { setHistoryIndex(-1); if (event.kind === 'feedback') setNotice(null); void reload(); } }) : () => {};
-    return () => { clearTimeout(timer); unsubscribe(); };
-  }, [api, nodeId, reload]);
-  // Expiry is computed on read and never pushed; re-read while a session is armed.
-  const armed = view?.session?.status === 'armed';
-  useEffect(() => {
-    if (!armed) return undefined;
-    const timer = setInterval(() => { void reload(); }, 60_000);
-    return () => clearInterval(timer);
-  }, [armed, reload]);
-  // The practice connector coming up after launch sends no event either.
-  const bridgeNotReady = !!view && !view.bridge?.ready;
-  useEffect(() => {
-    if (!bridgeNotReady) return undefined;
-    const timer = setInterval(() => { void reload(); }, 5000);
-    const onFocus = () => { void reload(); };
-    window.addEventListener('focus', onFocus);
-    return () => { clearInterval(timer); window.removeEventListener('focus', onFocus); };
-  }, [bridgeNotReady, reload]);
 
   // Past practice calls are local: list them whenever the hub mounts (and after
   // a call finishes) so a replay opens without leaving this panel.
@@ -116,48 +79,14 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The replay could not open.' }); }
   };
 
-  const start = async () => {
-    if (!api?.startInterviewPractice || busy) return;
-    setBusy(true); setNotice(null);
-    try {
-      const result = await api.startInterviewPractice({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest });
-      if (!result || result.success === false) { setNotice({ tone: 'error', text: result?.error || 'Practice could not start.' }); return; }
-      setView(result);
-      setNotice(result.ok ? { tone: 'ok', text: 'Claude chat opened in Chrome with the interview set up. Pick the model you want, press Enter, then switch to voice mode and treat it like a real call. Feedback appears here when the interviewer closes the call.' } : { tone: 'error', text: result.note || 'Practice could not start.' });
-    } catch (error) { setNotice({ tone: 'error', text: error?.message || 'Practice could not start.' }); }
-    finally { setBusy(false); }
-  };
-  const cancel = async () => {
-    if (!api?.cancelInterviewPractice || busy) return;
-    setBusy(true);
-    try { const result = await api.cancelInterviewPractice({ nodeId }); if (result && result.success !== false) setView(result); } catch { /* status reload shows the truth */ }
-    finally { setBusy(false); }
-  };
-  const copyUrl = async () => {
-    const url = view?.bridge?.connectorUrl;
-    if (!url) return;
-    try { await navigator.clipboard.writeText(url); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* clipboard unavailable */ }
-  };
-
-  // Older preloads expose only the Claude-chat path, so each path degrades on
-  // its own instead of hiding the whole panel.
-  const canChat = typeof api?.startInterviewPractice === 'function';
-  const canCallApi = typeof api?.startPracticeCall === 'function';
-  if (!canChat && !canCallApi) return null;
-  const bridge = view?.bridge || null;
-  const session = view?.session || null;
-  const history = view?.history || [];
-  const shown = historyIndex >= 0 ? history[historyIndex] : view?.feedback;
-  const canStart = ready && !disabled && !busy && !!bridge?.ready && session?.status !== 'armed';
-  // Same readiness rule as the Claude-chat start: prepared interview, connector
-  // up, and no session already in progress.
-  const canCall = ready && !disabled && !practiceBusy && !!bridge?.ready && session?.status !== 'armed';
+  // The in-app call is the only practice path; without it the panel has nothing to show.
+  if (typeof api?.startPracticeCall !== 'function') return null;
+  const canCall = ready && !disabled && !practiceBusy;
   const durationLabel = ms => { const total = Math.max(0, Math.round((Number(ms) || 0) / 1000)); return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`; };
   return <section className="space-y-2 border-t border-white/10 pt-3" aria-label="Practice interview">
     <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
-    <p className="text-[11px] text-white/60">A Claude chat plays the interviewer on a virtual call: small talk, your prepared questions reworded, follow-ups and curveballs of its own. Written feedback on the whole call comes back here.</p>
-    {canCallApi && <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
-      <p className="text-[11px] text-white/70">A local AI interviewer calls inside the app: it speaks, hears your answers, and writes up the call afterwards.</p>
+    <p className="text-[11px] text-white/60">An AI interviewer calls you inside the app: small talk, your prepared questions reworded, follow-ups and curveballs. Answer out loud, or type in the call's chat — typed answers are heard as if you said them. Feedback on the whole call comes with the replay.</p>
+    <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
       <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Starting…' : 'Start practice call'}</button>
       {!ready && <p className="text-[10px] text-white/45">Prepare the interview first; the call uses the prepared questions and answers.</p>}
       <div aria-label="Past calls">
@@ -172,19 +101,7 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
         })}</ul>}
       </div>
       {pastNotice && <p role={pastNotice.tone === 'error' ? 'alert' : 'status'} className={`text-[11px] ${pastNotice.tone === 'error' ? 'text-red-200' : 'text-emerald-100'}`}>{pastNotice.text}</p>}
-    </div>}
-    {canChat && <p className="text-[10px] font-semibold uppercase text-white/45">Practice in Claude chat instead</p>}
-    {bridge && !bridge.ready && <p role="status" className="rounded-md border border-amber-400/25 bg-amber-500/10 p-2 text-[11px] text-amber-100">{bridge.reason === 'no_hostname' ? 'The practice connector is not set up; feedback arrives through it.' : 'The practice connector is not running; feedback arrives through its public hostname.'}</p>}
-    {bridge?.connectorUrl && <div className="rounded-md border border-white/10 bg-black/20 p-1.5 text-[10px] text-white/55">
-      <p>Once, in claude.ai → Settings → Connectors → Add custom connector (no OAuth), name it “{bridge.connectorName}” with this URL:</p>
-      <p className="mt-0.5 flex items-center gap-1"><code className="truncate text-white/80" title={bridge.connectorUrl}>{bridge.connectorUrl}</code><button type="button" className="nodrag rounded border border-white/10 px-1 py-0.5 text-[10px] hover:bg-white/5" onClick={copyUrl} aria-label="Copy practice connector URL"><Copy size={10} className="mr-0.5 inline" />{copied ? 'Copied' : 'Copy'}</button></p>
-    </div>}
-    <button type="button" className="nodrag w-full rounded-md bg-violet-500/20 px-2 py-1.5 text-xs text-violet-100 disabled:opacity-50" onClick={start} disabled={!canStart}>{busy ? 'Opening…' : session?.status === 'armed' ? 'Interview in progress' : 'Start practice interview'}</button>
-    {!ready && <p className="text-[10px] text-white/45">Prepare the interview first; practice uses the prepared questions and answers.</p>}
-    {session && <p role="status" className="text-[11px] text-white/70">{STATUS_TEXT[session.status] || ''}{session.status === 'armed' && <button type="button" className="ml-2 text-violet-200 underline disabled:opacity-50" onClick={cancel} disabled={busy}>Cancel</button>}</p>}
-    {notice && <p role={notice.tone === 'error' ? 'alert' : 'status'} className={`text-[11px] ${notice.tone === 'error' ? 'text-red-200' : 'text-emerald-100'}`}>{notice.text}</p>}
-    {history.length > 0 && <label className="block text-[10px] text-white/50">Earlier feedback<select aria-label="Earlier practice feedback" className="nodrag mt-0.5 w-full rounded-md border border-white/10 bg-black/30 px-1 py-1 text-[11px]" value={historyIndex} onChange={event => setHistoryIndex(Number(event.target.value))}><option value={-1}>Latest{view?.feedback?.receivedAt ? ` · ${when(view.feedback.receivedAt)}` : ''}</option>{history.map((item, index) => <option key={index} value={index}>{when(item.receivedAt) || `Earlier ${index + 1}`}{item.overall?.score != null ? ` · ${item.overall.score}/10` : ''}</option>)}</select></label>}
-    {shown ? <FeedbackView feedback={shown} /> : session?.status === 'armed' ? null : <p className="text-[10px] text-white/45">No feedback yet.</p>}
+    </div>
   </section>;
 }
 

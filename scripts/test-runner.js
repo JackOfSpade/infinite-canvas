@@ -228,6 +228,7 @@ import one_card_live_acceptance from './tests/one-card-live-acceptance.js';
 import pointer_occlusion_probe from './tests/pointer-occlusion-probe.js';
 import test_runner_watchdog from './tests/test-runner-watchdog.js';
 import interview_helper from './tests/interview-helper.js';
+import interview_helper_canvas_career_drop from './tests/interview-helper-canvas-career-drop.js';
 import interview_helper_privacy from './tests/interview-helper-privacy.js';
 import interview_helper_render from './tests/interview-helper-render.js';
 import interview_private_store_filesystem from './tests/interview-private-store-filesystem.js';
@@ -553,6 +554,7 @@ const testGroups = [
   ['pointer-occlusion-probe.js', pointer_occlusion_probe],
   ['test-runner-watchdog.js', test_runner_watchdog],
   ['interview-helper.js', interview_helper],
+  ['interview-helper-canvas-career-drop.js', interview_helper_canvas_career_drop],
   ['interview-helper-privacy.js', interview_helper_privacy],
   ['interview-helper-render.js', interview_helper_render],
   ['interview-private-store-filesystem.js', interview_private_store_filesystem],

@@ -286,6 +286,49 @@ export default [
       } finally { controller.abort(); await bundle?.dispose(); await fs.promises.rm(directory, { recursive: true, force: true }); }
     });
   } },
+  { name: 'practice panel source: the Claude-chat practice UI and its IPC are gone, the in-app call and feedback view stay', async run() {
+    const source = await fs.promises.readFile(path.resolve('src/components/InterviewPracticePanel.jsx'), 'utf8');
+    assert.equal(source.includes('Practice in Claude chat'), false, 'no Claude-chat practice heading');
+    assert.equal(source.includes('Start practice interview'), false, 'no Claude-chat start button');
+    assert.equal(source.includes('onInterviewPracticeUpdated'), false, 'no Claude-chat subscription');
+    assert.equal(source.includes('connectorUrl'), false, 'no connector URL box');
+    assert.doesNotMatch(source, /\b(?:load|cancel|start)InterviewPractice\b/u, 'the panel never calls the Claude-chat IPC');
+    assert.equal(/import \{[^}]*\bCopy\b[^}]*\} from 'lucide-react'/u.test(source), false, 'the unused Copy icon import is gone');
+    assert(source.includes('Start practice call'), 'the in-app call button stays');
+    assert(source.includes('Past calls'), 'past calls stay');
+    assert.match(source, /export function FeedbackView/u, 'FeedbackView keeps its named export');
+    assert.match(source, /export default InterviewPracticePanel/u);
+  } },
+  { name: 'practice panel render: the call starts with no connector, no Claude-chat API and no session', async run() {
+    await withDom(async window => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-practice-panel-'));
+      const entry = path.join(directory, 'PracticePanelProbe.jsx');
+      const controller = new AbortController();
+      let bundle;
+      try {
+        await fs.promises.writeFile(entry, `import React from 'react';\nimport { InterviewPracticePanel } from ${JSON.stringify(path.resolve('src/components/InterviewPracticePanel.jsx'))};\nexport function PanelProbe(props) { return <InterviewPracticePanel {...props} />; }\n`);
+        bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
+        const started = [];
+        window.electronAPI = { startPracticeCall: async args => { started.push(args); return { success: true }; } };
+        const root = bundle.module.createRoot(window.document.getElementById('root'));
+        const props = { nodeId: 'helper-1', briefRecordId: 'c'.repeat(64), snapshotId: 'd'.repeat(64), canonicalJobUrl: 'https://jobs.example/1', ready: true };
+        await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, props)); await new Promise(resolve => setTimeout(resolve, 0)); });
+        const panel = () => window.document.querySelector('section[aria-label="Practice interview"]');
+        assert.ok(panel(), 'the panel renders when only the in-app call API exists');
+        assert.equal(panel().textContent.includes('Practice in Claude chat'), false, 'no Claude-chat practice UI is rendered');
+        const button = [...panel().querySelectorAll('button')].find(item => item.textContent.trim() === 'Start practice call');
+        assert.ok(button, 'the Start practice call button renders');
+        assert.equal(button.disabled, false, 'the call is not gated on connector readiness or a Claude-chat session');
+        await bundle.module.act(async () => { button.dispatchEvent(new window.Event('click', { bubbles: true })); await new Promise(resolve => setTimeout(resolve, 0)); });
+        assert.equal(started.length, 1, 'clicking the button starts the in-app call');
+        assert.equal(started[0].nodeId, 'helper-1'); assert.equal(started[0].canonicalJobUrl, 'https://jobs.example/1');
+        delete window.electronAPI.startPracticeCall;
+        await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.PanelProbe, props)); await new Promise(resolve => setTimeout(resolve, 0)); });
+        assert.equal(panel(), null, 'without the in-app call API there is nothing to practise');
+        await bundle.module.act(async () => { root.unmount(); });
+      } finally { controller.abort(); await bundle?.dispose(); await fs.promises.rm(directory, { recursive: true, force: true }); }
+    });
+  } },
   { name: 'practice plan order and bridge readiness', async run() {
     const ordered = orderPracticeQuestions([{ question: 'B?' }, { question: 'A?' }, { question: 'a?' }, { question: 'C?' }], ['A?', 'Missing?', 'C?']);
     assert.deepEqual(ordered.map(card => card.question), ['A?', 'C?', 'B?']);
