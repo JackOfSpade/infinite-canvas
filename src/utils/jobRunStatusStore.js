@@ -4,7 +4,12 @@ const entries = new Map();
 const listeners = new Set();
 let snapshot = Object.freeze([]);
 
-const statusKey = entry => JSON.stringify([entry.label, entry.headline, entry.lines, entry.pauseKeys, entry.pauseDisabledReason]);
+const pausable = entry => Boolean(entry?.onPause || entry?.pauseWithoutSave);
+
+const statusKey = entry => JSON.stringify([
+  entry.label, entry.headline, entry.lines, entry.pauseKeys, entry.pauseDisabledReason,
+  entry.claudeRequestId, entry.pauseWithoutSave,
+]);
 
 function publishSnapshot() {
   snapshot = Object.freeze([...entries.values()]);
@@ -16,6 +21,10 @@ export function publishJobRunStatus(nodeId, entry) {
     nodeId, label: entry.label || 'Job Search', headline: entry.headline || 'Processing',
     lines: (entry.lines || []).filter(Boolean), pauseKeys: entry.pauseKeys || [], onPause: entry.onPause || null,
     pauseDisabledReason: entry.pauseDisabledReason || '',
+    // A live Claude request the panel draws with the full worker activity card.
+    claudeRequestId: entry.claudeRequestId || null,
+    // The run pauses in place with no save step, so the card still holds a button.
+    pauseWithoutSave: entry.pauseWithoutSave === true,
   };
   const previous = entries.get(nodeId);
   entries.set(nodeId, next);
@@ -34,14 +43,14 @@ export const getJobRunStatus = nodeId => entries.get(nodeId) || null;
 /** Whose Pause & save covers this module: a Board running it, otherwise the module itself. */
 export function pauseOwnerStatus(nodeId, statuses = snapshot) {
   const key = `node:${nodeId}`;
-  return statuses.find(entry => entry.nodeId !== nodeId && entry.onPause && entry.pauseKeys.includes(key))
+  return statuses.find(entry => entry.nodeId !== nodeId && pausable(entry) && entry.pauseKeys.includes(key))
     || statuses.find(entry => entry.nodeId === nodeId)
     || null;
 }
 
 /** One button per pausable run. The handoff row holds its owner's button, so that card shows none. */
 export function showsOwnPauseButton(entry, handoffNodeId = null, statuses = snapshot) {
-  if (!entry?.onPause || pauseOwnerStatus(entry.nodeId, statuses)?.nodeId !== entry.nodeId) return false;
+  if (!pausable(entry) || pauseOwnerStatus(entry.nodeId, statuses)?.nodeId !== entry.nodeId) return false;
   return !handoffNodeId || pauseOwnerStatus(handoffNodeId, statuses)?.nodeId !== entry.nodeId;
 }
 

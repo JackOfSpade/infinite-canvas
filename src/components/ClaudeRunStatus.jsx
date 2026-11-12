@@ -1,7 +1,7 @@
 import React, { useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { ChevronDown, ChevronUp, ClipboardCopy, PauseCircle, PlayCircle } from 'lucide-react';
-import { ClaudeProgressCard } from './ClaudeProgress';
+import { ClaudeProgressCard, ClaudeTaskProgress } from './ClaudeProgress';
 import { claudeNodePauseKey, getClaudePauseFlow, resumeClaude, startClaudePause, stopRunningClaude, subscribeClaudePauseFlows } from '../utils/claudePauseFlow';
 import { getClaudeTaskActivity, subscribeClaudeTaskActivity } from '../utils/claudeTaskActivityStore';
 import { getJobRunStatus, getJobRunStatuses, showsOwnPauseButton, subscribeJobRunStatuses } from '../utils/jobRunStatusStore';
@@ -46,6 +46,19 @@ export function ClaudePauseControl({ pauseKeys, onSave = null, disabledReason = 
 }
 
 function RunStatusCard({ entry, showPause }) {
+  const pauseFooter = showPause ? (
+    <div className="mt-2">
+      <ClaudePauseControl
+        pauseKeys={entry.pauseKeys.length ? entry.pauseKeys : [claudeNodePauseKey(entry.nodeId)]}
+        onSave={entry.pauseWithoutSave && !entry.onPause ? null : () => (getJobRunStatus(entry.nodeId)?.onPause || entry.onPause)()}
+        disabledReason={entry.pauseDisabledReason}
+      />
+    </div>
+  ) : null;
+  // A module with a live Claude request shows the worker's own activity, not a summary.
+  if (entry.claudeRequestId) {
+    return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={pauseFooter} />;
+  }
   return (
     <ClaudeProgressCard
       kind="job-run"
@@ -53,15 +66,7 @@ function RunStatusCard({ entry, showPause }) {
       contextLabel={entry.label}
       headline={entry.headline}
       detail={entry.lines.join(' · ')}
-      footer={showPause ? (
-        <div className="mt-2">
-          <ClaudePauseControl
-            pauseKeys={entry.pauseKeys.length ? entry.pauseKeys : [claudeNodePauseKey(entry.nodeId)]}
-            onSave={() => (getJobRunStatus(entry.nodeId)?.onPause || entry.onPause)()}
-            disabledReason={entry.pauseDisabledReason}
-          />
-        </div>
-      ) : null}
+      footer={pauseFooter}
     />
   );
 }

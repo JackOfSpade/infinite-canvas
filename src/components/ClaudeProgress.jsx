@@ -103,11 +103,14 @@ export function ClaudeProgress({ run, item }) {
 
 // A handoff the local Claude worker is answering: its live steps and clocks, no
 // controls. Used by the dock for every handoff released to the worker.
-export function ClaudeTaskProgress({ requestId, compact = false }) {
+export function ClaudeTaskProgress({ requestId, compact = false, contextPrefix = '', region = undefined, footer = null }) {
   const activity = useSyncExternalStore(subscribeClaudeTaskActivity, getClaudeTaskActivity, getClaudeTaskActivity);
   const view = deriveClaudeTaskProgress({ activity, requestId });
   const now = useProgressClock(hasClock(view));
-  return <ClaudeProgressCard {...presentView(view, now)} compact={compact} />;
+  const present = presentView(view, now);
+  // A module's card names the module before the worker's own context label.
+  const contextLabel = contextPrefix ? (present.contextLabel ? `${contextPrefix} · ${present.contextLabel}` : contextPrefix) : present.contextLabel;
+  return <ClaudeProgressCard {...present} contextLabel={contextLabel} compact={compact} region={region} footer={footer} />;
 }
 
 export default ClaudeProgress;

@@ -12,7 +12,7 @@ import { COMPANY_RESEARCH_VERSION, evaluateJobPreferences, reapplyStoredJobPrefe
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { savedJobsReevaluationKeepsScores } from '../../src/utils/jobSearchSplitClear.js';
 import { carryBoardRescores } from '../../src/nodes/jobboard/jobBoardResearchStage.js';
-import { pauseOwnerStatus, showsOwnPauseButton } from '../../src/utils/jobRunStatusStore.js';
+import { __resetJobRunStatusForTests, getJobRunStatus, pauseOwnerStatus, publishJobRunStatus, showsOwnPauseButton, subscribeJobRunStatuses } from '../../src/utils/jobRunStatusStore.js';
 import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { runBoardPreferenceOverrideStage } from '../../src/nodes/jobboard/jobBoardPreferenceOverrideStage.js';
 import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView } from '../../src/utils/jobBoardPreferenceOverride.js';
@@ -411,6 +411,58 @@ export default [
       const dialog = fs.readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
       assert.match(dialog, /onSave=\{pauseOwnerStatus\(activeRequest\.nodeId\)\?\.onPause/);
       assert.match(fs.readFileSync(new URL('../../src/components/ClaudeRunStatus.jsx', import.meta.url), 'utf8'), /showPause=\{showsOwnPauseButton\(entry, pauseOwnedBy, statuses\)\}/);
+    },
+  },
+  {
+    name: 'Run status entries keep their live Claude request and a pause with no save step',
+    run: () => {
+      __resetJobRunStatusForTests();
+      try {
+        publishJobRunStatus('interview', { label: 'Interview Helper' });
+        const defaults = getJobRunStatus('interview');
+        assert.equal(defaults.claudeRequestId, null, 'no live request by default');
+        assert.equal(defaults.pauseWithoutSave, false, 'a saved pause by default');
+        const renders = [];
+        const unsubscribe = subscribeJobRunStatuses(() => renders.push(getJobRunStatus('interview').claudeRequestId));
+        publishJobRunStatus('interview', { label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: 'node:interview:prep', pauseKeys: ['node:interview:prep'], pauseWithoutSave: true });
+        assert.equal(getJobRunStatus('interview').claudeRequestId, 'node:interview:prep');
+        assert.equal(getJobRunStatus('interview').pauseWithoutSave, true);
+        assert.deepEqual(renders, ['node:interview:prep'], 'a new request id re-renders the panel');
+        publishJobRunStatus('interview', { label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: 'node:interview:prep', pauseKeys: ['node:interview:prep'], pauseWithoutSave: false });
+        assert.equal(getJobRunStatus('interview').claudeRequestId, 'node:interview:prep', 'the request survives a plain re-publish');
+        assert.deepEqual(renders, ['node:interview:prep', 'node:interview:prep'], 'flipping pauseWithoutSave alone also re-renders');
+        publishJobRunStatus('interview', { label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: 'node:interview:prep', pauseKeys: ['node:interview:prep'], pauseWithoutSave: false });
+        assert.equal(renders.length, 2, 'an unchanged entry does not re-render');
+        unsubscribe();
+      } finally { __resetJobRunStatusForTests(); }
+    },
+  },
+  {
+    name: 'Pause ownership: a run that pauses without saving still holds its own button',
+    run: () => {
+      const board = { nodeId: 'board', onPause: () => {}, pauseKeys: ['node:board'] };
+      const interview = { nodeId: 'interview', onPause: null, pauseWithoutSave: true, pauseKeys: ['node:interview'] };
+      const idle = { nodeId: 'idle', onPause: null, pauseKeys: ['node:idle'] };
+      const all = [board, interview, idle];
+      assert.equal(pauseOwnerStatus('interview', all), interview);
+      assert.equal(showsOwnPauseButton(interview, null, all), true, 'with no handoff the run shows its own Pause button');
+      assert.equal(showsOwnPauseButton(interview, 'board', all), true, 'nothing hands this run to another row');
+      assert.equal(showsOwnPauseButton(idle, null, all), false, 'neither an onPause nor pauseWithoutSave means no button');
+      const silentBoard = [{ nodeId: 'board', onPause: null, pauseWithoutSave: true, pauseKeys: ['node:board', 'node:interview'] }, interview];
+      assert.equal(pauseOwnerStatus('interview', silentBoard), silentBoard[0], 'a Board that pauses without saving covers the module it runs');
+    },
+  },
+  {
+    name: 'Interview Helper: the live Claude status lives in the Modules running panel, not the node',
+    run: () => {
+      const node = fs.readFileSync(new URL('../../src/nodes/InterviewHelperNode.jsx', import.meta.url), 'utf8');
+      assert.doesNotMatch(node, /ClaudeTaskProgress/);
+      assert.doesNotMatch(node, /ClaudePauseControl/);
+      assert.match(node, /usePublishJobRunStatus\(id, locallyPreparing \? \{ label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: claudeInterviewPauseKey\(data\.interviewHelperPreparationRunId\), pauseKeys: \[claudeInterviewPauseKey\(data\.interviewHelperPreparationRunId\)\], pauseWithoutSave: true \} : null\);/);
+      assert.match(node, /locallyPreparing \? 'Preparing…'/);
+      const card = fs.readFileSync(new URL('../../src/components/ClaudeRunStatus.jsx', import.meta.url), 'utf8');
+      assert.match(card, /if \(entry\.claudeRequestId\) \{\n {4}return <ClaudeTaskProgress requestId=\{entry\.claudeRequestId\} contextPrefix=\{entry\.label\} region=\{`\$\{entry\.label\} status`\} footer=\{pauseFooter\} \/>;/);
+      assert.match(card, /onSave=\{entry\.pauseWithoutSave && !entry\.onPause \? null :/);
     },
   },
   {
