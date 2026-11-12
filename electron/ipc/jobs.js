@@ -6495,6 +6495,38 @@ export function __recordJobSourceResolvePassForTests(sourceId, pass = {}, owners
   return recordJobSourceResolvePass(sourceId, pass, ownership || {});
 }
 
+// The gather stage stamps `sources-blocked` with the sources still waiting on a
+// Login/Solve/Skip decision and is never re-stamped afterwards, so a source the
+// user then solved left every later report saying the run stopped. Retire the
+// resolved source from that stage: when none remain the stage is genuinely
+// completed, and `resolvedAfterGather` records WHY it finished late.
+export function recordSourceResolvedAfterGather(sourceId) {
+  const pipeline = jobsTelemetry.pipeline;
+  if (!sourceId || !pipeline || pipeline.phase !== 'sources-blocked') return false;
+  const pending = Array.isArray(pipeline.pendingSources)
+    ? pipeline.pendingSources.filter(id => typeof id === 'string' && id)
+    : [];
+  if (!pending.includes(sourceId)) return false;
+  const remaining = pending.filter(id => id !== sourceId);
+  const resolvedAfterGather = [
+    ...(Array.isArray(pipeline.resolvedAfterGather)
+      ? pipeline.resolvedAfterGather.filter(id => typeof id === 'string' && id)
+      : []),
+    sourceId,
+  ];
+  jobsTelemetry.pipeline = remaining.length === 0
+    ? {
+      ...pipeline,
+      phase: 'completed',
+      ts: Date.now(),
+      active: false,
+      pendingSources: [],
+      resolvedAfterGather,
+    }
+    : { ...pipeline, pendingSources: remaining, resolvedAfterGather };
+  return true;
+}
+
 // The cap on the in-memory per-source resume trail (jobsTelemetry.resumeAttempts,
 // written by recordResumeAttemptTelemetry) and on the report payload built from
 // it. Declared here, ahead of both readers, because the durable receipt below
@@ -17152,7 +17184,12 @@ Return a JSON object with four arrays of search query strings:
             sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'error', url: 'https://www.linkedin.com/jobs', warning: rateWarning });
             return { resolved: true, items: scoringItems, warning: rateWarning, replaceSourceItems: true, nextBlockedUrl: null };
           }
-          if (canWriteTelemetry()) clearLinkedInCeiling(); // finished without hitting the ceiling — reset
+          if (canWriteTelemetry()) {
+            clearLinkedInCeiling(); // finished without hitting the ceiling — reset
+            // A clean LinkedIn re-fetch returns here, before the generic resolve
+            // tail, so it must retire its own sources-blocked stage entry.
+            recordSourceResolvedAfterGather('linkedin');
+          }
           sendProgress({ nodeId, sourceId: 'linkedin', count: items.length, status: 'done' });
           return { resolved: true, items: scoringItems, replaceSourceItems: true, nextBlockedUrl: null };
         } else if (allLinkedIn.length > 0) {
@@ -17160,7 +17197,10 @@ Return a JSON object with four arrays of search query strings:
           // still replaces the pending set (clears the warning cleanly).
           logger.info(`[Jobs][${nodeId}] LinkedIn re-fetch: all ${allLinkedIn.length} jobs already have descriptions`);
           items = await admitForScoring(allLinkedIn);
-          if (canWriteTelemetry()) clearLinkedInCeiling();
+          if (canWriteTelemetry()) {
+            clearLinkedInCeiling();
+            recordSourceResolvedAfterGather('linkedin');
+          }
           sendProgress({ nodeId, sourceId: 'linkedin', count: allLinkedIn.length, status: 'done' });
           return { resolved: true, items, replaceSourceItems: true, nextBlockedUrl: null };
         } else {
@@ -17934,6 +17974,17 @@ Return a JSON object with four arrays of search query strings:
         : (result?.resolved === false ? 'failed' : 'completed'),
       resolveWarning,
     );
+    // The gather stage stamped `sources-blocked` with this source still waiting
+    // on a user decision. A pass that resolved it with no remaining block
+    // warning and no queued blocked query retires that stage; otherwise every
+    // later report keeps calling a finished run INDETERMINATE.
+    if (canWriteTelemetry()
+      && result?.resolved !== false
+      && resolveWarning?.severity !== 'block'
+      && resolveWarning?.severity !== 'throttle'
+      && remaining.length === 0) {
+      recordSourceResolvedAfterGather(sourceId);
+    }
     // JobSourceCardNode's onResolved handler already reads `warning` off this
     // return to re-derive the hub's ScrapeWarningsPanel.
     return {

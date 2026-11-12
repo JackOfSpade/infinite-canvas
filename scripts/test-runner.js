@@ -199,6 +199,7 @@ import job_gap_review from './tests/job-gap-review.js';
 import validator_correction_details from './tests/validator-correction-details.js';
 import job_search_clear_ui from './tests/job-search-clear-ui.js';
 import job_board_combine_receipt from './tests/job-board-combine-receipt.js';
+import job_board_recovery_retry from './tests/job-board-recovery-retry.js';
 import job_api_probe from './tests/job-api-probe.js';
 import application_pdf_reconcile from './tests/application-pdf-reconcile.js';
 import packaging_integrity from './tests/packaging-integrity.js';
@@ -525,6 +526,7 @@ const testGroups = [
   ['validator-correction-details.js', validator_correction_details],
   ['job-search-clear-ui.js', job_search_clear_ui],
   ['job-board-combine-receipt.js', job_board_combine_receipt],
+  ['job-board-recovery-retry.js', job_board_recovery_retry],
   ['job-api-probe.js', job_api_probe],
   ['application-pdf-reconcile.js', application_pdf_reconcile],
   ['packaging-integrity.js', packaging_integrity],

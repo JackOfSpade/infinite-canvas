@@ -4442,6 +4442,11 @@ const JOB_BOARD_SELECTOR_ACTION_LABELS = new Set([
   'Combine saved results',
   'Search selected & combine',
 ]);
+// Why a paused Board's recovery error is (or is not) retryable, and what its
+// awaited source looks like. Fixed codes only: the report must never carry a
+// rendered message or a run id here.
+const JOB_BOARD_RECOVERY_ERROR_LATCHES = new Set(['none', 'search-retryable', 'sticky']);
+const JOB_BOARD_AWAITED_SOURCE_STATUSES = new Set(['none', 'pending', 'run-changed', 'terminal-match']);
 
 function boundedSelectorCount(value) {
   return Number.isSafeInteger(value) && value >= 0 && value <= 10_000 ? value : null;
@@ -4480,6 +4485,12 @@ function boardSelectorRuntimeDiagnostic(value) {
       .slice(0, 8),
     selectorBounds: selectorBoundsDiagnostic(boardDiagnosticValue(value, 'selectorBounds')),
     sourceListBounds: selectorBoundsDiagnostic(boardDiagnosticValue(value, 'sourceListBounds')),
+    recoveryErrorLatch: JOB_BOARD_RECOVERY_ERROR_LATCHES.has(boardDiagnosticValue(value, 'recoveryErrorLatch'))
+      ? boardDiagnosticValue(value, 'recoveryErrorLatch')
+      : 'not retained',
+    awaitedSource: JOB_BOARD_AWAITED_SOURCE_STATUSES.has(boardDiagnosticValue(value, 'awaitedSource'))
+      ? boardDiagnosticValue(value, 'awaitedSource')
+      : 'not retained',
   };
 }
 
@@ -4500,10 +4511,20 @@ function selectorBoundsSummary(bounds) {
   return `${visible}${scroll}${overflow.length ? ` (${overflow.join(', ')})` : ''}`;
 }
 
-function boardSelectorRuntimeSummary(snapshot) {
+// Exported so a regression test can assert the exact report line the Board's
+// recovery diagnostics produce instead of re-reading this renderer's source.
+export function boardSelectorRuntimeSummary(snapshot) {
   if (!snapshot) return 'not retained';
   const reasons = snapshot.reasons.length > 0 ? snapshot.reasons.join(',') : 'none';
-  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${snapshot.actionVisible === false ? 'hidden (board up to date)' : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)}`;
+  // The diagnostic sanitizer already allow-lists these two codes. Re-checking
+  // here keeps a hand-built snapshot from printing free text into the report.
+  const recoveryErrorLatch = JOB_BOARD_RECOVERY_ERROR_LATCHES.has(snapshot.recoveryErrorLatch)
+    ? snapshot.recoveryErrorLatch
+    : 'not retained';
+  const awaitedSource = JOB_BOARD_AWAITED_SOURCE_STATUSES.has(snapshot.awaitedSource)
+    ? snapshot.awaitedSource
+    : 'not retained';
+  return `rows=${snapshot.rowCount ?? 'not retained'} · selected=${snapshot.selectedCount ?? 'not retained'} · action=${snapshot.actionVisible === false ? 'hidden (board up to date)' : `${snapshot.actionEligible === true ? 'enabled' : snapshot.actionEligible === false ? 'disabled' : 'not retained'}${snapshot.actionLabel ? ` (${snapshot.actionLabel})` : ''}`} · reasons=${reasons} · selector=${selectorBoundsSummary(snapshot.selectorBounds)} · source-list=${selectorBoundsSummary(snapshot.sourceListBounds)} · recovery-error-latch=${recoveryErrorLatch} · awaited-source=${awaitedSource}`;
 }
 
 const JOB_BOARD_COMBINE_PHASES = new Set([
@@ -5189,7 +5210,17 @@ export function formatSourceEvent(event) {
 export function formatPipelineState(pipeline = {}) {
   if (pipeline.active) return '🔄 active';
   const phase = String(pipeline.phase || '').toLowerCase();
-  if (phase === 'completed') return '✅ complete';
+  if (phase === 'completed') {
+    // A gather that first stamped `sources-blocked` and only completed once a
+    // Solve retired its last blocked source must say so: the bare "complete"
+    // reads as if nothing was ever waiting on the user.
+    const afterSolve = (Array.isArray(pipeline.resolvedAfterGather) ? pipeline.resolvedAfterGather : [])
+      .filter(id => typeof id === 'string' && /^[a-z][a-z0-9-]{0,63}$/u.test(id))
+      .slice(0, 10);
+    return afterSolve.length > 0
+      ? `✅ complete (after Solve: ${afterSolve.join(', ')})`
+      : '✅ complete';
+  }
   if (phase === 'aborted' || phase === 'cancelled') return '⏹️ cancelled';
   if (phase.includes('fail') || phase === 'error') return '❌ failed';
   return '⚠️ stopped';

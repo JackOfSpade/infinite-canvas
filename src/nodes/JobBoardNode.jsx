@@ -74,7 +74,7 @@ import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, combin
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
-import { exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
+import { exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome, awaitedSourceTerminalStatus, canRetryBoardRecoveryAfterError } from '../utils/jobBoardPausedSourceContinuation';
 import { prepareBackgroundBoardChildRequest, validateBackgroundBoardChildRequest } from '../utils/jobBoardBackgroundRecovery';
 import { ACTIVE_JOB_SOURCES } from '../utils/constants';
 import { safeClone } from '../utils/navigationUtils';
@@ -915,6 +915,10 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
   // auto-resume latch. The latter also holds `cleanup:` and `combine:` tokens,
   // which are not evidence that a Search result changed.
   const searchRecoveryErrorRef = useRef(null);
+  // The awaited-source classification the recovery effect last computed, so the
+  // selector runtime snapshot can report why a recovery error was (or was not)
+  // cleared without the selector child knowing anything about recovery.
+  const boardRecoveryDiagnosticsRef = useRef({ recoveryErrorLatch: 'none', awaitedSource: 'none' });
   // An untitled canvas has no sidecar to recover after a reload, but a Search
   // can still pause for source-card input during this mounted renderer session.
   // A real component unmount cancels the Board transaction, so never extend
@@ -1328,10 +1332,17 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     [data.searchExecutionOrder, data.selectedSearchModuleIds, connectedModuleIds],
   );
   const captureSelectorRuntimeSnapshot = useCallback((nextSnapshot) => {
+    // Recovery diagnostics belong to this Board, not to the selector layout, so
+    // merge them into whatever the child observed. The child's snapshot has no
+    // access to the recovery effect's classification, and the bug report needs
+    // it to explain why a paused Board did or did not consume a finished source.
+    const enrichedSnapshot = nextSnapshot === null || nextSnapshot === undefined
+      ? nextSnapshot
+      : { ...nextSnapshot, ...(boardRecoveryDiagnosticsRef.current || {}) };
     // ResizeObserver can deliver duplicate observations. Avoid a state/render
     // loop while retaining the latest exact client/scroll bounds.
     setSelectorRuntimeSnapshot((current) => (
-      JSON.stringify(current) === JSON.stringify(nextSnapshot) ? current : nextSnapshot
+      JSON.stringify(current) === JSON.stringify(enrichedSnapshot) ? current : enrichedSnapshot
     ));
   }, []);
 
@@ -6090,15 +6101,46 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       setRecoveryError('This Job Search is paused with its saved work. Continue from the Job Board when ready.');
       return;
     }
-    const searchRecoveryError = searchRecoveryErrorRef.current;
+    // Classify the awaited source(s) once per run of this effect, right where the
+    // recovery inputs are read. It is the same terminal receipt the continuation
+    // consumes, so the retry guard below and the report's `awaitedSource` field
+    // can never disagree about whether it arrived.
+    const awaitedStatus = awaitedSourceTerminalStatus(plan, getNode);
+    boardRecoveryDiagnosticsRef.current = {
+      recoveryErrorLatch: recoveryError
+        ? (searchRecoveryErrorRef.current?.message === recoveryError ? 'search-retryable' : 'sticky')
+        : 'none',
+      awaitedSource: awaitedStatus,
+    };
     // A Search error may retry only after a *consumable* external state change.
     // The error identity is intentionally separate from autoResumedBoardScanRef:
     // that latch also carries cleanup/combine tokens whose prefixes cannot prove
     // that a Search changed. We defer clearing until after selected-platform
     // verification is no longer pending below.
+    // `canRetryBoardRecoveryAfterError` is the single decision point: the
+    // Search-key rule this local name has always meant, plus the awaited-source
+    // rule that stops a directly-set recovery error from being sticky forever.
+    const searchRecoveryError = searchRecoveryErrorRef.current;
     const hasChangedSearchRecoveryInput = plan.phase === 'searches'
-      && searchRecoveryError?.message === recoveryError
-      && searchRecoveryError.key !== recoveryKey;
+      && canRetryBoardRecoveryAfterError({
+        plan,
+        recoveryError,
+        searchRecoveryError,
+        recoveryKey,
+        awaitedStatus,
+      });
+    // Most recovery errors are published directly with `setRecoveryError(...)`
+    // and so never record the key they were raised under. The Search rule above
+    // cannot see those, which left this effect dead even when the exact awaited
+    // source then finished. Removing the local Search identity narrows the same
+    // helper to its awaited-source rule, so this flag names the admitting rule.
+    const awaitedSourceAdmittedRetry = !!recoveryError && canRetryBoardRecoveryAfterError({
+      plan,
+      recoveryError,
+      searchRecoveryError: null,
+      recoveryKey,
+      awaitedStatus,
+    });
     // Reload recovery needs a file-scoped sidecar. The only no-file exception
     // is a run this mounted Board started itself: source-card resolution is an
     // in-memory continuation of that exact transaction, not durable recovery.
@@ -6513,6 +6555,18 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // immediately before re-admission.
       searchRecoveryErrorRef.current = null;
       setRecoveryError(null);
+    }
+    if (awaitedSourceAdmittedRetry) {
+      // The awaited source finished with the exact generation this plan
+      // recorded, which is the one fact a direct `setRecoveryError(...)` could
+      // never express. Also reset the re-admission latch: re-entering this same
+      // `recoveryKey` under a sticky error is the deadlock being recovered from.
+      const awaitedRunId = plan.awaitingSourceResolution?.jobRunId
+        || (Array.isArray(plan.awaitingSourceResolutions) ? plan.awaitingSourceResolutions : [])
+          .find(entry => entry?.jobRunId)?.jobRunId
+        || '';
+      autoResumedBoardScanRef.current = null;
+      EventLogger.log(`[JobBoard] recovery error cleared: awaited source finished id=${id} run=${awaitedRunId}`);
     }
     if (autoResumedBoardScanRef.current === recoveryKey) return;
     if (!isCurrentBoardScanResume(getNode(id)?.data?.boardScanResume, plan)) {

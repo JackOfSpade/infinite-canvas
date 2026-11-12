@@ -13874,6 +13874,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
 
   const autoResumedManualAiRunRef = useRef(null);
   const manualAiAutoResumeAttemptRef = useRef(null);
+  // Latches the Board-deferral log to the exact (runId, owner) already reported,
+  // so a deferral that re-runs on every progress write logs once.
+  const boardDeferralLogRef = useRef(null);
   const [manualAiAutoResumeRetryRevision, setManualAiAutoResumeRetryRevision] = useState(0);
   useEffect(() => {
     const resume = data.manualAiResume;
@@ -13926,9 +13929,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // The Board's durable plan owns both queue admission and the exact child
       // rollback identity. Its recovery effect re-invokes runForJobBoard with
       // this descriptor; a parallel standalone replay would deadlock or race it.
-      EventLogger.log(
-        `[JobSearch][${id}] Manual-AI auto-resume deferred to Job Board ${boardRecoveryOwner.orchestratorNodeId}`,
-      );
+      // Log once per (run, owner): this branch re-runs on every progress write,
+      // and an unlatched log flooded the report with hundreds of identical lines.
+      const deferralKey = `${resume.runId}\n${boardRecoveryOwner.orchestratorNodeId}`;
+      if (boardDeferralLogRef.current !== deferralKey) {
+        boardDeferralLogRef.current = deferralKey;
+        EventLogger.log(
+          `[JobSearch][${id}] Manual-AI auto-resume deferred to Job Board ${boardRecoveryOwner.orchestratorNodeId}`,
+        );
+      }
       return;
     }
     if (resume.retirementPending) {

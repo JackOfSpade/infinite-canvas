@@ -1,5 +1,6 @@
 import { isJobSourceWarningGating } from './jobSourceWarningPolicy.js';
 import { moduleCombineFingerprint } from '../nodes/jobboard/mergeJobs.js';
+import { SAVED_HANDOFF_READY_MESSAGE } from '../nodes/jobboard/boardRecoveryNotice.js';
 
 function nonEmptyReceiptToken(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : null;
@@ -178,4 +179,86 @@ export function resolveExactPausedJobBoardTerminal(options) {
     ...terminal,
     mergeable: isMergeableTerminalJobSearchOutcome(options?.source, terminal.outcome),
   };
+}
+
+/**
+ * The paused sources a Board plan is still waiting on. The primary
+ * `awaitingSourceResolution` and the multi-source `awaitingSourceResolutions`
+ * entries can name the same source, so classify each source exactly once.
+ */
+function awaitedSourceDescriptors(plan) {
+  const descriptors = [
+    plan?.awaitingSourceResolution,
+    ...(Array.isArray(plan?.awaitingSourceResolutions) ? plan.awaitingSourceResolutions : []),
+  ];
+  const unique = [];
+  for (const descriptor of descriptors) {
+    const sourceId = typeof descriptor?.sourceId === 'string' ? descriptor.sourceId : '';
+    if (!sourceId || unique.some(entry => entry.sourceId === sourceId)) continue;
+    unique.push(descriptor);
+  }
+  return unique;
+}
+
+/**
+ * Classify the source(s) a paused Board scan is waiting on against the same
+ * terminal receipt the continuation logic consumes.
+ *
+ * `terminal-match` requires EVERY awaited source to prove the generation the
+ * plan recorded: one pending or one changed generation must not resume a plan
+ * on a partial witness. A changed generation outranks a pending sibling because
+ * it can never be consumed by this plan, while a pending one may still settle.
+ */
+export function awaitedSourceTerminalStatus(plan, getNode) {
+  const descriptors = awaitedSourceDescriptors(plan);
+  if (descriptors.length === 0) return 'none';
+  let pending = false;
+  let changed = false;
+  for (const descriptor of descriptors) {
+    const source = typeof getNode === 'function' ? getNode(descriptor.sourceId) : null;
+    const terminal = terminalJobSearchOutcome(source);
+    if (!terminal) pending = true;
+    else if (terminal.runId !== descriptor.jobRunId) changed = true;
+  }
+  if (changed) return 'run-changed';
+  return pending ? 'pending' : 'terminal-match';
+}
+
+// The two ways a saved pause is published as the Board's recovery error. Both
+// mean "waiting for the user to press Continue", never "a Search failed", so
+// the awaited-source retry below must never clear them.
+const BOARD_SAVED_PAUSE_MESSAGES = new Set([
+  SAVED_HANDOFF_READY_MESSAGE,
+  'This Job Search is paused with its saved work. Continue from the Job Board when ready.',
+]);
+
+const isSearchesPhase = plan => !plan?.phase || plan.phase === 'searches';
+
+/**
+ * Whether the recovery effect may continue while `recoveryError` is present.
+ *
+ * An error published through `searchRecoveryErrorRef` carries the recovery key
+ * it was raised under, so a changed key proves a consumable Search transition.
+ * An error set directly (`setRecoveryError(...)` anywhere else in the Board)
+ * never carries that identity and used to be sticky forever, even when the exact
+ * awaited source then finished; the second rule admits exactly that case, and
+ * only for a terminal receipt matching the awaited generation of every awaited
+ * source with no recoverable failure or pending cancellation cleanup.
+ */
+export function canRetryBoardRecoveryAfterError({
+  plan,
+  recoveryError,
+  searchRecoveryError,
+  recoveryKey,
+  awaitedStatus,
+}) {
+  if (!recoveryError) return true;
+  if (!isSearchesPhase(plan)) return false;
+  if (searchRecoveryError?.message === recoveryError && searchRecoveryError.key !== recoveryKey) {
+    return true;
+  }
+  return awaitedStatus === 'terminal-match'
+    && !plan?.recoverableFailure
+    && !plan?.cancellationCleanup
+    && !BOARD_SAVED_PAUSE_MESSAGES.has(recoveryError);
 }
