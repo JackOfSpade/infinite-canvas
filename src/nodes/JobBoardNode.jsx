@@ -4859,6 +4859,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
           activeSearchModuleIdsRef.current.delete(sourceId);
           const source = getNode(sourceId);
           const label = moduleLabel(source?.data);
+          // Every platform is inside its 24-hour rescrape cooldown and the Search has
+          // no saved result to hand on: it contributes nothing, so skip it.
+          if (!error && result?.status === 'not-ready' && result?.reason === 'platforms-recently-scraped') {
+            processed += 1;
+            EventLogger.log(`[JobBoard] skipped Search in rescrape cooldown id=${id} run=${boardRunId} source=${sourceId}`);
+            continue;
+          }
           if (error || result?.status === 'failed' || result?.status === 'not-ready' || result?.status === 'busy') {
             processed += 1;
             incompleteSearches.push({
@@ -5637,6 +5644,20 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
               result.error || 'unknown recovery inspection error',
             );
             return;
+          }
+          // A Search in its 24-hour rescrape cooldown with nothing to hand on is
+          // skipped, not counted as unfinished; Combine leaves it out.
+          if (result?.status === 'not-ready' && result?.reason === 'platforms-recently-scraped') {
+            processed += 1;
+            persistScanResume({
+              activeSourceId: null,
+              activeSourceRollback: null,
+              awaitingSourceResolution: null,
+              recoverableFailure: null,
+            });
+            setScanProgress({ completed: processed, total: totalSelected, currentLabel: label });
+            EventLogger.log(`[JobBoard] skipped Search in rescrape cooldown id=${id} run=${boardRunId} source=${sourceId}`);
+            continue;
           }
           if (result?.status !== 'completed') {
             const error = new Error(result?.error || `${label} did not finish.`);

@@ -164,6 +164,7 @@ import job_search_source_coverage from './tests/job-search-source-coverage.js';
 import job_board_provider from './tests/job-board-provider.js';
 import job_search_board_only from './tests/job-search-board-only.js';
 import job_search_paused_discard from './tests/job-search-paused-discard.js';
+import job_search_rescrape_interval from './tests/job-search-rescrape-interval.js';
 import job_fit_assessment from './tests/job-fit-assessment.js';
 import auth_cookie_checkpoint from './tests/auth-cookie-checkpoint.js';
 import browser_launch_lock_regression from './tests/browser-launch-lock-regression.js';
@@ -490,6 +491,7 @@ const testGroups = [
   ['job-board-provider.js', job_board_provider],
   ['job-search-board-only.js', job_search_board_only],
   ['job-search-paused-discard.js', job_search_paused_discard],
+  ['job-search-rescrape-interval.js', job_search_rescrape_interval],
   ['job-fit-assessment.js', job_fit_assessment],
   ['auth-cookie-checkpoint.js', auth_cookie_checkpoint],
   ['browser-launch-lock-regression.js', browser_launch_lock_regression],

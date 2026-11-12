@@ -79,6 +79,7 @@ import {
   subscribeJobWorkflowDeletionLifecycle,
 } from '../utils/nodeDeletionLifecycle';
 import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
+import { isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
 import { exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../utils/jobBoardRecoveryAdmission';
 import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../utils/jobSearchPreferenceReevaluation';
@@ -104,6 +105,7 @@ import {
 import {
   buildSourceCoverageCommitPatch,
   latestSourceCompletedAt,
+  partitionSourcesByRescrapeAge,
   resolveJobSearchSourceWindows,
   serializeJobSearchWindow,
   sourcesBehindLatest,
@@ -5093,6 +5095,66 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return searchRunOutcome('not-ready', {
           error: 'Select at least one job platform before running the search.',
         });
+      }
+      // A platform whose last COMPLETED scrape is younger than the interval
+      // must not be re-walked: its rows are already on this hub and would
+      // mostly be filtered by seen history. Only the due platforms take part
+      // in the window resolution and in the run itself, so re-runs target
+      // exactly the platforms that failed or were blocked. Recovery replays a
+      // frozen window and must never consult (or narrow) today's coverage.
+      if (!recoveredPreSearchContext) {
+        const rescrapePartition = partitionSourcesByRescrapeAge(
+          laneTurnData,
+          runActiveEnabledSourceIds,
+          new Date(),
+        );
+        if (rescrapePartition.fresh.length > 0) {
+          const freshSourceIds = rescrapePartition.fresh.map(entry => entry.sourceId);
+          const describeFresh = () => rescrapePartition.fresh
+            .map(entry => `${JOB_SOURCE_BY_ID[entry.sourceId]?.name || entry.sourceId}`
+              + ` (next eligible ${new Date(entry.nextEligibleAt).toISOString()})`)
+            .join(', ');
+          if (rescrapePartition.due.length === 0) {
+            const earliestNextEligibleAt = Math.min(
+              ...rescrapePartition.fresh.map(entry => entry.nextEligibleAt),
+            );
+            const existingOutcome = terminalJobSearchOutcome({ type: 'jobhub', data: laneTurnData });
+            if (isMergeableTerminalJobSearchOutcome({ type: 'jobhub', data: laneTurnData }, existingOutcome)) {
+              EventLogger.log(
+                `[JobSearch][${currentId}] Skipped recently scraped platforms: ${describeFresh()}`
+                + ` — reusing existing run ${laneTurnData.jobRunId || 'none'}`
+                + ` (earliest next eligible ${new Date(earliestNextEligibleAt).toISOString()})`,
+              );
+              return searchRunOutcome('completed', {
+                runId: laneTurnData.jobRunId || null,
+                resultDisposition: laneTurnData.resultDisposition || null,
+                reason: 'platforms-recently-scraped',
+              });
+            }
+            // Nothing mergeable to hand on (collection-only, Test Mode, an
+            // empty unscored run, ...): the platforms are still skipped. The
+            // 24-hour rule has no exceptions; the run stops without scraping.
+            EventLogger.log(
+              `[JobSearch][${currentId}] Skipped recently scraped platforms: ${describeFresh()}`
+              + ' — no saved result to hand on, nothing scraped',
+            );
+            return searchRunOutcome('not-ready', {
+              reason: 'platforms-recently-scraped',
+              error: 'Every selected job platform finished a scrape in the last 24 hours. '
+                + `The next one can run after ${new Date(earliestNextEligibleAt).toLocaleString()}.`,
+            });
+          } else {
+            runEnabledSourceIds = runEnabledSourceIds.filter(
+              sourceId => !freshSourceIds.includes(sourceId),
+            );
+            runActiveEnabledSourceIds = runActiveEnabledSourceIds.filter(
+              sourceId => !freshSourceIds.includes(sourceId),
+            );
+            EventLogger.log(
+              `[JobSearch][${currentId}] Skipped recently scraped platforms: ${describeFresh()}`,
+            );
+          }
+        }
       }
       // Recovery replays the exact window frozen before the interruption. A
       // fresh run resolves one window per platform: the broadest of them is

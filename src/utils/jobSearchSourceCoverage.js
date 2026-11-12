@@ -75,6 +75,54 @@ export function normalizeSourceCoverage(raw) {
   return normalized;
 }
 
+/**
+ * A platform's last COMPLETED scrape is reused for this long. Re-runs then
+ * target only the platforms that failed or were blocked, instead of re-walking
+ * platforms that finished today (their rows would mostly be filtered by seen
+ * history anyway).
+ */
+export const JOB_SOURCE_RESCRAPE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+function rescrapeNowMs(now) {
+  const value = now instanceof Date ? now.getTime() : Number(now);
+  return Number.isFinite(value) ? value : NaN;
+}
+
+/**
+ * Split selected platforms into the ones a fresh run must scrape (`due`) and
+ * the ones whose last completed scrape is still inside the interval (`fresh`).
+ *
+ * Only this node's own per-platform completion counts: the hub-level
+ * `lastCompletedRunAt` says nothing about a platform that never finished, so
+ * it must never make a platform fresh. A future `completedAt` (clock skew) is
+ * due as well, otherwise a skewed timestamp would block that platform forever.
+ */
+export function partitionSourcesByRescrapeAge(data, sourceIds, now = Date.now()) {
+  const nowMs = rescrapeNowMs(now);
+  const sourceCoverage = normalizeSourceCoverage(data?.sourceCoverage);
+  const due = [];
+  const fresh = [];
+  for (const sourceId of uniqueSourceIds(sourceIds)) {
+    const completedAt = hasOwn(sourceCoverage, sourceId)
+      ? sourceCoverage[sourceId].completedAt
+      : null;
+    if (
+      completedAt != null
+      && completedAt <= nowMs
+      && nowMs - completedAt < JOB_SOURCE_RESCRAPE_INTERVAL_MS
+    ) {
+      fresh.push({
+        sourceId,
+        completedAt,
+        nextEligibleAt: completedAt + JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+      });
+      continue;
+    }
+    due.push(sourceId);
+  }
+  return { due, fresh };
+}
+
 /** Prefer a platform's own bookmark; otherwise fall back to the hub anchor. */
 export function jobSearchSourceAnchor(data, nodeId, sourceId) {
   if (isSafeSourceId(sourceId)) {

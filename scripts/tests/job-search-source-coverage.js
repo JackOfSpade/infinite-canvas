@@ -4,9 +4,11 @@ import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear.js';
 import {
   buildSourceCoverageCommitPatch,
+  JOB_SOURCE_RESCRAPE_INTERVAL_MS,
   jobSearchSourceAnchor,
   latestSourceCompletedAt,
   normalizeSourceCoverage,
+  partitionSourcesByRescrapeAge,
   resolveJobSearchSourceWindows,
   serializeJobSearchWindow,
   sourcesBehindLatest,
@@ -370,6 +372,101 @@ export default [
       assert(!Object.prototype.hasOwnProperty.call(patch, 'sourceCoverage'),
         'the clear patch never writes sourceCoverage, so durable platform bookmarks survive');
       return { stagedCleared: true, durableKept: true };
+    },
+  },
+  {
+    name: 'Job Search rescrape interval partitions platforms into fresh and due by their own completed scrape',
+    run: () => {
+      assert(JOB_SOURCE_RESCRAPE_INTERVAL_MS === 24 * 60 * 60 * 1000,
+        'the rescrape interval is exactly twenty-four hours');
+      const nowDate = localDate(2026, 10, 20, 12);
+      const nowMs = nowDate.getTime();
+      const almostADay = JOB_SOURCE_RESCRAPE_INTERVAL_MS - 60 * 1000;
+      const freshCompletedAt = nowMs - almostADay;
+      const data = {
+        // A fresh hub-level completion says nothing about the platforms a run
+        // selected, so it must never make one of them fresh on its own.
+        lastCompletedRunAt: nowMs - 1000,
+        sourceCoverage: {
+          freshPlatform: {
+            coverageStartedAt: freshCompletedAt - 60 * 60 * 1000,
+            completedAt: freshCompletedAt,
+            runId: 'run-fresh',
+          },
+          exactlyADay: {
+            coverageStartedAt: nowMs - 2 * JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+            completedAt: nowMs - JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+          },
+          older: {
+            coverageStartedAt: nowMs - 4 * JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+            completedAt: nowMs - 3 * JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+          },
+          future: {
+            coverageStartedAt: nowMs - 60 * 1000,
+            completedAt: nowMs + 60 * 1000,
+          },
+          noStart: { completedAt: nowMs - 1000 },
+        },
+      };
+      const ids = [
+        'freshPlatform',
+        'exactlyADay',
+        'hubOnly',
+        'freshPlatform',
+        'older',
+        'future',
+        'noStart',
+      ];
+      const partition = partitionSourcesByRescrapeAge(data, ids, nowDate);
+
+      assert(JSON.stringify(partition.fresh) === JSON.stringify([
+        {
+          sourceId: 'freshPlatform',
+          completedAt: freshCompletedAt,
+          nextEligibleAt: freshCompletedAt + JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+        },
+      ]), `only a completed scrape under twenty-four hours old is fresh (got ${JSON.stringify(partition.fresh)})`);
+      assert(partition.fresh[0].nextEligibleAt === freshCompletedAt + JOB_SOURCE_RESCRAPE_INTERVAL_MS
+        && partition.fresh[0].nextEligibleAt > nowMs,
+      'a fresh platform carries the exact time it becomes eligible again');
+      assert(JSON.stringify(partition.due) === JSON.stringify([
+        'exactlyADay', 'hubOnly', 'older', 'future', 'noStart',
+      ]), `due platforms keep input order after de-duplication (got ${JSON.stringify(partition.due)})`);
+      assert(partition.due.includes('hubOnly'),
+        'a platform with no own completion entry is always due');
+      assert(partition.due.includes('exactlyADay'),
+        'a completion exactly twenty-four hours old is due, not fresh');
+      assert(partition.due.includes('future'),
+        'a future completion (clock skew) is due so the platform is never blocked forever');
+      assert(partition.due.includes('noStart'),
+        'an entry without a usable coverage start is due');
+      assert(partition.due.length + partition.fresh.length === new Set(ids).size,
+        'duplicated platform ids are partitioned exactly once');
+
+      const hubOnly = partitionSourcesByRescrapeAge(
+        { lastCompletedRunAt: nowMs - 1000 },
+        ['alpha', 'beta'],
+        nowDate,
+      );
+      assert(JSON.stringify(hubOnly) === JSON.stringify({ due: ['alpha', 'beta'], fresh: [] }),
+        'a fresh hub lastCompletedRunAt alone never makes a platform fresh');
+
+      assert(JSON.stringify(partitionSourcesByRescrapeAge(data, ids, nowMs)) === JSON.stringify(partition),
+        'a numeric now and a Date now partition identically');
+      assert(JSON.stringify(partitionSourcesByRescrapeAge(data, ids, new Date(nowMs))) === JSON.stringify(partition),
+        'an equivalent Date instance partitions identically');
+
+      const atEligibility = partitionSourcesByRescrapeAge(
+        data,
+        ['freshPlatform'],
+        freshCompletedAt + JOB_SOURCE_RESCRAPE_INTERVAL_MS,
+      );
+      assert(JSON.stringify(atEligibility) === JSON.stringify({ due: ['freshPlatform'], fresh: [] }),
+        'the platform is due again at its next eligible time');
+      assert(JSON.stringify(partitionSourcesByRescrapeAge(null, ['alpha'], nowDate)) === JSON.stringify({ due: ['alpha'], fresh: [] })
+        && JSON.stringify(partitionSourcesByRescrapeAge({}, [], nowDate)) === JSON.stringify({ due: [], fresh: [] }),
+      'missing data or an empty selection partitions without throwing');
+      return { freshCounted: partition.fresh.length, dueCounted: partition.due.length };
     },
   },
 ];
