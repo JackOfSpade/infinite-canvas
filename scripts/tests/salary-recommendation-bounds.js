@@ -63,15 +63,30 @@ export default [
     name: 'A posted floor above the whole market bounds the desired salary by the posted band',
     run: () => {
       const options = { marketRange: MARKET, evidence: PACKET, offered: POSTED };
-      assert.throws(() => validatePersonalSalaryRecommendation(personal(), options), /recommendation bounds \(165000–330000 CAD/,
-        'the saved CAD 85,000 answer sits below the employer floor and must be rejected');
-      assert.equal(normalizePersonalSalaryRecommendation(personal(), options).status, 'unavailable');
+      const belowFloor = validatePersonalSalaryRecommendation(personal(), options);
+      assert.equal(belowFloor.boundsAdjusted, true);
+      assert.equal(belowFloor.min, 165000);
+      assert.equal(belowFloor.max, 165000);
+      assert.equal(belowFloor.desiredSalary, 165000,
+        'the saved CAD 85,000 answer below the employer floor is fitted up to it, never left below it');
+      const normalized = normalizePersonalSalaryRecommendation(personal(), options);
+      assert.equal(normalized.status, 'personalized');
+      assert.deepEqual(normalized.range, { min: 165000, max: 165000, currency: 'CAD', period: 'annual' });
+      assert.equal(normalized.desiredSalary, 165000);
+      assert.ok(normalized.limitations.some(value => /fitted to the recommendation bounds/.test(value)),
+        'the card must say the answer was fitted to the recommendation bounds');
+      assert.ok(normalized.limitations.some(value => /posted minimum is above the whole researched market range/.test(value)),
+        'the card must also say the bounds are the posted band');
       const accepted = normalizePersonalSalaryRecommendation(personal({ min: 165000, max: 200000, desiredSalary: 175000 }), options);
       assert.equal(accepted.status, 'personalized');
       assert.equal(accepted.desiredSalary, 175000);
       assert.ok(accepted.limitations.some(value => /posted minimum is above the whole researched market range/.test(value)),
         'the card must say why the answer is not inside the researched market range');
-      assert.throws(() => validatePersonalSalaryRecommendation(personal({ min: 165000, max: 340000, desiredSalary: 200000 }), options), /recommendation bounds/);
+      const raisedCeiling = validatePersonalSalaryRecommendation(personal({ min: 165000, max: 340000, desiredSalary: 200000 }), options);
+      assert.equal(raisedCeiling.min, 165000);
+      assert.equal(raisedCeiling.max, 330000);
+      assert.equal(raisedCeiling.desiredSalary, 200000);
+      assert.equal(raisedCeiling.boundsAdjusted, true);
 
       const estimate = normalizePersonalSalaryRecommendation(undefined, { ...options, evidence: { ...PACKET, evidence: [] } });
       assert.equal(estimate.status, 'market_estimate');
@@ -234,16 +249,23 @@ export default [
       const assessment = compensationAssessment({ offer, competitiveRanges: sources, marketCurrency: 'CAD' });
       assert.deepEqual(assessment.competitiveRange, band, 'the assessment saves the typical band');
       assert.deepEqual(assessment.reportedSpan, union);
-      // A target only the old union would allow must fail against exactly the
+      // A target only the old union would allow must be fitted to exactly the
       // band the assessment saved, not a second wider definition.
       const aboveBand = personal({ min: 120000, max: 130000, desiredSalary: 125000 });
-      assert.throws(() => validatePersonalSalaryRecommendation(aboveBand, {
+      const fitted = validatePersonalSalaryRecommendation(aboveBand, {
         marketRange: assessment.competitiveRange, evidence: PACKET, offered: offer,
-      }), /recommendation bounds/,
-      'a desired salary above the saved typical band must be rejected');
+      });
+      assert.equal(fitted.boundsAdjusted, true);
+      assert.equal(fitted.min, 110000);
+      assert.equal(fitted.max, 110000);
+      assert.equal(fitted.desiredSalary, 110000,
+        'a target only the old union would allow is fitted to exactly the saved band');
       assert.doesNotThrow(() => validatePersonalSalaryRecommendation(aboveBand, {
         marketRange: union, evidence: PACKET, offered: offer,
       }), 'the union alone would have accepted it, so the saved band is what bounds the answer');
+      assert.equal(validatePersonalSalaryRecommendation(aboveBand, {
+        marketRange: union, evidence: PACKET, offered: offer,
+      }).boundsAdjusted, undefined, 'the union would leave this answer untouched');
       const inside = personal({ min: 95000, max: 108000, desiredSalary: 101500 });
       assert.doesNotThrow(() => validatePersonalSalaryRecommendation(inside, {
         marketRange: assessment.competitiveRange, evidence: PACKET, offered: offer,

@@ -955,17 +955,21 @@ Model prose happens to mention https://prose.example.test/untrusted.`);
     const diagnostics = [];
     for (const bad of [
       { ...personalRecommendation, evidenceIds: ['another-candidate-evidence'] },
-      { ...personalRecommendation, max: 210000 },
       { ...personalRecommendation, desiredSalary: 135000 },
       { ...personalRecommendation, currency: 'USD' },
     ]) {
       try { validateCompensationEvidenceBatchSubmission(response(bad), requests, sections); }
       catch (error) { diagnostics.push({ code: error.code, diagnostic: error.validationDiagnostic }); }
     }
-    assert(diagnostics.length === 4 && diagnostics.every(value => value.code === 'JOB_COMPENSATION_RESPONSE_INVALID'
+    assert(diagnostics.length === 3 && diagnostics.every(value => value.code === 'JOB_COMPENSATION_RESPONSE_INVALID'
       && value.diagnostic?.stage === 'compensation-assessment' && value.diagnostic?.reason === 'COMPENSATION_RANGE_INVALID')
       && !JSON.stringify(diagnostics).includes('another-candidate-evidence'),
-    'foreign personal citations, out-of-market ranges, outside desired amounts and wrong currency must be rejected before acceptance using correction-safe diagnostics');
+    'foreign personal citations, outside desired amounts and wrong currency must be rejected before acceptance using correction-safe diagnostics');
+    let outOfBoundsRangeAccepted = true;
+    try { validateCompensationEvidenceBatchSubmission(response({ ...personalRecommendation, max: 210000 }), requests, sections); }
+    catch { outOfBoundsRangeAccepted = false; }
+    assert(outOfBoundsRangeAccepted,
+      'a range whose ceiling oversteps the recommendation bounds is fitted by the host instead of being rejected');
     return { accepted: true, invalidPersonalResultsRejected: diagnostics.length };
   },
 }, {

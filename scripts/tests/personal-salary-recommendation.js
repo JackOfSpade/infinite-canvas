@@ -162,7 +162,7 @@ export default [
       assert.equal(normalized.researchedAt, options.researchedAt);
       assert.equal(normalizePersonalSalaryRecommendation(answer({ evidenceIds: ['experience-1'] }), options).status, 'personalized', 'host-recomputed category tenure can independently support positioning');
       for (const invalid of [
-        { min: 90000 }, { max: 210000 }, { min: 140000, max: 130000 },
+        { min: 140000, max: 130000 },
         { desiredSalary: 150000 }, { desiredSalary: Number.NaN }, { desiredSalary: '125000' },
         { currency: 'USD' }, { min: Number.POSITIVE_INFINITY },
         { evidenceIds: [] }, { evidenceIds: ['invented-evidence'] },
@@ -173,6 +173,33 @@ export default [
         assert.equal(normalizePersonalSalaryRecommendation(raw, options).status, 'unavailable', JSON.stringify(invalid));
         assert.equal(normalizePersonalSalaryRecommendation(raw, options).desiredSalary, null);
       }
+      // The host owns the bounds, so a range that oversteps them is fitted
+      // instead of being thrown away.
+      const belowFloor = answer({ min: 90000 });
+      assert.doesNotThrow(() => validatePersonalSalaryRecommendation(belowFloor, options));
+      const fittedMin = normalizePersonalSalaryRecommendation(belowFloor, options);
+      assert.equal(fittedMin.status, 'personalized');
+      assert.deepEqual(fittedMin.range, { min: 100000, max: 130000, currency: 'CAD', period: 'annual' },
+        'a floor below the bounds is raised to the bounds minimum');
+      assert.equal(fittedMin.desiredSalary, 125000, 'an in-range desired salary is not moved by fitting the floor');
+      assert.ok(fittedMin.limitations.some(value => /fitted to the recommendation bounds/.test(value)));
+      assert.equal('boundsAdjusted' in fittedMin, false, 'the saved answer does not expose the fitting flag');
+      const aboveCeiling = answer({ max: 210000 });
+      assert.doesNotThrow(() => validatePersonalSalaryRecommendation(aboveCeiling, options));
+      const fittedMax = normalizePersonalSalaryRecommendation(aboveCeiling, options);
+      assert.equal(fittedMax.status, 'personalized');
+      assert.deepEqual(fittedMax.range, { min: 110000, max: 200000, currency: 'CAD', period: 'annual' },
+        'a ceiling above the bounds is lowered to the bounds maximum');
+      assert.equal(fittedMax.desiredSalary, 125000);
+      assert.ok(fittedMax.limitations.some(value => /fitted to the recommendation bounds/.test(value)));
+      assert.equal(validatePersonalSalaryRecommendation(answer(), options).boundsAdjusted, undefined,
+        'an answer already inside the bounds is unchanged');
+      const whollyAbove = normalizePersonalSalaryRecommendation(answer({ min: 210000, max: 230000, desiredSalary: 220000 }), options);
+      assert.equal(whollyAbove.status, 'personalized');
+      assert.deepEqual(whollyAbove.range, { min: MARKET.max, max: MARKET.max, currency: 'CAD', period: 'annual' },
+        'a range wholly above the bounds collapses onto the bounds maximum');
+      assert.equal(whollyAbove.desiredSalary, MARKET.max);
+      assert.ok(whollyAbove.limitations.some(value => /fitted to the recommendation bounds/.test(value)));
       assert.throws(() => validatePersonalSalaryRecommendation(answer(), { ...options, marketRange: { ...MARKET, period: 'hourly' } }), /annual researched market range/);
       assert.throws(() => validatePersonalSalaryRecommendation(answer(), { ...options, evidence: { ...packet(), careerSnapshotId: '' } }), /pinned approved career snapshot/);
     },
@@ -191,7 +218,14 @@ export default [
       assert.ok(fallback.limitations.some(value => /advertised salary is below/.test(value)));
       const declared = answer({ status: 'market_estimate', ...MARKET, desiredSalary: 100000, evidenceIds: [], confidence: 'low' });
       assert.equal(normalizePersonalSalaryRecommendation(declared, options).desiredSalary, 150000, 'market-only answers use a deterministic midpoint');
-      assert.throws(() => validatePersonalSalaryRecommendation({ ...declared, max: 130000 }, options), /full recommendation bounds/);
+      const narrowed = normalizePersonalSalaryRecommendation({ ...declared, max: 130000 }, options);
+      assert.equal(narrowed.status, 'market_estimate', 'a model range narrower than the bounds is rebuilt, not rejected');
+      assert.deepEqual(narrowed.range, MARKET);
+      assert.equal(narrowed.desiredSalary, 150000);
+      assert.throws(() => validatePersonalSalaryRecommendation({ ...declared, evidenceIds: ['requirement-1'] }, { ...options, evidence: packet() }), /market estimate/,
+        'a market estimate must still refuse personal citations');
+      assert.throws(() => validatePersonalSalaryRecommendation({ ...declared, confidence: 'medium' }, options), /market estimate/,
+        'a market estimate keeps low confidence');
       assert.equal(normalizePersonalSalaryRecommendation(undefined, { ...options, evidence: packet() }).status, 'unavailable', 'existing career evidence requires a fresh personal assessment');
       assert.equal(normalizePersonalSalaryRecommendation(undefined, { evidence: empty }).status, 'unavailable');
       assert.equal(normalizePersonalSalaryRecommendation(undefined, { ...options, marketRange: { ...MARKET, min: 102100, max: 102300 } }).desiredSalary, 102200, 'narrow published bands must not be rounded outside their bounds');
@@ -203,7 +237,12 @@ export default [
     run: () => {
       const offered = { usable: true, min: 160000, max: 190000, currency: 'CAD', period: 'annual' };
       const options = { marketRange: MARKET, evidence: packet(), offered };
-      assert.throws(() => validatePersonalSalaryRecommendation(answer({ min: 140000, max: 180000, desiredSalary: 150000 }), options), /advertised minimum/);
+      const raisedFloor = normalizePersonalSalaryRecommendation(answer({ min: 140000, max: 180000, desiredSalary: 150000 }), options);
+      assert.equal(raisedFloor.status, 'personalized');
+      assert.deepEqual(raisedFloor.range, { min: 160000, max: 180000, currency: 'CAD', period: 'annual' },
+        'the advertised floor raises a suggested minimum below it');
+      assert.equal(raisedFloor.desiredSalary, 160000, 'a desired salary below the fitted floor is raised with it');
+      assert.ok(raisedFloor.limitations.some(value => /fitted to the recommendation bounds/.test(value)));
       assert.equal(normalizePersonalSalaryRecommendation(answer({ min: 160000, max: 180000, desiredSalary: 170000 }), options).status, 'personalized');
       const general = normalizePersonalSalaryRecommendation(undefined, { ...options, evidence: packet(job(), { careerData: '' }) });
       assert.deepEqual(general.range, { ...MARKET, min: 160000 }, 'the estimate range starts at the employer floor; the researched market range is kept separately on the assessment');
@@ -243,10 +282,18 @@ export default [
       const options = { marketRange: market, evidence: packet(), offered: { usable: true, min: 48000, max: 72000, currency: 'CAD', period: 'annual' } };
       // The advertised midpoint (CAD 60,000) is above the researched maximum
       // (CAD 55,000), so the ceiling rises to the advertisement.
-      assert.throws(() => validatePersonalSalaryRecommendation(answer({ min: 50000, max: 64000, desiredSalary: 62000 }), options),
-        /recommendation bounds \(48000–60000 CAD/, 'the raised ceiling stops at the advertised midpoint');
-      assert.throws(() => validatePersonalSalaryRecommendation(answer({ min: 40000, max: 54000, desiredSalary: 54000 }), options),
-        /recommendation bounds/, 'the advertised minimum still raises the floor');
+      const fittedCeiling = normalizePersonalSalaryRecommendation(answer({ min: 50000, max: 64000, desiredSalary: 62000 }), options);
+      assert.equal(fittedCeiling.status, 'personalized');
+      assert.deepEqual(fittedCeiling.range, { min: 50000, max: 60000, currency: 'CAD', period: 'annual' },
+        'the fitted ceiling stops at the advertised midpoint');
+      assert.equal(fittedCeiling.desiredSalary, 60000, 'the desired salary is fitted with the range');
+      assert.ok(fittedCeiling.limitations.some(value => /fitted to the recommendation bounds/.test(value)));
+      const fittedFloor = normalizePersonalSalaryRecommendation(answer({ min: 40000, max: 54000, desiredSalary: 54000 }), options);
+      assert.equal(fittedFloor.status, 'personalized');
+      assert.deepEqual(fittedFloor.range, { min: 48000, max: 54000, currency: 'CAD', period: 'annual' },
+        'the advertised minimum still raises the floor');
+      assert.equal(fittedFloor.desiredSalary, 54000);
+      assert.ok(fittedFloor.limitations.some(value => /fitted to the recommendation bounds/.test(value)));
       const belowMidpoint = normalizePersonalSalaryRecommendation(answer({ min: 48000, max: 54000, desiredSalary: 54000 }), options);
       assert.equal(belowMidpoint.status, 'personalized');
       assert.equal(belowMidpoint.desiredSalary, 54000);
