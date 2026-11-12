@@ -546,7 +546,7 @@ export default [
       'job preferences must re-export compatibility aliases only, never retain a second scheduler implementation');
       assert(Object.values(sources).every(source => source.includes("from '../../src/utils/handoffScheduler.js';")),
       'every multi-item AI owner must import the central scheduler directly rather than inherit it through another IPC module');
-      assert(sources.preferences.includes('await mapAutomaticHandoffs(\n      batches,\n      HANDOFF_CONCURRENCY,')
+      assert(/await mapAutomaticHandoffs\(\s*batches,\s*HANDOFF_CONCURRENCY,/.test(sources.preferences)
         && sources.preferences.includes('await runAutomaticHandoffWorkers({')
         && sources.preferences.includes('async function runCompanyResearchPipeline(')
         && sources.preferences.includes('createDependencyReadyQueue(rawWave.map(')

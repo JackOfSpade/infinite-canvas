@@ -436,6 +436,20 @@ export function indeedPanelShowsJob({ jobKey, before, now }) {
   return now.text !== before?.text;
 }
 
+/**
+ * The description to save for this card, or '' when nothing may be saved. A panel read inside the click window is
+ * preferred, but the later read wins when it is still on the same job. A slow panel that only opened the job after the
+ * click wait is accepted too — but only on an explicit key match and a text that really is this job's, because a stale
+ * text with a fresh key reads exactly like the previous job's text. Pure + testable.
+ */
+export function indeedPanelDescription({ jobKey, before, panelRead, settled }) {
+  if (panelRead) {
+    return settled?.openKey && settled.openKey !== jobKey ? panelRead.text : (settled?.text || panelRead.text);
+  }
+  if (!settled?.openKey || settled.openKey !== jobKey) return '';
+  return indeedPanelShowsJob({ jobKey, before, now: settled }) ? settled.text : '';
+}
+
 async function readIndeedPanel(page) {
   // Text first: if the key changes between these two reads, the old text fails the check and the wait goes on.
   const text = await page.$eval(DESC_SELECTOR, readIndeedDescriptionText).catch(() => '');
@@ -557,13 +571,8 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
 
     const settled = await readIndeedPanel(page);
     // The text can fill in during the wait, so prefer the later read unless another job has opened since.
-    const description = !panelRead ? '' : (settled.openKey && settled.openKey !== job.jobkey ? panelRead.text : settled.text || panelRead.text);
-    if (!panelRead && settled.text) {
-      // Nothing is saved, so the row stays short of evidence and the exact-page retry opens this job's own page.
-      recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'stale-panel', length: 0 });
-      stalePanels++;
-      logger.warn(`[Indeed/Browser] Panel did not open job ${job.jobkey} (card ${t + 1}/${limit}, open job ${settled.openKey || 'none'}${covered ? `, card covered by ${covered}` : ''})`);
-    } else if (description) {
+    const description = indeedPanelDescription({ jobKey: job.jobkey, before, panelRead, settled });
+    if (description) {
       job.description = description;
       job.snippet = description;
       recordIndeedEnrichmentAttempt(job, {
@@ -572,6 +581,11 @@ async function enrichWithDescriptions(page, pageJobs, signal, overlayBase = null
         length: description.length,
       });
       enriched++;
+    } else if (!panelRead && settled.text) {
+      // Nothing is saved, so the row stays short of evidence and the exact-page retry opens this job's own page.
+      recordIndeedEnrichmentAttempt(job, { stage: 'card-panel', outcome: 'stale-panel', length: 0 });
+      stalePanels++;
+      logger.warn(`[Indeed/Browser] Panel did not open job ${job.jobkey} (card ${t + 1}/${limit}, open job ${settled.openKey || 'none'}${covered ? `, card covered by ${covered}` : ''})`);
     } else {
       // Blank panel — may be early CF interference before the full challenge page appears.
       const sigs = await getChallengeSignals(page);

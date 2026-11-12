@@ -4,7 +4,7 @@ import { collectionScopeCaveatsFromSourceResults, describeSourceHealthFailures, 
 import { isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { appendWalkGuard, CHALLENGE_ESCALATE_MS, descriptionPanelPacing, DETAIL_BLOCK_MAX_TOTAL_REPROBES, detailBlockCooldownMs, panelWindowWaitMs, revealLowGrowthStop, selectManualSourcePageJobs, WALK_GUARD_MAX } from '../../electron/ipc/browser/manualScraper.js';
 import { linkedInEnrichedRow } from '../../electron/extractors/apiExtractors.js';
-import { indeedPanelShowsJob } from '../../electron/extractors/indeedBrowser.js';
+import { indeedPanelDescription, indeedPanelShowsJob } from '../../electron/extractors/indeedBrowser.js';
 
 const TEXT = 'Build reliable services for regional teams. '.repeat(12);
 const row = (source, over = {}) => ({ source, title: 'Engineer', company: 'Acme', location: 'Toronto', posted: '1 day ago', salary: '$1', url: `https://${source}.test/1`, snippet: TEXT, ...over });
@@ -25,6 +25,86 @@ export default [
       assert.equal(shows({ openKey: '', text: 'First job text' }), false);
       assert.equal(indeedPanelShowsJob({ jobKey: 'a', before, now: { openKey: 'a', text: 'First job text' } }), true, 'the job was already open');
       assert.equal(indeedPanelShowsJob({ jobKey: 'a', before: { openKey: '', text: 'First job text' }, now: { openKey: '', text: 'First job text' } }), false);
+    },
+  },
+  {
+    name: 'A panel that only opened the target job after the click wait still gets its description saved',
+    run() {
+      const before = { openKey: 'a', text: 'First job text' };
+      const description = indeedPanelDescription({
+        jobKey: 'b',
+        before,
+        panelRead: null,
+        settled: { openKey: 'b', text: 'Second job text' },
+      });
+      assert.equal(description, 'Second job text');
+    },
+  },
+  {
+    name: 'A fresh key over the previous job text is not saved as the late panel description',
+    run() {
+      const before = { openKey: 'a', text: 'First job text' };
+      const description = indeedPanelDescription({
+        jobKey: 'b',
+        before,
+        panelRead: null,
+        settled: { openKey: 'b', text: 'First job text' },
+      });
+      assert.equal(description, '', 'the stale text would otherwise pass on the new key');
+    },
+  },
+  {
+    name: 'A late panel that shows another job is not saved',
+    run() {
+      const before = { openKey: 'a', text: 'First job text' };
+      const description = indeedPanelDescription({
+        jobKey: 'b',
+        before,
+        panelRead: null,
+        settled: { openKey: 'c', text: 'Third job text' },
+      });
+      assert.equal(description, '');
+    },
+  },
+  {
+    name: 'A late panel with no open key in the URL is not saved, because only the key can prove which job it is',
+    run() {
+      const before = { openKey: 'a', text: 'First job text' };
+      const description = indeedPanelDescription({
+        jobKey: 'b',
+        before,
+        panelRead: null,
+        settled: { openKey: '', text: 'Second job text' },
+      });
+      assert.equal(description, '');
+    },
+  },
+  {
+    name: 'A panel read inside the click wait is kept when another job opens before the dwell ends',
+    run() {
+      const before = { openKey: 'a', text: 'First job text' };
+      const panelRead = { openKey: 'b', text: 'Second job text' };
+      const description = indeedPanelDescription({
+        jobKey: 'b',
+        before,
+        panelRead,
+        settled: { openKey: 'c', text: 'Third job text' },
+      });
+      assert.equal(description, 'Second job text');
+    },
+  },
+  {
+    name: 'A panel that stays on the card job through the dwell is saved from the later read',
+    run() {
+      const before = { openKey: 'a', text: 'First job text' };
+      const panelRead = { openKey: 'b', text: 'Second job tex' };
+      const description = indeedPanelDescription({
+        jobKey: 'b',
+        before,
+        panelRead,
+        settled: { openKey: 'b', text: 'Second job text, now fully loaded' },
+      });
+      assert.equal(description, 'Second job text, now fully loaded');
     },
   },
   {
