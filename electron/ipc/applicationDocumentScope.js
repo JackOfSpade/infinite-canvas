@@ -5,6 +5,8 @@
  * `documentScope`. A job without one predates the split and produces both, so
  * every helper here treats an absent scope as "both".
  */
+import { JSDOM } from 'jsdom';
+
 export const APPLICATION_DOCUMENT_KINDS = Object.freeze(['resume', 'cover']);
 
 export function normalizeApplicationDocumentScope(value) {
@@ -81,4 +83,47 @@ export function evidenceResumeForLetter({ identity, sourceRoles, profile, catalo
   return { schemaVersion: 'structured-resume.v1', identity: { name: identity?.name || '', contact: [...(identity?.contact || [])],
       ...(identity?.subtitleRole ? { subtitleRole: identity.subtitleRole } : {}), ...(identity?.credential ? { credential: identity.credential } : {}) },
     roles, projects: [], skills: [], education: [], credentials: [] };
+}
+
+/**
+ * How much of a saved résumé a cover-only letter writer may see. It is a
+ * prompt-side context aid, not a document: the letter is checked against the
+ * approved catalog exactly as before, so the cap only bounds the reading.
+ */
+export const SAVED_RESUME_TEXT_MAX_CHARS = 6000;
+
+const SAVED_RESUME_BLOCK_SELECTOR = 'h1, h2, h3, h4, p, li';
+const HIDDEN_BLOCK_SELECTOR = '[hidden], [aria-hidden="true"]';
+const collapseBlockText = value => String(value ?? '').replace(/\s+/gu, ' ').trim();
+
+/**
+ * The plain text of the saved résumé panel in a saved Application.html: one
+ * line per content block, hidden blocks skipped, whitespace collapsed, and the
+ * letter panel never read. Joining a cover-only letter job reads the saved
+ * file (not the original generation) so the writer sees the user's own synced
+ * edits. Capped at a line boundary so a cut line is never half a claim.
+ */
+export function savedResumeTextFromHtml(html) {
+  const dom = new JSDOM(String(html ?? ''));
+  try {
+    const panel = dom.window.document.querySelector('[data-ic-document-panel="resume"] main.page');
+    if (!panel) return '';
+    const selected = [];
+    let text = '';
+    for (const element of panel.querySelectorAll(SAVED_RESUME_BLOCK_SELECTOR)) {
+      if (selected.some(parent => parent.contains(element))) continue;
+      if (element.closest(HIDDEN_BLOCK_SELECTOR)) continue;
+      selected.push(element);
+      const line = collapseBlockText(element.textContent);
+      if (!line) continue;
+      const next = text ? `${text}\n${line}` : line;
+      if (next.length > SAVED_RESUME_TEXT_MAX_CHARS) {
+        // Nothing fits yet: one over-long first block is cut to the ceiling.
+        if (!text) text = line.slice(0, SAVED_RESUME_TEXT_MAX_CHARS);
+        break;
+      }
+      text = next;
+    }
+    return text;
+  } finally { dom.window.close(); }
 }

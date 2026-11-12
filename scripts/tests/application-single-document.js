@@ -10,12 +10,12 @@ import electronPkg from 'electron';
 import { JSDOM } from 'jsdom';
 import { PDFDocument } from 'pdf-lib';
 import {
-  ABSENT_DOCUMENT_FIT, evidenceResumeForLetter, normalizeApplicationDocumentScope,
-  savedDocumentsFromHtml, workspaceDocumentKinds,
+  ABSENT_DOCUMENT_FIT, SAVED_RESUME_TEXT_MAX_CHARS, evidenceResumeForLetter, normalizeApplicationDocumentScope,
+  savedDocumentsFromHtml, savedResumeTextFromHtml, workspaceDocumentKinds,
 } from '../../electron/ipc/applicationDocumentScope.js';
 import { mergeApplicationDocument } from '../../electron/ipc/applicationBundleMerge.js';
 import { archiveV2Content } from '../../electron/ipc/applicationV2EvidenceArchive.js';
-import { __queueLegacyLocalApplicationFixtureForTests, buildLocalGenerationAuditArtifact, withApplicationDocumentStart } from '../../electron/ipc/localAiApplication.js';
+import { __queueLegacyLocalApplicationFixtureForTests, buildLocalGenerationAuditArtifact, savedResumeTextForCoverStart, withApplicationDocumentStart } from '../../electron/ipc/localAiApplication.js';
 import { buildResumeDocument, embedApplicationSyncConfig } from '../../electron/ipc/resumeHtml.js';
 import { applicationSyncConfig, mergeSelectedApplicationPanel, workspacePanelsMatchBundle } from '../../electron/ipc/applicationSync.js';
 import { documentSnapshot, editSummaries, logGeneratedBundle, improvementStatus } from '../../electron/ipc/applicationEditLog.js';
@@ -184,6 +184,62 @@ export default [
     },
   },
   {
+    name: 'the saved résumé panel reads as plain text, without the letter, hidden blocks or an over-cap tail',
+    run() {
+      const html = `<!doctype html><html><body>
+        <section data-ic-document-panel="resume"><main class="page">
+          <h1>Sample   Person</h1>
+          <p>sample@example.test</p>
+          <section><h2>Experience</h2><p>Generated résumé line.</p>
+          <ul><li>Bullet <em>one</em>.</li><li>Bullet two.</li></ul></section>
+          <div hidden><p>Hidden by attribute.</p></div>
+          <div aria-hidden="true"><p>Hidden by aria.</p></div>
+        </main></section>
+        <section data-ic-document-panel="cover"><main class="page"><p>First paragraph of the synthetic letter.</p></main></section>
+      </body></html>`;
+      assert.equal(SAVED_RESUME_TEXT_MAX_CHARS, 6000);
+      const text = savedResumeTextFromHtml(html);
+      assert.equal(text, 'Sample Person\nsample@example.test\nExperience\nGenerated résumé line.\nBullet one.\nBullet two.');
+      for (const excluded of ['First paragraph of the synthetic letter', 'Hidden by attribute', 'Hidden by aria'])
+        assert.equal(text.includes(excluded), false, `${excluded} is not saved résumé text`);
+      assert.equal(savedResumeTextFromHtml('<section data-ic-document-panel="cover"><main class="page"><p>Only a letter.</p></main></section>'), '');
+      assert.equal(savedResumeTextFromHtml(''), '');
+      const line = index => `Approved résumé line ${String(index).padStart(4, '0')} ${'x'.repeat(74)}`;
+      const long = `<section data-ic-document-panel="resume"><main class="page">${Array.from({ length: 80 }, (_, index) => `<p>${line(index)}</p>`).join('')}</main></section>`;
+      const capped = savedResumeTextFromHtml(long);
+      const cappedLines = capped.split('\n');
+      assert.equal(capped.length <= SAVED_RESUME_TEXT_MAX_CHARS, true);
+      assert.equal(cappedLines.every(row => row === row.trim() && row.length === 100), true, 'every kept line is a whole line');
+      assert.equal(cappedLines.length, 59, 'the first line that would cross the ceiling is dropped whole');
+      assert.equal(cappedLines.at(-1), line(58));
+      assert.equal(capped.includes(line(59)), false);
+    },
+  },
+  {
+    name: 'a saved résumé reaches the cover source prompt as context and changes no other prompt by a byte',
+    async run() {
+      const profile = { roles: [], achievements: [], projects: [], skills: [], education: [], certifications: [], otherEvidence: [] };
+      const source = (documentScope, extra = {}) => writeVerifySourcePrompt({ posting: 'P', requirements: [], listingEvidence: [], identity: { name: 'Sample Person' },
+        sourceRoles: [], profile, catalog: [], documentScope, ...extra });
+      const text = 'Sample Person\nGenerated résumé line.';
+      const base = source('cover');
+      const withResume = source('cover', { savedResumeText: text });
+      const section = `SAVED RÉSUMÉ FOR THIS APPLICATION (context only, not a citable source; the letter is sent with this exact résumé):\n${text}\n\nKeep the letter consistent with this résumé. Do not restate its bullets; use the letter to explain how the work meets this job's needs and to go deeper on one or two examples. Every claim still cites the approved catalog.`;
+      assert.equal(withResume.split('SAVED RÉSUMÉ FOR THIS APPLICATION').length - 1, 1, 'the section appears exactly once');
+      assert.equal(withResume.includes(section), true);
+      const education = 'TRUSTED EDUCATION AND CREDENTIAL FIELDS (institution and issuer exclude separately stated locations):';
+      assert.equal(withResume, base.replace(`\n\n${education}`, `\n\n${section}\n\n${education}`), 'the section sits directly after the identity section and moves nothing else');
+      assert.equal(source('cover', { savedResumeText: '' }), base);
+      assert.equal(source('cover', { savedResumeText: '   \n\t ' }), base, 'blank text adds nothing');
+      const resumeBase = source('resume');
+      const bothBase = source(null);
+      assert.equal(source('resume', { savedResumeText: text }), resumeBase, 'a résumé job never sees a saved résumé');
+      assert.equal(source(null, { savedResumeText: text }), bothBase, 'a two-document job never sees a saved résumé');
+      for (const prompt of [base, source('resume', { savedResumeText: text }), source(null, { savedResumeText: text })])
+        assert.equal(prompt.includes('SAVED RÉSUMÉ FOR THIS APPLICATION'), false);
+    },
+  },
+  {
     name: 'each prompt stage asks for one document, and a letter-only job never shows its evidence as a résumé',
     run() {
       const profile = { roles: [], achievements: [], projects: [], skills: [], education: [], certifications: [], otherEvidence: [] };
@@ -247,6 +303,30 @@ export default [
       assert.throws(() => splitWriteVerifyWriterResponse('COVER LETTER\nBody', ids, { documentScope: 'cover' }), /EVIDENCE SHORTLIST/u);
       const twoDocument = `RÉSUMÉ\nA\nCOVER LETTER\nB\nEVIDENCE SHORTLIST\n${shortlist}\nEDITORIAL SUMMARY\nC`;
       assert.match(splitWriteVerifyWriterResponse(twoDocument, ids).plainText, /COVER LETTER/u, 'a job from before the split parses as it did');
+    },
+  },
+  {
+    name: 'a cover-only start against a saved résumé folder freezes its text, and a missing folder only omits it',
+    async run() {
+      // Canonical, as resolveCanvasProject gives the host: macOS tmpdir is a symlink.
+      const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'single-document-saved-resume-')));
+      try {
+        const canvasFilePath = path.join(root, 'Sample Canvas.canvas');
+        await fs.writeFile(canvasFilePath, '{}\n');
+        const savedDir = path.join(root, 'Applied Jobs', 'Sample Co - Role');
+        await fs.mkdir(savedDir, { recursive: true });
+        await fs.writeFile(path.join(savedDir, 'Application.html'), `<!doctype html><html><body>
+          <section data-ic-document-panel="resume"><main class="page"><h1>Sample Person</h1><p>Generated résumé line.</p></main></section>
+          <section data-ic-document-panel="cover"><main class="page"><p>First paragraph of the synthetic letter.</p></main></section>
+        </body></html>`);
+        const receipt = { version: 2, jobId: '11111111-1111-4111-8111-111111111111', canvasFilePath, status: 'imported', outputDir: savedDir };
+        const canvas = { canvasRoot: root, canonicalCanvasFilePath: canvasFilePath };
+        const text = await savedResumeTextForCoverStart(canvas, receipt);
+        assert.equal(text, 'Sample Person\nGenerated résumé line.');
+        assert.equal(text.includes('First paragraph of the synthetic letter'), false, 'the saved letter is never read as the résumé');
+        await fs.rm(savedDir, { recursive: true, force: true });
+        assert.equal(await savedResumeTextForCoverStart(canvas, receipt), '', 'a folder that is gone leaves the text out without throwing');
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
     },
   },
   {
@@ -661,6 +741,20 @@ export function CardProbe({navigation, queue, card}) {
           assert.equal(documentButton('resume').disabled, true, 'its own run greys it out');
           assert.equal(documentButton('cover').disabled, false, 'the other document can still be pressed');
 
+          await card.unmount();
+
+          // A résumé saved earlier: the second button adds only its letter, never the résumé again.
+          card = await mount({ localApplication: { id: 'job-1', status: 'saved', savedDir: '/synthetic/folder', savedDocuments: { resume: true, cover: false } } });
+          assert.equal(documentButton('resume').textContent.trim(), 'Résumé', 'the saved résumé is not offered again');
+          assert.equal(documentButton('resume').disabled, true, 'a saved résumé cannot be regenerated');
+          assert.equal(documentButton('both'), null, 'the pair is never offered once the résumé exists');
+          assert.ok(documentButton('cover'), 'the letter is still a choice');
+          assert.equal(documentButton('cover').textContent.trim(), 'Generate cover letter');
+          assert.equal(documentButton('cover').disabled, false, 'only the letter is left to generate');
+          await act(async () => { documentButton('cover').click(); });
+          await card.settle(60);
+          assert.equal(card.queued.length, 1, 'one job, and it never regenerates the résumé');
+          assert.equal(card.queued[0].documentScope, 'cover');
           await card.unmount();
 
           // Spam clicks in one tick, before anything could render: exactly one run, per document.

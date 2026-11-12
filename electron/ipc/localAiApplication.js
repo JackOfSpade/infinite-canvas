@@ -55,7 +55,7 @@ import { applicationBlindReviewValidatorStamp, isApplicationBlindReviewValidator
 import { BLIND_REPAIR_RAISED_CYCLES_RULE, BLIND_REPAIR_TRUNCATION_RULE } from './applicationRepairConvergence.js';
 import { RESUME_SUPPORT_VERB_RULE } from './applicationWriterGuidance.js';
 import { describeRoleStrengthFinding, roleStrengthFindings } from './applicationRoleStrength.js';
-import { ABSENT_DOCUMENT_FIT, applicationDocumentLabel, evidenceResumeForLetter, normalizeApplicationDocumentScope, savedDocumentsFromHtml } from './applicationDocumentScope.js';
+import { ABSENT_DOCUMENT_FIT, applicationDocumentLabel, evidenceResumeForLetter, normalizeApplicationDocumentScope, savedDocumentsFromHtml, savedResumeTextFromHtml } from './applicationDocumentScope.js';
 import { WRITE_VERIFY_PROTOCOL, WRITE_VERIFY_STAGES, WRITE_VERIFY_MAX_CORRECTIONS, WRITE_VERIFY_MAX_FIT_CORRECTIONS, acceptedWriteVerifyCandidates, droppedCandidateFindings, factCorrectionTransition, fullApprovedHand, initialWriteVerifyState, isWriteVerifyJob, appendWriteVerifyRejection, writeVerifyRankingErrors, writeVerifyRankingShapeError, writeVerifyRankingReasonErrors, writeVerifyCandidateCount, writeVerifyNextAfterCandidate, writeVerifyPrompt, writeVerifySourcePrompt, writeVerifySkillIndex, writeVerifyDroppedSkillErrors, writeVerifyStageKey, writeVerifyFactFindingErrors, writeVerifyChangedFindingErrors, writeVerifyDocumentsForPrompt } from './applicationWriteVerify.js';
 import { applicationProtocolSetting } from './applicationProtocolSetting.js';
 import { targetIdentityNameLicensed, validateSharedApplicationContent } from './applicationTruthGates.js';
@@ -5080,6 +5080,9 @@ async function writeVerifyFrozenContext(input, state) {
   const lengthBudget = writeVerifyLengthBudgets(hydrated.snapshot.profile, hydrated.sourceRoles);
   const sourcePrompt = writeVerifySourcePrompt({
     documentScope: input.documentScope || null,
+    // The letter is sent with the résumé the card saved; a cover-only job may
+    // read it as context. It is never part of the résumé or of the checks.
+    savedResumeText: input.documentScope === 'cover' ? input.savedResumeText || '' : '',
     posting, requirements, listingEvidence, identity: hydrated.snapshot.profile.identity,
     sourceRoles: hydrated.sourceRoles, profile: hydrated.snapshot.profile, catalog, lengthBudget,
     careerSkillEvidence: hydrated.skillEvidence,
@@ -10473,6 +10476,18 @@ async function readSavedApplicationDocuments(canvas, receipt) {
     const dir = await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt);
     return savedDocumentsFromHtml(await readOwnedFile(dir, path.join(dir, 'Application.html'), { maxBytes: MAX_SAVED_APPLICATION_HTML_BYTES }));
   } catch { return null; }
+}
+
+// What a cover-only letter has to stay consistent with: the résumé panel of the
+// saved Application.html, read through the trusted receipt folder (never a
+// renderer-supplied path) so the writer sees the user's own synced edits. ''
+// means the letter writes from the approved catalog alone; a résumé it could
+// not read never blocks the start.
+export async function savedResumeTextForCoverStart(canvas, receipt) {
+  try {
+    const dir = await resolveTrustedSavedApplicationOutputDirectory(canvas, receipt);
+    return savedResumeTextFromHtml(await readOwnedFile(dir, path.join(dir, 'Application.html'), { maxBytes: MAX_SAVED_APPLICATION_HTML_BYTES }));
+  } catch { return ''; }
 }
 
 async function writeLocalAiTerminalReceipt({
@@ -16246,6 +16261,10 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
   }
   const canvas = await resolveCanvasProject(args.canvasFilePath);
   const documentScope = normalizeApplicationDocumentScope(args.documentScope);
+  // Frozen below for a cover-only start, so the letter writer sees the résumé
+  // this card already saved. Read at queue time from the trusted receipt
+  // folder only; '' (any failure) simply leaves the writer on the catalog.
+  let savedResumeText = '';
   if (args.priorLocalApplicationId != null) {
     if (typeof args.priorLocalApplicationId !== 'string' || !JOB_ID_RE.test(args.priorLocalApplicationId)) {
       throw new Error('Invalid prior Local AI job id.');
@@ -16257,6 +16276,11 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       catch (error) { if (error?.code !== 'ENOENT') throw error; outputExists = false; }
       // A saved folder blocks only the documents it already holds.
       const savedDocuments = outputExists ? await readSavedApplicationDocuments(canvas, receipt) : null;
+      // A letter-only job joining a saved résumé is the one start that reads
+      // that résumé. A résumé-only or two-document job never does.
+      if (outputExists && documentScope === 'cover' && savedDocuments?.resume === true) {
+        savedResumeText = await savedResumeTextForCoverStart(canvas, receipt);
+      }
       if (outputExists && (!documentScope || savedDocuments?.[documentScope] !== false)) {
         const error = new Error('This job already has a linked application bundle. Delete its saved folder externally before generating another application.');
         error.code = 'LOCAL_AI_OUTPUT_ALREADY_LINKED';
@@ -16331,7 +16355,8 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       ...(snapshotInput && pasteTransport ? { authorityProtocol: queuedCurrentAuthorityProtocolForTests || AUTHORITY_PROTOCOL_CURRENT, listingCoverageVersion: AUTHORITY_LISTING_COVERAGE_VERSION } : {}),
       ...(snapshotInput && pasteTransport && !args[LEGACY_APPLICATION_TEST_CAPABILITY]
         && applicationProtocolSetting(args.applicationProtocol ?? tryGetStore()?.get('application.protocol')) === WRITE_VERIFY_PROTOCOL
-        ? { applicationProtocol: WRITE_VERIFY_PROTOCOL, candidateCount: writeVerifyCandidateCount(args.candidateCount), ...(documentScope ? { documentScope } : {}) } : {}),
+        ? { applicationProtocol: WRITE_VERIFY_PROTOCOL, candidateCount: writeVerifyCandidateCount(args.candidateCount), ...(documentScope ? { documentScope } : {}),
+          ...(documentScope === 'cover' && savedResumeText ? { savedResumeText } : {}) } : {}),
       additionalNotes: normalizeApplicationAdditionalNotes(args.additionalNotes),
       reasoning: cleanText(args.reasoning, 8_000), matchScore: Number.isFinite(args.matchScore) ? args.matchScore : null,
       // A pinned snapshot is the complete career authority. Never carry the
