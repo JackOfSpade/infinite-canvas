@@ -31,8 +31,7 @@ handles acknowledgements and interruptions, can interrupt the candidate, and
 ends the call itself. After the call it reviews performance, including
 delivery: filler words, pace, pauses and interruptions.
 
-The existing claude.ai practice path (docs/interview-practice-mode.md) stays
-as a secondary option until the user accepts the new one.
+The in-app practice call is the only practice mode.
 
 ## 2. Why not the alternatives
 

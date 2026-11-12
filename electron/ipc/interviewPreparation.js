@@ -38,15 +38,13 @@ import { standaloneClaudeActivity } from './claudeTaskActivity.js';
 import { createInterviewClaudeTransport } from './interviewClaudeTransport.js';
 import { INTERVIEW_DISCLOSURE_RESEARCH_INSTRUCTION, mapInterviewDisclosures } from './interviewQaDisclosures.js';
 import { factCheckInterviewCards } from './interviewQaFactCheck.js';
-import { PRACTICE_CONNECTOR_NAME, buildPracticeInterviewPrompt, orderPracticeQuestions, planInterviewPracticeOrder } from './interviewQaPractice.js';
+import { planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
-import { PRACTICE_LAUNCH_NOTES, createPracticeChatLauncher } from './interviewPracticeLauncher.js';
-import { PRACTICE_MCP_PATH, getPracticeConnectorStatus } from './practiceConnector/index.js';
-import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, loadInterviewQaLiveCards, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
 import { isRendererPrivateAppPath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 
-const { app, dialog } = electronPkg;
+const { app } = electronPkg;
 
 const ARTIFACT_DIR = 'interview-helper-artifacts';
 const ARTIFACT_SCHEMA_VERSION = 1;
@@ -748,23 +746,6 @@ async function defaultPreparePractice({ userDataPath, nodeId, questions, company
   if (!ordered.length) return null;
   return saveInterviewPractice({ userDataPath, nodeId, practice: { order: ordered } });
 }
-function validatePracticeArgs(args) {
-  strictKeys(args, ['nodeId'], 'Interview practice requires a valid request.');
-  if (!isInterviewHelperNodeId(args.nodeId)) throw new TypeError('Interview practice requires a valid request.');
-}
-function validatePracticeStartArgs(args) {
-  // The same binding as load-interview-prepared-brief: a practice run is tied
-  // to this helper's snapshot, job URL and captured application bundle.
-  try { validateInterviewPreparedBriefLoadArgs(args); } catch { throw new TypeError('Interview practice requires a valid request.'); }
-}
-/** The practice connector needs its public hostname and a live tunnel. */
-export function practiceConnectorReadiness(status) {
-  const hostname = typeof status?.hostname === 'string' && status.hostname ? status.hostname : null;
-  const live = !!hostname && status?.serving === 'live';
-  return { ready: live, hostname, connectorUrl: hostname ? `https://${hostname}${PRACTICE_MCP_PATH}` : null, connectorName: PRACTICE_CONNECTOR_NAME,
-    reason: !hostname ? 'no_hostname' : !live ? 'not_serving' : null };
-}
-function validateSelectionArgs(args) { strictKeys(args, ['nodeId'], 'Interview preparation requires a valid request.'); if (!isInterviewHelperNodeId(args.nodeId)) throw new TypeError('Interview preparation requires a valid request.'); }
 export function validateInterviewPreparationLoadArgs(args) {
   strictKeys(args, ['nodeId', 'artifactId'], 'Interview preparation requires a valid request.');
   if (!isInterviewHelperNodeId(args.nodeId) || typeof args.artifactId !== 'string' || !ID_RE.test(args.artifactId)) throw new TypeError('Interview preparation requires a valid request.');
@@ -1371,30 +1352,17 @@ export async function publishInterviewPreparedAnswers({ bank, brief, userDataPat
   } finally { await fs.promises.unlink(tmp).catch(() => undefined); }
 }
 
-async function defaultPicker() {
-  const selected = await dialog.showOpenDialog({ properties: ['openDirectory'] });
-  return selected.canceled ? '' : selected.filePaths?.[0] || '';
-}
 const interviewActivityKey = runId => `interview:${runId}`;
 /** Register intake, sealed research and separately sealed prepared answers. */
-export function registerInterviewPreparationHandlers({ appInstance = app, registerHandler = handleSafe, picker = defaultPicker, captureBundle = captureInterviewPreparationBundle, loadBundle = loadInterviewPreparationBundle, buildBrief = buildInterviewBrief, publishBrief = publishInterviewPreparedBrief,
+export function registerInterviewPreparationHandlers({ appInstance = app, registerHandler = handleSafe, captureBundle = captureInterviewPreparationBundle, loadBundle = loadInterviewPreparationBundle, buildBrief = buildInterviewBrief, publishBrief = publishInterviewPreparedBrief,
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
-  practiceLauncher = null, connectorStatus = getPracticeConnectorStatus, practiceRegistry = null, broadcast = null, loadPreparedBrief = loadInterviewPreparedBrief,
+  practiceRegistry = null,
   logWarning = message => console.warn(message) } = {}) {
   if (!appInstance || typeof appInstance.getPath !== 'function' || typeof registerHandler !== 'function') throw new TypeError('Interview preparation IPC registration is unavailable.');
-  registerHandler('select-interview-preparation-bundle', async (_event, args, signal) => {
-    validateSelectionArgs(args); throwIfAborted(signal);
-    try {
-      const directory = await picker(); throwIfAborted(signal); if (!directory) return { cancelled: true };
-      const bundle = await captureBundle({ directory, userDataPath: appInstance.getPath('userData'), signal });
-      throwIfAborted(signal);
-      return { bundle };
-    } catch (error) { if (signal?.aborted) throw error; throw new Error('The selected application bundle could not be read safely.'); }
-  }, { validateArgs: validateSelectionArgs });
   // Searchable Applied Jobs list: tokens only; a selection resolves inside main
-  // to a folder this process enumerated, then follows the picker's capture path.
+  // to a folder this process enumerated, then captures that bundle.
   const folderRegistry = createApplicationFolderRegistry();
   const assertCanvasPathAllowed = canvasPath => {
     try { registerRendererPrivateAppRoot(appInstance.getPath('userData')); } catch { /* test stubs */ }
@@ -1442,43 +1410,10 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
     return addInterviewQaCard({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, scope: args.scope, card: args.card });
   }, { validateArgs: args => validateQaCardArgs(args, false) });
   // ---------------------------------------------------------- practice --
-  // Practice runs in the person's Claude chat; the app arms a one-shot
-  // session, places the starter and reads the feedback back from the
-  // practice connector.
-  const registry = practiceRegistry || getInterviewPracticeRegistry() || configureInterviewPracticeRegistry({ userDataPath: appInstance.getPath('userData') });
-  const launcher = practiceLauncher || createPracticeChatLauncher();
-  const sendPracticeUpdate = broadcast || (event => { try { for (const contents of electronPkg.webContents?.getAllWebContents?.() || []) { if (!contents.isDestroyed?.()) contents.send?.('interview-practice:updated', event); } } catch { /* renderer notice is best effort */ } });
-  registry.subscribe(event => sendPracticeUpdate({ nodeId: event.nodeId, kind: event.kind }));
-  const practiceView = async nodeId => ({ ...(await registry.status(nodeId)), bridge: practiceConnectorReadiness(connectorStatus()) });
-  registerHandler('load-interview-practice', async (_event, args) => { validatePracticeArgs(args); return practiceView(args.nodeId); }, { validateArgs: validatePracticeArgs });
-  registerHandler('cancel-interview-practice', async (_event, args) => { validatePracticeArgs(args); await registry.cancel(args.nodeId); return practiceView(args.nodeId); }, { validateArgs: validatePracticeArgs });
-  registerHandler('start-interview-practice', async (_event, args, signal) => {
-    validatePracticeStartArgs(args); throwIfAborted(signal);
-    const bridge = practiceConnectorReadiness(connectorStatus());
-    if (!bridge.ready) return { ok: false, reason: bridge.reason, note: bridge.reason === 'no_hostname' ? 'The practice connector is not set up on this computer.' : 'The practice connector is not running; practice feedback arrives through its public hostname.', ...(await practiceView(args.nodeId)) };
-    const userDataPath = appInstance.getPath('userData');
-    const brief = await loadPreparedBrief({ briefRecordId: args.briefRecordId, userDataPath });
-    if (!brief || brief.inputs?.careerSnapshotId !== args.snapshotId
-      || brief.inputs?.jobUrlSha256 !== sha256(args.canonicalJobUrl)
-      || brief.inputs?.applicationArtifactId !== args.bundleArtifactId
-      || brief.inputs?.applicationArtifactDigest !== args.bundleArtifactDigest) throw new Error('Prepare this interview before practicing.');
-    const [cards, saved] = await Promise.all([loadInterviewQaLiveCards({ userDataPath, nodeId: args.nodeId }), registry.status(args.nodeId)]);
-    const ordered = orderPracticeQuestions(cards, saved.order);
-    if (!ordered.length) throw new Error('No prepared questions yet. Run Prepare on this Interview Helper first.');
-    throwIfAborted(signal);
-    let code;
-    try { code = await registry.arm({ nodeId: args.nodeId, company: brief.role?.company || '', role: brief.role?.title || '', questionCount: ordered.length }); } catch (error) {
-      if (error?.code !== 'already_armed') throw error;
-      return { ok: false, reason: 'already_armed', note: error.message, ...(await practiceView(args.nodeId)) };
-    }
-    const prompt = buildPracticeInterviewPrompt({ code, company: brief.role?.company || '', role: brief.role?.title || '', roleSummary: brief.role?.summary || '', roleThemes: brief.roleThemes || [], companyFacts: brief.companyFacts || [], recentContext: brief.recentContext || [], cards: ordered });
-    const launched = await launcher.launch({ prompt });
-    if (!launched.ok) {
-      await registry.cancel(args.nodeId);
-      return { ok: false, reason: launched.reason, note: PRACTICE_LAUNCH_NOTES[launched.reason] || 'The Claude chat could not be opened.', ...(await practiceView(args.nodeId)) };
-    }
-    return { ok: true, ...(await practiceView(args.nodeId)) };
-  }, { validateArgs: validatePracticeStartArgs });
+  // The registry backs the in-app practice call (electron/practiceCall/**).
+  // electron/main.js reads it back through getInterviewPracticeRegistry(), so
+  // configure it here rather than handing it to the deleted chat-mode handlers.
+  if (!practiceRegistry && !getInterviewPracticeRegistry()) configureInterviewPracticeRegistry({ userDataPath: appInstance.getPath('userData') });
   registerHandler('delete-interview-qa-card', async (_event, args) => {
     validateQaDeleteArgs(args);
     return deleteInterviewQaCard({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, scope: args.scope, cardId: args.cardId });

@@ -210,7 +210,6 @@ import paste_identity_guard from './tests/paste-identity-guard.js';
 import paste_review_delta from './tests/paste-review-delta.js';
 import event_log_deletion_batching from './tests/event-log-deletion-batching.js';
 import non_api_ai_worker_seam from './tests/non-api-ai-worker-seam.js';
-import practice_connector_tunnel from './tests/practice-connector-tunnel.js';
 import issue_reporter from './tests/issue-reporter.js';
 import search_bar_render from './tests/search-bar-render.js';
 import network_rolling_scheduler from './tests/network-rolling-scheduler.js';
@@ -279,7 +278,6 @@ import interview_application_folders from './tests/interview-application-folders
 import career_writing_core from './tests/career-writing-core.js';
 import interview_qa from './tests/interview-qa.js';
 import interview_practice from './tests/interview-practice.js';
-import practice_connector from './tests/practice-connector.js';
 import career_recovery_resume from './tests/career-recovery-resume.js';
 import adaptability_skills from './tests/adaptability-skills.js';
 import adaptability_metrics from './tests/adaptability-metrics.js';
@@ -537,7 +535,6 @@ const testGroups = [
   ['paste-review-delta.js', paste_review_delta],
   ['event-log-deletion-batching.js', event_log_deletion_batching],
   ['non-api-ai-worker-seam.js', non_api_ai_worker_seam],
-  ['practice-connector-tunnel.js', practice_connector_tunnel],
   ['issue-reporter.js', issue_reporter],
   ['search-bar-render.js', search_bar_render],
   ['network-rolling-scheduler.js', network_rolling_scheduler],
@@ -606,7 +603,6 @@ const testGroups = [
   ['career-writing-core.js', career_writing_core],
   ['interview-qa.js', interview_qa],
   ['interview-practice.js', interview_practice],
-  ['practice-connector.js', practice_connector],
   ['career-recovery-resume.js', career_recovery_resume],
   ['adaptability-skills.js', adaptability_skills],
   ['adaptability-metrics.js', adaptability_metrics],

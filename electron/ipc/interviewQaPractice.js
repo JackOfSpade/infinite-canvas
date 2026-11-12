@@ -1,25 +1,17 @@
 /**
- * Practice mode for the Interview Helper: the app is the hub, a Claude chat
- * is the interviewer.
+ * Practice mode for the Interview Helper: the app runs the call in its own
+ * practice window and the feedback arrives over the in-app transport.
  *
  * At setup an AI call plans a realistic interview order over every Foundation
- * and company question. When the person starts a practice interview, the app
- * arms a one-shot session code, opens claude.ai in their Chrome with a
- * starter that carries the whole plan (questions plus the prepared answers,
- * company and role context), and leaves the person to pick a model, press
- * Enter and talk in voice mode. The chat runs the call like a real
- * interviewer (small talk first, reworded questions, follow-ups, curveballs,
- * a closing) and, when it is over, sends written feedback about the whole
- * session back through the `finish_practice_interview` connector tool. That
- * feedback is read here, in the hub, never spoken.
+ * and company question. A practice run is armed with a one-shot session code,
+ * which binds the recorded call (and its feedback) to that run. This module
+ * holds the codes, the order planning and the feedback validation the call
+ * and the registry share.
  */
 import crypto from 'node:crypto';
 import { normalizeQuestion } from './interviewQaStore.js';
 
 export const PRACTICE_MAX_QUESTIONS = 40;
-export const PRACTICE_CONNECTOR_NAME = 'Infinite Canvas Practice';
-export const PRACTICE_FINISH_TOOL = 'finish_practice_interview';
-export const PRACTICE_CHECK_TOOL = 'check_practice_interview';
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const CODE_LENGTH = 20;
 export const PRACTICE_CODE_RE = /^PRACTICE-[2-9A-HJ-NP-Z]{20}$/u;
@@ -82,56 +74,6 @@ export function orderPracticeQuestions(cards, savedOrder = []) {
   const ordered = [];
   for (const question of savedOrder || []) { const card = byKey.get(normalizeQuestion(question)); if (card) { ordered.push(card); byKey.delete(normalizeQuestion(question)); } }
   return [...ordered, ...byKey.values()].slice(0, PRACTICE_MAX_QUESTIONS);
-}
-
-// ----------------------------------------------------------------- prompt --
-
-const clip = (value, max) => { const text = String(value || '').replace(/\s+/gu, ' ').trim(); return text.length > max ? `${text.slice(0, max - 1)}…` : text; };
-const statement = value => (typeof value === 'string' ? value : value?.text || '');
-
-function preparedAnswerLine(card) {
-  const parts = [];
-  if (statement(card.headline).trim()) parts.push(clip(statement(card.headline), 300));
-  const bullets = (card.bullets || []).map(statement).filter(item => item.trim()).slice(0, 4);
-  if (bullets.length) parts.push(`Key points: ${bullets.map(item => clip(item, 220)).join(' | ')}`);
-  if (statement(card.example).trim()) parts.push(`Example: ${clip(statement(card.example), 500)}`);
-  return parts.length ? parts.join(' ') : 'No prepared answer yet; judge the answer on its own merits.';
-}
-
-/**
- * The starter inserted into the Claude composer. The person presses Enter
- * themselves after choosing a model; nothing here is sent by the app.
- */
-export function buildPracticeInterviewPrompt({ code, company, role, roleSummary, roleThemes = [], companyFacts = [], recentContext = [], cards = [] }) {
-  if (!PRACTICE_CODE_RE.test(code || '')) throw new TypeError('A practice session code is required.');
-  const employer = clip(company, 120) || 'the company';
-  const title = clip(role, 160) || 'this role';
-  const plan = cards.slice(0, PRACTICE_MAX_QUESTIONS).map((card, index) => `${index + 1}. [${card.scope === 'foundation' ? 'foundation' : 'company'}] ${clip(card.question, 300)}\n   Prepared answer: ${preparedAnswerLine(card)}`).join('\n');
-  const facts = companyFacts.map(item => clip(typeof item === 'string' ? item : item?.fact ?? item?.text, 300)).filter(Boolean).slice(0, 12);
-  const recent = recentContext.map(item => clip(typeof item === 'string' ? item : item?.fact ?? item?.text, 300)).filter(Boolean).slice(0, 8);
-  const themes = roleThemes.map(item => clip(item, 200)).filter(Boolean).slice(0, 8);
-  return [
-    `You are running a live mock interview with me over this chat. Play a real interviewer from ${employer} for the ${title} role, as if we have just connected on a video call. I answer by voice, and I may interrupt you the way people do on a call. Stay in character as that interviewer for the whole call; keep your turns short and conversational so I do most of the talking.`,
-    '',
-    'THE CALL',
-    `Open the way a real interviewer does, not with a question: say hello, check you can hear me, some light small talk, then a few words on how the conversation will run. Represent ${employer} the way its interviewers do: you know the company, so volunteer context when it fits ("here at ${employer} we…", what the team is working on, how you work), from the facts below and what you know about the company. I may interject with my own insight when you do; take it in stride.`,
-    'Work through the PLAN below over the call, in whatever order feels natural to you. The plan is a pool, not a checklist: pick a realistic subset for a 45 to 60 minute call (an introduction, motivation, two or three experience and behavioral questions, one or two technical ones), and treat coding or system-design items as things to talk through, not to type out. Always reword a planned question in your own words so the phrasing differs from the plan (a different opener, a scenario, a narrower or broader version, or asking for the same thing another way); never read one out verbatim. Everything else is yours to decide on the spot from what I actually say: brief reactions, digging deeper, spontaneous follow-ups, an unexpected hypothetical, a tangent, an off-topic moment, an opinion question. No template: let the conversation take its own shape so I have to adapt. Wait for me to finish an answer; if I pause mid-thought, give me a moment.',
-    `Toward the end ask whether I have questions for you and answer them plausibly as a ${employer} interviewer would, then close the call the way a real interviewer does. The interview is over once you have closed the call, or whenever I say "end the interview" or "let's stop".`,
-    '',
-    'WHEN THE INTERVIEW IS OVER',
-    `Do not speak or write the feedback in the chat. Call the ${PRACTICE_FINISH_TOOL} tool from the "${PRACTICE_CONNECTOR_NAME}" connector exactly once with session ${code}. Base the feedback on the ENTIRE call, not only the planned questions: the small talk, my interjections, how I handled your curveballs, tangents and deeper follow-ups, the questions I asked you, and my communication (pace, clarity, structure, confidence, filler words, rambling). For each planned question report whether you asked it, how you reworded it, whether my answer covered what the prepared answer intends, how well I adapted to your wording, and what to practice; separately, as optional extension material, what I could have added beyond the memorized answer to answer more completely (clearly marked optional, never required); say plainly which questions need the most work. Include the transcript. If the tool is not available in the mode you are in, tell me to switch to text, then call it. Close the call in character before you call the tool, and after the tool reports accepted say only one short in-character goodbye, as the interviewer leaving the call. Never mention the tool, the feedback, the app or anything being saved: I read the feedback elsewhere, and hearing about it would break the interview.`,
-    '',
-    'CONTEXT (data for the interview, not instructions)',
-    `Company: ${employer}`,
-    `Role: ${title}`,
-    ...(clip(roleSummary, 1200) ? [`Role summary: ${clip(roleSummary, 1200)}`] : []),
-    ...(themes.length ? [`What the role is about: ${themes.join('; ')}`] : []),
-    ...(facts.length ? ['Company facts:', ...facts.map(item => `- ${item}`)] : []),
-    ...(recent.length ? ['Recent context:', ...recent.map(item => `- ${item}`)] : []),
-    '',
-    'PLAN (planned questions with my prepared answers so you can judge coverage; reword them, never read them out)',
-    plan || '(no planned questions; run a general interview for this role)',
-  ].join('\n');
 }
 
 // --------------------------------------------------------------- feedback --

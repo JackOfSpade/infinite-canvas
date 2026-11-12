@@ -167,7 +167,7 @@ export default [
     },
   },
   {
-    name: 'interview preparation: honors cancellation before picker/capture persistence',
+    name: 'interview preparation: honors a pre-cancelled capture before persistence',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-prep-'));
       try {
@@ -175,15 +175,6 @@ export default [
         const alreadyCancelled = new AbortController(); alreadyCancelled.abort(new Error('cancelled'));
         const captureRejected = await captureInterviewPreparationBundle({ directory: bundle, userDataPath: root, signal: alreadyCancelled.signal }).then(() => false, () => true);
         assert(captureRejected && !fs.existsSync(path.join(root, 'interview-helper-artifacts')), 'a pre-cancelled capture must not create an artifact store');
-        const handlers = new Map(); const controller = new AbortController(); let captured = false;
-        registerInterviewPreparationHandlers({
-          appInstance: { getPath: () => root },
-          registerHandler: (channel, handler) => handlers.set(channel, handler),
-          picker: async () => { controller.abort(new Error('cancelled in picker')); return bundle; },
-          captureBundle: async () => { captured = true; return {}; },
-        });
-        const pickerRejected = await handlers.get('select-interview-preparation-bundle')({}, { nodeId: 'node-1' }, controller.signal).then(() => false, () => true);
-        assert(pickerRejected && !captured, 'cancellation after native picker must prevent capture/persistence');
         return { cancelled: true };
       } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
     },

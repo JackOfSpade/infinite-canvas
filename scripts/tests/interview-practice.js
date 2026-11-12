@@ -2,24 +2,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { EventEmitter } from 'node:events';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
-import { PRACTICE_CODE_RE, PRACTICE_FINISH_TOOL, buildPracticeInterviewPrompt, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
-import { addInterviewQaCard, findInterviewPracticeSession, listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
+import { PRACTICE_CODE_RE, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
+import { findInterviewPracticeSession, listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
-import { PRACTICE_MCP_PATH, createPracticeMcpHandler, createPracticeRequestHandler, isPracticeRequest } from '../../electron/ipc/practiceConnector/practiceMcp.js';
-import { CLAUDE_NEW_CHAT_URL, createPracticeChatLauncher } from '../../electron/ipc/interviewPracticeLauncher.js';
-import { practiceConnectorReadiness, registerInterviewPreparationHandlers } from '../../electron/ipc/interviewPreparation.js';
 
 async function userData(run) {
   const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-practice-'));
   try { await run(dir); } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
 }
-const cards = [
-  { id: 'intro', scope: 'foundation', question: 'Tell me about yourself.', headline: { text: 'Product engineer, five years.' }, bullets: [{ text: 'Shipped the checkout redesign' }], example: { text: 'At Acme I led the migration.' }, extensions: [] },
-  { id: 'why', scope: 'company', question: 'Why Discord?', headline: '', bullets: [], example: '', extensions: [] },
-];
 const feedbackPayload = code => ({
   session: code, overall: { score: 7, summary: 'Solid call; the opening was stiff.' },
   planned: [{ question: 'Tell me about yourself.', asked: true, askedAs: 'Walk me through your path so far.', score: 8, covered: 'Hit the headline and the example.', adapted: 'Adjusted fine.', improve: 'Tighten the ending.', extension: 'Mention the on-call rotation you ran.' }, { question: 'Why Discord?', asked: false, score: 1 }],
@@ -27,32 +19,8 @@ const feedbackPayload = code => ({
   communication: { pace: 'Good', filler: 'Many "like"s' }, priorities: ['Curveballs', 'Shorter intro'],
   transcript: [{ role: 'interviewer', text: 'Hi, can you hear me?' }, { role: 'candidate', text: 'Loud and clear.' }],
 });
-function fakeRequest({ url = PRACTICE_MCP_PATH, method = 'POST', host = 'bridge.example.com', body = '', headers = {} } = {}) {
-  const req = new EventEmitter();
-  Object.assign(req, { url, method, headers: { host, 'content-type': 'application/json', 'content-length': String(Buffer.byteLength(body)), ...headers }, socket: { remoteAddress: '203.0.113.9' }, destroy() {} });
-  const res = { status: 0, headers: null, body: '', headersSent: false, writeHead(status, headers) { this.status = status; this.headers = headers; this.headersSent = true; }, end(data) { this.body = String(data || ''); } };
-  setTimeout(() => { if (body) req.emit('data', Buffer.from(body)); req.emit('end'); }, 0);
-  return { req, res };
-}
-const rpc = (id, method, params) => JSON.stringify({ jsonrpc: '2.0', id, method, params });
 
 export default [
-  { name: 'practice prompt: a one-shot code, the whole plan with prepared answers, company context and the connector hand-back', async run() {
-    const code = newPracticeCode();
-    assert.match(code, PRACTICE_CODE_RE);
-    assert.notEqual(newPracticeCode(), code);
-    const prompt = buildPracticeInterviewPrompt({ code, company: 'Discord', role: 'Product Engineer', roleSummary: 'Own features end to end.', roleThemes: ['voice', 'reliability'], companyFacts: [{ fact: 'Discord runs on Elixir and Rust.', sourceUrl: 'https://x', evidenceQuote: 'q' }], recentContext: ['Launched Clyde.'], cards });
-    for (const needle of ['interviewer from Discord', code, PRACTICE_FINISH_TOOL, 'reword', 'never read one out verbatim', 'small talk', 'here at Discord we', 'ENTIRE call', 'Discord runs on Elixir and Rust.', 'Launched Clyde.', 'voice; reliability',
-      '1. [foundation] Tell me about yourself.', 'Product engineer, five years.', 'Key points: Shipped the checkout redesign', 'Example: At Acme I led the migration.', '2. [company] Why Discord?', 'No prepared answer yet']) {
-      assert.ok(prompt.includes(needle), `prompt carries ${JSON.stringify(needle)}`);
-    }
-    assert.match(prompt, /No template/u, 'the interviewer is free to shape the call');
-    assert.match(prompt, /pool, not a checklist/u, 'a long plan is sampled to one realistic call');
-    assert.match(prompt, /Never mention the tool, the feedback, the app/u, 'the sign-off stays in character');
-    assert.match(prompt, /optional extension material/u, 'feedback separates memorized coverage from optional extension material');
-    assert.doesNotMatch(prompt, /must ask a curveball/iu);
-    assert.throws(() => buildPracticeInterviewPrompt({ code: 'nope', company: 'x', cards }), /session code/u);
-  } },
   { name: 'practice feedback: bounded, typed, and rejected with a reason the chat can fix', async run() {
     const ok = validatePracticeFeedback(feedbackPayload('PRACTICE-X'));
     assert.equal(ok.overall.score, 7); assert.equal(ok.planned.length, 2); assert.equal(ok.planned[1].askedAs, ''); assert.equal(ok.moments[0].kind, 'curveball');
@@ -156,110 +124,6 @@ export default [
       assert.equal((await registry.finish(code4, feedbackPayload(code4))).status, 'duplicate');
     });
   } },
-  { name: 'practice connector: MCP initialize, tools and finish call reach the registry; notifications are 202', async run() {
-    const calls = [];
-    const mcp = createPracticeMcpHandler({ finish: async (code, payload) => { calls.push(['finish', code, payload.overall.score]); return { status: 'accepted' }; }, check: async code => { calls.push(['check', code]); return { status: 'armed' }; } });
-    const init = await mcp({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18' } });
-    assert.equal(init.status, 200); assert.equal(init.body.result.protocolVersion, '2025-06-18'); assert.ok(init.body.result.capabilities.tools);
-    assert.equal((await mcp({ jsonrpc: '2.0', id: 2, method: 'initialize', params: { protocolVersion: '1900-01-01' } })).body.result.protocolVersion, '2025-06-18');
-    assert.equal((await mcp({ jsonrpc: '2.0', method: 'notifications/initialized' })).status, 202);
-    const list = await mcp({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
-    assert.deepEqual(list.body.result.tools.map(tool => tool.name), ['check_practice_interview', PRACTICE_FINISH_TOOL]);
-    assert.equal(list.body.result.tools[1].inputSchema.required.includes('session'), true);
-    const done = await mcp({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: PRACTICE_FINISH_TOOL, arguments: feedbackPayload('PRACTICE-A') } });
-    assert.equal(done.body.result.structuredContent.status, 'accepted'); assert.equal(done.body.result.isError, false);
-    await mcp({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'check_practice_interview', arguments: { session: ' PRACTICE-A ' } } });
-    assert.deepEqual(calls, [['finish', 'PRACTICE-A', 7], ['check', 'PRACTICE-A']]);
-    assert.equal((await mcp({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: PRACTICE_FINISH_TOOL, arguments: { overall: {} } } })).body.result.structuredContent.status, 'rejected');
-    assert.equal((await mcp({ jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'nope', arguments: { session: 'x' } } })).body.error.code, -32602);
-    assert.equal((await mcp({ jsonrpc: '2.0', id: 8, method: 'resources/list' })).body.error.code, -32601);
-    assert.equal((await mcp({ id: 9, method: 'ping' })).status, 400);
-  } },
-  { name: 'practice connector HTTP: only /practice/mcp POST JSON on the public host, bounded and rate limited', async run() {
-    let clock = 0;
-    const handler = createPracticeRequestHandler({ hostname: 'bridge.example.com', now: () => clock, limits: { perSourceCapacity: 3, perSourcePerSecond: 1, maxBodyBytes: 200 }, mcp: async body => ({ status: 200, body: { jsonrpc: '2.0', id: body.id, result: { ok: true } } }) });
-    assert.equal(isPracticeRequest({ url: '/practice/mcp?x=1' }), true); assert.equal(isPracticeRequest({ url: '/mcp' }), false);
-    let pair = fakeRequest({ url: '/mcp' }); assert.equal(await handler(pair.req, pair.res), false, 'the OAuth bridge keeps every other route');
-    pair = fakeRequest({ method: 'GET' }); assert.equal(await handler(pair.req, pair.res), true); assert.equal(pair.res.status, 405);
-    pair = fakeRequest({ host: 'other.example.com', body: rpc(1, 'ping') }); await handler(pair.req, pair.res); assert.equal(pair.res.status, 421);
-    pair = fakeRequest({ body: rpc(1, 'ping') }); await handler(pair.req, pair.res); assert.equal(pair.res.status, 200); assert.equal(JSON.parse(pair.res.body).result.ok, true);
-    pair = fakeRequest({ body: 'x'.repeat(300) }); await handler(pair.req, pair.res); assert.equal(pair.res.status, 413);
-    pair = fakeRequest({ body: 'not json' }); await handler(pair.req, pair.res); assert.equal(pair.res.status, 400);
-    pair = fakeRequest({ body: rpc(1, 'ping') }); await handler(pair.req, pair.res); assert.equal(pair.res.status, 429, 'the fourth call in the same second is throttled'); assert.ok(pair.res.headers['Retry-After']);
-    clock += 2000;
-    pair = fakeRequest({ body: rpc(1, 'ping'), headers: { 'content-type': 'text/plain' } }); await handler(pair.req, pair.res); assert.equal(pair.res.status, 415);
-    clock += 60_000;
-    const v6 = suffix => fakeRequest({ body: rpc(1, 'ping'), headers: { 'cf-connecting-ip': `2001:db8:1:2:${suffix}` } });
-    for (const suffix of ['a::1', 'b::2', 'c::3']) { pair = v6(suffix); await handler(pair.req, pair.res); assert.equal(pair.res.status, 200); }
-    pair = v6('d::4'); await handler(pair.req, pair.res); assert.equal(pair.res.status, 429, 'addresses inside one /64 share a bucket');
-    clock += 60_000;
-    pair = fakeRequest({ method: 'GET' }); assert.equal(handler.preflight(pair.req, pair.res), false); assert.equal(pair.res.status, 405, 'the Expect preflight refuses before any 100 Continue');
-    assert.equal(handler.preflight({ url: '/mcp' }, {}), null, 'the OAuth bridge keeps its own preflight');
-    pair = fakeRequest({ body: rpc(1, 'ping') }); assert.equal(handler.preflight(pair.req, pair.res), true); await handler(pair.req, pair.res); assert.equal(pair.res.status, 200, 'an admitted request is served without a second gate');
-  } },
-  { name: 'practice launcher: opens claude.ai in front, waits for the composer, inserts the starter and never sends', async run() {
-    const scripts = [];
-    const make = answers => createPracticeChatLauncher({ delay: async () => {}, now: () => scripts.length * 1000, editorTimeoutMs: 5000, run: async (script, args) => { scripts.push(args); return answers(script, args); } });
-    const launcher = make((script, args) => (args.length === 1 ? '7:42' : /tab\.execute\(/u.test(script) ? (/insertText/u.test(args[2]) ? 'match' : JSON.stringify({ ready: true, path: '/new', origin: 'https://claude.ai' })) : 'focused'));
-    const result = await launcher.launch({ prompt: 'Hello interviewer' });
-    assert.deepEqual(result, { ok: true, tab: { windowId: '7', tabId: '42' } });
-    assert.deepEqual(scripts[0], [CLAUDE_NEW_CHAT_URL]);
-    assert.ok(scripts.some(args => args[2]?.includes('"Hello interviewer"')), 'the starter is inserted through page script, not a URL');
-    assert.ok(!scripts.some(args => /Send|Enter|submit\(/u.test(args[2] || '')), 'nothing presses send');
-    const mismatch = make((script, args) => (args.length === 1 ? '1:2' : /insertText/u.test(args[2] || '') ? 'mismatch' : JSON.stringify({ ready: true, path: '/new', origin: 'https://claude.ai' })));
-    assert.equal((await mismatch.launch({ prompt: 'x' })).reason, 'insert_mismatch');
-    let inserts = 0;
-    const late = make((script, args) => (args.length === 1 ? '1:2' : /insertText/u.test(args[2] || '') ? (inserts += 1, inserts < 3 ? 'mismatch:' : 'match') : JSON.stringify({ ready: true, path: '/new', origin: 'https://claude.ai' })));
-    assert.equal((await late.launch({ prompt: 'x' })).ok, true, 'an empty composer (editor not attached yet) is retried');
-    assert.equal(inserts, 3);
-    const login = make((script, args) => (args.length === 1 ? '1:2' : JSON.stringify({ ready: false, path: '/login', origin: 'https://claude.ai' })));
-    assert.equal((await login.launch({ prompt: 'x' })).reason, 'login_required');
-    const elsewhere = make((script, args) => (args.length === 1 ? '1:2' : JSON.stringify({ ready: true, path: '/', origin: 'https://evil.example' })));
-    assert.equal((await elsewhere.launch({ prompt: 'x' })).reason, 'editor_timeout', 'another origin never counts as ready');
-    assert.ok(!scripts.some(args => (args[2] || '').includes('insertText') && scripts.indexOf(args) > scripts.length - 3), 'nothing was inserted elsewhere');
-    assert.match(scripts.find(args => /insertText/u.test(args[2] || ''))[2], /location\.origin !== "https:\/\/claude\.ai"/u, 'the insert script itself refuses a foreign origin');
-    const off = make(() => { throw Object.assign(new Error('execution error: Google Chrome got an error: Executing JavaScript through AppleScript is turned off.'), { stderr: 'Executing JavaScript through AppleScript is turned off' }); });
-    assert.equal((await off.launch({ prompt: 'x' })).reason, 'apple_events_js_off');
-    let editorReads = 0;
-    const offAfterOpen = make((script, args) => { if (args.length === 1) return '1:2'; editorReads += 1; throw Object.assign(new Error('execution error'), { stderr: 'Executing JavaScript through AppleScript is turned off' }); });
-    const offResult = await offAfterOpen.launch({ prompt: 'x' });
-    assert.equal(offResult.reason, 'apple_events_js_off', 'a scripting refusal while reading the editor is reported, not timed out');
-    assert.deepEqual(offResult.tab, { windowId: '1', tabId: '2' });
-    assert.equal(editorReads, 1, 'the editor poll stops at the first refusal');
-    assert.equal((await launcher.launch({ prompt: '' })).reason, 'empty_prompt');
-  } },
-  { name: 'practice IPC: start arms, launches and reports; load and cancel round-trip; the bridge and the brief binding gate it', async run() {
-    await userData(async dir => {
-      const handlers = new Map(); const launches = []; const notices = [];
-      let launchResult = { ok: true, tab: { windowId: '1', tabId: '2' } };
-      let status = { hostname: 'bridge.example.com', serving: 'live' };
-      const inputs = { careerSnapshotId: 'd'.repeat(64), jobUrlSha256: (await import('node:crypto')).createHash('sha256').update('https://jobs.example/1').digest('hex'), applicationArtifactId: 'a'.repeat(64), applicationArtifactDigest: 'b'.repeat(64) };
-      const brief = { inputs, role: { title: 'Product Engineer', company: 'Discord', summary: 'Own features.' }, roleThemes: ['voice'], companyFacts: [{ fact: 'Discord runs on Elixir.' }], recentContext: [] };
-      registerInterviewPreparationHandlers({ appInstance: { getPath: () => dir }, registerHandler: (channel, handler) => handlers.set(channel, handler),
-        practiceRegistry: createInterviewPracticeRegistry({ userDataPath: dir }), practiceLauncher: { launch: async ({ prompt }) => { launches.push(prompt); return launchResult; } },
-        connectorStatus: () => status, broadcast: event => notices.push(event), loadPreparedBrief: async ({ briefRecordId }) => (briefRecordId === 'c'.repeat(64) ? brief : null) });
-      const nodeId = 'interview-helper-1';
-      await addInterviewQaCard({ userDataPath: dir, nodeId, scope: 'company', card: { question: 'Why Discord?', headline: 'Because voice.' } });
-      const startArgs = { nodeId, briefRecordId: 'c'.repeat(64), snapshotId: 'd'.repeat(64), canonicalJobUrl: 'https://jobs.example/1', bundleArtifactId: 'a'.repeat(64), bundleArtifactDigest: 'b'.repeat(64) };
-      const load = await handlers.get('load-interview-practice')({}, { nodeId });
-      assert.equal(load.session, null); assert.equal(load.bridge.connectorUrl, 'https://bridge.example.com/practice/mcp');
-      status = { hostname: null, serving: 'off' };
-      assert.equal((await handlers.get('start-interview-practice')({}, startArgs, new AbortController().signal)).reason, 'no_hostname');
-      status = { hostname: 'bridge.example.com', serving: 'live' };
-      await assert.rejects(handlers.get('start-interview-practice')({}, { ...startArgs, snapshotId: 'e'.repeat(64) }, new AbortController().signal), /Prepare this interview/u, 'a brief bound to other inputs is refused');
-      const started = await handlers.get('start-interview-practice')({}, startArgs, new AbortController().signal);
-      assert.equal(started.ok, true); assert.equal(started.session.status, 'armed'); assert.equal(started.session.questionCount, 1);
-      assert.equal(launches.length, 1); assert.match(launches[0], /interviewer from Discord/u); assert.match(launches[0], /Why Discord\?/u); assert.match(launches[0], /Discord runs on Elixir\./u);
-      assert.ok(!('codeHash' in started.session));
-      assert.equal((await handlers.get('start-interview-practice')({}, startArgs, new AbortController().signal)).reason, 'already_armed');
-      const cancelled = await handlers.get('cancel-interview-practice')({}, { nodeId });
-      assert.equal(cancelled.session.status, 'cancelled');
-      launchResult = { ok: false, reason: 'login_required' };
-      const failed = await handlers.get('start-interview-practice')({}, startArgs, new AbortController().signal);
-      assert.equal(failed.ok, false); assert.match(failed.note, /sign in/u); assert.equal(failed.session.status, 'cancelled', 'a failed launch disarms the session');
-      assert.deepEqual(notices.map(item => item.kind), ['armed', 'cancelled', 'armed', 'cancelled']);
-    });
-  } },
   { name: 'practice feedback view: memorized answer first, optional extension second and only when present', async run() {
     await withDom(async window => {
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-practice-render-'));
@@ -329,12 +193,15 @@ export default [
       } finally { controller.abort(); await bundle?.dispose(); await fs.promises.rm(directory, { recursive: true, force: true }); }
     });
   } },
-  { name: 'practice plan order and bridge readiness', async run() {
+  { name: 'practice codes: one-shot, well formed and stored only as a hash', async run() {
+    const code = newPracticeCode();
+    assert.match(code, PRACTICE_CODE_RE);
+    assert.notEqual(newPracticeCode(), code, 'every run arms a fresh one-shot code');
+    assert.notEqual(practiceCodeHash(code), code, 'the code is never stored in the clear');
+    assert.notEqual(practiceCodeHash(code), practiceCodeHash(newPracticeCode()), 'a hash names exactly one code');
+  } },
+  { name: 'practice plan order: saved order first, then any card the plan does not know yet', async run() {
     const ordered = orderPracticeQuestions([{ question: 'B?' }, { question: 'A?' }, { question: 'a?' }, { question: 'C?' }], ['A?', 'Missing?', 'C?']);
     assert.deepEqual(ordered.map(card => card.question), ['A?', 'C?', 'B?']);
-    assert.deepEqual(practiceConnectorReadiness({ hostname: 'bridge.example.com', serving: 'live' }), { ready: true, hostname: 'bridge.example.com', connectorUrl: 'https://bridge.example.com/practice/mcp', connectorName: 'Infinite Canvas Practice', reason: null });
-    assert.equal(practiceConnectorReadiness({ hostname: null, serving: 'off' }).reason, 'no_hostname');
-    assert.equal(practiceConnectorReadiness({ hostname: 'h.example.com', serving: 'off' }).reason, 'not_serving');
-    assert.equal(practiceConnectorReadiness({ hostname: 'h.example.com', serving: 'starting' }).reason, 'not_serving');
   } },
 ];

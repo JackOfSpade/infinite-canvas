@@ -57,7 +57,6 @@ import { registerSettingsHandlers } from './ipc/settings.js';
 import { flushNonApiAiPersistence, hasPendingNonApiAiRequestsForSender, registerNonApiAiHandlers } from './ipc/nonApiAi.js';
 import { registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registerClaudeTaskStatusHandler, startClaudeTaskWorker, wakeClaudeTaskWorker } from './ipc/claudeTaskWorker.js';
 import { beginSenderQuitPause, releaseSenderQuitPause, drainSenderNodeTasksForQuit, handleSafe } from './ipc/ipcUtils.js';
-import { startPracticeConnector, stopPracticeConnector } from './ipc/practiceConnector/index.js';
 import fs from 'fs';
 import { Readable } from 'node:stream';
 import { execFile as execFileCb } from 'node:child_process';
@@ -1535,10 +1534,6 @@ if (!gotTheLock) {
 
     setupApplicationMenu();
     createWindow(initialCanvasWindowSpec(process.argv));
-    // The practice-interview connector owns the tunnel and its hostname.
-    startPracticeConnector({ userData: app.getPath('userData') }).catch(error => {
-      logger.warn(`[PracticeConnector] start failed: ${error?.message || error}`);
-    });
 
     if (process.env.INFINITE_CANVAS_E2E !== '1') {
       // Mark every platform pending before the delayed worker pool begins. The
@@ -1601,7 +1596,6 @@ app.on('before-quit', async (event) => {
       closeAllPages,
       closeStealthBrowser,
       stopApplicationSyncServer,
-      stopPracticeConnector,
     });
     try {
       await Promise.allSettled([shutdownClaudeApplicationRunner()]);
@@ -1676,7 +1670,6 @@ app.on('before-quit', async (event) => {
     // Cleanup with safety timeout
     try {
       const cleanup = async () => {
-        const practiceConnectorStop = stopPracticeConnector();
         const claudeRunnerStop = shutdownClaudeApplicationRunner();
         // Visible login/native-auth windows own the same persistent profile.
         // Close and await them first so the singleton cannot race their final
@@ -1686,7 +1679,6 @@ app.on('before-quit', async (event) => {
           closeAllPages(),
           closeStealthBrowser(true),
           stopApplicationSyncServer(),
-          practiceConnectorStop,
           claudeRunnerStop,
         ]);
       };

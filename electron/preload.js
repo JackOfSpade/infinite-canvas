@@ -147,7 +147,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // career snapshot for the Interview Helper. The node id keeps the request
   // cancellable with the rest of its canvas module lifecycle.
   loadInterviewHelperCareerSnapshot: (args) => ipcRenderer.invoke('load-interview-helper-career-snapshot', args),
-  selectInterviewApplicationBundle: (args) => ipcRenderer.invoke('select-interview-preparation-bundle', args),
   // Applied Jobs folders are listed by main; the renderer receives only tokens.
   listInterviewApplicationFolders: (args) => {
     const { nodeId, canvasFilePath = null } = args || {};
@@ -197,18 +196,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     });
   },
   launchInterviewWindow: (args) => ipcRenderer.invoke('interview-window:launch', args),
-  loadInterviewPractice: ({ nodeId }) => ipcRenderer.invoke('load-interview-practice', { nodeId }),
-  startInterviewPractice: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }) => ipcRenderer.invoke('start-interview-practice', { nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }),
-  cancelInterviewPractice: ({ nodeId }) => ipcRenderer.invoke('cancel-interview-practice', { nodeId }),
   startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }) => ipcRenderer.invoke('practice-call:start', { nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }),
   openPracticeReplay: ({ nodeId, callId }) => ipcRenderer.invoke('practice-call:open-replay', { nodeId, callId }),
   listPracticeCalls: ({ nodeId }) => ipcRenderer.invoke('practice-call:list', { nodeId }),
-  onInterviewPracticeUpdated: (callback) => {
-    if (typeof callback !== 'function') throw new TypeError('Interview practice callback must be a function.');
-    const listener = (_event, event) => callback(event);
-    ipcRenderer.on('interview-practice:updated', listener);
-    return () => ipcRenderer.removeListener('interview-practice:updated', listener);
-  },
   // New Local AI application jobs use an app-owned copy/paste handoff. Legacy
   // filesystem coding-agent jobs remain supported for existing job folders.
   queueLocalApplication: (args) => ipcRenderer.invoke('queue-local-application', args),
