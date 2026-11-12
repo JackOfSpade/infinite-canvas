@@ -1788,6 +1788,8 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
   recoveryDisposition = undefined,
   // Pages that loaded without the structure the reader needs. Saved so a resumed run still raises the source alarm.
   pageShapeFailures = undefined,
+  // Dated cards the collection window dropped. Saved so a resumed run keeps the posted-date check's denominator.
+  windowDropped = undefined,
 } = {}) {
   const located = await locateRun(canvasFilePath, nodeId);
   const { files } = located;
@@ -1798,6 +1800,10 @@ async function markSourceStatusRaw(canvasFilePath, sourceId, status, now, {
     if (pageShapeFailures !== undefined) {
       if (Number.isSafeInteger(pageShapeFailures) && pageShapeFailures > 0) src.pageShapeFailures = Math.min(pageShapeFailures, 10_000);
       else delete src.pageShapeFailures;
+    }
+    if (windowDropped !== undefined) {
+      if (Number.isSafeInteger(windowDropped) && windowDropped > 0) src.windowDropped = Math.min(windowDropped, 100_000);
+      else delete src.windowDropped;
     }
     if (status === 'done' || status === 'skipped') {
       delete src.recoveryDisposition;

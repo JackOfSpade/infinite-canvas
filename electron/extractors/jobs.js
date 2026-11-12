@@ -233,6 +233,11 @@ export const GLASSDOOR_EXTRACTOR = `
 `;
 // ── Google Jobs ──────────────────────────────────────────────────────────────
 
+// The Google list-card date label vocabulary (shared with the detail-panel
+// reader in manualScraper.js). Imported, never re-declared, so the extractor and
+// the panel recovery can't drift apart.
+import { GOOGLE_POSTED_TEXT_PATTERN } from '../ipc/browser/googlePostedDate.js';
+
 export const GOOGLE_JOBS_CONFIG = {
   waitMs: 2500,
   timeoutMs: 25000,
@@ -292,11 +297,34 @@ export const GOOGLE_JOBS_EXTRACTOR = `
       const viaIndex = locationLine.toLowerCase().lastIndexOf(' via ');
       const applySource = viaIndex >= 0 ? locationLine.slice(viaIndex + 5).trim() : '';
 
-      // Posted date + employment type from bare <span> elements (no class attr).
+      // Employment type stays sourced from the bare <span> chips.
       const bareSpans = Array.from(card.querySelectorAll('span:not([class])'))
         .map(s => s.innerText?.trim()).filter(Boolean);
-      const posted = bareSpans.find(s => /\\d+\\s+(day|week|hour|month)/i.test(s) || s === 'Just now') || '';
       const empType = bareSpans.find(s => /full[- ]?time|part[- ]?time|contract|intern/i.test(s)) || '';
+
+      // Posted date: Google renders it in ANY short text leaf — classed or not
+      // ("45 minutes ago", "30+ days ago", "5h ago", "Today", "Yesterday") — and
+      // omits it entirely on some cards. Scan leaves in DOM order, but never the
+      // title / company / location lines or a pay chip: those can carry
+      // date-shaped fragments ("24 hours support", "a year") that are not a
+      // posting date.
+      const postedRe = new RegExp(${JSON.stringify(GOOGLE_POSTED_TEXT_PATTERN)}, 'i');
+      const titleLineEl = contentDivs[0] || null;
+      const companyLineEl = contentDivs[1] || null;
+      const locationLineEl = contentDivs[2] || null;
+      const isMetaLeaf = el => [titleEl, titleLineEl, companyLineEl, locationLineEl]
+        .some(node => node && (node === el || node.contains(el)));
+      let posted = '';
+      for (const leaf of Array.from(card.querySelectorAll('*'))) {
+        if (leaf.children && leaf.children.length > 0) continue;
+        const leafText = (leaf.innerText || '').trim();
+        if (!leafText || leafText.length > 40) continue;
+        if (isMetaLeaf(leaf) || payRe.test(leafText)) continue;
+        const dateMatch = postedRe.exec(leafText);
+        if (!dateMatch) continue;
+        posted = dateMatch[0].trim();
+        break;
+      }
 
       // Salary: prefer the semantic aria-label="Salary $X" anchor (keeps the currency
       // even when the visible chip drops it); fall back to a money-text scan of the card.

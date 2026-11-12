@@ -70,6 +70,7 @@ import official_posting_chat_engine from './tests/official-posting-chat-engine.j
 import official_posting_eightfold from './tests/official-posting-eightfold.js';
 import official_posting_rendered_page from './tests/official-posting-rendered-page.js';
 import official_posting_run_fixes from './tests/official-posting-run-fixes.js';
+import google_posted_date from './tests/google-posted-date.js';
 import job_source_health from './tests/job-source-health.js';
 import scrape_alarms from './tests/scrape-alarms.js';
 import scrape_health_official from './tests/scrape-health-official.js';
@@ -390,6 +391,7 @@ const testGroups = [
   ['official-posting-rendered-page.js', official_posting_rendered_page],
   ['official-posting-run-fixes.js', official_posting_run_fixes],
   ['job-source-health.js', job_source_health],
+  ['google-posted-date.js', google_posted_date],
   ['scrape-alarms.js', scrape_alarms],
   ['scrape-health-official.js', scrape_health_official],
   ['scrape-health-liveness.js', scrape_health_liveness],

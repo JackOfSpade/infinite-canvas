@@ -23,6 +23,7 @@ import {
 } from '../stealthBrowser.js';
 import { logger } from '../../logger.js';
 import { filterJobsByPostedSince, POSTED_DATE_PATTERN } from '../jobDateFilter.js';
+import { GOOGLE_POSTED_TEXT_PATTERN, readGooglePanelPostedDate } from './googlePostedDate.js';
 import { buildOverlayScript, updateOverlay as paintOverlay, linkDetailOverlayPages, overlayControlPage, overlayTabLayout } from './scraperOverlay.js';
 import { prepareBackgroundScrapeLaunchOptions, createBackgroundScrapePage } from './backgroundScrapeBrowser.js';
 import { isProfileLockCollision } from '../browserLaunchTelemetry.js';
@@ -5659,6 +5660,17 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
           enhanced[i].pendingApplyRedirects = pendingApplyRedirects;
           googleApplyLinkPendingRows++;
           googleApplyLinkPendingRedirects += pendingApplyRedirects.length;
+        }
+        // Google only sometimes renders the posting age on the LIST card (a
+        // whole class of cards ships no date at all), which is what tripped the
+        // scrape-health "posted date missing" alarm. The verified panel header
+        // always carries it: fill a BLANK list date, and never overwrite a date
+        // the list card already supplied.
+        if (!String(enhanced[i]?.posted ?? '').trim()) {
+          const panelPosted = await page.evaluate(
+            readGooglePanelPostedDate, cfg.panelSelector, GOOGLE_POSTED_TEXT_PATTERN,
+          ).catch(() => '');
+          if (panelPosted) enhanced[i] = { ...enhanced[i], posted: panelPosted };
         }
         if (applyOptions.some(option => !isAggregatorHost(new URL(option.href).hostname))) googleApplyOptionsNonAggregator++;
         if (applyResult.url) {

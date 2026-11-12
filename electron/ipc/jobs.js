@@ -12080,6 +12080,7 @@ Return a JSON object with four arrays of search query strings:
     // and therefore must not be fetched again during this recovery.
     let resumedCollectionScopeCaveats = [];
     let resumedPageShapeFailures = {};
+    let resumedWindowDropped = {};
     // compare-and-clear token returned to the renderer (allocated above so
     // preflight source progress remains correlated).
     let resumeSourceIds = null;   // persisted source breadth; never take it from a changed UI selection
@@ -12258,6 +12259,11 @@ Return a JSON object with four arrays of search query strings:
         resumedPageShapeFailures = Object.fromEntries(Object.entries(priorSources)
           .filter(([sid, source]) => ACTIVE_SOURCE_ID_SET.has(sid) && source?.status === 'done' && Number.isSafeInteger(source.pageShapeFailures) && source.pageShapeFailures > 0)
           .map(([sid, source]) => [sid, source.pageShapeFailures]));
+        // A finished source's window-dropped dated cards also come from the
+        // manifest: they keep the posted-date check's denominator honest.
+        resumedWindowDropped = Object.fromEntries(Object.entries(priorSources)
+          .filter(([sid, source]) => ACTIVE_SOURCE_ID_SET.has(sid) && source?.status === 'done' && Number.isSafeInteger(source.windowDropped) && source.windowDropped > 0)
+          .map(([sid, source]) => [sid, source.windowDropped]));
         resumeSourceIds = Object.keys(priorSources).filter(sourceId => ACTIVE_SOURCE_ID_SET.has(sourceId));
         recoveredStaged = prior.stagedJobs.map(s => ({ ...s.job, source: s.sourceId }));
         if (finishSavedRecoveryRequested && recoveredStaged.length === 0) {
@@ -12616,6 +12622,10 @@ Return a JSON object with four arrays of search query strings:
     for (const [sid, pages] of Object.entries(resumedPageShapeFailures)) {
       const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], errors: 0, warnings: [], pagesWalked: 0, stopReasons: new Set() });
       result.pageShapeFailures = (result.pageShapeFailures || 0) + pages;
+    }
+    for (const [sid, dropped] of Object.entries(resumedWindowDropped)) {
+      const result = sourceResults[sid] || (sourceResults[sid] = { jobs: [], errors: 0, warnings: [], pagesWalked: 0, stopReasons: new Set() });
+      result.windowDropped = (result.windowDropped || 0) + dropped;
     }
 
     // Resume: seed the gathered set with jobs recovered from the prior run's
@@ -13581,6 +13591,7 @@ Return a JSON object with four arrays of search query strings:
               : null,
             collectionScopeCaveats: collectionScopeCaveatsFromSourceResults({ [sourceId]: data }),
             pageShapeFailures: data?.pageShapeFailures || 0,
+            windowDropped: data?.windowDropped || 0,
           },
         );
         await assertSearchCurrent();

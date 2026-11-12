@@ -253,6 +253,56 @@ export default [
     },
   },
   {
+    name: 'A finished source keeps its window-dropped dated count in the run manifest, so a resumed google search does not look mostly undated',
+    async run() {
+      const { markSourceStatus, readRunState, startRun } = await import('../test-dependencies.js');
+      const fsm = await import('node:fs'); const osm = await import('node:os'); const pathm = await import('node:path');
+      const root = await fsm.promises.mkdtemp(pathm.join(osm.tmpdir(), 'ic-window-dropped-manifest-'));
+      const canvasPath = pathm.join(root, 'workspace.json');
+      const runId = 'window-dropped-run'; const nodeId = 'window-dropped-hub';
+      let sources = {};
+      try {
+        await startRun(canvasPath, { runId, startedAt: 1_700_000_000_000, nodeId, profileFingerprint: 'b'.repeat(64), sourceIds: ['google', 'indeed', 'linkedin'] });
+        await markSourceStatus(canvasPath, 'google', 'done', 1_700_000_000_100, { expectedRunId: runId, nodeId, windowDropped: 40 });
+        await markSourceStatus(canvasPath, 'indeed', 'done', 1_700_000_000_150, { expectedRunId: runId, nodeId, windowDropped: 12 });
+        await markSourceStatus(canvasPath, 'indeed', 'done', 1_700_000_000_200, { expectedRunId: runId, nodeId, windowDropped: 0 });
+        await markSourceStatus(canvasPath, 'linkedin', 'done', 1_700_000_000_300, { expectedRunId: runId, nodeId, windowDropped: 500_000 });
+        sources = (await readRunState(canvasPath, 1_700_000_000_400, nodeId))?.manifest?.sources || {};
+        assert.equal(sources.google.windowDropped, 40);
+        assert.equal(Object.hasOwn(sources.indeed, 'windowDropped'), false, 'a zero clears the count a live walk already saved');
+        assert.equal(sources.linkedin.windowDropped, 100_000, 'the durable boundary caps the count');
+      } finally { await fsm.promises.rm(root, { recursive: true, force: true }); }
+
+      // The exact resume filter jobs.js applies to a 'done' source's manifest row.
+      const restoredWindowDropped = Object.fromEntries(Object.entries(sources)
+        .filter(([sid, source]) => ['google', 'indeed', 'linkedin'].includes(sid) && source?.status === 'done' && Number.isSafeInteger(source.windowDropped) && source.windowDropped > 0)
+        .map(([sid, source]) => [sid, source.windowDropped]));
+      assert.deepEqual(restoredWindowDropped, { google: 40, linkedin: 100_000 });
+
+      // The reported run: 127 google rows, 104 of them undated.
+      const googleRows = Array.from({ length: 127 }, (_, i) => ({
+        source: 'google',
+        url: `https://www.google.com/search?q=engineer&htidocid=${i}`,
+        company: `Acme ${i}`,
+        location: 'Toronto, ON',
+        snippet: `Listing ${i}. ${'Build reliable systems across the whole stack. '.repeat(12)}`,
+        ...(i < 23 ? { posted: '2026-11-02' } : {}),
+        ...(i === 0 ? { salary: '$120,000 a year' } : {}),
+      }));
+      const lost = assessSourceHealth(googleRows, { datedOutsideWindowBySource: { google: 0 } })
+        .map(({ source, field, rows, missing, limit }) => ({ source, field, rows, missing, limit }));
+      assert.deepEqual(lost, [{ source: 'google', field: 'posted', rows: 127, missing: 104, limit: 0.8 }],
+        'without the saved count the resumed survivors measure 82% undated, which is the false alarm');
+      const restored = assessSourceHealth(googleRows, { datedOutsideWindowBySource: restoredWindowDropped });
+      assert.deepEqual(restored, [], 'the restored window drops widen the posted denominator, so no alarm is raised');
+
+      const jobs = fsm.readFileSync(new URL('../../electron/ipc/jobs.js', import.meta.url), 'utf8');
+      assert(jobs.includes("source?.status === 'done' && Number.isSafeInteger(source.windowDropped) && source.windowDropped > 0")
+        && jobs.includes('result.windowDropped = (result.windowDropped || 0) + dropped;'), 'resume restores the saved window drops for finished sources');
+      assert(jobs.includes('windowDropped: data?.windowDropped || 0,'), 'the live source status write saves the window drops');
+    },
+  },
+  {
     name: 'Pager trickle counter trips on the third quiet page, and a productive or tiny page restarts the streak',
     run() {
       // A page qualifies at >=5 rows carrying <=1 row new to its query. Two in a
