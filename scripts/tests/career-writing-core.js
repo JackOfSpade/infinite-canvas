@@ -4,6 +4,7 @@ import * as writeVerify from '../../electron/ipc/applicationWriteVerify.js';
 import { claudeCliArgs, claudeStageProfile, CLAUDE_STAGE_PROFILES } from '../../electron/ipc/claudeApplicationRunner.js';
 import {
   APPLICATION_STAGE_PROFILES, careerChangedFindingErrors, careerFactFindingErrors, careerInflationRules, careerWritingStageProfile,
+  INTERVIEW_QA_STAGE_PROFILES,
 } from '../../electron/ipc/careerWritingCore.js';
 import { goldenDocuments, goldenFindings, goldenListing, goldenState } from '../fixtures/career-writing-core-golden-source.mjs';
 
@@ -57,6 +58,14 @@ export default [
     assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'medium' });
     assert.equal(careerWritingStageProfile('qa-fact-check'), careerWritingStageProfile('fact-check'), 'Q&A checks use the application fact-check profile object');
     assert.deepEqual(careerWritingStageProfile('qa-fact-correction'), careerWritingStageProfile('fact-correction'));
+    assert.deepEqual(careerWritingStageProfile('qa-disclosures'), { model: 'sonnet', effort: 'low' });
+    assert.deepEqual(careerWritingStageProfile('qa-practice-order'), { model: 'opus', effort: 'low' });
+    assert.deepEqual(careerWritingStageProfile('qa-answer-entailment'), { model: 'opus', effort: 'high' });
+    assert.deepEqual(careerWritingStageProfile('qa-card-repair'), { model: 'opus', effort: 'low' });
+    for (const stage of ['qa-disclosures', 'qa-practice-order', 'qa-answer-entailment', 'qa-card-repair']) {
+      assert.equal(Object.hasOwn(INTERVIEW_QA_STAGE_PROFILES, stage), true, `${stage} is an explicit Q&A stage entry`);
+      assert.notDeepEqual(careerWritingStageProfile(stage), { model: 'sonnet', effort: 'high' }, `${stage} does not fall back to the Sonnet-high default`);
+    }
   } },
   { name: 'career writing core: the shared finding contract works over any unit text lookup (interview card claims)', run() {
     const units = { 'cards[0].headline': 'I built the hub with React and Django.', 'cards[0].bullets[0]': 'We migrated the data over three months.' };

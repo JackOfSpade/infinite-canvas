@@ -28,7 +28,7 @@ async function resolveClients(deps) {
   })();
   const callText = deps.callText ?? await (async () => {
     const { callLLMText } = await import('../../ipc/llm.js');
-    return request => callLLMText(request.prompt, { task: 'interview-qa-practice', claudeStage: 'qa-brief', responseSchema: request.schema });
+    return request => callLLMText(request.prompt, { task: 'practice-review', claudeStage: 'qa-practice-review', responseSchema: request.schema });
   })();
   return { transcribe, metrics, callText };
 }

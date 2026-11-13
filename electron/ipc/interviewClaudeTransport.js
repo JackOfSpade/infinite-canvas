@@ -40,9 +40,9 @@ let offloadBlockedUntil = 0;
 /** Clears the Q&A offload credit block (used by tests). */
 export function resetInterviewOffloadBlock() { offloadBlockedUntil = 0; }
 
-/** Research and fact-check stages stay on Claude even if a table entry exists. */
+/** Research and every truth-check stage stay on Claude even if a table entry exists. */
 export function interviewStageMayOffload(stage) {
-  return typeof stage === 'string' && stage !== 'qa-research' && !stage.startsWith('qa-fact-');
+  return typeof stage === 'string' && stage !== 'qa-research' && stage !== 'qa-answer-entailment' && stage !== 'qa-card-repair' && !stage.startsWith('qa-fact-');
 }
 
 /** The Claude stage for an interview task. `stage` from the caller wins. */

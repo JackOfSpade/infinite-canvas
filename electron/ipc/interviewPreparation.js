@@ -1093,7 +1093,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       const candidate = { cards: pending, evidence };
       const judge = value => validateInterviewAnswerEntailment(value, candidate);
       const review = await callText(interviewAnswerEntailmentPrompt(candidate), {
-        signal, task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
+        signal, task: 'interview-answer-bank', claudeStage: 'qa-answer-entailment', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
         responseValidator: judge,
       });
       throwIfAborted(signal);
@@ -1125,7 +1125,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
     try {
       const response = await callText(interviewAnswerRepairPrompt({ cards: targets, failures, evidence, brief, bundle,
         lockedCards: cards.filter(card => lockedIds.has(card.id)) }), {
-        signal, task: 'interview-answer-bank', claudeStage: 'qa-fact-correction', responseSchema: interviewAnswerRepairSchema(targets),
+        signal, task: 'interview-answer-bank', claudeStage: 'qa-card-repair', responseSchema: interviewAnswerRepairSchema(targets),
         responseValidator: value => validateInterviewAnswerDraft(value, targets, { requireExtensions: true }),
       });
       throwIfAborted(signal);
@@ -1217,7 +1217,7 @@ export async function buildInterviewPreparedAnswers({ brief, snapshotId, canonic
       const candidate = { cards: fallbackCards, evidence };
       const judge = value => validateInterviewAnswerEntailment(value, candidate);
       const review = await callText(interviewAnswerEntailmentPrompt(candidate), {
-        signal, task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
+        signal, task: 'interview-answer-bank', claudeStage: 'qa-answer-entailment', responseSchema: INTERVIEW_ANSWER_ENTAILMENT_SCHEMA,
         responseValidator: judge,
       });
       throwIfAborted(signal);

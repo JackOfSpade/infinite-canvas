@@ -14,11 +14,11 @@ export const profile = (model, effort, tools = '', options = {}) => Object.freez
 
 export const CLAUDE_TASK_PROFILES = Object.freeze({
   'job-role-screen-batch': profile('haiku', 'low'),
-  // Same judgment as the title pass with a short description opening added;
-  // untested on real prompts yet (docs/ai-model-selection.md).
-  'job-role-snippet-screen-batch': profile('haiku', 'low'),
+  // 2026-11-12: Same cost as Haiku low ($0.0056 a call) and, on 106 disputed rows judged blind, dropped fewer real jobs (28 vs 40 of 212 judgments); Sonnet medium dropped 118 (docs/ai-model-selection.md).
+  'job-role-snippet-screen-batch': profile('haiku', 'medium'),
   'job-taxonomy-plan': profile('haiku', 'low'),
-  'job-listing-liveness': profile('haiku', 'low'),
+  // 2026-11-12: Same cost as Haiku low; matched production on every real page and caught every planted closed, open and login-wall page Sonnet medium caught (docs/ai-model-selection.md).
+  'job-listing-liveness': profile('haiku', 'medium'),
   'platform-fit-assessment': profile('haiku', 'low'),
   'marketplace-hub-scan-batch': profile('haiku', 'low'),
   'career-profile-clean': profile('haiku', 'low'),
@@ -39,12 +39,14 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // 2026-11-09: Sonnet low agreed with Sonnet high within run-to-run noise (decision 98.0% vs 96.8%,
   // 6 batches x 2 runs) at about 15% less cost; Haiku fell 12-14 points short (docs/ai-model-selection.md).
   'job-preference-evaluation': profile('sonnet', 'low'),
-  'job-gap-review': profile('sonnet', 'high'),
+  // 2026-11-12: Caught all planted softer-wording, overlooked-evidence and duplicate rows with no false alarms, the same as Sonnet high, and agreed 18/18 on real prompts, at about a tenth of the cost (docs/ai-model-selection.md).
+  'job-gap-review': profile('haiku', 'high'),
   // 2026-11-10: Sonnet low matched every production outcome (40 of 40 across 2 runs of a real 20-item batch)
   // at about 30% less cost; Haiku medium and high reversed most outcomes (4 of 40) (docs/ai-model-selection.md).
   'job-preference-research-batch-assessment': profile('sonnet', 'low'),
   'job-scoring': profile('opus', 'low'),
-  'job-compensation-assessment-batch': profile('opus', 'low'),
+  // 2026-11-12: Blind-judged ranges scored 9 and 8 against production's 8 and Opus low reruns' 6 and 5, all answers passed the app validator, at about half the cost (docs/ai-model-selection.md).
+  'job-compensation-assessment-batch': profile('sonnet', 'low'),
   // 2026-11-10: On the real board prompt plus planted pairs (a copy with changed seniority, employment type,
   // team, required stack, level, or a separate requisition must be split; a location-only or boilerplate-only
   // copy must merge), Haiku low decided 40 of 40 correctly across 2 runs, the same as Opus low or better (Opus

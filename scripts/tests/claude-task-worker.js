@@ -75,6 +75,10 @@ export default [
     run() {
       const expected = [...WORKER_RELEASE_ONE_TASKS, ...WORKER_ENABLED_ATTACHMENT_TASKS].sort();
       assert.deepEqual([...CLAUDE_TASK_IDS].sort(), expected);
+      assert.deepEqual(CLAUDE_TASK_PROFILES['job-role-snippet-screen-batch'], profile('haiku', 'medium'), 'the snippet screen keeps the measured Haiku medium profile');
+      assert.deepEqual(CLAUDE_TASK_PROFILES['job-listing-liveness'], profile('haiku', 'medium'), 'liveness keeps the measured Haiku medium profile');
+      assert.deepEqual(CLAUDE_TASK_PROFILES['job-gap-review'], profile('haiku', 'high'), 'the gap review keeps the measured Haiku high profile');
+      assert.deepEqual(CLAUDE_TASK_PROFILES['job-compensation-assessment-batch'], profile('sonnet', 'low'), 'compensation assessment keeps the measured Sonnet low profile');
       for (const profile of Object.values(CLAUDE_TASK_PROFILES)) {
         assert(['haiku', 'sonnet', 'opus'].includes(profile.model), 'only the latest of these three models');
         assert(['low', 'medium', 'high', 'xhigh'].includes(profile.effort), 'max effort is excluded');

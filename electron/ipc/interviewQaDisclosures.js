@@ -104,13 +104,13 @@ export function validateDisclosureMapping(value, { disclosures, foundationQuesti
 export async function mapInterviewDisclosures({ rawResearch, foundationQuestions, companyQuestions, callText, signal }) {
   if (typeof rawResearch !== 'string' || !rawResearch.trim()) return [];
   const extracted = await callText(interviewDisclosureExtractionPrompt(rawResearch), {
-    signal, task: 'interview-qa-disclosures', claudeStage: 'qa-brief', responseSchema: INTERVIEW_DISCLOSURE_SCHEMA,
+    signal, task: 'interview-qa-disclosures', claudeStage: 'qa-disclosures', responseSchema: INTERVIEW_DISCLOSURE_SCHEMA,
   });
   const disclosures = groundedDisclosures(extracted, rawResearch);
   if (!disclosures.length) return [];
   const context = { disclosures, foundationQuestions, companyQuestions };
   const mapped = await callText(interviewDisclosureMappingPrompt(context), {
-    signal, task: 'interview-qa-disclosures', claudeStage: 'qa-brief', responseSchema: INTERVIEW_DISCLOSURE_MAPPING_SCHEMA,
+    signal, task: 'interview-qa-disclosures', claudeStage: 'qa-disclosures', responseSchema: INTERVIEW_DISCLOSURE_MAPPING_SCHEMA,
     responseValidator: value => validateDisclosureMapping(value, context),
   });
   const byIndex = new Map(validateDisclosureMapping(mapped, context).map(item => [item.index, item]));

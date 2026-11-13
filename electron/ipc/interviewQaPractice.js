@@ -61,7 +61,7 @@ export async function planInterviewPracticeOrder({ questions, company, callText,
   const unique = [...byKey.values()].slice(0, PRACTICE_MAX_QUESTIONS);
   if (unique.length < 2) return unique;
   const reply = await callText(interviewPracticeOrderPrompt({ questions: unique, company }), {
-    signal, task: 'interview-qa-practice', claudeStage: 'qa-brief', responseSchema: INTERVIEW_PRACTICE_ORDER_SCHEMA,
+    signal, task: 'interview-qa-practice', claudeStage: 'qa-practice-order', responseSchema: INTERVIEW_PRACTICE_ORDER_SCHEMA,
     responseValidator: value => validatePracticeOrder(value, unique),
   });
   return validatePracticeOrder(reply, unique).map(index => unique[index]);

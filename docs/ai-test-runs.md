@@ -1670,3 +1670,353 @@ Recorded cost so far: $0.000.
 Recorded cost so far: $0.971.
 - Note: n and valid count pair decisions. Blunt round (seniority, employment type, team, location-only control) packed 6 pairs per prompt, over the schema's 4-pair cap, so the ladder marked those calls invalid; decisions were scored from the answers. Subtle round (stack, level, separate requisition, boilerplate control) stayed within the cap and was valid.
 <!-- /ai-test-run:2026-11-11T02-03-42-375Z-plantedpairsclaude-effort-ladderrun-aa72dd -->
+
+<!-- ai-test-run:2026-11-12T22-04-14-957Z-claude-effort-ladderrun-861ca5 -->
+### 2026-11-12 22:04 UTC · claude-effort-ladder run · job-listing-liveness · haiku:low, haiku:medium, sonnet:medium
+
+- Status: **finished** (updated 2026-11-12 22:07:32 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/liveness`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/liveness.jsonl --configs haiku:low,haiku:medium,sonnet:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/liveness`
+- Records: 13 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/liveness.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-listing-liveness haiku:low | 26 | 26 | 0 | $0.061 |  |
+| job-listing-liveness haiku:medium | 26 | 26 | 0 | $0.063 |  |
+| job-listing-liveness sonnet:medium | 26 | 26 | 0 | $0.648 |  |
+
+Recorded cost so far: $0.771.
+<!-- /ai-test-run:2026-11-12T22-04-14-957Z-claude-effort-ladderrun-861ca5 -->
+
+<!-- ai-test-run:2026-11-12T22-04-14-956Z-claude-effort-ladderrun-61e678 -->
+### 2026-11-12 22:04 UTC · claude-effort-ladder run · interview-answer-repair · opus:high, haiku:high, sonnet:medium, sonnet:high, opus:low, opus:medium
+
+- Status: **finished** (updated 2026-11-12 22:27:28 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-card-repair`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-card-repair.jsonl --configs opus:high,haiku:high,sonnet:medium,sonnet:high,opus:low,opus:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-card-repair`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-card-repair.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-answer-repair haiku:high | 4 | 4 | 0 | $0.130 |  |
+| interview-answer-repair opus:high | 4 | 4 | 0 | $2.021 |  |
+| interview-answer-repair opus:low | 4 | 4 | 0 | $1.340 |  |
+| interview-answer-repair opus:medium | 4 | 4 | 0 | $1.624 |  |
+| interview-answer-repair sonnet:high | 4 | 4 | 0 | $1.335 |  |
+| interview-answer-repair sonnet:medium | 4 | 4 | 0 | $0.878 |  |
+
+Recorded cost so far: $7.328.
+<!-- /ai-test-run:2026-11-12T22-04-14-956Z-claude-effort-ladderrun-61e678 -->
+
+<!-- ai-test-run:2026-11-12T22-04-14-956Z-claude-effort-ladderrun-b15a08 -->
+### 2026-11-12 22:04 UTC · claude-effort-ladder run · job-role-screen-batch · haiku:low, haiku:medium, sonnet:medium
+
+- Status: **finished** (updated 2026-11-12 22:16:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/role-screen`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/role-screen.jsonl --configs haiku:low,haiku:medium,sonnet:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/role-screen`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/role-screen.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-screen-batch haiku:low | 4 | 4 | 0 | $0.144 |  |
+| job-role-screen-batch haiku:medium | 4 | 4 | 0 | $0.189 |  |
+| job-role-screen-batch sonnet:medium | 4 | 4 | 0 | $0.890 |  |
+
+Recorded cost so far: $1.223.
+<!-- /ai-test-run:2026-11-12T22-04-14-956Z-claude-effort-ladderrun-b15a08 -->
+
+<!-- ai-test-run:2026-11-12T22-04-14-956Z-claude-effort-ladderrun-ed0dd9 -->
+### 2026-11-12 22:04 UTC · claude-effort-ladder run · job-compensation-assessment-batch · opus:low, haiku:medium, haiku:high, sonnet:low, sonnet:medium, sonnet:high
+
+- Status: **finished** (updated 2026-11-12 22:20:42 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/comp-assessment`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/comp-assessment.jsonl --configs opus:low,haiku:medium,haiku:high,sonnet:low,sonnet:medium,sonnet:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/comp-assessment`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/comp-assessment.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-compensation-assessment-batch haiku:high | 4 | 3 | 0 | $0.132 |  |
+| job-compensation-assessment-batch haiku:medium | 4 | 4 | 0 | $0.100 |  |
+| job-compensation-assessment-batch opus:low | 4 | 4 | 0 | $1.058 |  |
+| job-compensation-assessment-batch sonnet:high | 4 | 4 | 0 | $0.906 |  |
+| job-compensation-assessment-batch sonnet:low | 4 | 4 | 0 | $0.556 |  |
+| job-compensation-assessment-batch sonnet:medium | 4 | 4 | 0 | $0.677 |  |
+
+Recorded cost so far: $3.430.
+<!-- /ai-test-run:2026-11-12T22-04-14-956Z-claude-effort-ladderrun-ed0dd9 -->
+
+<!-- ai-test-run:2026-11-12T22-04-14-955Z-claude-effort-ladderrun-cf5090 -->
+### 2026-11-12 22:04 UTC · claude-effort-ladder run · interview-answer-entailment · opus:high, haiku:high, sonnet:low, sonnet:medium, sonnet:high, opus:low, opus:medium
+
+- Status: **finished** (updated 2026-11-12 22:15:05 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-entailment`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-entailment.jsonl --configs opus:high,haiku:high,sonnet:low,sonnet:medium,sonnet:high,opus:low,opus:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-entailment`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-entailment.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-answer-entailment haiku:high | 6 | 6 | 0 | $0.049 |  |
+| interview-answer-entailment opus:high | 6 | 6 | 0 | $0.913 |  |
+| interview-answer-entailment opus:low | 6 | 6 | 0 | $0.772 |  |
+| interview-answer-entailment opus:medium | 6 | 6 | 0 | $0.836 |  |
+| interview-answer-entailment sonnet:high | 6 | 6 | 0 | $0.439 |  |
+| interview-answer-entailment sonnet:low | 6 | 6 | 0 | $0.402 |  |
+| interview-answer-entailment sonnet:medium | 6 | 6 | 0 | $0.415 |  |
+
+Recorded cost so far: $3.827.
+<!-- /ai-test-run:2026-11-12T22-04-14-955Z-claude-effort-ladderrun-cf5090 -->
+
+<!-- ai-test-run:2026-11-12T22-07-32-389Z-claude-effort-ladderrun-6614aa -->
+### 2026-11-12 22:07 UTC · claude-effort-ladder run · interview-qa-practice · opus:low, haiku:low, haiku:medium, sonnet:low, sonnet:medium
+
+- Status: **finished** (updated 2026-11-12 22:07:46 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-practice-order`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-practice-order.jsonl --configs opus:low,haiku:low,haiku:medium,sonnet:low,sonnet:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-practice-order`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-practice-order.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-qa-practice haiku:low | 2 | 2 | 0 | $0.002 |  |
+| interview-qa-practice haiku:medium | 2 | 2 | 0 | $0.001 |  |
+| interview-qa-practice opus:low | 2 | 2 | 0 | $0.028 |  |
+| interview-qa-practice sonnet:low | 2 | 2 | 0 | $0.014 |  |
+| interview-qa-practice sonnet:medium | 2 | 2 | 0 | $0.014 |  |
+
+Recorded cost so far: $0.058.
+<!-- /ai-test-run:2026-11-12T22-07-32-389Z-claude-effort-ladderrun-6614aa -->
+
+<!-- ai-test-run:2026-11-12T22-07-46-313Z-claude-effort-ladderrun-fb802b -->
+### 2026-11-12 22:07 UTC · claude-effort-ladder run · interview-qa-disclosures · opus:low, haiku:medium, haiku:high, sonnet:low, sonnet:medium
+
+- Status: **finished** (updated 2026-11-12 22:08:46 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-disclosures`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-disclosures.jsonl --configs opus:low,haiku:medium,haiku:high,sonnet:low,sonnet:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/qa-disclosures`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/qa-disclosures.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-qa-disclosures haiku:high | 4 | 4 | 0 | $0.008 |  |
+| interview-qa-disclosures haiku:medium | 4 | 4 | 0 | $0.008 |  |
+| interview-qa-disclosures opus:low | 4 | 4 | 0 | $0.159 |  |
+| interview-qa-disclosures sonnet:low | 4 | 4 | 0 | $0.091 |  |
+| interview-qa-disclosures sonnet:medium | 4 | 4 | 0 | $0.091 |  |
+
+Recorded cost so far: $0.356.
+<!-- /ai-test-run:2026-11-12T22-07-46-313Z-claude-effort-ladderrun-fb802b -->
+
+<!-- ai-test-run:2026-11-12T22-16-25-033Z-claude-effort-ladderrun-b3e61e -->
+### 2026-11-12 22:16 UTC · claude-effort-ladder run · job-role-snippet-screen-batch · haiku:low, haiku:medium, sonnet:medium
+
+- Status: **finished** (updated 2026-11-12 22:17:47 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/snippet-screen`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/snippet-screen.jsonl --configs haiku:low,haiku:medium,sonnet:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/snippet-screen`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/snippet-screen.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-snippet-screen-batch haiku:low | 8 | 8 | 0 | $0.045 |  |
+| job-role-snippet-screen-batch haiku:medium | 8 | 8 | 0 | $0.045 |  |
+| job-role-snippet-screen-batch sonnet:medium | 8 | 8 | 0 | $0.430 |  |
+
+Recorded cost so far: $0.520.
+<!-- /ai-test-run:2026-11-12T22-16-25-033Z-claude-effort-ladderrun-b3e61e -->
+
+<!-- ai-test-run:2026-11-12T22-17-47-305Z-claude-effort-ladderrun-ac7188 -->
+### 2026-11-12 22:17 UTC · claude-effort-ladder run · job-gap-review · sonnet:high, haiku:medium, haiku:high
+
+- Status: **finished** (updated 2026-11-12 22:18:33 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/gap-review`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/gap-review.jsonl --configs sonnet:high,haiku:medium,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/gap-review`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/gap-review.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-gap-review haiku:high | 4 | 4 | 0 | $0.045 |  |
+| job-gap-review haiku:medium | 4 | 3 | 0 | $0.043 |  |
+| job-gap-review sonnet:high | 4 | 3 | 0 | $0.469 |  |
+
+Recorded cost so far: $0.557.
+<!-- /ai-test-run:2026-11-12T22-17-47-305Z-claude-effort-ladderrun-ac7188 -->
+
+<!-- ai-test-run:2026-11-12T22-30-11-376Z-claude-effort-ladderrun-340017 -->
+### 2026-11-12 22:30 UTC · claude-effort-ladder run · interview-answer-entailment · opus:high, opus:low, opus:medium, sonnet:high
+
+- Status: **finished** (updated 2026-11-12 22:36:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/ent-plants`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/ent-plants.jsonl --configs opus:high,opus:low,opus:medium,sonnet:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/ent-plants`
+- Records: 3 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/ent-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-answer-entailment opus:high | 6 | 6 | 0 | $0.875 |  |
+| interview-answer-entailment opus:low | 6 | 6 | 0 | $0.775 |  |
+| interview-answer-entailment opus:medium | 6 | 6 | 0 | $0.814 |  |
+| interview-answer-entailment sonnet:high | 6 | 6 | 0 | $0.430 |  |
+
+Recorded cost so far: $2.895.
+<!-- /ai-test-run:2026-11-12T22-30-11-376Z-claude-effort-ladderrun-340017 -->
+
+<!-- ai-test-run:2026-11-12T22-30-11-376Z-claude-effort-ladderrun-13839d -->
+### 2026-11-12 22:30 UTC · claude-effort-ladder run · job-gap-review · sonnet:high, haiku:medium, haiku:high
+
+- Status: **finished** (updated 2026-11-12 22:31:26 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/gap-plants`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/gap-plants.jsonl --configs sonnet:high,haiku:medium,haiku:high --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/runs/gap-plants`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls/records/gap-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-gap-review haiku:high | 8 | 7 | 0 | $0.082 |  |
+| job-gap-review haiku:medium | 8 | 7 | 0 | $0.081 |  |
+| job-gap-review sonnet:high | 8 | 6 | 0 | $0.856 |  |
+
+Recorded cost so far: $1.020.
+<!-- /ai-test-run:2026-11-12T22-30-11-376Z-claude-effort-ladderrun-13839d -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-580Z-blindjudgeDeepSeekFlashOffloadreportjob-271f6a -->
+### 2026-11-12 22:56 UTC · blind judge (DeepSeek Flash, Offload report job) · job-role-screen-batch, job-role-snippet-screen-batch · 2026-11-12 disputed rows
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+- Items: 300 title rows sampled from 1,054 disputed; all 106 disputed snippet rows
+- Judge job: oj-20261112-fb7ceb8972984ef394422bbc5270ea6e (review packet passed 10/10)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| title haiku:low (2 reruns) | 600 |  |  |  | 60.7% right; 27 real jobs dropped; 151 mismatches kept; $0.036/call |
+| title production haiku:low | 300 |  |  |  | 58.3% right; 34 real jobs dropped; 51 mismatches kept |
+| title haiku:medium | 600 |  |  |  | 64.8% right; 32 real jobs dropped; 102 mismatches kept; $0.047/call |
+| title sonnet:medium | 600 |  |  |  | 59.7% right; 158 real jobs dropped; 15 mismatches kept; $0.223/call |
+| snippet haiku:low (2 reruns) | 212 |  |  |  | 58.5% right; 40 real jobs dropped; 48 mismatches kept; $0.0056/call |
+| snippet production haiku:low | 106 |  |  |  | 53.8% right; 28 real jobs dropped; 21 mismatches kept |
+| snippet haiku:medium | 212 |  |  |  | 65.1% right; 28 real jobs dropped; 46 mismatches kept; $0.0056/call |
+| snippet sonnet:medium | 212 |  |  |  | 44.3% right; 118 real jobs dropped; 0 mismatches kept; $0.054/call |
+
+Recorded cost so far: $0.000.
+- Note: Disputed rows only (rows where any arm disagreed), so rates are far below whole-batch accuracy.
+<!-- /ai-test-run:2026-11-12T22-56-03-580Z-blindjudgeDeepSeekFlashOffloadreportjob-271f6a -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-621Z-plantedpagesladderrunscoremjs-300591 -->
+### 2026-11-12 22:56 UTC · planted pages (ladder run, score.mjs) · job-listing-liveness · 2026-11-12 planted closed/open/login pages
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:low | 26 | 26 | 0 | $0.061 | real rows 6/8 match production; planted 15/20 (all 4 jsonld-only missed, 1 open-with-deadline as unclear) |
+| haiku:medium | 26 | 26 | 0 | $0.063 | real 8/8; planted 16/20 (only the 4 jsonld-only missed) |
+| sonnet:medium | 26 | 26 | 0 | $0.648 | real 7/8; planted 16/20 (only the 4 jsonld-only missed) |
+
+Recorded cost so far: $0.772.
+- Note: jsonld-only = JSON-LD isListed false with no closure text; every arm answered open or unclear (the prompt allows closed there but does not require it).
+<!-- /ai-test-run:2026-11-12T22-56-03-621Z-plantedpagesladderrunscoremjs-300591 -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-659Z-planteddefectsladderrunscore-plantsmjs-767f0a -->
+### 2026-11-12 22:56 UTC · planted defects (ladder run, score-plants.mjs) · job-gap-review · 2026-11-12 soft wording, overlooked evidence, duplicate row, near-miss trap
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| sonnet:high (production) | 8 | 6 | 0 | $0.857 | caught 8/8; 0/18 false alarms |
+| haiku:medium | 8 | 7 | 0 | $0.081 | caught 8/8; 0/18 false alarms |
+| haiku:high | 8 | 7 | 0 | $0.082 | caught 8/8; 0/18 false alarms |
+
+Recorded cost so far: $1.020.
+- Note: Real prompts (2, every row confirmed): haiku:high 18/18 agreement, 4/4 valid; haiku:medium 15/18, 3/4 valid; sonnet:high rerun 17/18, 3/4 valid.
+<!-- /ai-test-run:2026-11-12T22-56-03-659Z-planteddefectsladderrunscore-plantsmjs-767f0a -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-696Z-planteddefectsreal-flagagreement-8b985e -->
+### 2026-11-12 22:56 UTC · planted defects + real-flag agreement · interview answer entailment review (stage qa-fact-check) · 2026-11-12
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:high (production) | 6 | 6 | 0 | $0.875 | real flags caught 4/4; planted 18/18; 0/178 false alarms |
+| opus:medium | 6 | 6 | 0 | $0.814 | real flags 3/4; planted 18/18 |
+| opus:low | 6 | 6 | 0 | $0.775 | real flags 3/4; planted 18/18; 1/178 false alarm |
+| sonnet:high | 6 | 6 | 0 | $0.430 | real flags 1/4; planted 18/18 |
+| haiku:high | 6 | 6 | 0 | $0.049 | real flags 1/4; 3 false alarms on real prompts |
+
+Recorded cost so far: $2.943.
+- Note: Production flagged 2 claims across 3 real prompts (4 instances over 2 reps); planted defects were coarse, so the real flags decide.
+<!-- /ai-test-run:2026-11-12T22-56-03-696Z-planteddefectsreal-flagagreement-8b985e -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-735Z-appvalidatorblindjudgeDeepSeekFlash-c64004 -->
+### 2026-11-12 22:56 UTC · app validator + blind judge (DeepSeek Flash) · job-compensation-assessment-batch · 2026-11-12 one real 4-cohort prompt
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+- Validator: validateCompensationEvidenceBatchSubmission rebuilt from the prompt (comp-validate.mjs)
+- Judge job: oj-20261112-2f5f235e70174a6ab52499665f43d209
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production opus:low | 1 | 1 |  | $0.268 | judge 8 |
+| opus:low reruns | 4 | 4 | 0 | $1.058 | judge 6, 5; agreement with production 87.6% |
+| sonnet:low | 4 | 4 | 0 | $0.556 | judge 9, 8; agreement 70.0% |
+| sonnet:medium | 4 | 4 | 0 | $0.677 | judge 9, 7; agreement 86.2% |
+| sonnet:high | 4 | 4 | 0 | $0.906 | judge 8, 8; agreement 87.8% |
+| haiku:medium | 4 | 4 | 0 | $0.100 | judge 6, 7; agreement 74.2% |
+| haiku:high | 4 | 3 | 0 | $0.132 | agreement 67.1% |
+
+Recorded cost so far: $3.697.
+<!-- /ai-test-run:2026-11-12T22-56-03-735Z-appvalidatorblindjudgeDeepSeekFlash-c64004 -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-772Z-blindjudgeDeepSeekFlash-d7719c -->
+### 2026-11-12 22:56 UTC · blind judge (DeepSeek Flash) · interview answer card repair (stage qa-fact-correction) · 2026-11-12 two real repair prompts
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+- Judge jobs: oj-20261112-a4cd7f7535644641ae226c1064050e35, oj-20261112-fbb6ef1a37ec46d1b7b7e23649ddf8d3
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production opus:high | 2 |  |  |  | judge 8, 9 |
+| opus:high rerun | 4 | 4 | 0 | $2.021 | judge 9, 7 |
+| opus:low | 4 | 4 | 0 | $1.340 | judge 9, 8; no unsupported claims |
+| sonnet:high | 4 | 4 | 0 | $1.334 | judge 8, 8 |
+| sonnet:medium | 4 | 4 | 0 | $0.878 | judge 7, 7; unsupported claims in both |
+| haiku:high | 4 | 4 | 0 | $0.130 | judge 6, 6; broken sentences, spliced quotes |
+
+Recorded cost so far: $5.703.
+<!-- /ai-test-run:2026-11-12T22-56-03-772Z-blindjudgeDeepSeekFlash-d7719c -->
+
+<!-- ai-test-run:2026-11-12T22-56-03-811Z-blindjudgeDeepSeekFlashagreement-121799 -->
+### 2026-11-12 22:56 UTC · blind judge (DeepSeek Flash) + agreement · interview-qa-practice order, interview-qa-disclosures (stage qa-brief) · 2026-11-12
+
+- Status: **finished** (updated 2026-11-12 22:56:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-12-policy-gap-calls`
+- Practice judge job: oj-20261112-d73760090aaf415ba035c8e8b06e6ead
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| practice production opus:low | 1 |  |  |  | judge 9 |
+| practice opus:low reruns | 2 | 2 | 0 | $0.028 | judge 10, 10; rank correlation 0.95 |
+| practice sonnet:low | 2 | 2 | 0 | $0.014 | judge 7, 6 |
+| practice sonnet:medium | 2 | 2 | 0 | $0.014 | judge 7, 7 |
+| practice haiku:low | 2 | 1 | 0 | $0.002 | judge 8, 2 (one repeated a question) |
+| practice haiku:medium | 2 | 2 | 0 | $0.001 | judge 8, 5 |
+| disclosures opus:low rerun | 4 | 4 | 0 | $0.159 | agreement 100% (extraction + mapping prompts) |
+| disclosures sonnet:low | 4 | 4 | 0 | $0.091 | agreement 100% |
+| disclosures sonnet:medium | 4 | 4 | 0 | $0.090 | agreement 100% |
+| disclosures haiku:medium | 4 | 4 | 0 | $0.008 | agreement 79% (extraction 25%, 100%) |
+| disclosures haiku:high | 4 | 4 | 0 | $0.008 | agreement 75% (extraction 0%, 100%) |
+
+Recorded cost so far: $0.415.
+<!-- /ai-test-run:2026-11-12T22-56-03-811Z-blindjudgeDeepSeekFlashagreement-121799 -->

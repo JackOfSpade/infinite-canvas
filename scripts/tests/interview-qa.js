@@ -7,7 +7,7 @@ import {
   loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
-import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, INTERVIEW_RESEARCH_TOOLS, resetInterviewOffloadBlock } from '../../electron/ipc/interviewClaudeTransport.js';
+import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_TOOLS, resetInterviewOffloadBlock } from '../../electron/ipc/interviewClaudeTransport.js';
 import { attachInterviewLiveCards, cardsOf } from '../../electron/interviewWindow.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
 import { applyInterviewFactFindings, factCheckInterviewCards, interviewCardUnits, interviewFactCheckPrompt } from '../../electron/ipc/interviewQaFactCheck.js';
@@ -163,7 +163,7 @@ export default [
       : { mappings: [{ index: 0, target: 'company', cardQuestion: 'Why are you interested in this company?' }] }; };
     const mapped = await mapInterviewDisclosures({ rawResearch: raw, ...context, callText });
     assert.deepEqual(mapped.map(item => [item.question, item.target, item.cardQuestion]), [['Why Discord?', 'company', 'Why are you interested in this company?']]);
-    assert(calls.every(opts => opts.claudeStage === 'qa-brief'));
+    assert(calls.every(opts => opts.claudeStage === 'qa-disclosures'));
     assert.deepEqual(await mapInterviewDisclosures({ rawResearch: '', ...context, callText }), [], 'no research, no disclosures');
   } },
   { name: 'interview Claude transport: application stage profiles, research-only web tools, same-session retry on rejection', async run() {
@@ -248,7 +248,7 @@ export default [
     assert.throws(() => validatePracticeOrder({ order: [1, 1, 2] }, questions), /order-permutation/);
     const prompts = [];
     const ordered = await planInterviewPracticeOrder({ questions: [...questions, 'tell me about yourself'], company: 'Discord', callText: async (prompt, opts) => {
-      prompts.push(prompt); assert.equal(opts.claudeStage, 'qa-brief');
+      prompts.push(prompt); assert.equal(opts.claudeStage, 'qa-practice-order');
       assert.throws(() => opts.responseValidator({ order: [2, 1, 0] }), /order-intro/);
       return { order: [1, 0, 2] };
     } });
@@ -286,10 +286,15 @@ export default [
       runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
       routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
       offloadCall: async () => { throw new Error('offload must not be called'); } });
-    for (const stage of ['qa-research', 'qa-fact-check', 'qa-fact-verify']) await transport.callText('P', { claudeStage: stage });
-    assert.equal(runs.length, 3);
+    for (const stage of ['qa-research', 'qa-fact-check', 'qa-fact-verify', 'qa-answer-entailment', 'qa-card-repair']) await transport.callText('P', { claudeStage: stage });
+    assert.equal(runs.length, 5);
     assert.equal(runs[0].tools, INTERVIEW_RESEARCH_TOOLS);
     assert.equal(runs[1].tools, '');
+    assert.equal(interviewStageMayOffload('qa-answer-entailment'), false);
+    assert.equal(interviewStageMayOffload('qa-card-repair'), false);
+    assert.equal(interviewStageMayOffload('qa-fact-recheck'), false);
+    assert.equal(interviewStageMayOffload('qa-disclosures'), true);
+    assert.equal(interviewStageMayOffload('qa-practice-order'), true);
   } },
   { name: 'interview Q&A offload: an OFFLOAD_ error falls back to a fresh Claude session; credit exhaustion blocks offload', async run() {
     resetInterviewOffloadBlock();

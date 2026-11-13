@@ -44,6 +44,14 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   // qa-brief, 2026-11-10: Opus low scored within the noise of an Opus medium rerun in blind judging of 4 real Prepare briefs (7.5 vs 8.0; two production runs differ by 0.75) at 39% less cost; Sonnet medium and Haiku medium scored 7.0 (docs/ai-model-selection.md).
   'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
+  // qa-disclosures, 2026-11-12: Sonnet low matched Opus low's extraction and mapping answers on 2 real prompts x 2 runs at about 43% less; Haiku dropped extracted questions (docs/ai-model-selection.md).
+  'qa-disclosures': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
+  // qa-practice-order, 2026-11-12: Blind judge gave Opus low reruns 10 and 10, production 9; every Sonnet and Haiku setting scored 2-8, and one Haiku answer repeated a question (docs/ai-model-selection.md).
+  'qa-practice-order': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
+  // qa-answer-entailment, 2026-11-12: The only setting that caught every claim production flagged on 3 real prompts; Opus low/medium and Sonnet missed some (docs/ai-model-selection.md).
+  'qa-answer-entailment': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  // qa-card-repair, 2026-11-12: Blind judge over 2 real repair prompts gave Opus low 9 and 8, production 8 and 9, at 34% less; Sonnet medium added unsupported claims and Haiku high broke sentences (docs/ai-model-selection.md).
+  'qa-card-repair': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // Post-call review of an in-app practice call (judgement and writing, one call per practice): Opus medium, not yet tested (needs a recorded practice call; docs/ai-model-selection.md).
   'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
