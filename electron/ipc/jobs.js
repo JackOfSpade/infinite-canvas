@@ -45,6 +45,7 @@ import {
   summarizeGapReviews, validateGapReviewSubmission,
 } from './jobGapReview.js';
 import { buildScoringAudit, scoringAuditRowsFromBatches, scoringSimilarityKey } from './scoringAudit.js';
+import { createJobScoreReuseStore, jobScoreReuseFingerprint, mergeReusedAndScored, partitionBatchForReuse } from './jobScoreReuse.js';
 import { buildJobScoringRequestParts } from './jobScoringCache.js';
 import { planRoleFamilyResearchBatches, planRoleFamilyAssessmentBatches, packCompensationAssessmentBatches, packCompensationResearchBatches } from './jobCompensationPlanning.js';
 export { planRoleFamilyResearchBatches, planRoleFamilyAssessmentBatches, packCompensationAssessmentBatches, packCompensationResearchBatches } from './jobCompensationPlanning.js';
@@ -11057,6 +11058,11 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
   const resolveRequiredPinnedCareerInputForHandler = dependencies.resolveRequiredPinnedCareerInput || resolveRequiredPinnedCareerInput;
   const beforeScoreSideEffect = dependencies.beforeScoreSideEffect || (async () => {});
   const runScoreBatch = dependencies.runScoreBatch || callLLMText;
+  // Per-job score reuse for resumed runs. Production reads and writes the same
+  // durable run migrations every other durable scoring step already uses.
+  const reuseStoreDeps = dependencies.jobScoreReuseStore
+    || { recall: recallRunMigration, remember: rememberRunMigration };
+
   const runGapReview = dependencies.runGapReview || callLLMText;
   const runBoardTaxonomy = dependencies.runBoardTaxonomy || runBoundedJobTaxonomy;
   const resolveBoardCompensationCareerInputs = dependencies.resolveCompensationCareerInputs || resolveCompensationCareerInputs;
@@ -15755,6 +15761,19 @@ Return a JSON object with four arrays of search query strings:
     // Score each job against the entire approved record. Splitting jobs handles
     // batch breadth; a singleton that cannot fit stays visibly unscored.
     const cachedPrefix = materializeScoringCareerEvidence(snapshotCachedPrefix, snapshot.careerData);
+    // A resumed run (same manualAiRunId) reuses the saved score rows of jobs
+    // whose scoring input is byte-identical and scores only the rest (see
+    // jobScoreReuse.js). Without a run id there is no scope to save rows under,
+    // so every job scores exactly as before.
+    const reuseRunId = getCurrentIpcRequestContext()?.manualAiRunId
+      || (typeof manualAiRunId === 'string' && manualAiRunId.trim())
+      || null;
+    const reuseStore = createJobScoreReuseStore({
+      runId: reuseRunId,
+      recall: reuseStoreDeps.recall,
+      remember: reuseStoreDeps.remember,
+    });
+    await reuseStore.load();
 
     const inputQuality = summarizeScoringInputQuality(toScore);
     logger.info(`[Jobs][${nodeId}] Scoring`, gathered.length, 'jobs', role ? `(target: ${role})` : '');
@@ -15795,6 +15814,9 @@ Return a JSON object with four arrays of search query strings:
     // requirement coverage are deliberately converted into placeholders.
     // Keep this separate from transport failures for diagnostics.
     let ungroundedScoreCount = 0;
+    // Saved rows this resumed run reused instead of spending a handoff on the
+    // jobs they already describe (see jobScoreReuse.js).
+    let reusedScoreCount = 0;
     let failedBatches = 0;
     let batches = 0;
     // Top-level batches can wait on independent manual handoffs together.
@@ -16160,8 +16182,55 @@ Return a JSON object with four arrays of search query strings:
       const completedBatches = await mapAutomaticHandoffs(scoringBatches, HANDOFF_CONCURRENCY, async (batch, batchIndex) => {
           if (signal?.aborted) throw signal.reason || new Error('Job scoring cancelled.');
           const topLevelBatch = batchIndex + 1;
-          const results = await scoreBatch(batch, { topLevelBatch, rootBatchSize: batch.length });
+          // Reuse the saved rows of jobs whose scoring input did not change and
+          // pay for a handoff only for the rest. The fingerprint covers the slim
+          // row the prompt is built from, src career snapshot and prefix.
+          const { fingerprints, reused, pendingIndices } = partitionBatchForReuse(batch, {
+            fingerprintOf: job => jobScoreReuseFingerprint({
+              contract: JOB_SCORING_CONTRACT,
+              prefix: cachedPrefix,
+              careerSnapshotId,
+              job: slimBatch([job])[0],
+            }),
+            store: reuseStore,
+            // A saved row is only reused when it still passes the same
+            // calibration the live card requires for THIS job's text.
+            isReusable: (row, job) => {
+              try {
+                return prepareLiveScoringResults([{ ...row, index: 0 }], [postingJob(job)], {
+                  candidateText: candidateFitText,
+                  candidateRoles,
+                }).scores[0] != null;
+              } catch {
+                return false;
+              }
+            },
+          });
+          const pendingJobs = pendingIndices.map(index => batch[index]);
+          const scoredRows = pendingJobs.length > 0
+            ? await scoreBatch(pendingJobs, { topLevelBatch, rootBatchSize: pendingJobs.length })
+            : [];
+          const results = mergeReusedAndScored(batch.length, reused, pendingIndices, scoredRows);
+          if (reused.size > 0) {
+            reusedScoreCount += reused.size;
+            logger.info(`[Jobs][${nodeId}] Batch ${topLevelBatch}: reused ${reused.size} saved score(s) for unchanged listings, scoring ${pendingJobs.length}`);
+          }
           const liveResults = prepareLiveScoringResults(results, batch.map(postingJob), { candidateText: candidateFitText, candidateRoles });
+          // Keep the rows that just validated so a resumed run can reuse them.
+          // A save failure is never a scoring failure.
+          const freshRows = [];
+          for (const [index, row] of results.entries()) {
+            if (reused.has(index) || !row || typeof row !== 'object') continue;
+            if (liveResults.scores[index] == null || !fingerprints[index]) continue;
+            freshRows.push({ fingerprint: fingerprints[index], row });
+          }
+          if (freshRows.length > 0) {
+            try {
+              await reuseStore.record(freshRows);
+            } catch (error) {
+              logger.warn(`[Jobs][${nodeId}] Could not save reusable score rows for batch ${topLevelBatch}: ${error?.message || error}`);
+            }
+          }
           completedScoringJobCount += batch.length;
           emitScoringProgress(completedScoringJobCount, {
             phase: 'batch-complete', batch: topLevelBatch, attemptSize: batch.length,
@@ -16260,6 +16329,9 @@ Return a JSON object with four arrays of search query strings:
       scored: scoredJobs.length,
       placeholders: placeholderCount,
       ungroundedScores: ungroundedScoreCount,
+      // Rows a resumed run reused from its own saved per-job scores instead of
+      // re-scoring an otherwise identical listing (jobScoreReuse.js).
+      reusedScoreCount,
       // How often the deterministic evidence-gap ceilings moved a score, and
       // how many jobs they moved from at-or-above the application bar to
       // below it. Count-only; the per-job detail lives in each card's audit.
