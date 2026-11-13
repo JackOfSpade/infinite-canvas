@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, englishShare, explicitSalaryCurrency, filterNonEnglishJobs, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeJobLanguages, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, englishShare, explicitSalaryCurrency, filterNonEnglishJobs, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorDateFilterReapplyUrl, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeJobLanguages, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeCountry, normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 // Synthetic sections long enough to stand alone as a language-detection chunk.
@@ -93,6 +93,32 @@ export default [
       assert(glassdoorLocationProof('https://www.glassdoor.com/Job/denver-jobs-SRCH_IL.0,6_IC1148170_KO7,24.htm', '1148170') === 'applied', 'canonical slug carrying the id reads applied');
       assert(glassdoorLocationProof('https://www.glassdoor.com/Job/canada-jobs-SRCH_IL.0,6_IN3_KO7,24.htm', '1') === 'missing', 'canonical slug with the WRONG id is a real failure');
       assert(glassdoorLocationProof('https://www.glassdoor.com/Job/jobs.htm?sc.keyword=x&locId=1', '1') === 'unavailable', 'non-canonical route cannot prove or disprove the location');
+
+      // Glassdoor's canonical redirect DROPS the posting-date filter: the built
+      // /Job/jobs.htm?...&fromAge=14 URL landed on this SRCH slug carrying no
+      // fromAge and served 12,084 mostly-30d+ cards for a 13-day window, while
+      // the same slug plus fromAge=14 answered 2,680 cards all <=13d.
+      const datedLanding = 'https://www.glassdoor.ca/Job/united-states-ai-product-engineer-jobs-SRCH_IL.0,13_IN1_KO14,33.htm?sc.keyword=AI%2520Product%2520Engineer&locId=1&locT=N';
+      const datedRequest = 'https://www.glassdoor.ca/Job/jobs.htm?sc.keyword=AI%20Product%20Engineer&fromAge=14';
+      const reapplied = glassdoorDateFilterReapplyUrl(datedLanding, datedRequest);
+      const reappliedUrl = new URL(reapplied);
+      assert(reappliedUrl.searchParams.get('fromAge') === '14', 'the requested posting-date window is restored on the landed URL');
+      assert(reappliedUrl.pathname === new URL(datedLanding).pathname, 'the landed canonical path is kept, not swapped for the request path');
+      assert(reappliedUrl.hostname === new URL(datedLanding).hostname, 'the landed host is kept (a .com request may land on .ca)');
+      assert(reappliedUrl.searchParams.get('locId') === '1' && reappliedUrl.searchParams.get('locT') === 'N',
+        'other landed params survive the reapply');
+      assert(glassdoorDateFilterReapplyUrl(`${datedLanding}&fromAge=14`, datedRequest) === null,
+        'a landing that already carries the requested window needs no re-navigation');
+      assert(glassdoorDateFilterReapplyUrl(datedLanding, 'https://www.glassdoor.ca/Job/jobs.htm?sc.keyword=x') === null,
+        'no requested fromAge means nothing to restore');
+      assert(glassdoorDateFilterReapplyUrl('https://www.glassdoor.ca/Job/jobs.htm?sc.keyword=x&locId=1', datedRequest) === null,
+        'a non-canonical /Job/jobs.htm landing is not patched — Glassdoor re-derives that route');
+      assert(new URL(glassdoorDateFilterReapplyUrl(`${datedLanding}&fromAge=30`, datedRequest)).searchParams.get('fromAge') === '14',
+        'a wider landed window is narrowed back to the requested one');
+      for (const [landed, requested] of [[null, datedRequest], [datedLanding, null], ['not a url', datedRequest], [datedLanding, 'also not a url'], [undefined, undefined]]) {
+        assert(glassdoorDateFilterReapplyUrl(landed, requested) === null,
+          `malformed input (${String(landed)} / ${String(requested)}) yields no re-navigation instead of throwing`);
+      }
       // ZipRecruiter is the ONE board whose advertised total matched its
       // reachable count when walked to the end (520 reachable, 520 in the
       // header). Two shapes must never be read as a total: the path form's

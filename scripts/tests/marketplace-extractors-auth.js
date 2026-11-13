@@ -1,4 +1,4 @@
-import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, classifyVisibleWindowNavigation, computeMissingLogins, cookieListHasAuth, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, validateVisibleWindowUrl, visibleWindowLaunchOptions, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, classifyVisibleWindowNavigation, computeMissingLogins, cookieListHasAuth, describeIndeedQueryOutcomes, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, validateVisibleWindowUrl, visibleWindowLaunchOptions, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
 import { CAPTCHA_RESOLVE_CHALLENGE_SELECTORS } from '../test-dependencies.js';
 import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
 // Imported at the source: the shared test-dependencies barrel is edited by
@@ -1009,6 +1009,94 @@ export default [
       assert(shouldHandoffIndeedChallengeToNative('indeed-login-wall') === false
         && shouldHandoffIndeedChallengeToNative('') === false,
       'login walls and unknown states do not create a native-challenge handoff');
+      return { ok: true };
+    },
+  },
+{
+    // The real run hit Indeed's login wall at query 4 page 32, so queries 5-10
+    // never ran — yet the end-of-run summary printed `clean` for all ten and
+    // "0 challenges". The summary loop only knew about Cloudflare counters, so
+    // this helper carries the stop through to per-query wording and the totals.
+    name: 'describeIndeedQueryOutcomes: a stopped run names the stop and never calls unrun queries clean',
+    run: () => {
+      const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+      // 1. No stop — the pre-existing wording (CF count, else clean) is unchanged.
+      const noStop = describeIndeedQueryOutcomes({
+        queries: ['alpha', 'beta', 'gamma'],
+        perQueryChallenges: { 0: 2 },
+      });
+      assert(eq(noStop.lines, [
+        'q1 "alpha": 2 CF',
+        'q2 "beta": clean',
+        'q3 "gamma": clean',
+      ]), `no-stop lines must keep the existing CF/clean wording (got ${JSON.stringify(noStop.lines)})`);
+      assert(noStop.summarySuffix === '',
+        `no stop must not append a suffix (got ${JSON.stringify(noStop.summarySuffix)})`);
+
+      // 2. The reported failure: login wall at query 4 (qi 3), 0-based page 31.
+      const tenQueries = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j'];
+      const loginWall = describeIndeedQueryOutcomes({
+        queries: tenQueries,
+        perQueryChallenges: {},
+        stop: { kind: 'login-wall', qi: 3, p: 31 },
+      });
+      assert(eq(loginWall.lines, [
+        'q1 "a": clean',
+        'q2 "b": clean',
+        'q3 "c": clean',
+        'q4 "d": stopped at login wall on page 32',
+        'q5 "e": not run (stopped at q4)',
+        'q6 "f": not run (stopped at q4)',
+        'q7 "g": not run (stopped at q4)',
+        'q8 "h": not run (stopped at q4)',
+        'q9 "i": not run (stopped at q4)',
+        'q10 "j": not run (stopped at q4)',
+      ]), `the stopped query and every later query must say so, never "clean" (got ${JSON.stringify(loginWall.lines)})`);
+      assert(loginWall.summarySuffix === '; stopped at q4 p32 (login wall), 6 queries not run',
+        `the totals line must carry the stop suffix (got ${JSON.stringify(loginWall.summarySuffix)})`);
+
+      // 3. A manual-challenge stop on a query that ALSO hit Cloudflare keeps the
+      // count and appends the stop on the same line.
+      const challengeStop = describeIndeedQueryOutcomes({
+        queries: ['a', 'b', 'c', 'd'],
+        perQueryChallenges: { 1: 1 },
+        stop: { kind: 'challenge', qi: 1, p: 2, reason: 'soft-block' },
+      });
+      assert(eq(challengeStop.lines, [
+        'q1 "a": clean',
+        'q2 "b": 1 CF, stopped at soft-block on page 3',
+        'q3 "c": not run (stopped at q2)',
+        'q4 "d": not run (stopped at q2)',
+      ]), `a challenge stop keeps its CF count and names its reason (got ${JSON.stringify(challengeStop.lines)})`);
+      assert(challengeStop.summarySuffix === '; stopped at q2 p3 (soft-block), 2 queries not run',
+        `a challenge stop must suffix the totals with its reason (got ${JSON.stringify(challengeStop.summarySuffix)})`);
+      const noReason = describeIndeedQueryOutcomes({
+        queries: ['a', 'b'],
+        perQueryChallenges: {},
+        stop: { kind: 'challenge', qi: 0, p: 0 },
+      });
+      assert(eq(noReason.lines, ['q1 "a": stopped at challenge on page 1', 'q2 "b": not run (stopped at q1)'])
+        && noReason.summarySuffix === '; stopped at q1 p1 (challenge), 1 queries not run',
+      `a reason-less challenge stop falls back to "challenge" (got ${JSON.stringify(noReason)})`);
+
+      // 4. An invalid stop (negative qi) is ignored entirely — same as no stop.
+      const invalidStop = describeIndeedQueryOutcomes({
+        queries: ['a', 'b'],
+        perQueryChallenges: { 1: 3 },
+        stop: { kind: 'login-wall', qi: -1, p: 4 },
+      });
+      assert(eq(invalidStop.lines, ['q1 "a": clean', 'q2 "b": 3 CF']),
+        `an invalid stop must behave exactly like no stop (got ${JSON.stringify(invalidStop.lines)})`);
+      assert(invalidStop.summarySuffix === '',
+        `an invalid stop must not add a suffix (got ${JSON.stringify(invalidStop.summarySuffix)})`);
+
+      // 5. Odd inputs never throw: a non-array query list yields no lines.
+      const nonArray = describeIndeedQueryOutcomes({ queries: 'alpha,beta', perQueryChallenges: null });
+      assert(eq(nonArray.lines, []),
+        `non-array queries must produce no lines (got ${JSON.stringify(nonArray.lines)})`);
+      assert(nonArray.summarySuffix === '',
+        `non-array queries must not produce a suffix (got ${JSON.stringify(nonArray.summarySuffix)})`);
       return { ok: true };
     },
   },

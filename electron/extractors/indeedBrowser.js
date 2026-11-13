@@ -134,6 +134,51 @@ export function classifyIndeedSessionPreflight({ hasPPID = false, authenticatedU
   return { status: 'needs-login', reason: 'auth-cookie-missing' };
 }
 
+/**
+ * Per-query lines for the end-of-run Indeed summary. The Cloudflare counters
+ * alone only describe challenges: a run that stops on Indeed's login wall (or on
+ * a manual challenge/soft block) never reaches the later queries, and the old
+ * loop printed all of them as "clean" — reporting queries that never ran as
+ * successes. Pure + non-throwing so the summary can never fail a scrape.
+ *
+ * `stop` is null or { kind: 'login-wall' | 'challenge', qi, p, reason? } where
+ * `p` is the 0-based page index (displayed as p + 1).
+ */
+export function describeIndeedQueryOutcomes({ queries = [], perQueryChallenges = {}, stop = null } = {}) {
+  const list = Array.isArray(queries) ? queries : [];
+  const counts = perQueryChallenges && typeof perQueryChallenges === 'object' ? perQueryChallenges : {};
+  // An invalid (non-integer / negative) qi means "no stop" — never fabricate one.
+  const stopQi = Number.isInteger(stop?.qi) && stop.qi >= 0 ? stop.qi : null;
+  const stopPage = Number.isInteger(stop?.p) && stop.p >= 0 ? stop.p : 0;
+  const isLoginWall = stop?.kind === 'login-wall';
+  const reason = typeof stop?.reason === 'string' && stop.reason ? stop.reason : 'challenge';
+  const stopLabel = isLoginWall ? 'login wall' : reason;
+
+  const lines = [];
+  for (let i = 0; i < list.length; i++) {
+    const n = Number(counts[i]);
+    const cf = Number.isFinite(n) && n > 0 ? n : 0;
+    let note;
+    if (stopQi == null || i < stopQi) {
+      note = cf ? ` ${cf} CF` : ' clean';
+    } else if (i === stopQi) {
+      const detail = isLoginWall
+        ? `stopped at login wall on page ${stopPage + 1}`
+        : `stopped at ${reason} on page ${stopPage + 1}`;
+      note = cf ? ` ${cf} CF, ${detail}` : ` ${detail}`;
+    } else {
+      note = ` not run (stopped at q${stopQi + 1})`;
+    }
+    lines.push(`q${i + 1} "${list[i]}":${note}`);
+  }
+
+  const summarySuffix = stopQi == null
+    ? ''
+    : `; stopped at q${stopQi + 1} p${stopPage + 1} (${stopLabel}), ${Math.max(0, list.length - stopQi - 1)} queries not run`;
+
+  return { lines, summarySuffix };
+}
+
 function ownedProcessExited(proc) {
   return !proc || proc.exitCode != null || proc.signalCode != null;
 }
@@ -1594,12 +1639,23 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
     // Compact per-query summary — 1 line per query so the full run picture fits
     // within the 60-line ring buffer regardless of how long the scrape ran.
-    for (let i = 0; i < queryList.length; i++) {
-      const cf      = perQueryChallenges[i] || 0;
-      const cfNote      = cf      ? ` ${cf} CF`            : ' clean';
-      logger.info(`[Indeed/Browser] q${i + 1} "${queryList[i]}":${cfNote}`);
+    // A run that stopped early left the later queries unrun, so the stop has to
+    // be part of each remaining line: Cloudflare counts alone printed every
+    // untouched query as "clean".
+    const outcomeStop = loginWallHit
+      ? { kind: 'login-wall', qi: challengedQi, p: challengedPage }
+      : manualChallenge
+        ? { kind: 'challenge', qi: manualChallenge.qi, p: manualChallenge.p, reason: manualChallenge.reason }
+        : null;
+    const queryOutcomes = describeIndeedQueryOutcomes({
+      queries: queryList,
+      perQueryChallenges,
+      stop: outcomeStop,
+    });
+    for (const line of queryOutcomes.lines) {
+      logger.info(`[Indeed/Browser] ${line}`);
     }
-    logger.info(`[Indeed/Browser] ${retainedJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}`);
+    logger.info(`[Indeed/Browser] ${retainedJobs.length} unique jobs, ${totalChallenges} challenges, ${queryList.length} queries${reEnriched > 0 ? `, ${reEnriched} re-enriched` : ''}${queryOutcomes.summarySuffix}`);
 
     const inWindow = collectionStartTimestamp != null
       ? filterJobsByPostedSince(retainedJobs, collectionStartTimestamp)

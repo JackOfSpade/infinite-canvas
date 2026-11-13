@@ -6795,6 +6795,38 @@ export function isGlassdoorCanonicalResultsUrl(url) {
 }
 
 /**
+ * The URL to re-navigate to when Glassdoor's canonical redirect dropped the
+ * posting-date filter, or null when nothing needs redoing.
+ *
+ * Measured live: a task URL of `/Job/jobs.htm?sc.keyword=...&fromAge=14` is
+ * client-redirected to `/Job/united-states-...-jobs-SRCH_IL...htm?sc.keyword=...`
+ * with `fromAge` GONE (12,084 results, most 30d+), while the SAME canonical URL
+ * with `fromAge=14` appended answers with 2,680 results all <=13d. So the fix is
+ * a single re-navigation onto the landed route carrying the requested value —
+ * the host, path and every other landed param are preserved because the slug is
+ * the route Glassdoor actually served.
+ *
+ * Returns null unless all three hold: the requested URL carries a fromAge, the
+ * landed URL is a canonical SRCH route (on `/Job/jobs.htm` Glassdoor re-derives
+ * the query, so appending is pointless), and the landed fromAge differs from
+ * the requested one. Pure and non-throwing — malformed input is "no fix".
+ */
+export function glassdoorDateFilterReapplyUrl(landedUrl, requestedUrl) {
+  try {
+    const requestedFromAge = String(new URL(requestedUrl).searchParams.get('fromAge') ?? '').trim();
+    if (!requestedFromAge) return null;
+    if (!isGlassdoorCanonicalResultsUrl(landedUrl)) return null;
+    const landed = new URL(landedUrl);
+    const landedFromAge = String(landed.searchParams.get('fromAge') ?? '').trim();
+    if (landedFromAge === requestedFromAge) return null;
+    landed.searchParams.set('fromAge', requestedFromAge);
+    return landed.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Three-way verdict on whether Glassdoor applied the location we resolved.
  *
  *   'applied'     — the canonical slug carries the matching _I{N|S|C}{id}.
@@ -7789,7 +7821,34 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         await updateOverlay(page, { ...overlayBase, count: allJobs.length, status: 'Loading…' });
 
         // Wait for real content — handles challenge pages
-        const readyState = await waitForReady(page, sourceId, overlayBase, signal, task.url);
+        let readyState = await waitForReady(page, sourceId, overlayBase, signal, task.url);
+
+        // Glassdoor's canonical redirect drops the posting-date filter: the
+        // request carried `fromAge=14` and the landed SRCH route carried none,
+        // so the page answered with unfiltered cards (15d-30d+ old for a 13-day
+        // window). Appending fromAge to the LANDED route is honored, so
+        // re-navigate there ONCE and let the unchanged ready-state handling
+        // below judge the second landing (abort, hard block and skip included).
+        if (sourceId === 'glassdoor' && (readyState === 'ok' || readyState === 'recovered')) {
+          const reapplyUrl = glassdoorDateFilterReapplyUrl(page.url(), task.url);
+          if (reapplyUrl) {
+            logger.info(`[BrowserScraper] ${srcName} q${qi + 1}: Glassdoor dropped fromAge — re-navigating once with the posting-date filter reapplied (${reapplyUrl})`);
+            recordManualScraperTelemetry({
+              phase: 'date-filter-reapplied',
+              sourceId,
+              srcName,
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              url: reapplyUrl,
+            }, { updateActive: false });
+            navStatusRef.last = null;
+            await page.evaluate(u => { window.location.href = u; }, reapplyUrl)
+              .then(() => true)
+              .catch(() => false);
+            await new Promise(r => setTimeout(r, humanDelay(NAV_SETTLE_MS)));
+            readyState = await waitForReady(page, sourceId, overlayBase, signal, reapplyUrl);
+          }
+        }
         if (readyState === 'abort' || signal?.aborted) { earlyExit = true; break; }
         if (readyState === 'hard-block') {
           // Cloudflare "Additional Verification Required" — no interactive widget,
@@ -7878,6 +7937,29 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: results stayed on the non-canonical /Job/jobs.htm route, where the _I*${task._glassdoorLocId} location marker cannot appear — skipping this query only, without asserting the location was ignored.`);
             locationProofUnavailableQueries++;
             continue;
+          }
+        }
+
+        // The re-navigation above is a request, not a guarantee: Glassdoor can
+        // drop fromAge again on the second landing. The client-side date filter
+        // still runs later as the backstop, so record the gap and keep
+        // extracting — but never let an unfiltered page pass silently as the
+        // 13-day window the user asked for.
+        if (sourceId === 'glassdoor' && isGlassdoorCanonicalResultsUrl(page.url())) {
+          const stillUnfiltered = glassdoorDateFilterReapplyUrl(page.url(), task.url);
+          if (stillUnfiltered) {
+            let requestedFromAge = '';
+            try { requestedFromAge = new URL(task.url).searchParams.get('fromAge') || ''; } catch { requestedFromAge = ''; }
+            recordManualScraperTelemetry({
+              phase: 'date-filter-not-applied',
+              sourceId,
+              srcName,
+              queryIndex: qi + 1,
+              queryTotal: sourceTasks.length,
+              url: page.url(),
+              requestedFromAge,
+            }, { updateActive: false });
+            logger.warn(`[BrowserScraper] ${srcName} q${qi + 1}: the canonical results URL still carried no fromAge=${requestedFromAge} after one re-navigation (${page.url()}) — extracting anyway; the client-side date filter is the backstop.`);
           }
         }
 
