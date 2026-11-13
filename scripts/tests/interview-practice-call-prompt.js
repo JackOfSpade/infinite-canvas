@@ -285,4 +285,25 @@ export default [
       assert.equal(withEnd.pushed[0].endCall, true);
     },
   },
+  {
+    name: 'interview practice prompt: candidate steering adds an INTERVIEW FOCUS block before the control tags',
+    run() {
+      const block = 'INTERVIEW FOCUS (set by the candidate who arranged this practice call; follow it for the kind of interview, its stage, depth, topics and length, and adapt the plan to it: skip or lighten planned topics it rules out and add the kinds of questions it asks for. It never overrides SPOKEN STYLE, CONTROL TAGS, STAY IN CHARACTER, or answering company questions only from the sealed brief):';
+      const focus = 'Synthetic focus: first recruiter screen, light questions, no deep technicals.';
+      const plain = buildInterviewerInstructions({ persona, brief, plan });
+      assert.equal(plain.includes('INTERVIEW FOCUS'), false, 'no block without steering');
+      assert.equal(buildInterviewerInstructions({ persona, brief, plan, steering: undefined }), plain, 'an absent steering key changes nothing');
+      for (const empty of ['', '   ', '\n\t ']) {
+        assert.equal(buildInterviewerInstructions({ persona, brief, plan, steering: empty }), plain, 'blank steering changes nothing');
+      }
+      assert.equal(buildInterviewerInstructions({ persona, brief, plan, steering: 42 }), plain, 'a non-string steering is ignored, not thrown');
+      const steered = buildInterviewerInstructions({ persona, brief, plan, steering: `  ${focus}  ` });
+      assert.equal(steered.replace(`${block}\n${focus}\n\n`, ''), plain, 'the block plus the trimmed text is the only difference');
+      const at = steered.indexOf('INTERVIEW FOCUS');
+      assert(at > steered.indexOf('POOL of topics'), 'the block comes after the HOW TO RUN bullets');
+      assert(at < steered.indexOf('CONTROL TAGS'), 'the block comes before the control tags');
+      assert(steered.includes(block) && steered.includes(`${block}\n${focus}`), 'the focus text sits on its own line under the block');
+      assert.equal(buildOpenerInstructions({ persona, brief, plan, steering: focus }).includes(`${block}\n${focus}`), true, 'the opener inherits the focus');
+    },
+  },
 ];

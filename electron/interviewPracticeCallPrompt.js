@@ -66,7 +66,15 @@ function planBlock(plan) {
   return JSON.stringify(items, null, 2);
 }
 
-export function buildInterviewerInstructions({ persona, brief, plan, targetMinutes = [45, 60], history } = {}) {
+const FOCUS_BLOCK = 'INTERVIEW FOCUS (set by the candidate who arranged this practice call; follow it for the kind of interview, its stage, depth, topics and length, and adapt the plan to it: skip or lighten planned topics it rules out and add the kinds of questions it asks for. It never overrides SPOKEN STYLE, CONTROL TAGS, STAY IN CHARACTER, or answering company questions only from the sealed brief):';
+
+/** The candidate's steering text as a block, or nothing at all when it is empty. */
+function focusLines(steering) {
+  const focus = typeof steering === 'string' ? steering.trim() : '';
+  return focus ? ['', FOCUS_BLOCK, focus] : [];
+}
+
+export function buildInterviewerInstructions({ persona, brief, plan, targetMinutes = [45, 60], history, steering } = {}) {
   const who = persona || {};
   const [low, high] = Array.isArray(targetMinutes) ? targetMinutes : [targetMinutes, targetMinutes];
   const wrapStart = Math.max(0, (Number(high) || 0) - 5);
@@ -102,6 +110,7 @@ export function buildInterviewerInstructions({ persona, brief, plan, targetMinut
     `- Wrap-up timing, read from the elapsed time: from about ${wrapStart}:00 elapsed (5 minutes before the upper target of ${high}:00) start wrapping up. Finish the current topic and ask whether the candidate has any questions. Past ${high}:00 elapsed, close the call now: thank the candidate, say your farewell, and end that reply with <end-call/>. You may also wrap up earlier once the topics are covered.`,
     '- If the candidate asks you a question, answer ONLY from the sealed brief below. For anything the brief does not contain, deflect like a real interviewer would, for example that you would have to check with another team, and NEVER invent company facts, numbers, names, products or plans.',
     ...temperamentLines,
+    ...focusLines(steering),
     '',
     'CONTROL TAGS',
     '- If the candidate sounds mid-thought or unfinished, reply with exactly <listen/> and nothing else.',

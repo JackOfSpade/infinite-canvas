@@ -120,9 +120,12 @@ const RULES = [
 export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, wordsByTurn = {}, transcriptionError = null, correction = null } = {}) {
   const transcript = Array.isArray(callRecord.transcript) ? callRecord.transcript : [];
   const role = [line(brief?.role?.title) || line(brief?.title), line(brief?.role?.company) || line(brief?.company)].filter(Boolean).join(' at ');
+  const focus = line(callRecord.steering);
   const header = [
     `call id: ${line(callRecord.callId) || '(unknown)'}`,
     `interviewer persona: ${line(callRecord.persona) || '(unknown)'}`,
+    focus ? `interview focus requested by the candidate: ${focus}` : '',
+    focus ? 'judge the call against that requested focus: a stage, depth or topic the focus asked to skip or lighten is not a gap, so do not penalise the interviewer for leaving it out' : '',
     `started: ${line(callRecord.startedAt) || '(unknown)'}`,
     role ? `role: ${role}` : '',
     `length: ${clock(callRecord.durationMs)}`,

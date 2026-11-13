@@ -231,6 +231,68 @@ test('replay protocol serves ranges, rejects unknowns and symlinks', async () =>
   assert.equal((await store.readRecord('call-a')).callId, 'call-a');
 });
 
+test('steering reaches both instruction builders and the saved record', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-steering-'));
+  const validated = [];
+  const built = [];
+  const prompts = {
+    buildOpenerInstructions: options => { built.push({ kind: 'opener', options }); return 'opener'; },
+    buildInterviewerInstructions: options => { built.push({ kind: 'main', options }); return 'interviewer'; },
+  };
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: { prompts, validateArgs: args => validated.push(args) } });
+  const service = createPracticeCallService(deps);
+  const focus = 'Final round: ask my salary expectations.';
+  const state = await service.start({ ...ARGS, steering: `  ${focus}  ` });
+  assert.equal(state.phase, 'ringing');
+  assert.deepEqual([...new Set(built.map(item => item.kind))].sort(), ['main', 'opener'], 'both sessions are built');
+  assert.equal(built.length > 0, true);
+  for (const item of built) assert.equal(item.options.steering, focus, `${item.kind}: the trimmed steering is passed through`);
+  assert.deepEqual(validated, [ARGS], 'the strict validator sees exactly the six keys');
+  await service.answer();
+  await service.hangUp();
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.steering, focus, 'the saved record keeps the trimmed steering');
+});
+
+test('a start without steering validates with exactly the six keys and records no steering', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-no-steering-'));
+  const validated = [];
+  const built = [];
+  const prompts = {
+    buildOpenerInstructions: options => { built.push({ kind: 'opener', options }); return 'opener'; },
+    buildInterviewerInstructions: options => { built.push({ kind: 'main', options }); return 'interviewer'; },
+  };
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: { prompts, validateArgs: args => validated.push(args) } });
+  const service = createPracticeCallService(deps);
+  const state = await service.start({ ...ARGS });
+  assert.equal(state.phase, 'ringing');
+  assert.equal(validated.length, 1);
+  assert.deepEqual(Object.keys(validated[0]).sort(), Object.keys(ARGS).sort());
+  assert.equal('steering' in validated[0], false);
+  assert.equal(built.length > 0, true);
+  for (const item of built) assert.equal(item.options.steering, '');
+  await service.answer();
+  await service.hangUp();
+  assert.equal((await deps.store.readRecord('call-1')).steering, null);
+});
+
+test('steering that is too long or not a string is invalid-request before the strict validator runs', async () => {
+  for (const [label, steering] of [['1001 chars', 'x'.repeat(1001)], ['number', 42], ['object', { text: 'hi' }], ['array', ['hi']]]) {
+    const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-steering-bad-'));
+    const validated = [];
+    const { deps } = makeDeps({ tmp, modelReady: true, deps: { validateArgs: args => validated.push(args) } });
+    const service = createPracticeCallService(deps);
+    const state = await service.start({ ...ARGS, steering });
+    assert.equal(state.phase, 'error', label);
+    assert.equal(state.error.code, 'invalid-request', label);
+    assert.deepEqual(validated, [], `${label}: the strict six-key validator is never reached`);
+  }
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-steering-max-'));
+  const service = createPracticeCallService(makeDeps({ tmp, modelReady: true }).deps);
+  const state = await service.start({ ...ARGS, steering: `  ${'x'.repeat(1000)}  ` });
+  assert.equal(state.phase, 'ringing', 'the 1000-character limit applies to the trimmed text');
+});
+
 export default cases;
 
 // --- guards against the real modules the service now imports on demand -----

@@ -239,5 +239,24 @@ export default [
       assert.ok(chapters.at(-1).markers.some(marker => marker.atMs === 40000), "clamped marker belongs to the closing chapter");
     },
   },
+  {
+    name: 'practice call analysis: the review prompt carries the candidate-requested interview focus only when one was set',
+    async run() {
+      const focus = 'Final round before an offer: ask my salary expectations.';
+      const plain = buildReviewPrompt({ callRecord, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      assert.equal(plain.includes('interview focus requested by the candidate'), false, 'no focus line without steering');
+      assert.equal(plain.includes('judge the call against that requested focus'), false);
+      for (const empty of ['', '   ']) {
+        assert.equal(buildReviewPrompt({ callRecord: { ...callRecord, steering: empty }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} }), plain, 'blank steering changes nothing');
+      }
+      assert.equal(buildReviewPrompt({ callRecord: { ...callRecord, steering: '   ' }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} }), plain);
+      const steered = buildReviewPrompt({ callRecord: { ...callRecord, steering: `  ${focus}  ` }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      const focusLine = `interview focus requested by the candidate: ${focus}`;
+      assert.equal(steered.split(focusLine).length, 2, 'the trimmed focus line appears exactly once');
+      assert.equal(steered.includes('judge the call against that requested focus'), true, 'the reviewer is told to judge against the focus');
+      assert.equal(steered.indexOf(focusLine) > steered.indexOf('interviewer persona: Warm hiring manager'), true, 'the focus line sits next to the persona line');
+      assert.equal(steered.split('\n').length, plain.split('\n').length + 2, 'only the focus line and its instruction are added');
+    },
+  },
 
 ];

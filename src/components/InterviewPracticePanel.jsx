@@ -35,8 +35,15 @@ export function FeedbackView({ feedback }) {
   </div>;
 }
 
-export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, ready, disabled }) {
+export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, ready, disabled, steering, onSteeringChange }) {
   const [practiceBusy, setPracticeBusy] = useState(false);
+  const [localSteering, setLocalSteering] = useState('');
+  // The node owns the text when it passes a handler; without one the panel keeps it.
+  const steeringText = typeof steering === 'string' ? steering : localSteering;
+  const setSteeringText = text => {
+    if (typeof onSteeringChange === 'function') onSteeringChange(text);
+    else setLocalSteering(text);
+  };
   const [pastCalls, setPastCalls] = useState([]);
   const [pastNotice, setPastNotice] = useState(null);
   const api = typeof window !== 'undefined' ? window.electronAPI : null;
@@ -64,8 +71,12 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     if (typeof api?.startPracticeCall !== 'function' || practiceBusy) return;
     setPracticeBusy(true);
     setPastNotice(null);
+    const focus = steeringText.trim();
     try {
-      const result = await api.startPracticeCall({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest });
+      const result = await api.startPracticeCall({
+        nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest,
+        ...(focus ? { steering: focus } : {}),
+      });
       if (result && result.success === false) setPastNotice({ tone: 'error', text: result.error || 'The practice call could not start.' });
       else if (result?.note) setPastNotice({ tone: 'error', text: result.note });
     } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The practice call could not start.' }); }
@@ -87,6 +98,10 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
     <p className="text-[11px] font-medium text-violet-200"><Mic size={12} className="mr-1 inline" />Practice interview</p>
     <p className="text-[11px] text-white/60">An AI interviewer calls you inside the app: small talk, your prepared questions reworded, follow-ups and curveballs. Answer out loud, or type in the call's chat — typed answers are heard as if you said them. Feedback on the whole call comes with the replay.</p>
     <div className="space-y-1.5 rounded-md border border-white/10 bg-black/20 p-2" aria-label="Practice call">
+      <label className="block space-y-1">
+        <span className="text-[10px] font-semibold uppercase text-white/45">Steer this interview (optional)</span>
+        <textarea className="nodrag w-full rounded-md border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] text-white placeholder:text-white/30 disabled:opacity-50" rows={3} maxLength={1000} value={steeringText} onChange={event => setSteeringText(event.target.value)} disabled={!canCall} placeholder={'e.g. "First recruiter screen: light questions, no deep technicals" or "Final round before an offer: ask my salary expectations"'} aria-label="Steer this interview (optional)" />
+      </label>
       <button type="button" className="nodrag w-full rounded-md bg-violet-500/30 px-2 py-1.5 text-xs text-violet-50 disabled:opacity-50" onClick={startCall} disabled={!canCall}>{practiceBusy ? 'Starting…' : 'Start practice call'}</button>
       {!ready && <p className="text-[10px] text-white/45">Prepare the interview first; the call uses the prepared questions and answers.</p>}
       <div aria-label="Past calls">

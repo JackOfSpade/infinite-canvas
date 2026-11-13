@@ -196,7 +196,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
     });
   },
   launchInterviewWindow: (args) => ipcRenderer.invoke('interview-window:launch', args),
-  startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }) => ipcRenderer.invoke('practice-call:start', { nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest }),
+  startPracticeCall: ({ nodeId, briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId, bundleArtifactDigest, steering }) => ipcRenderer.invoke('practice-call:start', {
+    nodeId,
+    briefRecordId,
+    snapshotId,
+    canonicalJobUrl,
+    bundleArtifactId,
+    bundleArtifactDigest,
+    ...(typeof steering === 'string' ? { steering } : {}),
+  }),
   openPracticeReplay: ({ nodeId, callId }) => ipcRenderer.invoke('practice-call:open-replay', { nodeId, callId }),
   listPracticeCalls: ({ nodeId }) => ipcRenderer.invoke('practice-call:list', { nodeId }),
   // New Local AI application jobs use an app-owned copy/paste handoff. Legacy

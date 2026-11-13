@@ -57,6 +57,23 @@ function plainArgs(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Practice call requires a valid request.');
   return value;
 }
+const STEERING_MAX_CHARS = 1000;
+/** The candidate's optional steering text; kept apart from the strict six-key load args. */
+function steeringText(value) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') {
+    const error = new TypeError('Practice call steering must be a string.');
+    error.code = 'practice-call-args';
+    throw error;
+  }
+  const trimmed = value.trim();
+  if (trimmed.length > STEERING_MAX_CHARS) {
+    const error = new TypeError(`Practice call steering must be at most ${STEERING_MAX_CHARS} characters.`);
+    error.code = 'practice-call-args';
+    throw error;
+  }
+  return trimmed;
+}
 function sha256(value) { return createHash('sha256').update(String(value)).digest('hex'); }
 function initialsOf(name) {
   return String(name || '').trim().split(/\s+/u).slice(0, 2).map(part => part[0] || '').join('').toUpperCase() || '?';
@@ -536,7 +553,7 @@ export function createPracticeCallService(deps = {}) {
       persona: {
         name: call.persona.name, role: call.persona.role, team: call.persona.team, temperament, voice: call.persona.voice,
       },
-      brief: call.promptBrief, plan: call.plan, targetMinutes,
+      brief: call.promptBrief, plan: call.plan, targetMinutes, steering: call.steering,
     });
     const settle = temperament => {
       const options = optionsFor(temperament);
@@ -640,7 +657,7 @@ export function createPracticeCallService(deps = {}) {
       closeEar(self);
       const record = {
         callId: self.callId, nodeId: self.args.nodeId, startedAt: self.startedAt, endedAt: Date.now(), durationMs,
-        persona: self.persona ? { ...self.persona } : null, transcript: engineState.transcript || [],
+        persona: self.persona ? { ...self.persona } : null, steering: self.steering || null, transcript: engineState.transcript || [],
         timings: { ...self.timings, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
         toneNotes: self.toneSamples.slice(), thresholds: deps.thresholds ?? null, reason,
       };
@@ -766,14 +783,15 @@ export function createPracticeCallService(deps = {}) {
     try {
       state = freshState();
       call = null;
-      const request = plainArgs(args);
+      const { steering: rawSteering, ...request } = plainArgs(args);
       const callId = newId();
       const dir = await store.ensure(callId);
-      const self = { callId, dir, args: { ...request }, startedAt: Date.now(), timings: { answers: [], precheckMs: 0 }, toneSamples: [], finished: false, inCall: false, record: null };
+      const self = { callId, dir, args: { ...request }, steering: '', startedAt: Date.now(), timings: { answers: [], precheckMs: 0 }, toneSamples: [], finished: false, inCall: false, record: null };
       call = self;
       state.callId = callId;
       state.elapsedMs = 0;
       try {
+        self.steering = steeringText(rawSteering);
         const loaded = await loadPlan(request);
         if (call !== self) return snapshot();
         self.brief = loaded.brief;
