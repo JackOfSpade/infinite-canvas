@@ -163,6 +163,7 @@ import job_search_source_windows_main from './tests/job-search-source-windows-ma
 import job_search_source_coverage from './tests/job-search-source-coverage.js';
 import job_board_provider from './tests/job-board-provider.js';
 import job_board_saved_analysis_resume from './tests/job-board-saved-analysis-resume.js';
+import dice_teaser_refresh from './tests/dice-teaser-refresh.js';
 import job_search_board_only from './tests/job-search-board-only.js';
 import job_search_paused_discard from './tests/job-search-paused-discard.js';
 import job_search_rescrape_interval from './tests/job-search-rescrape-interval.js';
@@ -492,6 +493,7 @@ const testGroups = [
   ['job-search-source-coverage.js', job_search_source_coverage],
   ['job-board-provider.js', job_board_provider],
   ['job-board-saved-analysis-resume.js', job_board_saved_analysis_resume],
+  ['dice-teaser-refresh.js', dice_teaser_refresh],
   ['job-search-board-only.js', job_search_board_only],
   ['job-search-paused-discard.js', job_search_paused_discard],
   ['job-search-rescrape-interval.js', job_search_rescrape_interval],

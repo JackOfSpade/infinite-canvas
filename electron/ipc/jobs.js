@@ -80,6 +80,7 @@ import {
   jobRelevanceEvidence,
 } from '../extractors/apiExtractors.js';
 import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, descriptionsNotFetchedWarning, sourceHealthWarning } from './jobSourceHealth.js';
+import { refreshDiceTeaserRows } from './diceTeaserRefresh.js';
 
 // A walker reports a walk guard when it stopped a walk for lack of real progress
 // or at a safety backstop. That usually means the scraper needs a fix.
@@ -15734,7 +15735,16 @@ Return a JSON object with four arrays of search query strings:
     // posting from an older run keeps that view, so its accepted batches replay.
     // Older retryable lookups and pending listings wait for the Board's research
     // stage, which takes them only at or above the threshold.
-    const scoringJobs = Array.isArray(jobs) ? jobs : [];
+    const rawScoringJobs = Array.isArray(jobs) ? jobs : [];
+    // A direct re-score (e.g. the Board's saved-job scoring) skips the search
+    // pipeline, so Dice rows still carry the list API's short teaser. Refresh
+    // them before the official-posting map and scoring run.
+    const diceRefresh = await refreshDiceTeaserRows(rawScoringJobs, { enrich: enrichDiceDescriptions, signal });
+    const scoringJobs = diceRefresh.jobs;
+    if (diceRefresh.attempted > 0) {
+      logger.info(`[Jobs][${nodeId}] Refreshed ${diceRefresh.attempted} Dice teaser description(s) before scoring: ${diceRefresh.lengthened} lengthened`);
+    }
+    await assertScoringCurrent();
     if (jobsTelemetry.search?.runId === snapshotContext?.runId) {
       jobsTelemetry.search.officialLookupsIncomplete = scoringJobs.filter(job => job?.officialPosting
         && officialPostingLookupStatus(job.officialPosting).retryable).length;
