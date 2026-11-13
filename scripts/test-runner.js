@@ -200,6 +200,7 @@ import job_card_review_bucket from './tests/job-card-review-bucket.js';
 import job_gap_review from './tests/job-gap-review.js';
 import job_score_reuse from './tests/job-score-reuse.js';
 import validator_correction_details from './tests/validator-correction-details.js';
+import job_analysis_snapshot_size from './tests/job-analysis-snapshot-size.js';
 import job_search_clear_ui from './tests/job-search-clear-ui.js';
 import job_board_combine_receipt from './tests/job-board-combine-receipt.js';
 import job_board_recovery_retry from './tests/job-board-recovery-retry.js';
@@ -530,6 +531,7 @@ const testGroups = [
   ['job-gap-review.js', job_gap_review],
   ['job-score-reuse.js', job_score_reuse],
   ['validator-correction-details.js', validator_correction_details],
+  ['job-analysis-snapshot-size.js', job_analysis_snapshot_size],
   ['job-search-clear-ui.js', job_search_clear_ui],
   ['job-board-combine-receipt.js', job_board_combine_receipt],
   ['job-board-recovery-retry.js', job_board_recovery_retry],

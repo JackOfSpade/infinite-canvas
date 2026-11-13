@@ -1789,6 +1789,18 @@ export function getCurrentRequestJobAnalysisPaths(canvasFilePath, nodeId = null)
   };
 }
 
+// The readable prompt file must be reproducible from the JSON snapshot that
+// was actually written, so the body is derived rather than trusted: an old
+// file that still carries `prompt` formats identically to one where the write
+// dropped it, and an omitted batch says so instead of looking empty.
+const OMITTED_PREVIEW_BATCH_JOBS_NOTICE = '(batch jobs omitted from the saved snapshot to stay under the 128 MiB recovery limit)';
+
+function formatPromptBatchBody(batch) {
+  if (typeof batch?.prompt === 'string') return batch.prompt;
+  if (batch?.jobsOmitted === true) return OMITTED_PREVIEW_BATCH_JOBS_NOTICE;
+  return `JOBS TO SCORE (array, indexed):\n${JSON.stringify(Array.isArray(batch?.jobs) ? batch.jobs : [])}`;
+}
+
 // Writes the exact text sent to the AI: the cached prefix followed by each
 // batch payload. Uses previewBatches (all gathered jobs, ignoring score cap)
 // so the file is populated even when AI scoring is skipped in test mode.
@@ -1813,7 +1825,7 @@ function formatPromptFile(snapshot) {
     lines.push('', '(no jobs — scoring was skipped or no jobs were gathered)');
   } else {
     for (const batch of batches) {
-      lines.push('', sep, `BATCH ${batch?.batchNumber ?? ''} of ${batches.length}  (${batch?.jobCount ?? 0} jobs)`, sep, '', batch?.prompt ?? '');
+      lines.push('', sep, `BATCH ${batch?.batchNumber ?? ''} of ${batches.length}  (${batch?.jobCount ?? 0} jobs)`, sep, '', formatPromptBatchBody(batch));
     }
   }
 
@@ -2049,7 +2061,10 @@ function buildJobAnalysisReportMetadata(snapshot) {
   };
 }
 
-function serializeJobAnalysisSnapshot(snapshot) {
+// Serialize the durable envelope WITHOUT the size assertion. The recovery
+// writer retries a smaller form before it fails the whole save, so the assert
+// lives in serializeJobAnalysisSnapshot and in prepareJobAnalysisSnapshotForWrite.
+function serializeJobAnalysisSnapshotText(snapshot) {
   const payload = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
     ? snapshot
     : {};
@@ -2057,7 +2072,7 @@ function serializeJobAnalysisSnapshot(snapshot) {
   // incoming copy rather than spreading it through as stale or spoofed state.
   const { reportMetadata: _ignoredReportMetadata, ...rest } = payload;
   const reportMetadata = buildJobAnalysisReportMetadata(rest);
-  if (!reportMetadata) return assertJobAnalysisArtifactSize(`${JSON.stringify(rest, null, 2)}\n`);
+  if (!reportMetadata) return `${JSON.stringify(rest, null, 2)}\n`;
 
   // Object-property enumeration promotes array-index keys ahead of ordinary
   // string keys. A normal production snapshot has none, but this is a durable
@@ -2077,7 +2092,68 @@ function serializeJobAnalysisSnapshot(snapshot) {
     const encoded = property(key, rest[key]);
     if (encoded != null) properties.push(encoded);
   }
-  return assertJobAnalysisArtifactSize(`{\n${properties.join(',\n')}\n}\n`);
+  return `{\n${properties.join(',\n')}\n}\n`;
+}
+
+// A snapshot's previewBatches store the same batch payload twice: `jobs` and
+// `prompt` (an escaped JSON copy of `jobs`). Only formatPromptFile ever reads
+// `prompt`, and it can derive identical text from `jobs`, so the durable write
+// drops the copy first and only then drops the batch jobs themselves.
+function jobAnalysisSnapshotWithoutPreviewBatchPrompts(snapshot) {
+  const payload = snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)
+    ? snapshot
+    : {};
+  if (!Array.isArray(payload.previewBatches)) return { ...payload };
+  return {
+    ...payload,
+    previewBatches: payload.previewBatches.map((batch) => {
+      if (!batch || typeof batch !== 'object' || Array.isArray(batch)) return batch;
+      const { prompt: _ignoredPrompt, ...rest } = batch;
+      return rest;
+    }),
+  };
+}
+
+function jobAnalysisSnapshotWithOmittedPreviewBatchJobs(persisted) {
+  if (!Array.isArray(persisted.previewBatches)) return null;
+  return {
+    ...persisted,
+    previewBatchJobsOmitted: true,
+    previewBatches: persisted.previewBatches.map((batch) => {
+      if (!batch || typeof batch !== 'object' || Array.isArray(batch)) return batch;
+      const { jobs: _omittedJobs, ...rest } = batch;
+      // Keep the batch count and its accounting: only the (reproducible) job
+      // payload is dropped, so readers still see one entry per batch.
+      return { ...rest, jobs: [], jobsOmitted: true };
+    }),
+  };
+}
+
+function prepareJobAnalysisSnapshotForWrite(snapshot, { maxBytes = MAX_JOB_ANALYSIS_ARTIFACT_BYTES } = {}) {
+  const limit = Number.isFinite(maxBytes) && maxBytes >= 0 ? maxBytes : MAX_JOB_ANALYSIS_ARTIFACT_BYTES;
+  const persisted = jobAnalysisSnapshotWithoutPreviewBatchPrompts(snapshot);
+  const serialized = serializeJobAnalysisSnapshotText(persisted);
+  if (Buffer.byteLength(serialized, 'utf8') <= limit) return { snapshot: persisted, serialized };
+  const omitted = jobAnalysisSnapshotWithOmittedPreviewBatchJobs(persisted);
+  if (omitted) {
+    const omittedSerialized = serializeJobAnalysisSnapshotText(omitted);
+    if (Buffer.byteLength(omittedSerialized, 'utf8') <= limit) {
+      return { snapshot: omitted, serialized: omittedSerialized };
+    }
+  }
+  // Still too large. The default limit keeps reporting through the shared
+  // assertion (single source of the message and code); an explicit test limit
+  // gets an identical error without depending on the real 128 MiB threshold.
+  if (limit === MAX_JOB_ANALYSIS_ARTIFACT_BYTES) {
+    assertJobAnalysisArtifactSize(serializeJobAnalysisSnapshotText(omitted || persisted));
+  }
+  const error = new Error('Saved job analysis exceeds the 128 MiB recovery limit. The previous saved analysis was preserved.');
+  error.code = 'JOB_ANALYSIS_ARTIFACT_TOO_LARGE';
+  throw error;
+}
+
+function serializeJobAnalysisSnapshot(snapshot) {
+  return prepareJobAnalysisSnapshotForWrite(snapshot).serialized;
 }
 
 function jobAnalysisArtifactDigest(serialized) {
@@ -2290,7 +2366,7 @@ async function saveJobAnalysisSnapshot(snapshot) {
       return { retired: true, jsonPath, lastSuccessJsonPath, promptPath };
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
-    const serialized = serializeJobAnalysisSnapshot(snapshot);
+    const { snapshot: persisted, serialized } = prepareJobAnalysisSnapshotForWrite(snapshot);
     const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
       publications: [
@@ -2305,7 +2381,7 @@ async function saveJobAnalysisSnapshot(snapshot) {
     // erase the only detailed copy of opportunities that durable seen-history
     // will correctly suppress from future reruns.
     const rotation = await rotateSuccessfulJobAnalysisGenerations(rotationPlan);
-    await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
+    await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(persisted));
     const lifecycle = {
       canvasFilePath: snapshot.canvasFilePath,
       ownerId: jobAnalysisSnapshotOwner(snapshot),
@@ -3711,7 +3787,7 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
       return { saved: true, globalSaved: false, checkpointPath: checkpoint.checkpointPath, reason: 'superseded' };
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
-    const serialized = serializeJobAnalysisSnapshot(snapshot);
+    const { snapshot: persisted, serialized } = prepareJobAnalysisSnapshotForWrite(snapshot);
     const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
       publications: [
@@ -3722,7 +3798,7 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
     });
     await writeJobAnalysisFileAtomically(jsonPath, serialized);
     await rotateSuccessfulJobAnalysisGenerations(rotationPlan);
-    await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(snapshot));
+    await writeJobAnalysisFileAtomically(promptPath, formatPromptFile(persisted));
       return { saved: true, globalSaved: true, checkpointPath: checkpoint.checkpointPath, jsonPath, lastSuccessJsonPath, promptPath };
     });
   };
@@ -4183,6 +4259,11 @@ function descriptionRecoveryNotReadyWarning(sourceLabel, reason) {
 /** Test seam for the deterministic prompt/snapshot binding contract. */
 export function __formatJobAnalysisPromptForTests(snapshot) {
   return formatPromptFile(snapshot);
+}
+
+/** Test seam for the durable-write size ladder (prompts, then omitted jobs). */
+export function __prepareJobAnalysisSnapshotForWriteForTests(snapshot, options) {
+  return prepareJobAnalysisSnapshotForWrite(snapshot, options);
 }
 
 export function canRecoverGatheredRunDirectly(manifest, queries) {
