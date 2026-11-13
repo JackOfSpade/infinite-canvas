@@ -128,4 +128,54 @@ export default [
       assert(sourceText.split(`displayOnlyPromptSuffix: ${name}`).length - 1 === count, `${name} must be wired at every v2 call site`);
     }
   } },
+  { name: 'W4 evidence supported-and-gap: one requirement cited as both supported and a gap is one contradiction at both paths', run: () => {
+    const span = 'Build responsive React interfaces for the internal dashboard.';
+    const conflicts = score => jobs.explainScoreRow(score, { title: 'Frontend Engineer', description: span })
+      .findings.filter(finding => finding.ruleId === 'scoring.evidence-supported-and-gap' || finding.ruleId === 'scoring.evidence-reuse')
+      .map(finding => `${finding.ruleId}@${finding.entity}`).sort();
+    const shared = { jobEvidence: span, priority: 'required', requirementText: 'React interface build' };
+    const differentMeaning = conflicts({
+      matchScore: 72,
+      requirementAssessments: [{ ...shared, status: 'direct', candidateEvidence: 'Built responsive React interfaces daily.' }],
+      materialGaps: [{ ...shared, status: 'not_documented', candidateEvidence: '' }],
+    });
+    const sameMeaning = conflicts({
+      matchScore: 72,
+      requirementAssessments: [{ ...shared, status: 'direct', candidateEvidence: 'Built responsive React interfaces daily.' }],
+      materialGaps: [{ ...shared, status: 'direct', candidateEvidence: 'Built responsive React interfaces daily.' }],
+    });
+    const expected = ['scoring.evidence-supported-and-gap@materialGaps.0', 'scoring.evidence-supported-and-gap@requirementAssessments.0'];
+    assert(JSON.stringify(differentMeaning) === JSON.stringify(expected), `cross-field sharing must not be reported as span reuse: ${JSON.stringify(differentMeaning)}`);
+    assert(JSON.stringify(sameMeaning) === JSON.stringify(expected), `identical requirement text in both lists is still the same contradiction: ${JSON.stringify(sameMeaning)}`);
+    const mirroredGap = conflicts({
+      matchScore: 40,
+      requirementAssessments: [{ ...shared, status: 'not_documented', candidateEvidence: '' }],
+      materialGaps: [{ ...shared, requirementText: 'React interfaces (responsive)', status: 'not_documented', candidateEvidence: '' }],
+    });
+    assert(JSON.stringify(mirroredGap) === '[]', `a gap-status assessment mirrored by its own gap row is one requirement, not reuse: ${JSON.stringify(mirroredGap)}`);
+  } },
+  { name: 'W4 evidence reuse: two supported rows sharing one span for different requirements keep reporting reuse', run: () => {
+    const span = 'Build responsive React interfaces for the internal dashboard.';
+    const findings = jobs.explainScoreRow({
+      matchScore: 80,
+      requirementAssessments: [
+        { jobEvidence: span, candidateEvidence: 'Built responsive React interfaces.', status: 'direct', priority: 'required', requirementText: 'React interface build' },
+        { jobEvidence: span, candidateEvidence: 'Owned dashboard layout work.', status: 'direct', priority: 'required', requirementText: 'Responsive dashboard layout' },
+      ],
+      materialGaps: [],
+    }, { title: 'Frontend Engineer', description: span }).findings;
+    const conflicts = findings.filter(finding => finding.ruleId === 'scoring.evidence-supported-and-gap' || finding.ruleId === 'scoring.evidence-reuse')
+      .map(finding => `${finding.ruleId}@${finding.entity}`).sort();
+    assert(JSON.stringify(conflicts) === JSON.stringify(['scoring.evidence-reuse@requirementAssessments.0', 'scoring.evidence-reuse@requirementAssessments.1']), `same-field reuse still reports reuse only: ${JSON.stringify(conflicts)}`);
+  } },
+  { name: 'W4 evidence supported-and-gap: the scoring registry renders its own repair sentence', run: () => {
+    assert(Object.hasOwn(jobs.SCORING_CORRECTION_TEMPLATES, 'scoring.evidence-supported-and-gap'), 'the scoring correction registry must publish the new rule');
+    const c = lines.collector();
+    c.add('scoring.evidence-supported-and-gap', 'requirementAssessments.0');
+    c.add('scoring.evidence-supported-and-gap', 'materialGaps.0');
+    const problems = c.render(jobs.SCORING_CORRECTION_TEMPLATES).problems;
+    const line = problems.length === 1 ? problems[0].line : '';
+    assert(problems.length === 1 && problems[0].ruleId === 'scoring.evidence-supported-and-gap', `one line for the new rule: ${JSON.stringify(problems.map(problem => problem.ruleId))}`);
+    assert(line.includes('only one list') && line.includes('[requirementAssessments.0, materialGaps.0]'), `the repair must say one requirement belongs in only one list and name both paths: ${line}`);
+  } },
 ];

@@ -2208,7 +2208,7 @@ export function NonApiAiDialog() {
                 </section>
               )}
 
-              <div className="flex flex-col gap-2 min-h-0">
+              <div className="flex flex-col gap-2 shrink-0">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="flex flex-wrap items-center gap-2">
                     <label htmlFor="non-api-ai-prompt" className="text-xs font-medium text-white/65 uppercase tracking-wider">
@@ -2285,7 +2285,7 @@ export function NonApiAiDialog() {
                 />
               </div>
 
-              <div className="flex flex-col gap-2 min-h-0">
+              <div className="flex flex-col gap-2 shrink-0">
                 <label htmlFor="non-api-ai-response" className="text-xs font-medium text-white/65 uppercase tracking-wider">Paste AI response</label>
                 <textarea
                   id="non-api-ai-response"

@@ -12,6 +12,7 @@ export const VALIDATION_TEMPLATES = Object.freeze({
   "scoring.no-requirement-rows": "rows {ids} list no requirementAssessments and no materialGaps; list every distinct professional requirement of the posting",
   "scoring.evidence-blank": "jobEvidence is blank, or a required candidateEvidence is blank, at {ids}; every requirement row needs its verbatim posting span, and direct, adjacent or contradicted rows also need a verbatim candidate span",
   "scoring.evidence-reuse": "the same jobEvidence span is cited for different requirements at {ids}; give each distinct requirement its own shortest verbatim posting span instead of reusing a compound sentence",
+  "scoring.evidence-supported-and-gap": "the same jobEvidence span is cited both as supported (requirementAssessments) and as a gap (materialGaps) at {ids}; keep it in only one list, so delete the other row and keep requirementAssessments only if candidate evidence supports it, otherwise materialGaps",
   "scoring.no-grounded-requirement": "rows {ids} have no professional requirement whose jobEvidence appears verbatim in the supplied posting; work authorization and location rows do not count, so copy each span exactly as written in the listing",
   "gap.reviews-missing": "reviews is not an array; return an object with a reviews array holding one entry per job index",
   "gap.index-invalid": "review index {value} is not an integer from 0 to {max}",

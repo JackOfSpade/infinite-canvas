@@ -18711,8 +18711,15 @@ export function explainScoreRow(score, job, options = {}) {
   for (const field of ['requirementAssessments', 'materialGaps']) for (const [i, row] of (Array.isArray(score?.[field]) ? score[field] : []).entries()) {
     const path = `${field}.${i}`, quote = String(row?.jobEvidence || '').normalize('NFC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase();
     const meaning = JSON.stringify([scoringEvidenceStatus(row), String(row?.priority || '').trim().toLocaleLowerCase(), String(row?.requirementText || '').normalize('NFC').replace(/\s+/gu, ' ').trim().toLocaleLowerCase()]);
-    if (quote && quotes.has(quote) && quotes.get(quote).meaning !== meaning) { add('scoring.evidence-reuse', quotes.get(quote).path); add('scoring.evidence-reuse', path); }
-    if (quote) quotes.set(quote, { meaning, path });
+    const prior = quote ? quotes.get(quote) : null;
+    // A span shared across the two lists names ONE requirement. It is a
+    // contradiction only when the assessment claims support; a gap-status
+    // assessment mirrored by its own materialGaps row is the same requirement
+    // (wording may differ), so telling the model to split the span loops.
+    if (prior && prior.field !== field) {
+      if (prior.supported) { add('scoring.evidence-supported-and-gap', prior.path); add('scoring.evidence-supported-and-gap', path); }
+    } else if (prior && prior.meaning !== meaning) { add('scoring.evidence-reuse', prior.path); add('scoring.evidence-reuse', path); }
+    if (quote) quotes.set(quote, { meaning, path, field, supported: field === 'requirementAssessments' && ['direct', 'adjacent'].includes(scoringEvidenceStatus(row)) });
   }
   for (const [i, gap] of (Array.isArray(score?.materialGaps) ? score.materialGaps : []).entries()) if (nonScoringJobConstraintKind(gap)) add('scoring.logistics-gap', `materialGaps.${i}`);
   let fit = null;
