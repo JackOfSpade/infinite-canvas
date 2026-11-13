@@ -178,4 +178,47 @@ export default [
     assert(problems.length === 1 && problems[0].ruleId === 'scoring.evidence-supported-and-gap', `one line for the new rule: ${JSON.stringify(problems.map(problem => problem.ruleId))}`);
     assert(line.includes('only one list') && line.includes('[requirementAssessments.0, materialGaps.0]'), `the repair must say one requirement belongs in only one list and name both paths: ${line}`);
   } },
+  { name: 'W4 scoring rejection names the supported-and-gap fix, not span reuse, for a requirement cited as both supported and a gap', run: () => {
+    const span = 'Build responsive React interfaces for the internal dashboard.';
+    const shared = { jobEvidence: span, priority: 'required', requirementText: 'React interface build' };
+    let error;
+    try {
+      jobs.validateJobScoringSubmission({
+        scores: [{
+          index: 0,
+          matchScore: 72,
+          requirementAssessments: [{ ...shared, status: 'direct', candidateEvidence: 'Built responsive React interfaces daily.' }],
+          materialGaps: [{ ...shared, status: 'not_documented', candidateEvidence: '' }],
+        }],
+      }, [{ title: 'Frontend Engineer', description: span }], {
+        requireComplete: true,
+        candidateText: 'Built responsive React interfaces daily.',
+        candidateRoles: ['Frontend Engineer'],
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert(error, 'a requirement cited as supported and as a gap must be rejected');
+    const supportedAndGap = 'keep each requirement in only one list: requirementAssessments when candidate evidence supports it, otherwise materialGaps';
+    assert(error.message === `Invalid job-scoring response: rows at index 0 must contain grounded requirement evidence supported by the supplied candidate and job text; ${supportedAndGap}.`, `unexpected rejection summary: ${error.message}`);
+    assert(!error.message.includes('compound sentence'), 'a supported-and-gap row must not be told to fix span reuse');
+  } },
+  { name: 'W4 scoring rejection names the no-requirement-rows fix for a row that lists no requirements at all', run: () => {
+    let error;
+    try {
+      jobs.validateJobScoringSubmission({
+        scores: [{ index: 0, matchScore: 70, requirementAssessments: [], materialGaps: [] }],
+      }, [{ title: 'Frontend Engineer', description: 'Build responsive React interfaces for the internal dashboard.' }], {
+        requireComplete: true,
+        candidateText: 'Built responsive React interfaces daily.',
+        candidateRoles: [],
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert(error, 'a score row with no requirement rows must be rejected');
+    const noRequirementRows = 'list every distinct professional requirement of the posting in requirementAssessments or materialGaps';
+    assert(error.message === `Invalid job-scoring response: rows at index 0 must contain grounded requirement evidence supported by the supplied candidate and job text; ${noRequirementRows}.`, `unexpected rejection summary: ${error.message}`);
+    assert(!error.message.includes('compound sentence'), 'a row with no requirements must not be told to fix span reuse');
+  } },
 ];

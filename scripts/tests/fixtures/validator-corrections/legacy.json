@@ -1,6 +1,6 @@
 {
   "scoring strict": {
-    "message": "Invalid job-scoring response: rows at index 0, 1, 2 must contain grounded requirement evidence supported by the supplied candidate and job text; resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence.",
+    "message": "Invalid job-scoring response: rows at index 0, 1, 2 must contain grounded requirement evidence supported by the supplied candidate and job text; give matchScore as an integer from 0 to 100; fill every blank jobEvidence, and the candidateEvidence of direct, adjacent or contradicted rows; copy at least one professional requirement's jobEvidence verbatim from the posting.",
     "code": "VALIDATION_FAILED",
     "diagnostic": null
   },

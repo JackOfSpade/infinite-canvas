@@ -4814,6 +4814,19 @@ export function mergeRecoveredScoreRows(alignedScores, recoveryIndices, recovere
  * that smaller request pending gives the person a precise correction loop
  * instead of silently persisting placeholders.
  */
+// One plain-language remedy per scoring rule. The rejection banner used to
+// repeat a single evidence-reuse sentence whatever actually failed, which told
+// a person to fix a rule their rows never broke.
+const SCORING_REQUIREMENT_EVIDENCE_FIXES = Object.freeze({
+  'scoring.evidence-reuse': 'give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence',
+  'scoring.evidence-supported-and-gap': 'keep each requirement in only one list: requirementAssessments when candidate evidence supports it, otherwise materialGaps',
+  'scoring.no-requirement-rows': 'list every distinct professional requirement of the posting in requirementAssessments or materialGaps',
+  'scoring.no-grounded-requirement': "copy at least one professional requirement's jobEvidence verbatim from the posting",
+  'scoring.evidence-blank': 'fill every blank jobEvidence, and the candidateEvidence of direct, adjacent or contradicted rows',
+  'scoring.logistics-gap': 'move work authorization and location constraints out of materialGaps',
+  'scoring.score-invalid': 'give matchScore as an integer from 0 to 100',
+});
+
 function validateJobScoringSubmissionCore(value, batch, {
   candidateText = '',
   candidateRoles = [],
@@ -4897,7 +4910,27 @@ function validateJobScoringSubmissionCore(value, batch, {
       failures.add('SCORING_ROWS_MISSING', `missing score rows at index ${responsePlan.missingIndices.join(', ')}`);
     }
     if (invalidIndices.length) {
-      failures.add('SCORING_REQUIREMENT_EVIDENCE_UNGROUNDED', `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text; resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence`);
+      const fixes = [];
+      try {
+        const seen = new Set();
+        for (const index of invalidIndices) {
+          const { findings } = explainScoreRow(responsePlan.alignedScores[index], jobs[index], { candidateText, candidateRoles });
+          for (const finding of findings) {
+            const phrase = SCORING_REQUIREMENT_EVIDENCE_FIXES[finding?.ruleId];
+            if (!phrase || seen.has(finding.ruleId)) continue;
+            seen.add(finding.ruleId);
+            fixes.push(phrase);
+          }
+        }
+      } catch {
+        fixes.length = 0;
+      }
+      // Name the fix for the rules these rows actually broke; only an unknown
+      // or missing rule falls back to the generic correction sentence.
+      const remedy = fixes.length
+        ? fixes.join('; ')
+        : 'resolve each requirement once, and give distinct requirements different shortest verbatim jobEvidence spans instead of reusing a compound sentence';
+      failures.add('SCORING_REQUIREMENT_EVIDENCE_UNGROUNDED', `rows at index ${invalidIndices.join(', ')} must contain grounded requirement evidence supported by the supplied candidate and job text; ${remedy}`);
     }
     failures.throwIfAny();
   }
