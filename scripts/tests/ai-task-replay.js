@@ -440,7 +440,7 @@ export default [
       const call = { prompt: 'p', cachedPrefix: 'c' };
       const baseline = { id: 'claude', kind: 'claude' };
       const setting = { id: 'claude:haiku:low', kind: 'claude-setting', model: 'haiku', effort: 'low' };
-      const strip = ({ model, effort, ...rest }) => rest;
+      const strip = args => { const rest = { ...args }; delete rest.model; delete rest.effort; return rest; };
       const research = appExecute(fakeApp('WebSearch,WebFetch'), 'job-official-posting-research', null);
       await research({ config: baseline, call });
       await research({ config: setting, call });
