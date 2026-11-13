@@ -78,7 +78,7 @@ import {
   buildGeoTermSet,
   jobRelevanceEvidence,
 } from '../extractors/apiExtractors.js';
-import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, sourceHealthWarning } from './jobSourceHealth.js';
+import { SOURCE_HEALTH_WARNING_CODE, assessSourceHealth, descriptionsNotFetchedWarning, sourceHealthWarning } from './jobSourceHealth.js';
 
 // A walker reports a walk guard when it stopped a walk for lack of real progress
 // or at a safety backstop. That usually means the scraper needs a fix.
@@ -6406,6 +6406,7 @@ const SOURCE_RUN_RESOLVE_SEVERITIES = new Set(['block', 'throttle', 'warn', 'inf
 // job text, a URL, a query, or a location through a nominal diagnostic code.
 const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
   'source-health-failed',
+  'descriptions-not-fetched',
   'description-appcast-temporary-restriction',
   'description-card-unavailable',
   'description-detail-error',
@@ -13885,14 +13886,50 @@ Return a JSON object with four arrays of search query strings:
 
     // Enrich Dice jobs with full descriptions — runs after all filtering so we
     // only fetch detail pages for jobs that will actually be scored/shown.
+    // This runs in EVERY run, including a local-only continuation
+    // (finish-from-saved, or a resume of an already gathered checkpoint) that
+    // sets skipProviderCollection: the detail fetch is a PUBLIC dice.com page
+    // read — no API key, no login, no browser — not provider collection, and it
+    // keeps the list summary on any failure. Skipping it there left Dice rows
+    // scored on the list API's ~500-char `summary` (usually company boilerplate),
+    // so the scorer had no real requirement to cite and the evidence validator
+    // rejected the row in an endless correction loop.
     const diceKept = kept.filter(j => j.source === 'dice');
-    if (!skipProviderCollection && diceKept.length > 0) {
+    if (diceKept.length > 0) {
       jobsTelemetry.pipeline = { ...(jobsTelemetry.pipeline || {}), phase: 'enriching-dice', ts: Date.now(), active: true, pendingSources: ['dice'] };
+      // Longest text the row already carried (list summary/snippet), so the
+      // re-stage below can tell a genuinely lengthened row from a fallback that
+      // kept the teaser.
+      const diceTextLength = job => Math.max(String(job?.description || '').length, String(job?.snippet || '').length);
+      const diceTextLengthBefore = new Map(diceKept.map(j => [j.url, diceTextLength(j)]));
       await assertSearchCurrent();
       const enriched = await enrichDiceDescriptions(diceKept, combinedSignal);
       await assertSearchCurrent();
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
       kept = kept.map(j => j.source === 'dice' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
+
+      // Re-stage the enriched Dice rows. The page-level rows staged at gather
+      // time carry only the ~500-char list teaser, so a crash AFTER this point —
+      // the long renderer-driven scoring/bucketing window — would resume and
+      // score those teasers again (re-fetching every detail page, or worse,
+      // failing the evidence validator with nothing to cite). The recovery seed
+      // keeps the LAST staged copy per job, so these supersede the teaser rows.
+      // Best-effort, like all staging.
+      const diceEnrichedRows = filterJobsByDescriptionEvidence(kept.filter(j => j.source === 'dice'))
+        .jobs.filter(job => (diceTextLengthBefore.get(job.url) ?? 0) < diceTextLength(job));
+      // An unsaved canvas has no staging sidecar (recordSourcePage is a no-op
+      // there and returns nothing), so only a saved canvas re-stages.
+      if (canvasFilePath && diceEnrichedRows.length > 0) {
+        await assertSearchCurrent();
+        await beforeSearchStageWrite({ phase: 'before-dice-enrichment-stage', sourceId: 'dice', nodeId, runId: activeRunId });
+        await assertSearchCurrent();
+        const saved = await recordSourcePage(canvasFilePath, {
+          sourceId: 'dice', query: '', page: 1, jobs: diceEnrichedRows,
+          now: Date.now(), expectedRunId: activeRunId, nodeId, expectedOperationAuthority: authorityReceipt,
+        });
+        await assertSearchCurrent();
+        if (saved !== true) return searchSupersededResult();
+      }
     }
 
     // Enrich LinkedIn jobs with full descriptions via the shared stealth browser.
@@ -14176,7 +14213,7 @@ Return a JSON object with four arrays of search query strings:
       // recovery seed keeps the LAST staged copy per job, so these supersede
       // the bare gather-time rows. Best-effort, like all staging.
       const lkEnrichedRows = filterJobsByDescriptionEvidence(kept.filter(j => j.source === 'linkedin')).jobs;
-      if (lkEnrichedRows.length > 0) {
+      if (canvasFilePath && lkEnrichedRows.length > 0) {
         await assertSearchCurrent();
         await beforeSearchStageWrite({ phase: 'before-linkedin-enrichment-stage', sourceId: 'linkedin', nodeId, runId: activeRunId });
         await assertSearchCurrent();
@@ -14240,6 +14277,13 @@ Return a JSON object with four arrays of search query strings:
       // no parseable date and dropped dated ones, so the survivors skew undated.
       datedOutsideWindowBySource: Object.fromEntries(Object.keys(sourceResults).map(sid => [sid,
         Math.max(0, Number(sourceResults[sid]?.windowDropped) || 0) + Math.max(0, Number(ageBySource[sid]?.dropped) || 0)])),
+      // A local-only continuation never runs the LinkedIn browser description
+      // walk below, so LinkedIn rows carry no description by design and a
+      // missing description there is not evidence the site changed. Dice is
+      // absent on purpose: its detail enrichment is a public page read (not
+      // provider collection) and still runs in a continuation, so a
+      // description-less Dice row is real evidence again.
+      descriptionNotFetchedSourceIds: skipProviderCollection ? ['linkedin'] : [],
     }).filter(item => !sourceHealthKnownStopped(item.source));
     for (const sid of new Set(sourceHealthFailures.map(item => item.source))) {
       const warning = sourceHealthWarning(sid, sourceHealthFailures);
@@ -14249,6 +14293,23 @@ Return a JSON object with four arrays of search query strings:
       result.healthFailures = sourceHealthFailures.filter(item => item.source === sid).map(({ field, rows, missing }) => ({ field, rows, missing }));
       scrapeWarnings.push({ sourceId: sid, url: sourceFirstUrl[sid] || null, ...warning });
       emitProgress({ nodeId, sourceId: sid, status: 'done', count: result.jobs?.length || 0, warning, completed: 1, total: 1 });
+    }
+    // A local-only continuation ("Finish with saved listings", or a resume of an
+    // already gathered/finished checkpoint) deliberately skips the scraped
+    // collection and, with it, the LinkedIn browser description walk, so every
+    // un-enriched LinkedIn row is description-less by design. That is not a site
+    // change: those rows were deferred by the description gate and stay
+    // recoverable by Solve, so this gets a calm notice on the scrape warnings
+    // only — no source warning, no progress event and no error log that would
+    // read as a broken site. Dice is NOT covered here: its detail enrichment is
+    // a public page read, not provider collection, and still runs in a
+    // continuation, so a description-less Dice row is real evidence again.
+    if (skipProviderCollection) {
+      const warning = descriptionsNotFetchedWarning('linkedin', kept);
+      if (warning) {
+        logger.info(`[Jobs][${nodeId}] linkedin: ${warning.evidence}`);
+        scrapeWarnings.push({ sourceId: 'linkedin', url: sourceFirstUrl.linkedin || null, ...warning });
+      }
     }
     // A walk guard means a walker stopped a walk for lack of real progress or
     // at a safety backstop. Surface it per source as a non-gating 'warn' so

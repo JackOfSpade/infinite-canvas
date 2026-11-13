@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { assessSourceHealth, sourceHealthWarning } from '../../electron/ipc/jobSourceHealth.js';
+import { assessSourceHealth, DESCRIPTIONS_NOT_FETCHED_CODE, descriptionsNotFetchedWarning, sourceHealthWarning } from '../../electron/ipc/jobSourceHealth.js';
 import { collectionScopeCaveatsFromSourceResults, describeSourceHealthFailures, normalizeCollectionScopeCaveats, sourceHealthCaveats } from '../../src/utils/jobCollectionScopeCaveats.js';
 import { isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
 import { appendWalkGuard, CHALLENGE_ESCALATE_MS, descriptionPanelPacing, DETAIL_BLOCK_MAX_TOTAL_REPROBES, detailBlockCooldownMs, panelWindowWaitMs, revealLowGrowthStop, selectManualSourcePageJobs, WALK_GUARD_MAX } from '../../electron/ipc/browser/manualScraper.js';
@@ -314,6 +314,63 @@ export default [
       }
       assert.equal(guards.length, WALK_GUARD_MAX);
       assert.equal(guards[WALK_GUARD_MAX - 1].detail, `backstop ${WALK_GUARD_MAX - 1}`, 'the cap keeps the first twenty, in order');
+    },
+  },
+  {
+    name: 'A local-only continuation reports LinkedIn descriptions as not fetched, not as a broken site',
+    run() {
+      const linkedin = rows('linkedin', 30, { snippet: '' });
+      assert.deepEqual(
+        assessSourceHealth(linkedin).map(item => [item.source, item.field, item.missing]),
+        [['linkedin', 'description', 30]],
+        'the same rows do fail the description check when the walk was supposed to run',
+      );
+      assert.deepEqual(assessSourceHealth(linkedin, { descriptionNotFetchedSourceIds: ['linkedin'] }), []);
+      assert.deepEqual(assessSourceHealth(linkedin, { descriptionNotFetchedSourceIds: ['LINKEDIN'] }), [], 'the source match ignores case');
+      assert.deepEqual(assessSourceHealth(linkedin, { descriptionNotFetchedSourceIds: ['dice'] }), assessSourceHealth(linkedin), 'another source is never exempted');
+    },
+  },
+  {
+    name: 'Exempting the unfetched description leaves every other LinkedIn check in force',
+    run() {
+      const linkedin = rows('linkedin', 30, { snippet: '' }, 30, { company: '' });
+      assert.deepEqual(
+        assessSourceHealth(linkedin, { descriptionNotFetchedSourceIds: ['linkedin'] }).map(item => [item.source, item.field, item.missing, item.rows]),
+        [['linkedin', 'company', 30, 30]],
+        'only description is exempt; company still fails on every row',
+      );
+      assert.deepEqual(
+        assessSourceHealth(linkedin).map(item => [item.field, item.missing]),
+        [['description', 30], ['company', 30]],
+        'without the option both checks fail',
+      );
+    },
+  },
+  {
+    name: 'The LinkedIn exemption never hides the same problem on another site in the same run',
+    run() {
+      const mixed = [...rows('linkedin', 30, { snippet: '' }), ...rows('indeed', 30, { snippet: '' })];
+      assert.deepEqual(
+        assessSourceHealth(mixed, { descriptionNotFetchedSourceIds: ['linkedin'] }).map(item => [item.source, item.field, item.missing]),
+        [['indeed', 'description', 30]],
+      );
+    },
+  },
+  {
+    name: 'The not-fetched notice carries its own code and the exact count, never the broken-site alarm',
+    run() {
+      assert.equal(descriptionsNotFetchedWarning('linkedin', rows('linkedin', 30)), null, 'full descriptions need no notice');
+      const warning = descriptionsNotFetchedWarning('linkedin', [...rows('linkedin', 30, { snippet: '' }), ...rows('dice', 2)]);
+      assert.equal(warning.code, DESCRIPTIONS_NOT_FETCHED_CODE);
+      assert.equal(warning.code, 'descriptions-not-fetched');
+      assert.notEqual(warning.code, 'source-health-failed', 'this code must never raise the "site may have changed" alarm');
+      assert.equal(warning.severity, 'warn');
+      assert.equal(warning.shortLabel, 'Descriptions not fetched');
+      assert.equal(warning.evidence, '30 saved LinkedIn listing(s) have no description yet because this search finished from its saved listings without contacting the site again. They were set aside, not scored.');
+      assert.equal(warning.suggestion, 'Use Solve on this source, or run a new search, to fetch their descriptions.');
+      const dice = descriptionsNotFetchedWarning('dice', [{ source: 'dice', snippet: '' }]);
+      assert.equal(dice.evidence.startsWith('1 saved Dice listing(s)'), true, 'the site name and count are exact');
+      assert.equal(descriptionsNotFetchedWarning('dice', rows('linkedin', 5, { snippet: '' })), null, 'rows of another source are not counted');
     },
   },
 ];

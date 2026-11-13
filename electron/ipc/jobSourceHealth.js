@@ -14,13 +14,22 @@ import { SOURCE_HEALTH_FAILED_CODE, describeSourceHealthFailures } from '../../s
 export const SOURCE_HEALTH_WARNING_CODE = SOURCE_HEALTH_FAILED_CODE;
 /** Below this many rows a share says little: a few odd listings aren't a broken site. */
 export const SOURCE_HEALTH_MIN_ROWS = 20;
+/**
+ * A local-only continuation (a "Finish with saved listings" run, or a resume of
+ * a finished checkpoint) deliberately skips the description walk, so its rows
+ * have no description by design. That gets its own non-alarm code, never
+ * `source-health-failed`, which drives the "site may have changed" alarm.
+ */
+export const DESCRIPTIONS_NOT_FETCHED_CODE = 'descriptions-not-fetched';
 const DEFAULT_MAX_MISSING_SHARE = 0.25;
 const DESCRIPTION_MIN_CHARS = 400;
 
 const text = value => String(value ?? '').replace(/\s+/gu, ' ').trim();
+/** A row carries a usable description: not deferred, and long enough to be the posting rather than a list teaser. */
+const descriptionPresent = row => !row?.descriptionDeferredReason && text(row?.snippet || row?.description).length >= DESCRIPTION_MIN_CHARS;
 const FIELD_CHECKS = Object.freeze([
   { field: 'link', present: row => Boolean(text(row?.url) || (Array.isArray(row?.applyOptions) && row.applyOptions.length)) },
-  { field: 'description', present: row => !row?.descriptionDeferredReason && text(row?.snippet || row?.description).length >= DESCRIPTION_MIN_CHARS },
+  { field: 'description', present: descriptionPresent },
   { field: 'company', present: row => Boolean(text(row?.company)) },
   { field: 'location', present: row => Boolean(text(row?.location)) },
   { field: 'posted', present: row => Boolean(text(row?.posted)), maxMissingShare: 0.5, maxMissingShareBySource: { google: 0.8 } },
@@ -58,12 +67,14 @@ function rowsRepeatingAnotherEmployersDescription(list) {
 /**
  * @param {object[]} rows every row collected this run, before any description or scoring gate
  * @param {{ silentlyEmptySourceIds?: string[], pageShapeFailures?: Record<string, number>,
- *   datedOutsideWindowBySource?: Record<string, number> }} [options] sites searched that returned nothing and gave no
- *   warning of their own, per-site counts of responses a fetcher could not read at all, and per-site counts of dated
- *   rows the collection window dropped (they had a posted date)
+ *   datedOutsideWindowBySource?: Record<string, number>, descriptionNotFetchedSourceIds?: string[] }} [options] sites
+ *   searched that returned nothing and gave no warning of their own, per-site counts of responses a fetcher could not
+ *   read at all, per-site counts of dated rows the collection window dropped (they had a posted date), and sites whose
+ *   description walk never ran this run (a local-only continuation), where a missing description is by design rather
+ *   than a broken site; only the description check is exempted for those, every other check still applies
  * @returns {Array<{ source: string, field: string, rows: number, missing: number, share: number, limit: number }>}
  */
-export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {}, datedOutsideWindowBySource = {} } = {}) {
+export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShapeFailures = {}, datedOutsideWindowBySource = {}, descriptionNotFetchedSourceIds = [] } = {}) {
   const bySource = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const source = text(row?.source).toLowerCase();
@@ -77,6 +88,12 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShap
     return Number.isFinite(count) && count > 0 ? count : 0;
   };
   const failures = [];
+  // A local-only continuation never runs the description walk, so those rows
+  // having no description says nothing about the site. Every other field was
+  // still read by the gather, so only the description check is exempted.
+  const descriptionNotFetched = new Set((Array.isArray(descriptionNotFetchedSourceIds) ? descriptionNotFetchedSourceIds : [])
+    .map(value => text(value).toLowerCase())
+    .filter(Boolean));
   for (const [source, list] of bySource) {
     const repeats = rowsRepeatingAnotherEmployersDescription(list);
     if (list.length >= SAME_DESCRIPTION_MIN_ROWS && repeats >= SAME_DESCRIPTION_MIN_REPEATS && repeats / list.length > MAX_SAME_DESCRIPTION_SHARE) {
@@ -84,6 +101,7 @@ export function assessSourceHealth(rows, { silentlyEmptySourceIds = [], pageShap
     }
     if (list.length < SOURCE_HEALTH_MIN_ROWS) continue;
     for (const check of FIELD_CHECKS) {
+      if (check.field === 'description' && descriptionNotFetched.has(source)) continue;
       const missing = list.filter(row => !check.present(row)).length;
       const limit = check.maxMissingShareBySource?.[source] ?? check.maxMissingShare ?? DEFAULT_MAX_MISSING_SHARE;
       // Rows the window dropped measured a date, so only the posted check may
@@ -120,5 +138,28 @@ export function sourceHealthWarning(source, failures) {
     shortLabel: 'Results look broken',
     evidence: describeSourceHealthFailures(own).slice(0, 600),
     suggestion: 'This site may have changed, so the scraper may need a fix. Its results are incomplete until then. Send a bug report.',
+  };
+}
+
+const DESCRIPTION_NOT_FETCHED_SITE_NAMES = Object.freeze({ linkedin: 'LinkedIn', dice: 'Dice' });
+
+/**
+ * A local-only continuation reuses rows gathered earlier and skips the description walk on purpose, so those rows
+ * having no description is by design, not a sign the site changed. This is the calm notice for that case: it reuses the
+ * description-present predicate, so it can never disagree with the health check about which rows are missing text, and
+ * it never carries `source-health-failed`, which is what raises the "site may have changed" alarm.
+ */
+export function descriptionsNotFetchedWarning(source, rows) {
+  const id = text(source).toLowerCase();
+  if (!id) return null;
+  const count = (Array.isArray(rows) ? rows : []).filter(row => text(row?.source).toLowerCase() === id && !descriptionPresent(row)).length;
+  if (count === 0) return null;
+  const site = DESCRIPTION_NOT_FETCHED_SITE_NAMES[id] || id;
+  return {
+    code: DESCRIPTIONS_NOT_FETCHED_CODE,
+    severity: 'warn',
+    shortLabel: 'Descriptions not fetched',
+    evidence: `${count} saved ${site} listing(s) have no description yet because this search finished from its saved listings without contacting the site again. They were set aside, not scored.`,
+    suggestion: 'Use Solve on this source, or run a new search, to fetch their descriptions.',
   };
 }

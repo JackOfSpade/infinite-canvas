@@ -653,9 +653,11 @@ export default [
         && source.includes('[browserOut, httpResults] = [{ manualResults: [], indeedResult: null }, []];')
         && source.includes('gatherBranches = [')
         && source.includes('[browserOut, httpResults] = await Promise.all(gatherBranches);')
-        && source.includes('if (!skipProviderCollection && diceKept.length > 0)')
+        && source.includes('if (diceKept.length > 0) {')
+        && !source.includes('if (!skipProviderCollection && diceKept.length > 0)')
+        && source.includes("phase: 'before-dice-enrichment-stage'")
         && source.includes('if (!skipProviderCollection && linkedinKept.length > 0)'),
-      'direct gathered recovery skips session preflight, browser/HTTP tasks, and post-gather network enrichment while the later evidence gate remains intact');
+      'direct gathered recovery skips session preflight, browser/HTTP collection and LinkedIn browser enrichment, while Dice\'s public job-detail fetch still runs so its rows are never scored on the ~500-char list teaser; the later evidence gate remains intact');
       const stagingStart = source.indexOf('const runStartedAt = initialRunStartedAt;');
       const stagingEnd = source.indexOf('const stageOnPage =', stagingStart);
       const staging = source.slice(stagingStart, stagingEnd);
