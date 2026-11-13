@@ -82,6 +82,7 @@ import { isJobBoardUserCancellation } from '../utils/jobBoardAiProvider';
 import { isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome } from '../utils/jobBoardPausedSourceContinuation';
 import { exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../utils/jobBoardRecoveryAdmission';
 import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmission';
+import { getSavedAnalysisAvailability, publishSavedAnalysisAvailability, savedAnalysisResumeAdmission } from '../utils/jobSavedAnalysisAvailability';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../utils/jobSearchPreferenceReevaluation';
 import { CopyBriefButton } from './jobsearch/CopyBriefButton';
 import { buildJobHubCareerOnlyClearPatch, buildJobHubScrapeClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
@@ -786,6 +787,7 @@ function boardRunReadiness(node, {
   pausedScoringContinuation = false,
   interruptedRecovery = false,
   savedJobsRescore = false,
+  savedAnalysisResume = false,
 } = {}) {
   if (!node || node.type !== 'jobhub') {
     return searchRunOutcome('not-ready', { error: 'This Job Search module is no longer available.' });
@@ -870,6 +872,14 @@ function boardRunReadiness(node, {
     return liveData.resumeProfile && typeof liveData.resumeProfile === 'object'
       ? null
       : searchRunOutcome('not-ready', { error: 'This Job Search has no compiled career profile to re-score with.' });
+  }
+  // Resuming the Board's own cancelled saved scrape replays the durable
+  // job/profile/location snapshot from disk. It contacts no platform, so
+  // current platform/location/source settings must not block it.
+  if (savedAnalysisResume) {
+    return liveData.resumeProfile && typeof liveData.resumeProfile === 'object'
+      ? null
+      : searchRunOutcome('not-ready', { error: 'This saved job search has no stored career profile.' });
   }
   if (platformsVerifying) {
     return searchRunOutcome('not-ready', {
@@ -7346,10 +7356,15 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // Resume banner so an async peek cannot lose a race to fresh-run UI setup.
   // The key includes the clear watermark because an explicit Clear career data
   // action intentionally establishes a new recovery boundary for this canvas.
+  // It also includes the hub state: a cancelled scoring run deletes its
+  // manifest without touching the watermark, so after the card transitions
+  // (e.g. done -> empty) the peek must re-run and clear the stale
+  // "Saved job search checkpoint" banner.
   const recoveryPeekKey = JSON.stringify([
     canvasFilePath || null,
     id,
     data.jobAnalysisClearedAt ?? null,
+    data.hubState || 'empty',
   ]);
   const [recoveryPeek, setRecoveryPeek] = useState(null);
   const recoveryPeekResolved = recoveryPeek?.key === recoveryPeekKey
@@ -11496,6 +11511,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         error: liveImportAdmission.reason,
       });
     }
+    // Its cancelled Board scoring run left a scored-ready saved scrape on disk.
+    // That snapshot is the only non-destructive way forward for an empty hub
+    // whose career import was already consumed, so admit it like a saved-jobs
+    // re-score (no platform scan, no source/location settings involved).
+    const savedAnalysisResume = savedAnalysisResumeAdmission(
+      liveNode,
+      getSavedAnalysisAvailability(id),
+    );
     const notReady = boardRunReadiness(liveNode, {
       processing: processingRunsRef.current.active,
       platformsVerifying: platformsVerifyingRef.current,
@@ -11507,6 +11530,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       pausedScoringContinuation: exactPausedScoringContinuation,
       interruptedRecovery: exactInterruptedRecovery,
       savedJobsRescore: liveImportAdmission.kind === 'rescore-saved-jobs',
+      savedAnalysisResume: savedAnalysisResume.ok,
     });
     if (notReady) return notReady;
     if (requestedManualRetirementRecovery) {
@@ -11715,6 +11739,18 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         outcome = await resumeSavedScrapeRef.current?.({
             manualAiRunId,
             recoveryMode: effectiveManualAiResume.recoveryMode,
+            queueManagedByBoard: true,
+            parentCancelled: cancelled,
+            orchestratorNodeId,
+          });
+      } else if (savedAnalysisResume.ok) {
+        // The cancelled Board scoring run left this card's scored-ready saved
+        // scrape on disk. Resume that exact snapshot as a Board-owned replay so
+        // the Board never asks for the destructive "Clear + import".
+        control.ownsExistingRecoveryRun = true;
+        outcome = await resumeSavedScrapeRef.current?.({
+            manualAiRunId,
+            recoveryMode: 'resume-saved-scrape',
             queueManagedByBoard: true,
             parentCancelled: cancelled,
             orchestratorNodeId,
@@ -13039,12 +13075,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // hub/canvas that wrote it, never a different module sharing this canvas.
     if (!['empty', 'done', 'sources-ready'].includes(hubState) || !hasReusableCareerProfile) {
       setSavedAnalysisMeta(null);
+      publishSavedAnalysisAvailability(id, null);
       return;
     }
     let cancelled = false;
     void (async () => {
       if (!window.electronAPI?.getLastJobAnalysisSnapshot) {
         if (!cancelled) setSavedAnalysisMeta(null);
+        if (!cancelled) publishSavedAnalysisAvailability(id, null);
         return;
       }
       try {
@@ -13066,15 +13104,25 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           // so read it off the full snapshot here and fold it into the local
           // state this panel renders from.
           setSavedAnalysisMeta({ ...res.meta, resolvedRoleTitles: savedAnalysisRoleTitles(res.snapshot) });
+          // Make the resumable snapshot visible to a connected Job Board. This
+          // is a process-local registry entry only; nothing is persisted into
+          // node data (the durable snapshot stays on disk).
+          publishSavedAnalysisAvailability(id, {
+            careerSnapshotId: normalizedJobCareerSnapshotId(data.careerSnapshotId),
+            jobCount: res.snapshot.jobs.length,
+          });
         } else {
           setSavedAnalysisMeta(null);
+          publishSavedAnalysisAvailability(id, null);
         }
       } catch {
         if (!cancelled) setSavedAnalysisMeta(null);
+        if (!cancelled) publishSavedAnalysisAvailability(id, null);
       }
     })();
     return () => {
       cancelled = true;
+      publishSavedAnalysisAvailability(id, null);
     };
   }, [hubState, canvasFilePath, hasReusableCareerProfile, id, data.careerSnapshotId, data.jobAnalysisClearedAt, data.jobAnalysisClearedRunId]);
 

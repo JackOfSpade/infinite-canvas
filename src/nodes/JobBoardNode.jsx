@@ -72,6 +72,12 @@ import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmi
 import { cancelJobBoardChildrenSequentially, promoteJobBoardPausedSourceResolution, runJobBoardChildFanout } from '../utils/jobBoardChildFanout';
 import { boardHistoryAuthorityAvailable, classifyJobBoardSourceAdmission, combineSourceRunEntry, completedJobSearchOutcomeMatches, describeReceiptMismatch, jobSearchOutcomeReceiptMatches, partitionJobBoardSourceAdmissions } from '../utils/jobBoardSourceAdmission';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from '../utils/jobPlatformSelection';
+import {
+  getSavedAnalysisAvailability,
+  getSavedAnalysisAvailabilityVersion,
+  savedAnalysisResumeAdmission,
+  subscribeSavedAnalysisAvailability,
+} from '../utils/jobSavedAnalysisAvailability';
 import { normalizeJobCollectionLimits } from '../utils/jobCollectionLimits';
 import { getJobAuthPreflightSourceIds } from '../utils/jobAuthPreflight';
 import { exactPausedSourceContinuation, resolveExactPausedJobBoardTerminal, isMergeableTerminalJobSearchOutcome, terminalJobSearchOutcome, awaitedSourceTerminalStatus, canRetryBoardRecoveryAfterError } from '../utils/jobBoardPausedSourceContinuation';
@@ -386,6 +392,22 @@ function moduleSearchReadiness(node, verifyingPlatforms = null, {
     };
   }
   if (sourceAdmission.kind === 'fresh-import-requires-clear') {
+    // The card's scrape was cancelled, but the scored-ready saved snapshot the
+    // Board itself produced may still be on disk. Resuming it re-scores those
+    // saved jobs without scraping, so it is not a destructive Clear.
+    const savedAnalysisResume = savedAnalysisResumeAdmission(
+      node,
+      getSavedAnalysisAvailability(node?.id),
+    );
+    if (savedAnalysisResume.ok) {
+      const savedJobCount = savedAnalysisResume.jobCount;
+      return {
+        ready: true,
+        boardAction: 'resume-saved',
+        readinessReason: 'Its saved jobs will be scored again without scraping, then combined.',
+        statusLabel: `${savedJobCount} saved job${savedJobCount === 1 ? '' : 's'} · resume scoring`,
+      };
+    }
     return {
       ready: false,
       boardAction: 'fresh-import-blocked',
@@ -797,6 +819,14 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     subscribeJobWorkflowDeletionLifecycle,
     getJobWorkflowDeletionLifecycleRevision,
     getJobWorkflowDeletionLifecycleRevision,
+  );
+  // A Job Search card publishes its resumable saved analysis outside node data
+  // (see src/utils/jobSavedAnalysisAvailability.js). Subscribe here so this
+  // Board re-renders its connected-module readiness when that entry changes.
+  const savedAnalysisAvailabilityVersion = useSyncExternalStore(
+    subscribeSavedAnalysisAvailability,
+    getSavedAnalysisAvailabilityVersion,
+    getSavedAnalysisAvailabilityVersion,
   );
 
   const hubState = data.hubState || 'empty';
@@ -1311,7 +1341,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       });
     // connectedSig is the real reactive trigger; getEdges/getNodes are stable.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [boardRecoverySig, canvasFilePath, connectedSig, deletionLifecycleRevision, id, interruptedRecoveryProbes, verifyingPlatforms]);
+  }, [boardRecoverySig, canvasFilePath, connectedSig, deletionLifecycleRevision, id, interruptedRecoveryProbes, savedAnalysisAvailabilityVersion, verifyingPlatforms]);
 
   const connectedModuleIds = useMemo(() => connectedModules.map((module) => module.id), [connectedModules]);
   // Execution preference is deliberately independent from selection: old

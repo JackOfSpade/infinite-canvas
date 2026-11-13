@@ -23,6 +23,7 @@ import {
   classifyJobBoardSourceAdmission,
   partitionJobBoardSourceAdmissions,
 } from '../../src/utils/jobBoardSourceAdmission.js';
+import { getSavedAnalysisAvailability, savedAnalysisResumeAdmission } from '../../src/utils/jobSavedAnalysisAvailability.js';
 import {
   JOBHUB_CAREER_IDENTITY_FIELDS,
   getHubDropLockReason,
@@ -348,6 +349,7 @@ export default [
             bindings.finishScoringAndSpawn = instantiate(callback('finishScoringAndSpawn'));
             Object.assign(bindings, {
               classifyJobBoardSourceAdmission, jobBoardSavedPauseOutcome,
+              getSavedAnalysisAvailability, savedAnalysisResumeAdmission,
               findJobSearchBoardActiveRecoveryOwner: () => null,
               isExactPausedBoardScoringContinuation: () => false,
               isSavedScrapeManualAiResume: () => false,
