@@ -11368,6 +11368,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     freshImportCapability = null,
     recoverInterruptedJobRun = false,
     interruptedRecoveryRunId = null,
+    finishWithSavedListings = false,
     finalizationRecovery = null,
     providerPhaseOnlyRecovery = false,
     allowFreshProviderBootstrap = false,
@@ -11743,6 +11744,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // inspection failure. It must never fall through into handleRerun.
         outcome = await resumeInterruptedRunRef.current?.({
           discoverForBoard: true,
+          finishWithSavedListings,
           expectedRunId: interruptedRecoveryRunId,
           queueManagedByBoard: true,
           parentCancelled: cancelled,
@@ -11764,6 +11766,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       } else if (recoverInterruptedJobRun || window.electronAPI?.peekJobRun) {
         outcome = await resumeInterruptedRunRef.current?.({
           discoverForBoard: true,
+          finishWithSavedListings,
           queueManagedByBoard: true,
           parentCancelled: cancelled,
           orchestratorNodeId,
@@ -11789,12 +11792,19 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // fresh retry safe. Inspection failures remain failures so a temporary
         // disk/IPC problem can never truncate recoverable staged pages.
         if (outcome?.status === 'not-found') {
-          outcome = providerPhaseOnlyRecovery && !allowFreshProviderBootstrap
-            ? searchRunOutcome('paused', {
-              reason: 'awaiting-explicit-ai-continue',
-              error: 'This saved Board step needs an explicit Continue before it can plan or start a new search.',
+          outcome = finishWithSavedListings
+            // An explicit finish only ever scores an existing generation. With
+            // nothing saved there is nothing to finish, and a fresh import would
+            // silently restart the collection the user asked to stop.
+            ? searchRunOutcome('recovery-inspection-failed', {
+              error: 'No saved listings were found to finish this search with. It was kept unchanged.',
             })
-            : await runFreshBoardImport();
+            : providerPhaseOnlyRecovery && !allowFreshProviderBootstrap
+              ? searchRunOutcome('paused', {
+                reason: 'awaiting-explicit-ai-continue',
+                error: 'This saved Board step needs an explicit Continue before it can plan or start a new search.',
+              })
+              : await runFreshBoardImport();
         }
       } else {
         // The ordinary Board path can only begin a newly imported capability.

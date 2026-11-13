@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import assert from 'node:assert';
 
-import { isJobBoardUpToDate } from '../../src/utils/jobBoardSearchSelection.js';
+import { canFinishPausedBoardSearch, isJobBoardUpToDate } from '../../src/utils/jobBoardSearchSelection.js';
 
 function readSource(relativePath) {
   return fs.readFileSync(new URL(relativePath, import.meta.url), 'utf8');
@@ -112,6 +112,96 @@ export default [
       assert(computeAt !== -1, 'JobBoardNode must compute boardUpToDate via isJobBoardUpToDate');
       assert(board.includes('combineSignature: data.combineSignature'), 'boardUpToDate must be built from data.combineSignature');
       assert(board.includes('liveSignature,', computeAt), 'boardUpToDate must be built from the live signature');
+    },
+  },
+  {
+    name: 'canFinishPausedBoardSearch is true only for a paused, active, non-cancelling searches-phase plan',
+    run: async () => {
+      const pausedPlan = () => ({
+        version: 1,
+        boardRunId: 'board-run-1',
+        phase: 'searches',
+        pausedByUser: true,
+        activeSourceId: 'jobsearch-1',
+        autoResumeEligible: false,
+      });
+
+      assert(canFinishPausedBoardSearch(pausedPlan()) === true, 'a paused, active searches-phase plan must be finishable');
+      assert(canFinishPausedBoardSearch({ ...pausedPlan(), pausedByUser: false }) === true,
+        'autoResumeEligible === false alone also marks the plan user-paused');
+      assert(canFinishPausedBoardSearch({ ...pausedPlan(), activeSourceId: null, activeSourceIds: ['jobsearch-1'] }) === true,
+        'a non-empty activeSourceIds array also proves an active source');
+      assert(canFinishPausedBoardSearch({ ...pausedPlan(), cancellationCleanupsBySource: {} }) === true,
+        'an empty cancellationCleanupsBySource map must not block finishing');
+
+      // Each single falsifier flips the verdict. The table keeps every branch
+      // independently proven and names the failing case.
+      const falsifying = [
+        ['wrong version', { version: 2 }, {}, 'a non-v1 plan must not be finishable'],
+        ['missing boardRunId', { boardRunId: '' }, {}, 'an empty boardRunId must not be finishable'],
+        ['phase combine', { phase: 'combine' }, {}, 'a combine-phase plan is not a paused scan'],
+        ['not paused', { pausedByUser: false, autoResumeEligible: true }, {}, 'a plan that auto-resumes is not user-paused'],
+        ['no active source', { activeSourceId: null, activeSourceIds: [] }, {}, 'a plan with no active source must not be finishable'],
+        ['cancellationCleanup', { cancellationCleanup: { sourceId: 'jobsearch-1' } }, {}, 'a plan mid-cancellation must not be finishable'],
+        ['cancellationCleanupsBySource', { cancellationCleanupsBySource: { 'jobsearch-1': { sourceId: 'jobsearch-1' } } }, {}, 'per-source cleanup receipts must block finishing'],
+        ['recoverableFailure', { recoverableFailure: { sourceId: 'jobsearch-1', kind: 'terminal-finalization' } }, {}, 'a recoverable failure must not be finished as a success'],
+        ['scanning', {}, { scanning: true }, 'a running scan must not be finishable'],
+        ['combining', {}, { combining: true }, 'a running combine must not be finishable'],
+        ['locked', {}, { locked: true }, 'a locked board must not be finishable'],
+      ];
+      for (const [label, patch, options, message] of falsifying) {
+        assert(canFinishPausedBoardSearch({ ...pausedPlan(), ...patch }, options) === false, `${label}: ${message}`);
+      }
+
+      // Total and pure: malformed input is false, never a throw, never a write.
+      const snapshot = JSON.stringify(pausedPlan());
+      assert(canFinishPausedBoardSearch(null) === false, 'null must be false');
+      assert(canFinishPausedBoardSearch(undefined) === false, 'undefined must be false');
+      assert(canFinishPausedBoardSearch('board-run-1') === false, 'a string must be false');
+      assert(canFinishPausedBoardSearch(7) === false, 'a number must be false');
+      assert(canFinishPausedBoardSearch([]) === false, 'an array must be false');
+      assert(canFinishPausedBoardSearch(pausedPlan()) === true && JSON.stringify(pausedPlan()) === snapshot,
+        'the predicate must not mutate its input');
+    },
+  },
+  {
+    name: 'the Finish with saved listings action is wired from the Board selector through the child resume path',
+    run: async () => {
+      const selection = readSource('../../src/nodes/jobboard/JobBoardSearchSelection.jsx');
+      const board = readSource('../../src/nodes/JobBoardNode.jsx');
+      const search = readSource('../../src/nodes/JobSearchNode.jsx');
+
+      // Selector: opt-in prop, exact label and tooltip, hidden when disabled.
+      assert(selection.includes('onFinishSaved = null'), 'JobBoardSearchSelection must accept onFinishSaved with a null default');
+      assert(selection.includes('Finish with saved listings'), 'the recovery row must render the Finish with saved listings button');
+      assert(selection.includes('title="Stop collecting: score the listings this paused search already saved. Other selected searches still run."'),
+        'the finish button must carry the exact explanatory title');
+      assert(selection.includes("typeof onFinishSaved === 'function' && !disabled"),
+        'the finish button must require a handler and an enabled (unlocked) panel');
+
+      // Board: predicate gate, intent-carrying plan, durable carry-forward and
+      // the per-source child flag.
+      assert(/import \{[^}]*\bcanFinishPausedBoardSearch\b[^}]*\} from '\.\.\/utils\/jobBoardSearchSelection'/.test(board),
+        'JobBoardNode must import canFinishPausedBoardSearch from the selector utils');
+      assert(board.includes('const handleFinishPausedSearch = useCallback('), 'JobBoardNode must define handleFinishPausedSearch as a useCallback');
+      assert(board.includes('finishActiveSearchWithSavedListings: true'),
+        'handleFinishPausedSearch must persist finishActiveSearchWithSavedListings: true on the plan');
+      assert(board.includes('finishActiveSearchWithSavedListings: resumePlan?.finishActiveSearchWithSavedListings === true'),
+        'the durable plan rebuild must carry the finish intent forward');
+      assert(board.includes('onFinishSaved='), 'JobBoardNode must pass onFinishSaved to JobBoardSearchSelection');
+      assert(board.includes('void handleSearchSelected({ resumeBoardScan: true, plan: nextPlan, explicitRecoveryContinue: true });'),
+        'handleFinishPausedSearch must resume through handleSearchSelected with explicitRecoveryContinue');
+      assert(board.includes("finishWithSavedListings: durableScanResume.finishActiveSearchWithSavedListings === true"),
+        'runSearchModule must receive finishWithSavedListings derived from the durable plan');
+
+      // Search: the flag is accepted and forwarded to both Board resume calls.
+      assert(search.includes('finishWithSavedListings = false'),
+        'runForJobBoard must accept finishWithSavedListings with a false default');
+      const forwardedCalls = search.split('discoverForBoard: true,\n          finishWithSavedListings,').length - 1;
+      assert(forwardedCalls === 2,
+        `both Board interrupted-recovery resumeInterruptedRunRef calls must forward finishWithSavedListings (found ${forwardedCalls})`);
+      assert(/\? searchRunOutcome\('recovery-inspection-failed', \{\s*error: 'No saved listings were found to finish this search with\. It was kept unchanged\.',/.test(search),
+        'a not-found peek while finishing must return recovery-inspection-failed instead of a fresh import');
     },
   },
 ];

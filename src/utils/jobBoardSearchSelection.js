@@ -1007,3 +1007,32 @@ export function isJobBoardUpToDate(state) {
     && typeof liveSignature === 'string' && liveSignature !== ''
     && combineSignature === liveSignature;
 }
+
+/**
+ * Whether this exact durable Board plan may be finished early with the listing
+ * rows its sources already saved.
+ *
+ * Deliberately conservative and total: anything malformed, already cancelling,
+ * mid-cleanup, or reported as a recoverable failure yields `false`, so the
+ * action either stays hidden or falls back to the ordinary Continue path.
+ */
+export function canFinishPausedBoardSearch(plan, { scanning = false, combining = false, locked = false } = {}) {
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return false;
+  if (plan.version !== 1) return false;
+  if (typeof plan.boardRunId !== 'string' || plan.boardRunId === '') return false;
+  if ((plan.phase || 'searches') !== 'searches') return false;
+  if (plan.pausedByUser !== true && plan.autoResumeEligible !== false) return false;
+  const hasActiveSource = (typeof plan.activeSourceId === 'string' && plan.activeSourceId !== '')
+    || (Array.isArray(plan.activeSourceIds) && plan.activeSourceIds.length > 0);
+  if (!hasActiveSource) return false;
+  if (plan.cancellationCleanup) return false;
+  const cleanupsBySource = plan.cancellationCleanupsBySource;
+  if (cleanupsBySource !== undefined && cleanupsBySource !== null
+    && (typeof cleanupsBySource !== 'object' || Array.isArray(cleanupsBySource)
+      || Object.keys(cleanupsBySource).length > 0)) {
+    return false;
+  }
+  if (plan.recoverableFailure) return false;
+  if (scanning || combining || locked) return false;
+  return true;
+}

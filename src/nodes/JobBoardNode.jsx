@@ -65,7 +65,7 @@ import {
 import { replaceBoardDisplayChildren } from './jobboard/replaceBoardDisplayChildren';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../utils/jobBoardAiProvider';
 import { boundedCombinedSourceRuns, normalizeBoardResultCount } from '../utils/jobBoardProvenance';
-import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobBoardUpToDate, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId } from '../utils/jobBoardSearchSelection';
+import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobBoardUpToDate, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, toggleSelectedJobSearchId, canFinishPausedBoardSearch } from '../utils/jobBoardSearchSelection';
 import { hubHasAcceptedInitialDrop } from '../utils/hubDropEligibility';
 import { getSearchLocation, hasRequiredLocations, locationValidationMessage } from '../utils/jobSearchLocations';
 import { exactInterruptedRecoveryAdmission } from '../utils/jobBoardRecoveryAdmission';
@@ -4482,6 +4482,9 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
       // auto-resume adopt the same manual handoff as a standalone run.
       activeSourceId: queuedRecoverySourceId,
       phase: 'searches',
+      // A crash during an explicit "Finish with saved listings" click must
+      // still finish rather than re-scrape the interrupted source.
+      finishActiveSearchWithSavedListings: resumePlan?.finishActiveSearchWithSavedListings === true,
       updatedAt: Date.now(),
     };
     const persistScanResume = (patch = {}) => {
@@ -5459,6 +5462,11 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
             // that lets the child verify and resume this exact manifest before
             // applying its normal fresh-search source validation.
             interruptedRecoveryRunId,
+            // Explicit "Finish with saved listings" intent: skip the remaining
+            // provider work only for the interrupted or currently-active
+            // source. Not-yet-started searches on this Board still run.
+            finishWithSavedListings: durableScanResume.finishActiveSearchWithSavedListings === true
+              && (!!interruptedRecoveryRunId || (!!iterationPlan && iterationPlan.activeSourceId === sourceId)),
             finalizationRecovery: durableScanResume.recoverableFailure?.sourceId === sourceId
               && ['terminal-finalization', 'manual-ai-retirement']
                 .includes(durableScanResume.recoverableFailure?.kind)
@@ -7130,6 +7138,34 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     void handleSearchSelected({ resumeBoardScan: true, plan, explicitRecoveryContinue: true });
   }, [getNode, handleCancelRun, handleCombine, handleSearchSelected, id, retireBoardCleanupReceipt, settleRecoveredCombine, updateGlobal]);
 
+  // Stop collecting and score what the paused Board search already saved. This
+  // is the Board-side mirror of Job Search's "Finish with saved listings": it
+  // un-pauses the same durable plan, records the finish intent on it, then
+  // resumes through the ordinary explicit-recovery path. No new resume
+  // mechanism, and no provider work for that exact interrupted source.
+  const handleFinishPausedSearch = useCallback(() => {
+    if (scanRunRef.current || scanPreflightRef.current || combineRunRef.current
+      || cancellationInFlightRef.current) return;
+    const liveData = getNode(id)?.data || {};
+    const plan = liveData.boardScanResume;
+    if (!canFinishPausedBoardSearch(plan, { locked: !!liveData.locked })) return;
+    const nextPlan = {
+      ...plan,
+      autoResumeEligible: true,
+      pausedByUser: false,
+      finishActiveSearchWithSavedListings: true,
+      updatedAt: Date.now(),
+    };
+    updateGlobal(id, { boardScanResume: nextPlan });
+    if (liveData.manualAiResume && (liveData.manualAiResume.pausedByUser === true
+      || liveData.manualAiResume.autoResumeEligible === false)) {
+      updateGlobal(id, { manualAiResume: { ...liveData.manualAiResume, pausedByUser: false, autoResumeEligible: true } });
+    }
+    setRecoveryError(null);
+    autoResumedBoardScanRef.current = null;
+    void handleSearchSelected({ resumeBoardScan: true, plan: nextPlan, explicitRecoveryContinue: true });
+  }, [getNode, handleSearchSelected, id, updateGlobal]);
+
   // An independent handoff is never Board-run recovery (self-healed above).
   const durableRecoveryActive = !!data.boardCancellation || !!data.boardScanResume
     || isBoardCombineManualAiRunId(data.manualAiResume?.runId);
@@ -7482,6 +7518,13 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
               : 'Retry recovery'
           }
           recoveryCanCancel={!cleanupOnlyRecovery && !cancellationCleanupActive && !finalizingCommittedCombine}
+          // Only offer the early finish for a genuinely paused, resumable
+          // searches-phase plan. Any other state keeps the ordinary Retry.
+          onFinishSaved={canFinishPausedBoardSearch(data.boardScanResume, {
+            scanning,
+            combining,
+            locked: !!data.locked,
+          }) ? handleFinishPausedSearch : null}
           onRuntimeSnapshot={captureSelectorRuntimeSnapshot}
         />
         {connectedModules.length > 0 && (

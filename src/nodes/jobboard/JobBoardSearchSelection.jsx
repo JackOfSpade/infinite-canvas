@@ -62,6 +62,7 @@ export function JobBoardSearchSelection({
   onRetry = null,
   recoveryActionLabel = 'Retry recovery',
   recoveryCanCancel = true,
+  onFinishSaved = null,
   onRuntimeSnapshot = null,
   upToDate = false,
 }) {
@@ -315,6 +316,17 @@ export function JobBoardSearchSelection({
             <Search size={11} />
             {recoveryActionLabel}
           </button>
+          {typeof onFinishSaved === 'function' && !disabled && (
+            <button
+              type="button"
+              onClick={onFinishSaved}
+              className="flex items-center justify-center gap-1 rounded-lg border border-emerald-500/25 bg-emerald-500/15 px-2 py-1.5 text-[10px] font-medium text-emerald-100 transition-colors hover:bg-emerald-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Stop collecting: score the listings this paused search already saved. Other selected searches still run."
+            >
+              <CheckCircle2 size={11} />
+              Finish with saved listings
+            </button>
+          )}
           <button
             type="button"
             onClick={onCancel}
