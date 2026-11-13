@@ -19,7 +19,7 @@ import { validateResponseSchema } from '../test-dependencies.js';
 import { canAutomaticallyResolveJobSourceWarning, jobSourceWarningAction, jobSourceAuthPreflightScope } from '../test-dependencies.js';
 import { __canPerformJobSourceActionForTests, __createDescriptionRecoveryCheckpointForTests, __jobSourceActionAuthorizationForTests, __pruneSupersededDescriptionRecoveryCheckpointsForTests, authoritativeFreshJobSearchWindow, claimExactJobRunExecution, effectiveJobSearchWindow, filterAndDedupJobsByPostedSince, freshJobSearchWindow, jobSourceRecoveryDisposition, legacyJobSearchWindow, manualAiPreSearchRecoveryWindow, mergeJobSourceCollectionCap, mergeRoleScreenedJobs, __registerJobsHandlersForTests, shouldDiscardJobRunAfterAbort } from '../../electron/ipc/jobs.js';
 import { capPlatformJobsAfterWindow } from '../../electron/ipc/jobs.js';
-import { collectionCompletedAtForManifest, providerGatheredAtForManifest, rebindRunOperationAuthority, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
+import { collectionCompletedAtForManifest, finishRunWithSavedListings, providerGatheredAtForManifest, rebindRunOperationAuthority, rebindJobRunRecoveryOwners, sanitizeJobSearchWindow } from '../../electron/ipc/jobRunStaging.js';
 import { beginJobContinuation, claimJobContinuation, completeJobContinuation, listJobContinuations, pauseJobContinuations, rebindJobContinuationOwners, releaseJobContinuationExecution } from '../../electron/ipc/jobContinuation.js';
 import { acquireCanvasRecoveryRead, __canvasRecoveryPathsForTests, withCanvasRecoveryOwner, withCanvasRecoveryRebind } from '../../electron/ipc/canvasRecoveryPaths.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution } from '../../electron/ipc/jobBoardRunLease.js';
@@ -395,6 +395,65 @@ export default [
         assert(await __canPerformJobSourceActionForTests(canvasPath, nodeId, runId),
           'the queued Source Solve becomes authorized once the normal post-filter gathered checkpoint commits');
         return { pendingFenced: true, searchingBoundaryMutationFenced: true, legacyWithoutCheckpointFenced: true, gatheredAuthorized: true };
+      } finally {
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    name: 'an explicit finish with saved listings commits the provider-gather boundary with an unfinished source',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-finished-partial-boundary-'));
+      const canvasPath = path.join(root, 'workspace.json');
+      const runId = 'finished-partial-run';
+      const nodeId = 'finished-partial-hub';
+      const boundaryTimestamp = 1_700_000_001_400;
+      try {
+        await startRun(canvasPath, {
+          runId,
+          startedAt: 1_700_000_001_000,
+          nodeId,
+          profileFingerprint: 'b'.repeat(64),
+          sourceIds: ['google', 'glassdoor'],
+        });
+        // finishRunWithSavedListings is imported raw (not via the test dependency
+        // adapter), so the run's own pinned receipt must be supplied explicitly.
+        const pinned = (await readRunState(canvasPath, 1_700_000_001_050, { nodeId }))?.manifest?.inputs?.operationAuthority;
+        assert(typeof pinned?.operationId === 'string' && Number.isSafeInteger(pinned?.revision),
+          'the fixture run carries the pinned operation receipt the production finish path requires');
+        await markSourceStatus(canvasPath, 'google', 'done', 1_700_000_001_100, { expectedRunId: runId, nodeId });
+        const beforeFinish = await markProviderGathered(canvasPath, 1_700_000_001_200, {
+          expectedRunId: runId,
+          nodeId,
+          expectedOperationAuthority: pinned,
+          requiredSourceIds: ['google', 'glassdoor'],
+        });
+        assert(beforeFinish === false,
+          'a run without the explicit saved-listings finish still rejects the provider-gather boundary while glassdoor is unfinished');
+        const finished = await finishRunWithSavedListings(canvasPath, {
+          expectedRunId: runId,
+          nodeId,
+          expectedOperationAuthority: pinned,
+          now: 1_700_000_001_300,
+        });
+        assert(finished.ok === true
+          && Array.isArray(finished.unfinishedSourceIds)
+          && finished.unfinishedSourceIds.length === 1
+          && finished.unfinishedSourceIds[0] === 'glassdoor',
+          `the explicit finish records exactly glassdoor as unfinished: ${JSON.stringify(finished)}`);
+        const afterFinish = await markProviderGathered(canvasPath, boundaryTimestamp, {
+          expectedRunId: runId,
+          nodeId,
+          expectedOperationAuthority: pinned,
+          requiredSourceIds: ['google', 'glassdoor'],
+        });
+        assert(afterFinish === true,
+          'the deliberate user finish authorizes the provider-gather boundary even though glassdoor never reached a terminal status');
+        const state = await readRunState(canvasPath, 1_700_000_001_500, { nodeId });
+        assert(state?.manifest?.stage === 'gathered'
+          && providerGatheredAtForManifest(state?.manifest) === boundaryTimestamp,
+          'the committed boundary persists stage gathered with the exact providerGatheredAt timestamp');
+        return { beforeFinishFenced: true, finishedWithSavedListings: true, boundaryCommitted: true };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }

@@ -1888,7 +1888,12 @@ async function markProviderGatheredRaw(canvasFilePath, now, {
     const sourceIds = Array.isArray(requiredSourceIds)
       ? requiredSourceIds.filter(id => typeof id === 'string' && id)
       : [];
-    if (!sourceIds.every(id => terminal.has(manifest.sources?.[id]?.status))) return false;
+    // An explicit "finish with saved listings" is the user deliberately ending
+    // provider collection, so its intentionally unfinished sources can never
+    // become terminal; that recorded decision is itself sufficient authority.
+    // Every other manifest still requires all required sources to be terminal.
+    if (!isRunCollectionFinishedWithSavedListings(manifest)
+      && !sourceIds.every(id => terminal.has(manifest.sources?.[id]?.status))) return false;
     if (providerGatheredAtForManifest(manifest) == null) {
       const timestamp = manifestTimestamp(now);
       if (timestamp == null) return false;
