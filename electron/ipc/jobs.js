@@ -268,19 +268,60 @@ async function withHistorySourceAuthorities(canvasFilePath, sources, callback, i
   });
 }
 
+// A continuation claim (resume-saved-scrape and its siblings) rebinds the
+// current operation WITHOUT republishing the bytes it resumed: the authority
+// claim carries `publications` forward, so the sealed snapshot still embeds the
+// earlier operation's receipt. Board display is read-only over those exact
+// bytes, so admit that adoption when the continuation, its run, its career, and
+// the published generation digest all still agree. These are the same
+// continuation kinds the authority store treats as lineage operations.
+const BOARD_HISTORY_ADOPTED_KINDS = new Set([
+  'resume-saved-scrape', 'crash-resume', 'resolved-source-continuation',
+]);
+
+function historyAdoptionEligible(source, snapshotAuthority) {
+  const current = source?.authority?.semanticBase;
+  const sealedReceipt = snapshotAuthority?.semanticBase;
+  return !!current && !!sealedReceipt
+    && BOARD_HISTORY_ADOPTED_KINDS.has(current.kind)
+    && current.runId != null && current.runId === source.runId
+    && current.careerSnapshotId === source.careerSnapshotId
+    && sealedReceipt.runId === source.runId
+    && sealedReceipt.careerSnapshotId === source.careerSnapshotId;
+}
+
+// Fixed kebab-case codes only: a rejection must never leak ids, paths, or job
+// content into a log line or support report.
+function historySourceRejectionReason({ source, snapshotAuthority, receiptMatches }) {
+  if (!snapshotAuthority) return 'snapshot-authority-mismatch';
+  if (receiptMatches) return 'publication-mismatch';
+  // Adoption stopped somewhere other than the byte check (kind/run/career), so
+  // the receipt itself was the mismatch; otherwise the sealed bytes are no
+  // longer the generation the record published for this run.
+  return historyAdoptionEligible(source, snapshotAuthority) ? 'publication-mismatch' : 'snapshot-authority-mismatch';
+}
+
 async function verifySealedHistorySources(canvasFilePath, sources, records, displayedRows = []) {
   const sealed = [];
+  const reject = reason => ({ sealed: null, reason });
   for (let index = 0; index < sources.length; index += 1) {
     const source = sources[index];
     const paths = analysisPathsForCanvas(canvasFilePath, null, source.hubId);
     const read = await readAnalysisArtifact(paths.jsonPath);
-    if (read.state !== 'present') return null;
+    if (read.state !== 'present') return reject('snapshot-absent');
     const snapshot = read.snapshot;
-    if (classifySnapshotExactOwnership(snapshot, canvasFilePath, source.hubId) !== 'owned'
-      || normalizeJobAnalysisIdentifier(snapshot?.runId) !== source.runId
-      || snapshot?.careerSnapshotId !== source.careerSnapshotId
-      || !authorityReceiptMatches(snapshotOperationAuthority(snapshot), source.authority)
-      || !scopedPublicationMatches(records[index], 'current', read.serialized, source.authority)) return null;
+    if (classifySnapshotExactOwnership(snapshot, canvasFilePath, source.hubId) !== 'owned') return reject('snapshot-not-owned');
+    if (normalizeJobAnalysisIdentifier(snapshot?.runId) !== source.runId) return reject('run-mismatch');
+    if (snapshot?.careerSnapshotId !== source.careerSnapshotId) return reject('career-mismatch');
+    const snapshotAuthority = snapshotOperationAuthority(snapshot);
+    const receiptMatches = authorityReceiptMatches(snapshotAuthority, source.authority);
+    const exact = receiptMatches
+      && scopedPublicationMatches(records[index], 'current', read.serialized, source.authority);
+    const adopted = !exact && historyAdoptionEligible(source, snapshotAuthority)
+      && scopedPublicationMatches(records[index], 'current', read.serialized, snapshotAuthority);
+    if (!exact && !adopted) {
+      return reject(historySourceRejectionReason({ source, snapshotAuthority, receiptMatches }));
+    }
     // The source artifact is saved before scoring, so its rows normally carry
     // no score. It proves a displayed row belongs to this source; the Board
     // sends only rows it has a real score for. Its frozen preference status is
@@ -299,23 +340,52 @@ async function verifySealedHistorySources(canvasFilePath, sources, records, disp
     sealed.push({ ...source, artifactFingerprint: jobAnalysisArtifactDigest(read.serialized),
       displayedRows: scoredRows.filter(row => !notDisplayed.has(row)) });
   }
-  return sealed;
+  return { sealed, reason: null };
+}
+
+// Multi-source admission nests one `{ value }` wrapper per additional source,
+// while a single source returns its value directly. Unwrap both shapes so the
+// callers always see the innermost verification/staging object.
+function historyAdmissionValue(value) {
+  let current = value;
+  for (let depth = 0; depth < 16; depth += 1) {
+    if (!current || typeof current !== 'object') return null;
+    if (current.value !== undefined && !('sealed' in current) && !('historyStage' in current)
+      && !('historyFailure' in current)) {
+      current = current.value;
+      continue;
+    }
+    return current;
+  }
+  return null;
 }
 
 async function prepareBoardHistoryWrite(event, { canvasFilePath, jobs, sources } = {}) {
   const rows = canonicalHistoryRows(jobs);
   const normalizedSources = Array.isArray(sources) ? sources.map(normalizeHistorySource) : [];
   if (!canvasFilePath || !rows || normalizedSources.length === 0 || normalizedSources.some(source => !source)) {
-    return { success: false, operationSuperseded: true, error: 'Missing exact Board history authority.' };
+    return { success: false, operationSuperseded: true, reason: 'missing-authority',
+      error: 'Missing exact Board history authority.' };
   }
   normalizedSources.sort((a, b) => a.hubId.localeCompare(b.hubId));
   if (new Set(normalizedSources.map(source => source.hubId)).size !== normalizedSources.length) {
-    return { success: false, operationSuperseded: true, error: 'Ambiguous Board history sources.' };
+    return { success: false, operationSuperseded: true, reason: 'ambiguous-sources',
+      error: 'Ambiguous Board history sources.' };
   }
   const admission = await withHistorySourceAuthorities(canvasFilePath, normalizedSources,
     records => verifySealedHistorySources(canvasFilePath, normalizedSources, records, rows));
-  const sealed = admission?.admitted ? admission.value : null;
-  if (!sealed) return { success: false, operationSuperseded: true, error: 'Board inputs were superseded before display commit.' };
+  const verified = admission?.admitted && admission.value && typeof admission.value === 'object'
+    ? historyAdmissionValue(admission.value)
+    : null;
+  const sealed = Array.isArray(verified?.sealed) ? verified.sealed : null;
+  if (!sealed) {
+    return {
+      success: false,
+      operationSuperseded: true,
+      reason: !admission?.admitted || !verified ? 'authority-not-current' : (verified.reason || 'publication-mismatch'),
+      error: 'Board inputs were superseded before display commit.',
+    };
+  }
   purgeExpiredHistoryTokens();
   const token = crypto.randomUUID();
   pendingHistoryWrites.set(token, {
@@ -338,22 +408,37 @@ async function consumeBoardHistoryWrite(event, { canvasFilePath, jobs, historyTo
     || path.resolve(canvasFilePath) !== entry.canvasFilePath
     || entry.senderId !== (event.sender?.id || null)
     || historyRowsDigest(rows) !== entry.rowsDigest) {
-    return { success: false, operationSuperseded: true, error: 'Board history commit was not authorized.' };
+    return { success: false, operationSuperseded: true, reason: 'history-token-invalid',
+      error: 'Board history commit was not authorized.' };
   }
   entry.inFlight = true;
   try {
     const admission = await withHistorySourceAuthorities(entry.canvasFilePath, entry.sources, async records => {
-      const sealed = await verifySealedHistorySources(entry.canvasFilePath, entry.sources, records, rows);
-      if (!sealed || sealed.some((source, index) => source.artifactFingerprint !== entry.sources[index].artifactFingerprint)) return null;
+      const verified = await verifySealedHistorySources(entry.canvasFilePath, entry.sources, records, rows);
+      const sealed = Array.isArray(verified?.sealed) ? verified.sealed : null;
+      if (!sealed) return { historyFailure: verified?.reason || 'artifact-changed' };
+      if (sealed.some((source, index) => source.artifactFingerprint !== entry.sources[index]?.artifactFingerprint)) {
+        return { historyFailure: 'artifact-changed' };
+      }
       // Stage while the exact source locks are still held. A fresh scrape
       // cannot finalize the old generation and then admit a late display.
-      return stageDisplayedJobsHistory(entry.canvasFilePath,
-        sealed.map(source => ({ hubId: source.hubId, runId: source.runId, rows: source.displayedRows })));
+      return {
+        historyStage: await stageDisplayedJobsHistory(entry.canvasFilePath,
+          sealed.map(source => ({ hubId: source.hubId, runId: source.runId, rows: source.displayedRows }))),
+      };
     });
-    if (!admission?.admitted || !admission.value) {
-      return { success: false, operationSuperseded: true, error: 'Board inputs changed before history commit.' };
+    const settled = admission?.admitted && admission.value && typeof admission.value === 'object'
+      ? historyAdmissionValue(admission.value)
+      : null;
+    if (!settled || settled.historyFailure || !settled.historyStage) {
+      return {
+        success: false,
+        operationSuperseded: true,
+        reason: admission?.admitted ? (settled?.historyFailure || 'artifact-changed') : 'authority-not-current',
+        error: 'Board inputs changed before history commit.',
+      };
     }
-    const result = admission.value;
+    const result = settled.historyStage;
     pendingHistoryWrites.delete(token);
     return result;
   } finally {

@@ -2164,6 +2164,155 @@ export default [
     },
   },
   {
+    name: 'operation authority: Board history adopts a resumed scrape whose current publication predates it',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-history-adopted-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const hubId = 'hub';
+      const sender = { id: 81 };
+      const rows = [{ source: 'remoteok', company: 'Example', title: 'Role', location: 'Toronto', url: 'https://example.test/role' }];
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const search = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-search', semanticBase: base('search', { runId: 'run-1' }) });
+        const crashed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-crash', semanticBase: base('crash-resume', { runId: 'run-1' }), predecessor: search.receipt });
+        assert(search.admitted && crashed.admitted, `fixture must claim a crash-resume lineage: ${JSON.stringify(crashed)}`);
+        const saved = snapshot({ canvasFilePath: canvas, hubId, runId: 'run-1', authority: crashed.receipt });
+        saved.jobs = [{ ...rows[0], matchScore: 70 }];
+        await __saveJobAnalysisSnapshotForTests(saved);
+        const sealed = await __loadJobAnalysisSnapshotForTests(canvas, hubId, 'run-1');
+        assert(sealed.snapshot.jobs.length === 1, 'fixture must seal the published generation');
+        // A resumed scrape rebinds the current operation but republishes
+        // nothing: `publications.current` still belongs to the crash-resume
+        // receipt that actually wrote these bytes.
+        const resumed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-resume', semanticBase: base('resume-saved-scrape', { runId: 'run-1' }), predecessor: crashed.receipt });
+        assert(resumed.admitted, `fixture must claim the resume-saved-scrape successor: ${JSON.stringify(resumed)}`);
+        const prepared = await __boardHistoryAuthorityForTests.prepare({ sender }, {
+          canvasFilePath: canvas, jobs: rows,
+          sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: resumed.receipt }],
+        });
+        assert(prepared.success === true && !!prepared.historyToken,
+          `an adopted current publication must not be reported as superseded: ${JSON.stringify(prepared)}`);
+        const committed = await __boardHistoryAuthorityForTests.consume({ sender }, {
+          canvasFilePath: canvas, jobs: rows, historyToken: prepared.historyToken,
+        });
+        assert(committed.staged === 1 && committed.written === 0,
+          `consuming the adopted publication must stage the displayed row: ${JSON.stringify(committed)}`);
+        return { adoptedPublicationAccepted: true, staged: committed.staged };
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'operation authority: Board history rejects an adopted publication superseded by a later run claim',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-history-adopted-stale-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const hubId = 'hub';
+      const sender = { id: 81 };
+      const rows = [{ source: 'remoteok', company: 'Example', title: 'Role', location: 'Toronto', url: 'https://example.test/role' }];
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const search = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-stale-search', semanticBase: base('search', { runId: 'run-1' }) });
+        const crashed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-stale-crash', semanticBase: base('crash-resume', { runId: 'run-1' }), predecessor: search.receipt });
+        assert(search.admitted && crashed.admitted, `fixture must claim a crash-resume lineage: ${JSON.stringify(crashed)}`);
+        const saved = snapshot({ canvasFilePath: canvas, hubId, runId: 'run-1', authority: crashed.receipt });
+        saved.jobs = [{ ...rows[0], matchScore: 70 }];
+        await __saveJobAnalysisSnapshotForTests(saved);
+        const resumed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-stale-resume', semanticBase: base('resume-saved-scrape', { runId: 'run-1' }), predecessor: crashed.receipt });
+        assert(resumed.admitted, `fixture must claim the resume-saved-scrape successor: ${JSON.stringify(resumed)}`);
+        const nextRun = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-stale-run2', semanticBase: base('search', { runId: 'run-2' }) });
+        assert(nextRun.admitted, `fixture must claim the run-2 search: ${JSON.stringify(nextRun)}`);
+        const rejected = await __boardHistoryAuthorityForTests.prepare({ sender }, {
+          canvasFilePath: canvas, jobs: rows,
+          sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: resumed.receipt }],
+        });
+        assert(rejected.success !== true && rejected.operationSuperseded === true,
+          `a later run claim must still supersede the old resume receipt: ${JSON.stringify(rejected)}`);
+        assert(rejected.reason === 'authority-not-current',
+          `a superseded admission must report its fixed reason code: ${JSON.stringify(rejected)}`);
+        return { supersededRunRejected: true, reason: rejected.reason };
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'operation authority: Board history rejects adopted publication bytes that no longer match the current digest',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-history-adopted-bytes-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const hubId = 'hub';
+      const sender = { id: 81 };
+      const rows = [{ source: 'remoteok', company: 'Example', title: 'Role', location: 'Toronto', url: 'https://example.test/role' }];
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const search = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-bytes-search', semanticBase: base('search', { runId: 'run-1' }) });
+        const crashed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-bytes-crash', semanticBase: base('crash-resume', { runId: 'run-1' }), predecessor: search.receipt });
+        assert(search.admitted && crashed.admitted, `fixture must claim a crash-resume lineage: ${JSON.stringify(crashed)}`);
+        const saved = snapshot({ canvasFilePath: canvas, hubId, runId: 'run-1', authority: crashed.receipt });
+        saved.jobs = [{ ...rows[0], matchScore: 70 }];
+        await __saveJobAnalysisSnapshotForTests(saved);
+        const resumed = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'adopt-bytes-resume', semanticBase: base('resume-saved-scrape', { runId: 'run-1' }), predecessor: crashed.receipt });
+        assert(resumed.admitted, `fixture must claim the resume-saved-scrape successor: ${JSON.stringify(resumed)}`);
+        const paths = getJobAnalysisPaths(canvas, null, hubId);
+        const altered = JSON.parse(await fs.promises.readFile(paths.jsonPath, 'utf8'));
+        altered.jobs = altered.jobs.map(job => ({ ...job, title: 'Altered role' }));
+        await fs.promises.writeFile(paths.jsonPath, JSON.stringify(altered));
+        const rejected = await __boardHistoryAuthorityForTests.prepare({ sender }, {
+          canvasFilePath: canvas, jobs: rows,
+          sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: resumed.receipt }],
+        });
+        assert(rejected.success !== true && rejected.operationSuperseded === true,
+          `adoption must not accept bytes outside the published generation: ${JSON.stringify(rejected)}`);
+        assert(rejected.reason === 'publication-mismatch',
+          `a published digest mismatch must report publication-mismatch: ${JSON.stringify(rejected)}`);
+        return { digestMismatchRejected: true, reason: rejected.reason };
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'operation authority: Board history rejection reasons are fixed kebab-case codes',
+    run: async () => {
+      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-history-reasons-'));
+      const canvas = path.join(directory, 'canvas.json');
+      const hubId = 'hub';
+      const sender = { id: 81 };
+      const rows = [{ source: 'remoteok', company: 'Example', title: 'Role', location: 'Toronto', url: 'https://example.test/role' }];
+      const kebab = value => typeof value === 'string' && /^[a-z-]+$/.test(value);
+      try {
+        await fs.promises.writeFile(canvas, '{}');
+        const search = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'reason-search', semanticBase: base('search', { runId: 'run-1' }) });
+        const saved = snapshot({ canvasFilePath: canvas, hubId, runId: 'run-1', authority: search.receipt });
+        saved.jobs = [{ ...rows[0], matchScore: 70 }];
+        await __saveJobAnalysisSnapshotForTests(saved);
+        const missing = await __boardHistoryAuthorityForTests.prepare({ sender }, {
+          canvasFilePath: canvas, jobs: rows,
+          sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: null }],
+        });
+        assert(missing.operationSuperseded === true && missing.reason === 'missing-authority',
+          `a source without a receipt must report missing-authority: ${JSON.stringify(missing)}`);
+        const ambiguous = await __boardHistoryAuthorityForTests.prepare({ sender }, {
+          canvasFilePath: canvas, jobs: rows,
+          sources: [
+            { hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: search.receipt },
+            { hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: search.receipt },
+          ],
+        });
+        assert(ambiguous.operationSuperseded === true && ambiguous.reason === 'ambiguous-sources',
+          `duplicate hubs must report ambiguous-sources: ${JSON.stringify(ambiguous)}`);
+        const nextRun = await claimJobAnalysisOperationAuthority({ canvasFilePath: canvas, hubId, operationId: 'reason-run2', semanticBase: base('search', { runId: 'run-2' }) });
+        const stale = await __boardHistoryAuthorityForTests.prepare({ sender }, {
+          canvasFilePath: canvas, jobs: rows,
+          sources: [{ hubId, runId: 'run-1', careerSnapshotId: pin, operationAuthority: search.receipt }],
+        });
+        assert(nextRun.admitted && stale.operationSuperseded === true && stale.success !== true,
+          `the stale-source rejection path must stay superseded: ${JSON.stringify(stale)}`);
+        assert(stale.reason === 'authority-not-current',
+          `a stale-source rejection must report authority-not-current: ${JSON.stringify(stale)}`);
+        const reasons = [missing.reason, ambiguous.reason, stale.reason];
+        assert(reasons.every(kebab), `every rejection reason must be a fixed kebab-case code: ${JSON.stringify(reasons)}`);
+        return { missing: missing.reason, ambiguous: ambiguous.reason, stale: stale.reason };
+      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
+    },
+  },
+  {
     name: 'operation authority: large saved pools remain readable across multi-source history and publication recovery',
     run: async () => {
       const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-large-board-history-'));

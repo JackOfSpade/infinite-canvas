@@ -3536,7 +3536,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         });
         if (cancelled() || !getNode(id)) return { status: 'cancelled' };
         if (prepared?.success !== true || !prepared.historyToken) {
-          EventLogger.log(`[JobBoard] history preflight rejected id=${id} outcome=${prepared?.operationSuperseded ? 'superseded' : 'unavailable'}`);
+          EventLogger.log(`[JobBoard] history preflight rejected id=${id} outcome=${prepared?.operationSuperseded ? 'superseded' : 'unavailable'} reason=${/^[a-z-]+$/.test(prepared?.reason || '') ? prepared.reason : 'unknown'}`);
           if (prepared?.operationSuperseded === true) {
             autoResumedManualAiRunRef.current = null;
             await completeManualAiRun(manualAiRunId);
