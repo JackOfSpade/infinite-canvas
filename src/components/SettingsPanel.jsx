@@ -12,6 +12,7 @@ import { useToast } from './ToastProvider';
 import { SELL_PLATFORMS, SELL_PLATFORM_BY_ID, JOB_SOURCES, JOB_SOURCE_BY_ID } from '../utils/constants';
 import { normalizeMarketplaceWatchUrls } from '../utils/marketplaceWatchUrls';
 import { PlatformBadge } from './PlatformBadge';
+import { ClaudeAccountsPanel } from './ClaudeAccountsPanel';
 import { updateModalCount, useModalStackCount } from './modalStack';
 import { ConfirmDialog } from './ConfirmDialog';
 
@@ -789,6 +790,12 @@ export function SettingsPanel({ isOpen, onClose, settings, updateSetting, update
               ))}
             </div>
           </div>
+          <div className="w-full h-px bg-white/[0.06]" />
+
+          {/* ── Claude Accounts ─────────────────────────────────────── */}
+          {/* Every signed-in Claude account; the app fails over between them
+              when one reaches its usage limit. */}
+          <ClaudeAccountsPanel />
         </div>
 
         {/* Footer */}

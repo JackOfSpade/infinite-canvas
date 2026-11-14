@@ -172,7 +172,11 @@ export function createInterviewClaudeTransport({
         } catch (error) {
           if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;
           // Earlier stages are saved; this one waits for the reset and asks again.
-          reportClaudeUsageLimit({ resetsAt: standaloneClaudeActivity.view(scope.key)?.rateLimitResetsAt ?? null });
+          reportClaudeUsageLimit({
+            resetsAt: error.detail?.resetsAt ?? standaloneClaudeActivity.view(scope.key)?.rateLimitResetsAt ?? null,
+            accountId: error.detail?.accountId ?? null,
+            limitType: error.detail?.limitType ?? null,
+          });
           standaloneClaudeActivity.note(scope.key, 'Claude usage limit reached');
           standaloneClaudeActivity.released(scope.key);
           if (!claudeStarted) sessionId = crypto.randomUUID();

@@ -681,13 +681,19 @@ export default [
     },
   },
   {
-    name: 'claude runner: child env strips ANTHROPIC_* and CLAUDE_CODE_USE_* and prefixes PATH',
+    name: 'claude runner: child env strips ANTHROPIC_*, CLAUDE_CODE_USE_*, desktop identity and CLAUDE_CONFIG_DIR, and prefixes PATH',
     run() {
       const env = claudeChildEnv({
         ANTHROPIC_API_KEY: 'k', ANTHROPIC_BASE_URL: 'u', CLAUDE_CODE_USE_BEDROCK: '1', CLAUDE_CODE_USE_VERTEX: '1',
         HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg', PATH: '/usr/bin',
+        CLAUDE_CODE_ACCOUNT_UUID: 'acct', CLAUDE_CODE_ORGANIZATION_UUID: 'org', CLAUDE_CODE_USER_EMAIL: 'me@example.com',
+        CLAUDE_CODE_OAUTH_SCOPES: 'scopes', CLAUDE_CODE_OAUTH_TOKEN: 'token', CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH: '1',
+        CLAUDE_CODE_SESSION_ID: 'session', CLAUDE_CODE_HOST_SESSION_ID: 'host', CLAUDE_CODE_MESSAGING_SOCKET: '/tmp/sock',
+        CLAUDE_CODE_MESSAGING_TOKEN: 'mtoken', CLAUDE_CODE_CHILD_SESSION: 'child',
       }, '/opt/claude/bin');
-      assert.deepEqual(env, { HOME: '/home/me', CLAUDE_CONFIG_DIR: '/cfg', CLAUDE_CODE_MAX_OUTPUT_TOKENS: CLAUDE_MAX_OUTPUT_TOKENS, PATH: `/opt/claude/bin${path.delimiter}/usr/bin` });
+      // The account layer sets CLAUDE_CONFIG_DIR per call; a desktop session's copy must not leak in.
+      assert.deepEqual(env, { HOME: '/home/me', CLAUDE_CODE_MAX_OUTPUT_TOKENS: CLAUDE_MAX_OUTPUT_TOKENS, PATH: `/opt/claude/bin${path.delimiter}/usr/bin` });
+      assert.deepEqual(claudeChildEnv({ HOME: '/h' }), { HOME: '/h', CLAUDE_CODE_MAX_OUTPUT_TOKENS: CLAUDE_MAX_OUTPUT_TOKENS });
     },
   },
   {

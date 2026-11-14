@@ -318,10 +318,30 @@ export function resolveClaudeBinary({ env = process.env, homedir = '', isExecuta
 // is told to use all of it, so batch sizes derived from that limit can be met.
 export const CLAUDE_MAX_OUTPUT_TOKENS = String(CLAUDE_OUTPUT_TOKENS);
 
+// Inherited from a Claude desktop session; each one names that session's account,
+// socket or OAuth grant. CLAUDE_CONFIG_DIR belongs to the account layer instead.
+const DESKTOP_IDENTITY_VARS = new Set([
+  'CLAUDE_CONFIG_DIR',
+  'CLAUDE_CODE_ACCOUNT_UUID',
+  'CLAUDE_CODE_ORGANIZATION_UUID',
+  'CLAUDE_CODE_USER_EMAIL',
+  'CLAUDE_CODE_OAUTH_SCOPES',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH',
+  'CLAUDE_CODE_SESSION_ID',
+  'CLAUDE_CODE_HOST_SESSION_ID',
+  'CLAUDE_CODE_MESSAGING_SOCKET',
+  'CLAUDE_CODE_MESSAGING_TOKEN',
+  'CLAUDE_CODE_CHILD_SESSION',
+]);
+
 export function claudeChildEnv(env = {}, binaryDir = '') {
   const out = {};
   for (const [key, value] of Object.entries(env || {})) {
     if (key.startsWith('ANTHROPIC_') || key.startsWith('CLAUDE_CODE_USE_')) continue;
+    // Desktop-session identity must not follow the app's child: it would run as
+    // whichever account launched the desktop app, not the account we chose.
+    if (DESKTOP_IDENTITY_VARS.has(key)) continue;
     out[key] = value;
   }
   out.CLAUDE_CODE_MAX_OUTPUT_TOKENS = CLAUDE_MAX_OUTPUT_TOKENS;
@@ -1618,7 +1638,7 @@ export function createClaudeApplicationRunner({
         // Not a failure of this bundle: finished stages are saved, so wait out the
         // limit and carry on from them with the same recovery Retry uses.
         if (raw?.code === 'CLAUDE_USAGE_LIMIT' && usage) {
-          usage.report({ resetsAt: raw.detail?.resetsAt ?? null });
+          usage.report({ resetsAt: raw.detail?.resetsAt ?? null, accountId: raw.detail?.accountId, limitType: raw.detail?.limitType });
           liveActivity.note(jobId, 'Claude usage limit reached');
           setState(jobId, canvasFilePath, { status: 'running', stage: entry.stage, activity: 'waiting' });
           // A parallel lane's failure already aborted entry.controller, so that

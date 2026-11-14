@@ -1,6 +1,7 @@
 import { assert } from './testHelpers.js';
 import {
-  claudeUsageLimit, clearClaudeUsageLimit, recheckClaudeUsageAfterWake, reportClaudeUsageLimit, waitForClaudeUsage,
+  claudeUsageLimit, clearClaudeUsageLimit, recheckClaudeUsageAfterWake, reportClaudeUsageLimit,
+  setClaudeAccountLayerForTest, waitForClaudeUsage,
 } from '../../electron/ipc/claudePause.js';
 import {
   claudePauseDiagnosticsMarkdown, recordClaudePauseEvent, resetClaudePauseDiagnosticsForTest,
@@ -25,6 +26,45 @@ const settled = (promise, ms = 200) => Promise.race([
   promise.then(() => true),
   new Promise((resolve) => { const t = setTimeout(() => resolve(false), ms); t.unref?.(); }),
 ]);
+
+// A two-account registry: the default account plus one added account, both signed in.
+function accountFixture() {
+  const accounts = [
+    { id: 'default', isDefault: true, active: true, loggedIn: true, email: 'first@example.com', subscriptionType: 'max', limitedUntil: null, limitType: null },
+    { id: 'acct-11112222', isDefault: false, active: false, loggedIn: true, email: 'second@example.com', subscriptionType: 'pro', limitedUntil: null, limitType: null },
+  ];
+  const limitedOf = list => list
+    .filter(item => item.limitedUntil !== null && item.limitedUntil > Date.now())
+    .map(item => ({ id: item.id, limitedUntil: item.limitedUntil, resetsAt: Number.isFinite(item.resetsAt) ? item.resetsAt : null, limitType: item.limitType }));
+  const layer = {
+    markClaudeAccountLimited(accountId, { resetsAt = null, limitType = null } = {}) {
+      const at = Date.now();
+      const target = accounts.find(item => item.id === (accountId ?? accounts.find(entry => entry.active)?.id));
+      target.limitedUntil = Number.isFinite(resetsAt) && resetsAt > at ? resetsAt + 60_000 : at + 600_000;
+      target.resetsAt = Number.isFinite(resetsAt) ? resetsAt : null;
+      target.limitType = limitType;
+      const limitedIds = new Set(limitedOf(accounts).map(item => item.id));
+      const next = accounts.find(item => item.id !== target.id && !limitedIds.has(item.id));
+      if (next) for (const item of accounts) item.active = item.id === next.id;
+      return { nextAccountId: next ? next.id : null, accountId: target.id, limitedUntil: target.limitedUntil, limitType };
+    },
+    claudeAccountLimitState() {
+      const limited = limitedOf(accounts);
+      const limitedIds = new Set(limited.map(item => item.id));
+      return {
+        accountCount: accounts.length,
+        activeId: accounts.find(item => item.active)?.id ?? accounts[0].id,
+        accounts,
+        limited,
+        eligible: accounts.filter(item => !limitedIds.has(item.id) && item.loggedIn !== false),
+      };
+    },
+    clearClaudeAccountLimits() {
+      for (const item of accounts) { item.limitedUntil = null; item.limitType = null; item.resetsAt = null; }
+    },
+  };
+  return { accounts, layer };
+}
 
 export default [
   {
@@ -110,6 +150,64 @@ export default [
       assert(!markdown.includes('aaaaaaaa'), 'an over-long task id is dropped');
       assert(!markdown.includes('task '), 'no task is shown for invalid ids');
       assert(rowLines(markdown).length === 3, 'invalid outcome is rejected, valid rows kept');
+    }),
+  },
+  {
+    name: 'claude pause diagnostics: a second account with usage switches instead of pausing',
+    run: () => isched(() => {
+      const fixture = accountFixture();
+      setClaudeAccountLayerForTest(fixture.layer);
+      try {
+        const resetsAt = Date.now() + 3_600_000;
+        const first = reportClaudeUsageLimit({ resetsAt, task: 'job-scoring', limitType: 'five_hour' });
+        assert(first.paused === false, 'the first limit switches accounts instead of pausing');
+        assert(claudeUsageLimit() === null, 'no global limit is set while another account has usage');
+        const switched = claudePauseDiagnosticsMarkdown({ current: null });
+        assert(switched.includes('· account-switch · five_hour · account 1/2 -> 2/2'), 'the switch row carries ordinals only');
+        assert(!switched.includes('example.com'), 'no account email reaches the report');
+        assert(!switched.includes('acct-11112222'), 'no account id reaches the report');
+        assert(!switched.includes('· usage-limit ·'), 'a switch is not a pause');
+
+        const second = reportClaudeUsageLimit({ resetsAt: resetsAt + 600_000, limitType: 'seven_day' });
+        assert(second.paused === true, 'the last account limit pauses every call');
+        const limit = claudeUsageLimit();
+        assert(limit.limitType === 'seven_day' && limit.accountCount === 2, 'the pause names the window and the account count');
+        assert(limit.resumeAt === fixture.accounts[0].limitedUntil, 'the earliest account reset wins');
+        assert(second.resumeAt === limit.resumeAt, 'the report returns the earliest resume time');
+        const pausedRow = rowLines(claudePauseDiagnosticsMarkdown({ current: limit }))[0];
+        assert(pausedRow.includes('limit seven_day') && pausedRow.includes('accounts 2'), 'the pause row carries the window and count');
+
+        clearClaudeUsageLimit('resume-now');
+        assert(fixture.accounts.every(item => item.limitedUntil === null), 'resume now clears every account limit');
+      } finally {
+        setClaudeAccountLayerForTest(null);
+      }
+    }),
+  },
+  {
+    name: 'claude pause diagnostics: one account still pauses with its own reset time',
+    run: () => isched(() => {
+      const fixture = accountFixture();
+      fixture.layer.claudeAccountLimitState = () => {
+        const at = Date.now();
+        const [only] = fixture.accounts;
+        const limited = only.limitedUntil !== null && only.limitedUntil > at
+          ? [{ id: only.id, limitedUntil: only.limitedUntil, resetsAt: only.resetsAt ?? null, limitType: only.limitType }]
+          : [];
+        return { accountCount: 1, activeId: only.id, accounts: [only], limited, eligible: limited.length ? [] : [only] };
+      };
+      setClaudeAccountLayerForTest(fixture.layer);
+      try {
+        const resetsAt = Date.now() + 3_600_000;
+        const reported = reportClaudeUsageLimit({ resetsAt, task: 'job-scoring', limitType: 'five_hour' });
+        assert(reported.paused === true, 'a lone account pauses');
+        assert(claudeUsageLimit().resetsAt === resetsAt, 'the provider reset time is kept');
+        assert(claudeUsageLimit().accountCount === 1, 'the pause names the account count');
+        const markdown = claudePauseDiagnosticsMarkdown();
+        assert(!markdown.includes('· account-switch ·'), 'no switch is recorded');
+      } finally {
+        setClaudeAccountLayerForTest(null);
+      }
     }),
   },
 ];

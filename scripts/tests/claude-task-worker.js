@@ -316,6 +316,62 @@ export default [
     },
   },
   {
+    name: 'claude task worker: a usage limit that switched accounts re-runs the request at once, without pausing',
+    async run() {
+      let tries = 0;
+      const reported = [];
+      const { worker, state } = harness({
+        concurrency: 1,
+        entries: [entry('a')],
+        runStage: () => {
+          tries += 1;
+          if (tries === 1) {
+            const error = new Error('Claude usage limit reached');
+            error.code = 'CLAUDE_USAGE_LIMIT';
+            error.detail = { resetsAt: state.clock + 60_000, accountId: 'acct-1', limitType: 'five_hour' };
+            throw error;
+          }
+          return answer;
+        },
+        onUsageLimit: (args) => { reported.push(args); return { paused: false }; },
+      });
+      worker.start();
+      await settle();
+      assert.equal(reported.length, 1, 'the limit is reported once');
+      assert.deepEqual(reported[0], { resetsAt: state.clock + 60_000, task: 'job-scoring', accountId: 'acct-1', limitType: 'five_hour' });
+      assert.equal(worker.status().paused, false, 'nothing pauses while another account has usage');
+      assert.equal(state.failed.length, 0, 'a switch is not a failed attempt');
+      assert.equal(state.timers.length, 1, 'an immediate re-pump is scheduled instead of a pause');
+      assert.equal(state.timers[0].ms, 0);
+      state.timers.shift().fn();
+      await settle();
+      assert.equal(state.stages.length, 2, 'the request is released and runs again');
+      assert.equal(state.submits.length, 1);
+      worker.stop();
+    },
+  },
+  {
+    name: 'claude task worker: a usage limit that reports a pause keeps today\'s pause',
+    async run() {
+      const { worker, state } = harness({
+        concurrency: 1,
+        entries: [entry('a'), entry('b')],
+        runStage: failing('CLAUDE_USAGE_LIMIT'),
+        onUsageLimit: () => ({ paused: true }),
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1, 'only the first request ran');
+      assert.equal(worker.status().paused, true);
+      assert.equal(state.pending.size, 2);
+      assert.equal(state.timers.length, 1, 'one pause timer is armed');
+      state.clock += 11 * 60_000;
+      state.timers.shift().fn();
+      await settle();
+      assert(state.stages.length > 1, 'work resumes after the wait');
+    },
+  },
+  {
     name: 'claude task worker: a network failure backs off and retries',
     async run() {
       let tries = 0;

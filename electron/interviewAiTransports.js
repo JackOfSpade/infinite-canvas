@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { applyClaudeAccountEnv } from './ipc/claudeAccounts.js';
 import { claudeChildEnv } from './ipc/claudeApplicationRunner.js';
 
 const OUTPUT_LIMIT = 1024 * 1024;
@@ -21,7 +22,8 @@ function signalProcess(child, signal) {
 process.once('exit', () => { for (const child of owned) signalProcess(child, 'SIGKILL'); });
 
 function managedSpawn(binary, args, cwd, spawn) {
-  const env = claudeChildEnv(process.env);
+  // The raw CLI runs as whichever account is active now, not the desktop session's.
+  const env = applyClaudeAccountEnv(claudeChildEnv(process.env)).env;
   delete env.CLAUDECODE; delete env.CLAUDE_CODE_ENTRYPOINT;
   const child = spawn(binary, args, { cwd, env, shell: false, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
   owned.add(child);

@@ -526,6 +526,22 @@ export default [
     },
   },
   {
+    name: 'claude SDK: a rejected rate limit names its window and the account that ran the stage',
+    async run() {
+      const fake = fakeQuery([
+        { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: Date.now() + 60_000, rateLimitType: 'five_hour' } },
+        assistant(),
+        result({ subtype: 'error_during_execution', is_error: true, result: 'Claude usage limit reached', api_error_status: 429 }),
+      ]);
+      const accountEnv = env => ({ env: { ...env, CLAUDE_CONFIG_DIR: '/accounts/acct-1' }, accountId: 'acct-1' });
+      const error = await rejected(stage(fake.queryImpl, { accountEnv }), 'CLAUDE_USAGE_LIMIT');
+      assert.equal(error.detail.limitType, 'five_hour');
+      assert.equal(error.detail.accountId, 'acct-1');
+      assert.equal(fake.calls[0].options.env.CLAUDE_CONFIG_DIR, '/accounts/acct-1', 'the call runs under the active account');
+      assert.equal(fake.calls[0].options.env.PATH, '/bin', 'the rest of the env is untouched');
+    },
+  },
+  {
     name: 'claude SDK: a thrown startup failure is classified and query resources close',
     async run() {
       const fake = fakeQuery(async function* produce() { yield await Promise.reject(new Error('not logged in')); });

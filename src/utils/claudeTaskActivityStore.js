@@ -4,7 +4,9 @@ const LABEL_LIMIT = 160;
 const STEP_LIMIT = 12;
 const STATES = new Set(['queued', 'running', 'checking', 'retrying']);
 const PHASES = new Set(['starting', 'waiting', 'thinking', 'writing', 'tool', 'api-retry']);
-const IDLE = Object.freeze({ running: 0, waiting: 0, paused: false, pauseCode: null, held: Object.freeze([]), usageLimit: null, tasks: Object.freeze({}) });
+const IDLE = Object.freeze({ running: 0, waiting: 0, paused: false, pauseCode: null, held: Object.freeze([]), usageLimit: null, tasks: Object.freeze({}), claudeAccounts: Object.freeze([]) });
+const ACCOUNT_LIMIT = 10;
+const LIMIT_TYPES = new Set(['five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'seven_day_overage_included', 'overage']);
 
 const text = (value, limit = LABEL_LIMIT) => typeof value === 'string' && value ? value.slice(0, limit) : null;
 const time = value => Number.isFinite(value) && value >= 0 ? value : null;
@@ -43,6 +45,23 @@ export function normalizeClaudeActivityEntry(raw) {
   };
 }
 
+/** Pure: only the CONTRACT fields of one signed-in Claude account. */
+export function normalizeClaudeAccount(raw) {
+  if (!isObject(raw) || !text(raw.id, 60)) return null;
+  return Object.freeze({
+    id: text(raw.id, 60),
+    isDefault: raw.isDefault === true,
+    active: raw.active === true,
+    loggedIn: typeof raw.loggedIn === 'boolean' ? raw.loggedIn : null,
+    email: text(raw.email, 200),
+    subscriptionType: text(raw.subscriptionType, 40),
+    limitedUntil: time(raw.limitedUntil),
+    limitType: LIMIT_TYPES.has(raw.limitType) ? raw.limitType : null,
+  });
+}
+
+const limitTypeOf = value => (LIMIT_TYPES.has(value) ? value : null);
+
 /** Pure: only bounded, known fields of a snapshot from the main process. */
 export function normalizeClaudeTaskActivity(raw) {
   if (!isObject(raw)) return IDLE;
@@ -55,7 +74,14 @@ export function normalizeClaudeTaskActivity(raw) {
     running: count(raw.running), waiting: count(raw.waiting), paused: raw.paused === true,
     pauseCode: text(raw.pauseCode, 60), tasks: Object.freeze(tasks),
     usageLimit: isObject(raw.usageLimit) && time(raw.usageLimit.resumeAt) !== null
-      ? Object.freeze({ resumeAt: raw.usageLimit.resumeAt, knownReset: time(raw.usageLimit.resetsAt) !== null }) : null,
+      ? Object.freeze({
+        resumeAt: raw.usageLimit.resumeAt,
+        knownReset: time(raw.usageLimit.resetsAt) !== null,
+        limitType: limitTypeOf(raw.usageLimit.limitType),
+        accountCount: count(raw.usageLimit.accountCount),
+      }) : null,
+    claudeAccounts: Object.freeze((Array.isArray(raw.claudeAccounts) ? raw.claudeAccounts : [])
+      .slice(0, ACCOUNT_LIMIT).map(normalizeClaudeAccount).filter(Boolean)),
     held: Object.freeze((Array.isArray(raw.held) ? raw.held : []).filter(key => typeof key === 'string').slice(0, 100)),
   });
 }

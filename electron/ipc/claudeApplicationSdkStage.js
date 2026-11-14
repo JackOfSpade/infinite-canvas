@@ -16,6 +16,7 @@ import {
   withWorkflowTool,
 } from './claudeApplicationRunner.js';
 import { noteResolvedClaudeModel } from './aiModelCalibration.js';
+import { applyClaudeAccountEnv } from './claudeAccounts.js';
 import { claudeResetTimeMs, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
 
@@ -67,6 +68,9 @@ export async function runClaudeSdkStage({
   persistSession = true,
   systemAppend = '',
   queryImpl = null,
+  // Every call routes through the account layer, so a caller's cached env still
+  // runs as the account that is active now.
+  accountEnv = applyClaudeAccountEnv,
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   onThinkingSummary = async () => {},
   onActivity = () => {},
@@ -101,6 +105,8 @@ export async function runClaudeSdkStage({
   let summaryCount = 0;
   let summaryChars = 0;
   let usageResetsAt = null;
+  let accountId = null;
+  let accountLimitType = null;
   let outputBytes = 0;
   let interrupted = null;
   let timer = null;
@@ -151,6 +157,8 @@ export async function runClaudeSdkStage({
       ...(terminal?.usage ? { usage: terminal.usage } : {}),
       ...(typeof terminal?.costUsd === 'number' ? { costUsd: terminal.costUsd } : {}),
       ...(usageResetsAt !== null ? { resetsAt: usageResetsAt } : {}),
+      ...(accountId ? { accountId } : {}),
+      ...(accountLimitType ? { limitType: accountLimitType } : {}),
       ...(refuse || {}),
     };
   }
@@ -158,6 +166,10 @@ export async function runClaudeSdkStage({
   async function consume() {
     const query = queryImpl || (await import('@anthropic-ai/claude-agent-sdk')).query;
     checkInterrupted();
+    // A cached env is reused across calls, so the account is applied here, not by the caller.
+    const bound = accountEnv(env) || {};
+    const queryEnv = bound.env ?? env;
+    accountId = typeof bound.accountId === 'string' ? bound.accountId : null;
     queryHandle = query({
       prompt: stagePrompt(text, pageImages, sessionId),
       options: {
@@ -166,7 +178,7 @@ export async function runClaudeSdkStage({
         thinking: { type: 'adaptive', display: 'summarized' },
         pathToClaudeCodeExecutable: binary,
         cwd,
-        env,
+        env: queryEnv,
         abortController: controller,
         // Workflow is offered only for ultracode; research adds its web tools.
         // Every offered tool must run without a prompt in a headless stage.
@@ -197,7 +209,11 @@ export async function runClaudeSdkStage({
       if (item.done) break;
       const message = item.value;
       if (!message || typeof message !== 'object') continue;
-      if (message.type === 'rate_limit_event' && message.rate_limit_info?.status === 'rejected') usageResetsAt = claudeResetTimeMs(message.rate_limit_info.resetsAt);
+      if (message.type === 'rate_limit_event' && message.rate_limit_info?.status === 'rejected') {
+        usageResetsAt = claudeResetTimeMs(message.rate_limit_info.resetsAt);
+        // Which window ran out decides whether another account is worth trying.
+        if (typeof message.rate_limit_info.rateLimitType === 'string') accountLimitType = clipped(message.rate_limit_info.rateLimitType, 40);
+      }
       // Never awaited: activity reporting must not fail or slow a stage.
       try { if (typeof onActivity === 'function') onActivity(describeClaudeSdkMessage(message)); } catch { /* liveness only */ }
       backgroundTasks.observe(message);

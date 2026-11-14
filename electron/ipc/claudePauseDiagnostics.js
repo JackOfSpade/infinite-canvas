@@ -2,9 +2,12 @@
 // are projected to a closed vocabulary on entry: never prompts, answers, paths
 // or error text.
 const MAX_ROWS = 40;
-const KINDS = new Set(['usage-limit', 'resumed', 'system-suspend', 'system-resume', 'wake-recheck']);
+const KINDS = new Set(['usage-limit', 'account-switch', 'resumed', 'system-suspend', 'system-resume', 'wake-recheck']);
 const RESUME_REASONS = new Set(['reset-timer', 'resume-now', 'wake-recheck', 'answer']);
 const RECHECK_OUTCOMES = new Set(['cleared', 'rearmed', 'not-limited']);
+const LIMIT_TYPES = new Set([
+  'five_hour', 'seven_day', 'seven_day_opus', 'seven_day_sonnet', 'seven_day_overage_included', 'overage',
+]);
 const TASK_RE = /^[a-z0-9-]{1,80}$/u;
 const CODE_RE = /^[A-Z][A-Z0-9_]{0,59}$/u;
 let rows = [];
@@ -19,6 +22,10 @@ const isoField = (value) => {
   return iso(value);
 };
 const ms = value => (Number.isFinite(value) && value >= 0 ? Math.round(value) : null);
+// Account ordinals and counts only: an id, email or path never enters a row.
+const ordinal = value => (Number.isInteger(value) && value >= 1 && value <= 100 ? value : null);
+const count = value => (Number.isInteger(value) && value >= 0 && value <= 100 ? value : null);
+const limitType = value => (typeof value === 'string' && LIMIT_TYPES.has(value) ? value : null);
 
 export function recordClaudePauseEvent(event) {
   const kind = event?.kind;
@@ -28,7 +35,17 @@ export function recordClaudePauseEvent(event) {
     row.code = typeof event.code === 'string' && CODE_RE.test(event.code) ? event.code : 'CLAUDE_USAGE_LIMIT';
     row.resetsAt = isoField(event.resetsAt);
     row.resumeAt = isoField(event.resumeAt);
+    row.limitType = limitType(event.limitType);
+    row.accountCount = count(event.accountCount);
     if (typeof event.task === 'string' && TASK_RE.test(event.task)) row.task = event.task;
+  } else if (kind === 'account-switch') {
+    const from = ordinal(event.fromIndex);
+    const to = ordinal(event.toIndex);
+    if (from === null || to === null) return;
+    row.fromIndex = from;
+    row.toIndex = to;
+    row.accountCount = count(event.accountCount);
+    row.limitType = limitType(event.limitType);
   } else if (kind === 'resumed') {
     if (!RESUME_REASONS.has(event.reason)) return;
     row.reason = event.reason;
@@ -44,10 +61,16 @@ export function recordClaudePauseEvent(event) {
 
 export function resetClaudePauseDiagnosticsForTest() { rows = []; }
 
+const countText = row => (Number.isInteger(row.accountCount) ? String(row.accountCount) : 'unknown');
+
 function describe(row) {
   switch (row.kind) {
     case 'usage-limit':
-      return `${row.code} · resets ${row.resetsAt || 'unknown'} · resume ${row.resumeAt || 'unknown'}${row.task ? ` · task ${row.task}` : ''}`;
+      return `${row.code} · resets ${row.resetsAt || 'unknown'} · resume ${row.resumeAt || 'unknown'}`
+        + `${row.limitType ? ` · limit ${row.limitType}` : ''} · accounts ${countText(row)}`
+        + `${row.task ? ` · task ${row.task}` : ''}`;
+    case 'account-switch':
+      return `${row.limitType || 'unknown'} · account ${row.fromIndex}/${countText(row)} -> ${row.toIndex}/${countText(row)}`;
     case 'resumed': return `reason ${row.reason} · paused ${row.pausedMs ?? 'unknown'} ms`;
     case 'wake-recheck': return `outcome ${row.outcome} · remaining ${row.remainingMs ?? 0} ms`;
     default: return '';

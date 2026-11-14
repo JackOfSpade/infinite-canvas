@@ -8,6 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { logger } from '../logger.js';
 import { claudeChildEnv, resolveClaudeBinary } from './claudeApplicationRunner.js';
+import {
+  addClaudeAccount, cancelClaudeAccountLogin, listClaudeAccounts, listClaudeAccountsCached,
+  removeClaudeAccount, subscribeClaudeAccounts,
+} from './claudeAccounts.js';
 import { CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
 import { claudeUsageLimit, claudeUsageWaitMs, clearClaudeUsageLimit, drainClaudeCalls, heldClaudeKeys, holdClaude, isClaudeHeld, isClaudePauseKey, releaseClaude, reportClaudeUsageLimit, subscribeClaudeHolds } from './claudePause.js';
 import { createClaudeTaskActivity, standaloneClaudeActivity, subscribeStandaloneClaudeActivity } from './claudeTaskActivity.js';
@@ -93,7 +97,14 @@ export function claudeTaskWorkerActivity() {
 }
 
 function withStandaloneActivity(snapshot) {
-  return { ...snapshot, held: heldClaudeKeys(), usageLimit: claudeUsageLimit(), tasks: { ...snapshot.tasks, ...standaloneClaudeActivity.snapshot().tasks } };
+  return {
+    ...snapshot,
+    held: heldClaudeKeys(),
+    usageLimit: claudeUsageLimit(),
+    // Cached only: an activity push must never wait on the CLI.
+    claudeAccounts: listClaudeAccountsCached(),
+    tasks: { ...snapshot.tasks, ...standaloneClaudeActivity.snapshot().tasks },
+  };
 }
 
 const nodeOfPauseKey = key => (typeof key === 'string' && key.startsWith('node:') ? key.slice('node:'.length) : null);
@@ -117,6 +128,17 @@ export function registerClaudePauseHandlers({ ipcMain } = {}) {
   // Try now instead of waiting for the reset. A limit that still stands simply reports itself again.
   ipcMain.removeHandler?.('claude-usage:resume-now');
   ipcMain.handle('claude-usage:resume-now', () => { clearClaudeUsageLimit('resume-now'); current?.resumeNow(); return { resumed: true }; });
+  // Signed-in Claude accounts: each one is its own CLAUDE_CONFIG_DIR.
+  const accountHandlers = {
+    'claude-accounts:list': () => listClaudeAccounts(),
+    'claude-accounts:add': () => addClaudeAccount(),
+    'claude-accounts:remove': ({ id } = {}) => removeClaudeAccount(id),
+    'claude-accounts:cancel-login': () => cancelClaudeAccountLogin(),
+  };
+  for (const [channel, handler] of Object.entries(accountHandlers)) {
+    ipcMain.removeHandler?.(channel);
+    ipcMain.handle(channel, (_event, args) => handler(args ?? {}));
+  }
   for (const [channel, handler] of Object.entries(handlers)) {
     ipcMain.removeHandler?.(channel);
     ipcMain.handle(channel, (_event, args) => (isClaudePauseKey(args?.key) ? handler(args) : { error: 'Unknown pause key.' }));
@@ -251,7 +273,15 @@ export function createClaudeTaskWorker({
     if (error?.code === 'CLAUDE_CANCELLED') return activity.released(entry.requestId);
     if (error?.code === 'CLAUDE_USAGE_LIMIT') {
       activity.released(entry.requestId);
-      onUsageLimit({ resetsAt: error.detail?.resetsAt ?? null, task: entry.task });
+      const reported = onUsageLimit({
+        resetsAt: error.detail?.resetsAt ?? null,
+        task: entry.task,
+        accountId: error.detail?.accountId ?? null,
+        limitType: error.detail?.limitType ?? null,
+      });
+      // Another signed-in account has usage: this request runs again there at once,
+      // which is a switch, not a failed attempt.
+      if (reported?.paused === false) { wakeIn(0); return; }
       return pause(error.code, Number.isFinite(error.detail?.resetsAt) ? claudeUsageWaitMs(error.detail.resetsAt, now()) : USAGE_LIMIT_WAIT_MS, error.detail?.resetsAt ?? null);
     }
     if (error?.code === 'CLAUDE_NOT_SIGNED_IN' || error?.code === 'CLAUDE_CLI_MISSING') { activity.released(entry.requestId); return pause(error.code, RETRY_BASE_MS * 2); }
@@ -626,6 +656,13 @@ export function startClaudeTaskWorker({ userData, nativeImage = null, getAllWind
   };
   subscribeStandaloneClaudeActivity(scheduleBroadcast);
   subscribeClaudeHolds(scheduleBroadcast);
+  // A switched or limited account changes the dock and the pause notice alike.
+  subscribeClaudeAccounts(() => {
+    if (current) current.pump();
+    scheduleBroadcast();
+  });
+  // Learn each account's email and sign-in once, so a later pause notice can name it.
+  void listClaudeAccounts().catch(() => {});
   const worker = createClaudeTaskWorker({
     prepareImage: attachment => prepareTaskImage(attachment, nativeImage),
     onActivityChange: snapshot => broadcast(withStandaloneActivity(snapshot)),

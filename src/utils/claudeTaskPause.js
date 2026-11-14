@@ -17,15 +17,67 @@ export function claudePauseNotice(status) {
   return reason ? { headline: CLAUDE_PAUSE_COPY.headline, reason } : null;
 }
 
+// The limit kinds Claude reports, as the one or two words the dock and the
+// accounts panel put in a headline or a "Limited until …" line.
+const LIMIT_LABELS = Object.freeze({
+  five_hour: '5-hour',
+  seven_day: 'weekly',
+  seven_day_opus: 'weekly Opus',
+  seven_day_sonnet: 'weekly Sonnet',
+  seven_day_overage_included: 'extra usage',
+  overage: 'extra usage',
+});
+
+/** Pure: short label for a limitType; unknown or missing types read as plain usage. */
+export function claudeLimitLabel(limitType) {
+  return Object.hasOwn(LIMIT_LABELS, limitType) ? LIMIT_LABELS[limitType] : 'usage';
+}
+
+const LIMIT_HEADLINES = Object.freeze({
+  five_hour: 'Claude 5-hour limit reached',
+  seven_day: 'Claude weekly limit reached',
+  seven_day_opus: 'Claude weekly Opus limit reached',
+  seven_day_sonnet: 'Claude weekly Sonnet limit reached',
+  seven_day_overage_included: 'Claude extra usage limit reached',
+  overage: 'Claude extra usage limit reached',
+});
+
+/** Pure: 'pro' -> 'Pro', 'max' -> 'Max'; null when Claude did not say. */
+export function claudePlanLabel(subscriptionType) {
+  if (typeof subscriptionType !== 'string' || !subscriptionType) return null;
+  return subscriptionType.slice(0, 40).charAt(0).toUpperCase() + subscriptionType.slice(0, 40).slice(1);
+}
+
 const clockTime = at => new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 
-/** The notice while a usage limit holds every Claude call: what is safe, and when work continues. */
-export function claudeUsageLimitNotice(usageLimit) {
+const emailOf = account => (typeof account?.email === 'string' && account.email ? account.email : null);
+const countOf = value => (Number.isSafeInteger(value) && value >= 0 ? value : null);
+
+/** Pure: 'Signed in as a@b.c (Pro).' — null when Claude did not name the account. */
+function signInSentence(account) {
+  const email = emailOf(account);
+  if (!email) return null;
+  const plan = claudePlanLabel(account?.subscriptionType);
+  return plan ? `Signed in as ${email} (${plan}).` : `Signed in as ${email}.`;
+}
+
+/**
+ * The notice while a usage limit holds every Claude call: what is safe, when
+ * work continues, and which account (or how many) is actually blocked.
+ */
+export function claudeUsageLimitNotice(usageLimit, accounts = []) {
   if (!usageLimit) return null;
+  const list = Array.isArray(accounts) ? accounts.filter(account => account && typeof account === 'object') : [];
+  const accountCount = countOf(usageLimit.accountCount) ?? list.length;
+  const signedIn = list.filter(account => emailOf(account));
+  const saved = usageLimit.knownReset
+    ? `All finished work is saved and nothing was lost. Work continues by itself when usage resets, around ${clockTime(usageLimit.resumeAt)}.`
+    : `All finished work is saved and nothing was lost. Claude did not say when usage resets, so the app tries again around ${clockTime(usageLimit.resumeAt)}.`;
+  const blocked = accountCount >= 2
+    ? `All ${accountCount} signed-in Claude accounts are at their limit.`
+    : (signedIn.length === 1 ? signInSentence(signedIn[0]) : null);
   return {
-    headline: 'Claude usage limit reached',
-    reason: `All finished work is saved and nothing was lost. ${usageLimit.knownReset
-      ? `Work continues by itself when usage resets, around ${clockTime(usageLimit.resumeAt)}.`
-      : `Claude did not say when usage resets, so the app tries again around ${clockTime(usageLimit.resumeAt)}.`}`,
+    headline: Object.hasOwn(LIMIT_HEADLINES, usageLimit.limitType) ? LIMIT_HEADLINES[usageLimit.limitType] : 'Claude usage limit reached',
+    reason: [saved, blocked, 'Add another Claude account to keep working now.'].filter(Boolean).join(' '),
   };
 }

@@ -2,7 +2,18 @@
 // already running finishes and saves its answer, because an answer cut off or
 // rushed mid-reply is worth nothing. Keys: node:<id> for handoff tasks,
 // application:<jobId> for bundles, interview:<runId> for interview preparation.
+import { claudeAccountLimitState, clearClaudeAccountLimits, markClaudeAccountLimited } from './claudeAccounts.js';
 import { recordClaudePauseEvent } from './claudePauseDiagnostics.js';
+
+// The real account registry, unless a test installs an isolated one.
+const accountLayer = { markClaudeAccountLimited, claudeAccountLimitState, clearClaudeAccountLimits };
+
+/** Test seam: run the account switch against a two-account fixture. */
+export function setClaudeAccountLayerForTest(layer = null) {
+  accountLayer.markClaudeAccountLimited = layer?.markClaudeAccountLimited ?? markClaudeAccountLimited;
+  accountLayer.claudeAccountLimitState = layer?.claudeAccountLimitState ?? claudeAccountLimitState;
+  accountLayer.clearClaudeAccountLimits = layer?.clearClaudeAccountLimits ?? clearClaudeAccountLimits;
+}
 
 const KEY_RE = /^(node|application|interview):\S{1,300}$/u;
 const holds = new Set();
@@ -97,6 +108,8 @@ export const claudeUsageLimit = () => usageLimit;
 export function clearClaudeUsageLimit(reason = 'reset-timer') {
   if (usageTimer) clearTimeout(usageTimer);
   usageTimer = null;
+  // Resume now is the person asserting usage exists, so per-account limits end too.
+  if (reason === 'resume-now') accountLayer.clearClaudeAccountLimits();
   if (!usageLimit) return;
   const pausedMs = Date.now() - usageLimit.since;
   usageLimit = null;
@@ -115,15 +128,47 @@ function armUsageTimer(ms) {
   usageTimer.unref?.();
 }
 
-export function reportClaudeUsageLimit({ resetsAt = null, task = null } = {}) {
+const ordinalOf = (accounts, accountId) => {
+  const index = accounts.findIndex(account => account.id === accountId);
+  return index >= 0 ? index + 1 : null;
+};
+
+const earliestReset = limited => limited.reduce(
+  (best, item) => (Number.isFinite(item.resetsAt) && (best === null || item.resetsAt < best) ? item.resetsAt : best),
+  null,
+);
+
+export function reportClaudeUsageLimit({ resetsAt = null, task = null, accountId = null, limitType = null } = {}) {
   const now = Date.now();
-  const resumeAt = now + claudeUsageWaitMs(resetsAt, now);
+  // The reporting account is marked first: the switch below can only be as good as that state.
+  const marked = accountLayer.markClaudeAccountLimited(accountId, { resetsAt, limitType });
+  const state = accountLayer.claudeAccountLimitState();
+  if (state.eligible.length > 0) {
+    // Another signed-in account has usage, so nothing pauses; the next call runs there.
+    recordClaudePauseEvent({
+      kind: 'account-switch',
+      limitType: marked.limitType,
+      fromIndex: ordinalOf(state.accounts, marked.accountId),
+      toIndex: ordinalOf(state.accounts, state.activeId),
+      accountCount: state.accountCount,
+    });
+    wakeUsageWaiters();
+    return { paused: false };
+  }
+  const resumeAt = Math.min(...state.limited.map(item => item.limitedUntil));
   // Later failures from calls already running can only extend a known reset.
-  if (usageLimit && usageLimit.resumeAt >= resumeAt) return;
-  usageLimit = { since: usageLimit?.since ?? now, resumeAt, resetsAt: Number.isFinite(resetsAt) ? resetsAt : null };
+  if (usageLimit && usageLimit.resumeAt >= resumeAt) return { paused: true, resumeAt: usageLimit.resumeAt };
+  usageLimit = {
+    since: usageLimit?.since ?? now,
+    resumeAt,
+    resetsAt: earliestReset(state.limited),
+    limitType: marked.limitType,
+    accountCount: state.accountCount,
+  };
   armUsageTimer(resumeAt - now);
-  recordClaudePauseEvent({ kind: 'usage-limit', code: 'CLAUDE_USAGE_LIMIT', resetsAt: usageLimit.resetsAt, resumeAt, task });
+  recordClaudePauseEvent({ kind: 'usage-limit', code: 'CLAUDE_USAGE_LIMIT', resetsAt: usageLimit.resetsAt, resumeAt, task, limitType: usageLimit.limitType, accountCount: state.accountCount });
   notify();
+  return { paused: true, resumeAt };
 }
 
 /** After system sleep timers are unreliable, so the wall clock decides whether the limit is over. */

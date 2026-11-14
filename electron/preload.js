@@ -307,6 +307,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   drainClaude: key => ipcRenderer.invoke('claude-pause:drain', { key }),
   stopRunningClaude: key => ipcRenderer.invoke('claude-pause:stop-running', { key }),
   resumeClaudeUsageNow: () => ipcRenderer.invoke('claude-usage:resume-now'),
+  // Signed-in Claude accounts. Account items never carry a directory path.
+  listClaudeAccounts: () => ipcRenderer.invoke('claude-accounts:list'),
+  addClaudeAccount: () => ipcRenderer.invoke('claude-accounts:add'),
+  removeClaudeAccount: id => ipcRenderer.invoke('claude-accounts:remove', { id }),
+  cancelClaudeAccountLogin: () => ipcRenderer.invoke('claude-accounts:cancel-login'),
 
   // ── Price Check Module ──────────────────────────────────────────────────
   analyzePhotos: (args) => ipcRenderer.invoke('analyze-photos', args),
