@@ -2867,7 +2867,7 @@ const OVERLAY_SCRIPT = buildOverlayScript({ withPause: true });
  * Paint the in-page overlay AND record that the scrape is alive.
  *
  * Every progress signal a user needs already existed at exactly the right
- * granularity — "Opening result card 4/30", "Extracting page 3…", "Loading more
+ * granularity — "Opening job 4 of 30 to read", "Extracting page 3…", "Loading more
  * jobs…" — but it was written only into the scraper's own Chrome window and
  * never left it. The app, the main-process log, and the bug report were all
  * blind to work happening on screen, so a healthy multi-minute Glassdoor
@@ -5216,7 +5216,7 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
     await updateOverlay(page, {
       ...overlayBase,
       count:  baseCount + i + 1,
-      status: `Opening result card ${i + 1}/${enhanced.length} · result ${physicalIndex}/${physicalTotal}`,
+      status: `Opening job ${i + 1} of ${enhanced.length} to read · list position ${physicalIndex} of ${physicalTotal}`,
     });
 
     const preClickModal = await dismissBlockingGlassdoorModal(i + 1, physicalIndex, 'before-card');

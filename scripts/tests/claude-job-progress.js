@@ -1,6 +1,7 @@
 import { assert } from './testHelpers.js';
 import { claudeProgressTimeLines, deriveClaudeJobProgress } from '../../src/utils/claudeJobProgress.js';
 import { normalizeClaudeRun } from '../../src/utils/claudeApplicationRuns.js';
+import { applicationProgressContext } from '../../src/utils/applicationProgress.js';
 import { applicationWorkflowProgress } from '../../electron/ipc/applicationWorkflowProgress.js';
 
 const progress = { workflow: 'write-verify', startedAt: 1000, candidate: 2, candidateCount: 5, checked: 1, ready: 0, rejected: 1 };
@@ -66,5 +67,11 @@ export default [
     assert(applicationWorkflowProgress(input, { stage: 'requirements' }).checked === 0, 'requirements do not complete candidates');
     assert(applicationWorkflowProgress({}, {}) === null, 'missing frozen count stays unknown');
     assert(!JSON.stringify(summary).includes('candidate-'), 'metadata contains no IDs, facts, or document text');
+  } },
+  { name: 'Application progress heading names the first candidate before the host reports one', run() {
+    assert(applicationProgressContext({ workflow: 'write-verify', candidateCount: 4 }).label
+      === 'Application candidates · Starting first of 4', 'the heading says which candidate starts');
+    assert(applicationProgressContext({ workflow: 'write-verify', candidateCount: 4, candidate: 3 }).label
+      === 'Application candidates · Candidate 3 of 4', 'a reported candidate keeps its ordinal heading');
   } },
 ];

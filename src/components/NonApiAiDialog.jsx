@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, ArrowLeft, Check, ChevronDown, ChevronUp, ClipboardCopy, FolderOpen, LoaderCircle, Paperclip, Send, XCircle } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -9,7 +9,7 @@ import { careerCompilationProgressForRequest, recordCareerCompilationProgress } 
 import { ClaudeProgress, ClaudeTaskProgress } from './ClaudeProgress';
 import { ClaudePauseControl, JobRunStatusDock, JobRunStatusSection } from './ClaudeRunStatus';
 import { claudeApplicationPauseKey, claudeNodePauseKey } from '../utils/claudePauseFlow';
-import { pauseOwnerStatus } from '../utils/jobRunStatusStore';
+import { getJobRunStatuses, partitionRunStatusesForHandoffs, pauseOwnerStatus, runStatusBelongsToHandoff, subscribeJobRunStatuses } from '../utils/jobRunStatusStore';
 import { ClaudePauseNotice } from './ClaudePauseNotice';
 import { isJobSearchPauseEligible } from '../utils/jobHubManualAiOwnership';
 import { isWorkflowSuccessor, selectionAfterHandoffSettlement, successorPreferenceAfterSettlement } from '../utils/nonApiAiNavigation';
@@ -340,6 +340,13 @@ export function NonApiAiDialog() {
   }), []);
 
   const [selectedRequestId, setSelectedRequestId] = useState(null);
+  // Whether the dock is showing the "Modules" tab: the running modules NO
+  // pending handoff owns. Kept separate from selectedRequestId because this
+  // tab belongs to no request — every handoff chip click, and every focus
+  // request from a job card, clears it. It is only ever READ through
+  // showingModulesTab, so a tab whose last unrelated run finished simply
+  // stops existing without an effect having to reset this.
+  const [modulesTabSelected, setModulesTabSelected] = useState(false);
   // A new queue must be immediately actionable. Minimize remains an explicit
   // choice for the current queue, but an empty dock opening again resets that
   // choice so newly-issued work is never hidden behind the compact control.
@@ -441,6 +448,28 @@ export function NonApiAiDialog() {
       : applicationItems.filter(item => !dismissedBrokenRequestIds.has(item.requestId))
   ), [applicationItems, dismissedBrokenRequestIds]);
   const mergedRequests = useMemo(() => mergeDockQueue(requests, visibleApplicationItems), [requests, visibleApplicationItems]);
+  // Which running modules belong to which pending handoff. A module publishes
+  // its status into ONE global store, so a handoff tab that drew the whole
+  // store repeated every other hub's Job Board and search cards in every tab
+  // — and showed runs that touch none of the queued prompts at all. Split the
+  // store against the hubs this queue actually owns, and keep the leftovers
+  // for the Modules tab below.
+  const jobRunStatuses = useSyncExternalStore(subscribeJobRunStatuses, getJobRunStatuses, getJobRunStatuses);
+  const handoffNodeIds = useMemo(() => mergedRequests
+    .map(request => (typeof request?.nodeId === 'string' ? request.nodeId : ''))
+    .filter(Boolean), [mergedRequests]);
+  const { unrelated: unrelatedStatuses } = useMemo(
+    () => partitionRunStatusesForHandoffs(jobRunStatuses, handoffNodeIds),
+    [jobRunStatuses, handoffNodeIds],
+  );
+  const unrelatedStatusNodeIds = useMemo(
+    () => new Set(unrelatedStatuses.map(entry => entry.nodeId)),
+    [unrelatedStatuses],
+  );
+  // Derived, never reset by an effect: the last unrelated run finishing while
+  // this tab is open must simply take the tab away with it.
+  const showingModulesTab = modulesTabSelected && unrelatedStatuses.length > 0;
+  const modulesTabDescription = `Running modules: ${unrelatedStatuses.map(entry => entry.label || entry.nodeId).join(', ')}`;
   // Run before paint: after a manual Minimize, a newly populated queue must
   // not flash its compact button for one frame before reopening.
   useLayoutEffect(() => {
@@ -810,6 +839,9 @@ export function NonApiAiDialog() {
       }
       setRequests(previous => previous.filter(request => request.requestId !== requestId));
       setSelectedRequestId(selection.selectedRequestId);
+      // A settled handoff that hands focus to a real request is a handoff
+      // selection, so the Modules tab must not keep drawing over it.
+      if (selection.selectedRequestId) setModulesTabSelected(false);
       setDrafts(previous => {
         if (!(requestId in previous)) return previous;
         const { [requestId]: _removed, ...remaining } = previous;
@@ -990,6 +1022,7 @@ export function NonApiAiDialog() {
         pendingFocusJobIdsRef.current.delete(jobId);
         awaitingSuccessorRef.current = null;
         setSelectedRequestId(requestId);
+        setModulesTabSelected(false);
         setIsExpanded(true);
         EventLogger.log('[Manual AI] application bundle focused in the handoff dock');
         return;
@@ -1145,6 +1178,7 @@ export function NonApiAiDialog() {
         focused = true;
         awaitingSuccessorRef.current = null;
         setSelectedRequestId(focusRequestId);
+        setModulesTabSelected(false);
         setIsExpanded(true);
         EventLogger.log('[Manual AI] application bundle focused in the handoff dock');
       }
@@ -1777,18 +1811,30 @@ export function NonApiAiDialog() {
                   AI handoffs
                 </h2>
                 {activeRequest?.handoffCode && !isMcpRoutedRequest && (
-                  <span className="inline-flex rounded border border-violet-400/30 bg-violet-500/15 px-2 py-0.5 font-mono text-xs font-semibold tracking-wider text-violet-200">
-                    {activeRequest.handoffCode}
-                  </span>
+                  // The Modules tab names no handoff, so it shows no code badge.
+                  showingModulesTab ? null : (
+                    <span className="inline-flex rounded border border-violet-400/30 bg-violet-500/15 px-2 py-0.5 font-mono text-xs font-semibold tracking-wider text-violet-200">
+                      {activeRequest.handoffCode}
+                    </span>
+                  )
                 )}
               </div>
               <p aria-live="polite" aria-atomic="true" className="mt-0.5 text-xs text-white/55 break-words">
-                {multipleHubQueue && ownerBadgeForNode(activeRequest.nodeId) && (
-                  <span className="mr-1.5 inline-flex rounded border border-violet-400/25 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-200">
-                    {ownerBadgeForNode(activeRequest.nodeId)}
-                  </span>
+                {showingModulesTab ? (
+                  // No hub badge and no handoff summary here: none of these
+                  // runs belongs to the open handoff, so naming one would be a
+                  // lie. This line is the summary for the Modules tab.
+                  `${unrelatedStatuses.length} ${unrelatedStatuses.length === 1 ? 'module' : 'modules'} running · not part of any handoff`
+                ) : (
+                  <>
+                    {multipleHubQueue && ownerBadgeForNode(activeRequest.nodeId) && (
+                      <span className="mr-1.5 inline-flex rounded border border-violet-400/25 bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-violet-200">
+                        {ownerBadgeForNode(activeRequest.nodeId)}
+                      </span>
+                    )}
+                    {dockItemSummary(activeRequest)}
+                  </>
                 )}
-                {dockItemSummary(activeRequest)}
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -1807,11 +1853,30 @@ export function NonApiAiDialog() {
             </div>
           </div>
           <ClaudePauseNotice className="mt-3" />
-          {!isAutomaticMcpQueue && (
+          {!isAutomaticMcpQueue || unrelatedStatuses.length > 0 ? (
           <nav aria-label="Pending AI handoff batches" className="mt-3">
             <div className="grid grid-cols-5 gap-1 sm:grid-cols-10">
-              {mergedRequests.map((request, index) => {
-                const selected = request.requestId === activeRequestId;
+              {isAutomaticMcpQueue && (
+                // The automatic queue has no per-item chips — a worker plan
+                // claims the whole queue, so there is nothing to choose
+                // between — but the Modules tab beside it still needs a way
+                // back to the handoffs.
+                <button
+                  type="button"
+                  onClick={() => setModulesTabSelected(false)}
+                  disabled={!!cancelConfirmTarget}
+                  aria-current={!showingModulesTab ? 'page' : undefined}
+                  className={`col-span-3 inline-flex min-w-0 items-center justify-center rounded-md border px-1.5 py-1.5 text-xs font-medium transition-colors ${!showingModulesTab
+                    ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
+                    : 'border-white/10 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
+                >
+                  Handoffs
+                </button>
+              )}
+              {!isAutomaticMcpQueue && mergedRequests.map((request, index) => {
+                // Nothing in the handoff strip reads as open while the Modules
+                // tab is showing: those runs belong to no queued prompt.
+                const selected = !showingModulesTab && request.requestId === activeRequestId;
                 const hasDraft = Boolean(drafts[request.requestId]?.trim());
                 const hasError = Boolean(errors[request.requestId]);
                 const isWorking = submittingRequestIds.has(request.requestId)
@@ -1870,6 +1935,7 @@ export function NonApiAiDialog() {
                       awaitingSuccessorRef.current = null;
                       pendingFocusJobIdsRef.current.clear();
                       setSelectedRequestId(request.requestId);
+                      setModulesTabSelected(false);
                       EventLogger.log(`[Manual AI] user selected queued handoff${Number.isFinite(request.batch) ? ` batch=${request.batch}` : ''}`);
                     }}
                     // Switching the panel to another hub's handoff while the
@@ -1915,17 +1981,47 @@ export function NonApiAiDialog() {
                   </button>
                 );
               })}
+              {unrelatedStatuses.length > 0 && (
+                // Runs no queued handoff owns get their own tab instead of a
+                // card repeated inside every handoff tab. Two grid columns:
+                // the word has to fit even at the narrow 5-column layout.
+                <button
+                  type="button"
+                  onClick={() => setModulesTabSelected(true)}
+                  disabled={!!cancelConfirmTarget}
+                  aria-current={showingModulesTab ? 'page' : undefined}
+                  aria-label={modulesTabDescription}
+                  title={modulesTabDescription}
+                  className={`col-span-2 inline-flex min-w-0 items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-xs font-medium transition-colors ${showingModulesTab
+                    ? 'border-violet-300/60 bg-violet-500/20 text-violet-100'
+                    : 'border-dashed border-white/20 bg-black/20 text-white/60 hover:border-violet-400/35 hover:text-white/85'}`}
+                >
+                  <LoaderCircle size={10} className="shrink-0 animate-spin text-violet-200" aria-hidden="true" />
+                  <span>{unrelatedStatuses.length > 1 ? `Modules ${unrelatedStatuses.length}` : 'Modules'}</span>
+                </button>
+              )}
             </div>
           </nav>
-          )}
+          ) : null}
         </header>
 
+        {showingModulesTab ? (
+          // No <form> here: none of this is paste-able, and every control the
+          // form carries (prompt, submit, cancel) belongs to a handoff that is
+          // not the one on screen. Each run keeps its own Pause & save.
+          <div ref={panelBodyRef} className="min-h-0 flex-1 overflow-y-auto p-5 flex flex-col gap-4 custom-scrollbar">
+            <JobRunStatusSection only={entry => unrelatedStatusNodeIds.has(entry.nodeId)} />
+            <p className="text-xs leading-relaxed text-white/45">
+              These runs continue on their own. Pick a numbered tab to return to a handoff.
+            </p>
+          </div>
+        ) : (
         <form ref={panelBodyRef} onSubmit={submit} className="min-h-0 flex-1 overflow-y-auto p-5 flex flex-col gap-4 custom-scrollbar">
           {activeCareerProgress && <CareerCompilationProgress
             key={`${activeRequest.nodeId}:${activeRequest.runId}`}
             progress={activeCareerProgress}
           />}
-          <JobRunStatusSection pauseOwnedBy={activeRequest.nodeId} />
+          <JobRunStatusSection only={entry => runStatusBelongsToHandoff(entry, activeRequest.nodeId)} pauseOwnedBy={activeRequest.nodeId} />
 
           {brokenApplicationMessage ? (
             // No prompt and no response box: this job takes no further paste,
@@ -2405,6 +2501,7 @@ export function NonApiAiDialog() {
             </>
           )}
         </form>
+        )}
       </section>
         )}
       </div>

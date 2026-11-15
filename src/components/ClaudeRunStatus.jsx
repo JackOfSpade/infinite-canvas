@@ -4,7 +4,8 @@ import { ChevronDown, ChevronUp, ClipboardCopy, PauseCircle, PlayCircle } from '
 import { ClaudeProgressCard, ClaudeTaskProgress } from './ClaudeProgress';
 import { claudeNodePauseKey, getClaudePauseFlow, resumeClaude, startClaudePause, stopRunningClaude, subscribeClaudePauseFlows } from '../utils/claudePauseFlow';
 import { getClaudeTaskActivity, subscribeClaudeTaskActivity } from '../utils/claudeTaskActivityStore';
-import { getJobRunStatus, getJobRunStatuses, showsOwnPauseButton, subscribeJobRunStatuses } from '../utils/jobRunStatusStore';
+import { getJobRunStatus, getJobRunStatuses, groupRunStatusesByOwner, runStatusTimeLines, showsOwnPauseButton, subscribeJobRunStatuses } from '../utils/jobRunStatusStore';
+import { useProgressClock } from '../hooks/useProgressClock';
 
 const BUTTON = 'inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
 const AMBER = `${BUTTON} border-amber-400/30 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20`;
@@ -45,7 +46,73 @@ export function ClaudePauseControl({ pauseKeys, onSave = null, disabledReason = 
   );
 }
 
-function RunStatusCard({ entry, showPause }) {
+// A Board's nested search block. Clocks are the only live part, so they stay in
+// this small component and the hook never runs for a Claude activity card.
+function RunStatusChildLines({ entry }) {
+  const now = useProgressClock(true);
+  const time = runStatusTimeLines(entry, now);
+  return (
+    <div className="min-w-0 rounded-md border border-white/10 bg-white/[0.03] px-2 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wide text-violet-200/65">{entry.label}</div>
+      <div className="mt-1 text-xs font-medium text-white/85">{entry.headline}</div>
+      {entry.lines.length > 0 && <div className="mt-0.5 break-words text-[11px] text-white/60">{entry.lines.join(' · ')}</div>}
+      {time.lines.length > 0 && (
+        <p className={`mt-1 text-[11px] tabular-nums ${time.stale ? 'font-medium text-amber-200' : 'text-white/50'}`}>{time.lines.join(' · ')}</p>
+      )}
+    </div>
+  );
+}
+
+function RunStatusChild({ entry }) {
+  // A nested search with a live Claude request shows the worker's own activity.
+  if (entry.claudeRequestId) return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} compact />;
+  return <RunStatusChildLines entry={entry} />;
+}
+
+// A search the owner is running, drawn inside the owner's card above its Pause.
+function RunStatusChildren({ entries }) {
+  if (!entries.length) return null;
+  return (
+    <div className="mt-2 flex flex-col gap-2 border-t border-white/10 pt-2">
+      {entries.map(entry => <RunStatusChild key={entry.nodeId} entry={entry} />)}
+    </div>
+  );
+}
+
+// A run with no live Claude request: its own clocks and the no-change hint.
+function RunStatusSummaryCard({ entry, detail, footer }) {
+  const now = useProgressClock(true);
+  const time = runStatusTimeLines(entry, now);
+  return (
+    <ClaudeProgressCard
+      kind="job-run"
+      region={`${entry.label} status`}
+      contextLabel={entry.label}
+      headline={entry.headline}
+      detail={detail}
+      timeLines={time.lines}
+      stale={time.stale}
+      footer={footer}
+    />
+  );
+}
+
+// A card that owns other cards: the searches it runs sit under its own status
+// and above its Pause.
+function RunStatusOwnerCard({ entry, childEntries, pauseFooter }) {
+  const footer = (
+    <>
+      <RunStatusChildren entries={childEntries} />
+      {pauseFooter}
+    </>
+  );
+  if (entry.claudeRequestId) {
+    return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={footer} />;
+  }
+  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join(' · ')} footer={footer} />;
+}
+
+function RunStatusCard({ entry, childEntries = [], showPause }) {
   const pauseFooter = showPause ? (
     <div className="mt-2">
       <ClaudePauseControl
@@ -55,26 +122,26 @@ function RunStatusCard({ entry, showPause }) {
       />
     </div>
   ) : null;
+  if (childEntries.length > 0) return <RunStatusOwnerCard entry={entry} childEntries={childEntries} pauseFooter={pauseFooter} />;
   // A module with a live Claude request shows the worker's own activity, not a summary.
   if (entry.claudeRequestId) {
     return <ClaudeTaskProgress requestId={entry.claudeRequestId} contextPrefix={entry.label} region={`${entry.label} status`} footer={pauseFooter} />;
   }
-  return (
-    <ClaudeProgressCard
-      kind="job-run"
-      region={`${entry.label} status`}
-      contextLabel={entry.label}
-      headline={entry.headline}
-      detail={entry.lines.join(' · ')}
-      footer={pauseFooter}
-    />
-  );
+  return <RunStatusSummaryCard entry={entry} detail={entry.lines.join(' · ')} footer={pauseFooter} />;
 }
 
 /** Every running module's status. pauseOwnedBy names the handoff whose row holds that run's Pause. */
-export function JobRunStatusSection({ pauseOwnedBy = null }) {
+export function JobRunStatusSection({ pauseOwnedBy = null, only = null }) {
   const statuses = useSyncExternalStore(subscribeJobRunStatuses, getJobRunStatuses, getJobRunStatuses);
-  return statuses.map(entry => <RunStatusCard key={entry.nodeId} entry={entry} showPause={showsOwnPauseButton(entry, pauseOwnedBy, statuses)} />);
+  // `only` narrows what a panel draws (a handoff tab shows its own runs, not
+  // every module on the machine) without changing the ownership question
+  // below, which has to keep seeing the FULL store to know whose row holds a
+  // run's Pause & save.
+  const shown = typeof only === 'function' ? statuses.filter(entry => only(entry)) : statuses;
+  // A search its shown Board is running is drawn inside that Board's card.
+  return groupRunStatusesByOwner(shown, statuses).map(({ entry, children }) => (
+    <RunStatusCard key={entry.nodeId} entry={entry} childEntries={children} showPause={showsOwnPauseButton(entry, pauseOwnedBy, statuses)} />
+  ));
 }
 
 let minimized = false;

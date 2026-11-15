@@ -56,7 +56,7 @@ export function applicationProgressContext(value) {
   if (progress.rejected !== null) counts.push(`${progress.rejected} rejected in initial checks`);
   return {
     label: progress.candidate === null
-      ? `Application candidates · ${progress.candidateCount} planned`
+      ? `Application candidates · Starting first of ${progress.candidateCount}`
       : `Application candidates · Candidate ${progress.candidate} of ${progress.candidateCount}`,
     summary: counts.join(' · '),
     startedAt: progress.startedAt,

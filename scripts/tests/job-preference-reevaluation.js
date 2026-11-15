@@ -12,7 +12,7 @@ import { COMPANY_RESEARCH_VERSION, evaluateJobPreferences, reapplyStoredJobPrefe
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../../src/utils/jobSearchPreferenceReevaluation.js';
 import { savedJobsReevaluationKeepsScores } from '../../src/utils/jobSearchSplitClear.js';
 import { carryBoardRescores } from '../../src/nodes/jobboard/jobBoardResearchStage.js';
-import { __resetJobRunStatusForTests, getJobRunStatus, pauseOwnerStatus, publishJobRunStatus, showsOwnPauseButton, subscribeJobRunStatuses } from '../../src/utils/jobRunStatusStore.js';
+import { __resetJobRunStatusForTests, clearJobRunStatus, getJobRunStatus, groupRunStatusesByOwner, partitionRunStatusesForHandoffs, pauseOwnerStatus, publishJobRunStatus, runStatusBelongsToHandoff, runStatusTimeLines, showsOwnPauseButton, subscribeJobRunStatuses } from '../../src/utils/jobRunStatusStore.js';
 import { unverifiedCompanyPreferences } from '../../electron/ipc/researchGate.js';
 import { runBoardPreferenceOverrideStage } from '../../src/nodes/jobboard/jobBoardPreferenceOverrideStage.js';
 import { activeJobBoardPreferenceOverride, applyJobBoardPreferenceBrief, jobBoardPreferenceOverrideView } from '../../src/utils/jobBoardPreferenceOverride.js';
@@ -414,6 +414,38 @@ export default [
     },
   },
   {
+    name: 'Run status partition: a handoff tab owns the modules of its own hub only',
+    run: () => {
+      const pause = () => ({ success: true });
+      const board = { nodeId: 'board', label: 'Job Board', headline: 'Scraping 2 searches', onPause: pause, pauseKeys: ['node:board', 'node:ca'] };
+      const search = { nodeId: 'ca', label: 'Product Engineer · Canada', onPause: pause, pauseKeys: ['node:ca'] };
+      const interview = { nodeId: 'interview', label: 'Interview Helper', onPause: pause, pauseKeys: ['node:interview'] };
+      const nodeIds = entries => entries.map(entry => entry.nodeId);
+      assert.equal(runStatusBelongsToHandoff(board, 'ca'), true, 'a Board belongs to the handoff whose search it is running');
+      assert.equal(runStatusBelongsToHandoff(board, 'board'), true);
+      assert.equal(runStatusBelongsToHandoff(search, 'board'), false, 'a search module lists only its own pause key');
+      assert.equal(runStatusBelongsToHandoff(board, ''), false, 'an empty handoff id matches nothing');
+      assert.equal(runStatusBelongsToHandoff(board, undefined), false, 'an undefined handoff id matches nothing');
+      assert.equal(runStatusBelongsToHandoff(null, 'board'), false);
+      const all = [board, search, interview];
+      const application = partitionRunStatusesForHandoffs(all, ['applicationHub']);
+      assert.deepEqual(nodeIds(application.byHandoff.get('applicationHub')), [], 'an application hub owns no module status');
+      assert.deepEqual(nodeIds(application.unrelated), ['board', 'ca', 'interview'], 'every module is unrelated to it, in store order');
+      const searchTab = partitionRunStatusesForHandoffs(all, ['ca']);
+      assert.deepEqual(nodeIds(searchTab.byHandoff.get('ca')), ['board', 'ca']);
+      assert.deepEqual(nodeIds(searchTab.unrelated), ['interview']);
+      const repeated = partitionRunStatusesForHandoffs(all, ['ca', 'ca', '', undefined, 'interview']);
+      assert.deepEqual([...repeated.byHandoff.keys()], ['ca', 'interview'], 'empty and repeated ids add no extra tab');
+      assert.deepEqual(nodeIds(repeated.byHandoff.get('ca')), ['board', 'ca']);
+      assert.deepEqual(nodeIds(repeated.unrelated), [], 'a module owned by any listed handoff is not unrelated');
+      const reordered = partitionRunStatusesForHandoffs([interview, search, board], ['ca', 'interview']);
+      assert.deepEqual(nodeIds(reordered.byHandoff.get('ca')), ['ca', 'board'], 'store order is preserved inside a tab');
+      assert.deepEqual(nodeIds(reordered.byHandoff.get('interview')), ['interview']);
+      assert.deepEqual(nodeIds(reordered.unrelated), []);
+      assert.deepEqual(nodeIds(partitionRunStatusesForHandoffs(all, []).unrelated), ['board', 'ca', 'interview']);
+    },
+  },
+  {
     name: 'Run status entries keep their live Claude request and a pause with no save step',
     run: () => {
       __resetJobRunStatusForTests();
@@ -557,6 +589,67 @@ export default [
       const job = { ...listing('Product Engineer'), preferenceAssessment: { status: 'accepted', companyResearchPending: true, matches: [{ preferenceId: 'r8', criterion: 'Exclude government employers', category: 'company', strict: true, outcome: 'confirmed', source: 'web' }] } };
       const settled = await researchDeferredJobPreferences({ jobs: [job], callRaw: async () => { throw new Error('nothing is pending'); }, callText: async () => { throw new Error('nothing is pending'); } });
       assert.equal(settled.filtered, 0);
+    },
+  },
+  {
+    name: 'Run status clocks: startedAt carries over and changedAt moves only on a visible change',
+    run: () => {
+      __resetJobRunStatusForTests();
+      try {
+        publishJobRunStatus('board', { label: 'Job Board', headline: 'Scraping 2 searches', lines: ['2 searches'] }, 1000);
+        const first = getJobRunStatus('board');
+        assert.equal(first.startedAt, 1000, 'the first publish starts the run clock');
+        assert.equal(first.changedAt, 1000, 'the first publish is a visible change');
+        const renders = [];
+        const unsubscribe = subscribeJobRunStatuses(() => renders.push(getJobRunStatus('board').changedAt));
+        publishJobRunStatus('board', { label: 'Job Board', headline: 'Scraping 2 searches', lines: ['2 searches'] }, 5000);
+        const repeat = getJobRunStatus('board');
+        assert.equal(repeat.startedAt, 1000, 'startedAt is carried over on a re-publish');
+        assert.equal(repeat.changedAt, 1000, 'an identical re-publish is not a visible change');
+        assert.deepEqual(renders, [], 'carrying the clocks publishes no extra snapshot');
+        publishJobRunStatus('board', { label: 'Job Board', headline: '3 of 8 jobs read', lines: ['2 searches'] }, 7000);
+        const changed = getJobRunStatus('board');
+        assert.equal(changed.startedAt, 1000, 'the elapsed clock survives a status change');
+        assert.equal(changed.changedAt, 7000, 'a new headline moves changedAt');
+        assert.deepEqual(renders, [7000], 'a visible change publishes exactly once');
+        unsubscribe();
+        clearJobRunStatus('board');
+        publishJobRunStatus('board', { label: 'Job Board', headline: '3 of 8 jobs read' }, 9000);
+        assert.equal(getJobRunStatus('board').startedAt, 9000, 'a cleared node starts a fresh clock');
+      } finally { __resetJobRunStatusForTests(); }
+    },
+  },
+  {
+    name: 'Run status time lines: elapsed clock and the 120 s no-change hint',
+    run: () => {
+      const entry = { nodeId: 'search', startedAt: 1000, changedAt: 61000 };
+      assert.deepEqual(runStatusTimeLines(entry, 121000), { lines: ['Running: 2 min'], stale: false }, 'below the threshold only the clock shows');
+      assert.deepEqual(runStatusTimeLines(entry, 180999), { lines: ['Running: 2 min'], stale: false }, 'one millisecond below 120 s stays quiet');
+      assert.deepEqual(runStatusTimeLines(entry, 181000), { lines: ['Running: 3 min', 'No change for 2 min'], stale: true }, 'the threshold adds the labelled no-change line');
+      assert.deepEqual(runStatusTimeLines({ nodeId: 'search' }, 181000), { lines: [], stale: false }, 'missing timestamps draw nothing');
+      assert.deepEqual(runStatusTimeLines({ nodeId: 'search', startedAt: NaN, changedAt: 61000 }, 181000), { lines: [], stale: false }, 'a non-finite timestamp draws nothing');
+    },
+  },
+  {
+    name: 'Run status grouping: a Board card holds the searches it runs, and an unshown owner adopts none',
+    run: () => {
+      const pause = () => ({ success: true });
+      const board = { nodeId: 'board', label: 'Job Board', headline: 'Scraping 2 searches', onPause: pause, pauseKeys: ['node:board', 'node:ca', 'node:us'] };
+      const canada = { nodeId: 'ca', label: 'Product Engineer · Canada', headline: 'Reading list', onPause: pause, pauseKeys: ['node:ca'] };
+      const usa = { nodeId: 'us', label: 'Product Engineer · USA', headline: 'Reading list', onPause: pause, pauseKeys: ['node:us'] };
+      const solo = { nodeId: 'solo', label: 'Job Search', headline: 'Loading more jobs', onPause: pause, pauseKeys: ['node:solo'] };
+      const all = [board, canada, usa, solo];
+      const nodeIds = entries => entries.map(entry => entry.nodeId);
+      const grouped = groupRunStatusesByOwner(all, all);
+      assert.deepEqual(nodeIds(grouped.map(group => group.entry)), ['board', 'solo'], 'only runs with no shown owner stay top level, in store order');
+      assert.deepEqual(nodeIds(grouped[0].children), ['ca', 'us'], 'the Board holds its own searches in store order');
+      assert.deepEqual(nodeIds(grouped[1].children), [], 'an unowned module adopts no children');
+      const narrowed = groupRunStatusesByOwner([canada, solo], all);
+      assert.deepEqual(nodeIds(narrowed.map(group => group.entry)), ['ca', 'solo'], 'a search whose Board is not shown stays top level');
+      assert.deepEqual(nodeIds(narrowed.flatMap(group => group.children)), [], 'no unshown card adopts a child');
+      const partial = groupRunStatusesByOwner([canada, board], all);
+      assert.deepEqual(nodeIds(partial.map(group => group.entry)), ['board'], 'a shown Board still folds in the shown search');
+      assert.deepEqual(nodeIds(partial[0].children), ['ca']);
     },
   },
 ];
