@@ -8454,6 +8454,28 @@ Personal Projects`;
               probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
               return realRm.call(fs.promises, target, options);
             }
+            if (when === 'records-last') {
+              // Every file but the two the read loads first is already gone:
+              // the frozen-state grade then reports a job-integrity fault for
+              // a folder that is merely leaving, and recording that fault has
+              // no generation log left to append to.
+              for (const entry of await fs.promises.readdir(target)) {
+                if (entry === 'manifest.json' || entry === 'input.json') continue;
+                await realRm.call(fs.promises, path.join(target, entry), { recursive: true, force: true });
+              }
+              probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+              return realRm.call(fs.promises, target, options);
+            }
+            if (when === 'unreadable-record') {
+              // Not every half-removed folder reads as not-found: here a
+              // record the read needs is no longer a file, which is neither a
+              // not-found nor a job-integrity fault.
+              const page = path.join(target, 'context', 'application-authority-pages', 'catalog-000000000000.json');
+              await fs.promises.unlink(page);
+              await fs.promises.mkdir(page);
+              probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
+              return realRm.call(fs.promises, target, options);
+            }
             const removed = await realRm.call(fs.promises, target, options);
             probe = await readHandoff({ sender }, { jobId: queued.id, canvasFilePath: project.canvasFilePath });
             return removed;
@@ -8462,11 +8484,11 @@ Personal Projects`;
           finally { fs.promises.rm = realRm; }
           return { probe, errors: errorsSince(before) };
         };
-        for (const when of ['manifest-first', 'folder-first']) {
+        for (const when of ['manifest-first', 'records-last', 'unreadable-record', 'folder-first']) {
           const queued = await queueOne();
           const { probe, errors } = await raceOnce(queued, when);
           assert(probe?.success === true && probe.gone === true && probe.handoff === null,
-            `a read ${when === 'manifest-first' ? 'after the manifest was removed' : 'before the discarded stamp exists'} must be the quiet gone, got ${JSON.stringify(probe)}`);
+            `a read ${when === 'manifest-first' ? 'after the manifest was removed' : when === 'records-last' ? 'after everything but the manifest and input was removed' : when === 'unreadable-record' ? 'that found a record no longer readable' : 'before the discarded stamp exists'} must be the quiet gone, got ${JSON.stringify(probe)}`);
           assert(errors.length === 0, `and must log no ERROR (${when}), got ${JSON.stringify(errors.map(entry => entry.message))}`);
         }
 

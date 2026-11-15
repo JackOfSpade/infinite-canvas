@@ -374,6 +374,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  APPREJECT: {
+    label: 'Application Rejection Text',
+    description: 'The wording of each host check that rejected a résumé or cover-letter draft in this app process, so a rejection can be judged as a real defect or a false alarm. Messages may quote the rejected sentence; they are redacted again on export. Included automatically in FULL; this narrow code selects it directly. APPCORRECT gives the same checks as counts only.',
+    logFilter: line => /LocalAI|validation|handoff/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   HANDOFF: {
     label: 'Local AI Handoff',
     description: 'Local AI application handoff audit — app-authored result-hash and page-measurement trace, result.json / fit-feedback lifecycle, import, render, and final-save events. Use when a local coding agent reports an iteration that the app did not appear to observe, a result is imported too early, or a measured revision loop is disputed. Included automatically in FULL.',

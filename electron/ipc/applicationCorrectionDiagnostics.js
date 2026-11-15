@@ -1,8 +1,20 @@
 import { createHash } from 'node:crypto';
 
-// Project host validation messages to a closed vocabulary immediately. Never
-// retain prompts, answers, prose, citation IDs, paths or the messages themselves.
+// Project host validation messages to a closed vocabulary immediately. The
+// cause rows below never retain prompts, answers, prose, citation IDs, paths or
+// the messages themselves.
 const rows = [];
+// The messages themselves, kept apart from the cause rows and never rendered
+// with them. A rejection message quotes the sentence it rejects, so it is
+// document prose: only an explicit FULL or APPREJECT report renders this ring
+// (bugReport/applicationRejections.js), the same consent APPOUTPUT asks for.
+// It exists because the cause codes say THAT a check failed and never why:
+// whether a source-grounding rejection is a real defect or a false alarm can
+// only be read from its wording.
+export const MAX_REJECTION_TEXT_CHECKS = 40;
+export const MAX_REJECTION_TEXT_MESSAGES = 8;
+export const MAX_REJECTION_TEXT_CHARS = 900;
+const rejectionTexts = [];
 const stages = new Set(['convert', 'verify-correction', 'fit-correction', 'fact-correction']);
 const causes = [
   ['missing-career-citation', /needs at least one career-data evidence ID/iu],
@@ -30,6 +42,18 @@ export function recordApplicationCorrectionCheck({ jobId, stage, errors = [] }) 
     outcome: unique.length ? 'rejected' : 'passed',
     findings: unique.length, repeated: errors.length - unique.length, counts });
   if (rows.length > 60) rows.shift();
+  if (unique.length) {
+    rejectionTexts.push({ at: rows.at(-1).at, stage, job: rows.at(-1).job,
+      total: unique.length,
+      messages: unique.slice(0, MAX_REJECTION_TEXT_MESSAGES).map(message => (message.length > MAX_REJECTION_TEXT_CHARS
+        ? `${message.slice(0, MAX_REJECTION_TEXT_CHARS - 1)}…` : message)) });
+    if (rejectionTexts.length > MAX_REJECTION_TEXT_CHECKS) rejectionTexts.shift();
+  }
+}
+
+/** Newest first. Copies, so a renderer cannot change what the ring holds. */
+export function applicationRejectionTextRows() {
+  return [...rejectionTexts].reverse().map(row => ({ ...row, messages: [...row.messages] }));
 }
 
 export function applicationCorrectionDiagnosticsMarkdown() {

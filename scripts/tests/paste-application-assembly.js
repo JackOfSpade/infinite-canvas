@@ -9,7 +9,7 @@ import { careerDataProjectProvenanceHeadingForName } from '../../electron/ipc/jo
 import { recordApplicationCitationFlow, applicationCitationDiagnosticsMarkdown } from '../../electron/ipc/applicationCitationDiagnostics.js';
 import { generateMarkdown } from '../../electron/ipc/bugReport.js';
 import { applyBugReportCode } from '../../src/utils/bugReportCodes.js';
-import { recordApplicationCorrectionCheck, applicationCorrectionDiagnosticsMarkdown } from '../../electron/ipc/applicationCorrectionDiagnostics.js';
+import { recordApplicationCorrectionCheck, applicationCorrectionDiagnosticsMarkdown, applicationRejectionTextRows, MAX_REJECTION_TEXT_CHECKS, MAX_REJECTION_TEXT_MESSAGES, MAX_REJECTION_TEXT_CHARS } from '../../electron/ipc/applicationCorrectionDiagnostics.js';
 import { __writeVerifyCandidateGateForTests } from '../../electron/ipc/localAiApplication.js';
 
 const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting systems that reduced manual work.';
@@ -122,6 +122,42 @@ export default [
       assert(applyBugReportCode([], {}, 'APPCORRECT').matchedCodes.includes('APPCORRECT'));
       recordApplicationCorrectionCheck({ stage: 'fit-correction', errors: [] });
       assert(applicationCorrectionDiagnosticsMarkdown().includes('stage `fit-correction` · passed · distinct findings 0'));
+    },
+  },
+  {
+    name: 'APPREJECT exports the bounded wording of rejected checks only on FULL or its own code, redacted and literal',
+    run() {
+      const wording = 'unit-source-grounding: Cover-letter paragraph "p2": (sentence 1) names \u201cWIDGETRON\u201d, which none of its bound career-data quotes states. See /Users/someone/secret/notes.txt and https://example.test/private?token=abc.';
+      for (let index = 0; index < MAX_REJECTION_TEXT_CHECKS + 5; index++) {
+        recordApplicationCorrectionCheck({ jobId: 'reject-text-job', stage: 'convert', errors: [
+          wording, wording, 'x'.repeat(MAX_REJECTION_TEXT_CHARS + 50),
+          ...Array.from({ length: MAX_REJECTION_TEXT_MESSAGES + 2 }, (_unused, item) => `figure-discipline: synthetic finding ${index}-${item}`),
+        ] });
+      }
+      recordApplicationCorrectionCheck({ jobId: 'reject-text-job', stage: 'convert', errors: [] });
+      const rows = applicationRejectionTextRows();
+      assertStrict.equal(rows.length, MAX_REJECTION_TEXT_CHECKS, 'the ring is bounded and a passed check adds no row');
+      assertStrict.equal(rows[0].messages.length, MAX_REJECTION_TEXT_MESSAGES, 'messages per check are bounded');
+      assertStrict.equal(rows[0].total, MAX_REJECTION_TEXT_MESSAGES + 4, 'the distinct total is kept, duplicates are not');
+      assert(rows[0].messages.every(message => message.length <= MAX_REJECTION_TEXT_CHARS), 'each message is clipped');
+      rows[0].messages.length = 0;
+      assertStrict.equal(applicationRejectionTextRows()[0].messages.length, MAX_REJECTION_TEXT_MESSAGES, 'callers receive copies');
+
+      const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic' };
+      const HEADING = '## Application Rejection Text (APPREJECT)';
+      for (const filterCode of ['FULL', 'APPREJECT', 'APPCORRECT+APPREJECT']) {
+        const markdown = generateMarkdown({ ...payload, filterCode }).markdown;
+        assert(markdown.includes(HEADING), `${filterCode} includes the section`);
+        assert(markdown.includes('names \u201cWIDGETRON\u201d'), `${filterCode} keeps the rejection wording`);
+        assert(!markdown.includes('/Users/someone') && !markdown.includes('token=abc'), `${filterCode} redacts paths and URL secrets again at the boundary`);
+        assert(markdown.includes('      unit-source-grounding: Cover-letter paragraph'), 'wording is rendered as indented literal code');
+      }
+      // It quotes generated prose, so nothing short of an explicit FULL or APPREJECT exports it.
+      for (const filterCode of ['', 'APPCORRECT', 'APPLICATION', 'APPVALIDATION', 'APPOUTPUT', 'HANDOFF']) {
+        assert(!generateMarkdown({ ...payload, filterCode }).markdown.includes(HEADING), `${filterCode || 'the default report'} must not export rejection wording`);
+      }
+      assert(!applicationCorrectionDiagnosticsMarkdown().includes('WIDGETRON'), 'the cause-count section stays free of wording');
+      assert(applyBugReportCode([], {}, 'APPREJECT').matchedCodes.includes('APPREJECT'), 'registered filter');
     },
   },
   {

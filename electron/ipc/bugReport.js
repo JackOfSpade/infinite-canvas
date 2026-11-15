@@ -34,7 +34,8 @@ import { buildJobSearchDateHistory } from './bugReport/jobSearchDates.js';
 import { buildOfficialPostingSnapshot } from './bugReport/officialPostingSnapshot.js';
 import { buildOfficialPostingDiscoveryMarkdown } from './officialPostingDiscoveryDiagnostics.js';
 import { applicationCitationDiagnosticsMarkdown } from './applicationCitationDiagnostics.js';
-import { applicationCorrectionDiagnosticsMarkdown } from './applicationCorrectionDiagnostics.js';
+import { applicationCorrectionDiagnosticsMarkdown, applicationRejectionTextRows } from './applicationCorrectionDiagnostics.js';
+import { buildApplicationRejectionTextMarkdown, codeIncludesApplicationRejections } from './bugReport/applicationRejections.js';
 import { claudePauseDiagnosticsMarkdown } from './claudePauseDiagnostics.js';
 import { claudeUsageLimit } from './claudePause.js';
 import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
@@ -2595,6 +2596,13 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     ? applicationCitationDiagnosticsMarkdown() : '';
   const applicationCorrectionsMarkdown = (isFullReport || reportCodes.has('APPCORRECT') || reportCodes.has('APPLICATION') || reportCodes.has('APPVALIDATION'))
     ? applicationCorrectionDiagnosticsMarkdown() : '';
+  // The wording behind those cause codes. It quotes generated prose, so it is
+  // exported only on an explicit FULL or APPREJECT, like APPOUTPUT.
+  let applicationRejectionTextMarkdown = '';
+  if (codeIncludesApplicationRejections(reportCode)) {
+    try { applicationRejectionTextMarkdown = buildApplicationRejectionTextMarkdown(applicationRejectionTextRows()); }
+    catch { applicationRejectionTextMarkdown = '\n## Application Rejection Text (APPREJECT)\n- Unavailable: rejection text could not be safely projected.\n'; }
+  }
 
   // The durable counterpart to the section immediately above: that section is
   // a process-local ring, wiped on restart, so a report filed after a restart
@@ -2881,7 +2889,7 @@ ${viewportBlock}
 - Runtime: Electron ${systemInfo.electronVersion || '?'} · Chromium ${systemInfo.chromiumVersion || '?'} · Node ${systemInfo.nodeVersion || '?'}
 - OS release: ${systemInfo.osRelease}
 - Report generated: ${systemInfo.generatedAt} · timezone ${systemInfo.timezone} · UTC offset ${systemInfo.utcOffsetMinutes >= 0 ? '+' : ''}${systemInfo.utcOffsetMinutes} min
-${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${(isFullReport || reportCodes.has('CLAUDEPAUSE')) ? claudePauseDiagnosticsMarkdown({ current: claudeUsageLimit() }) : ''}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${(isFullReport || reportCodes.has('BTABS')) ? browserTabRestoreDiagnosticsMarkdown() : ''}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
+${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportCodes.has('WSIO') || reportCodes.has('SAVE')) ? workspaceIoDiagnosticsMarkdown() : ''}${buildFreshnessMarkdown}${pointerProbeMarkdown}${persistedWorkspaceMarkdown}${missingPreviewRelinkMarkdown}${activeTasksMarkdown}${sellHubResolveMarkdown}${aiConfigMarkdown}${jobsConfigMarkdown}${jobCompletionAssessmentMarkdown}${jobBoardDiagnosticsMarkdown}${jobCompensationMarkdown}${officialPostingMarkdown}${officialPostingDiscoveryMarkdown}${nonApiHandoffMarkdown}${(isFullReport || reportCodes.has('CLAUDEPAUSE')) ? claudePauseDiagnosticsMarkdown({ current: claudeUsageLimit() }) : ''}${pasteHandoffMarkdown}${applicationCitationsMarkdown}${applicationCorrectionsMarkdown}${applicationRejectionTextMarkdown}${pasteRejectionTraceMarkdown}${applicationOutputMarkdown}${(isFullReport || reportCodes.has('APPLINK')) ? savedApplicationLinkDiagnosticsMarkdown() : ''}${jobLinkMarkdown}${jobSearchDateHistoryMarkdown}${jobRecoveryOfferMarkdown}${jobRecoveryMarkdown}${issueReporterDraftMarkdown}${jobsPipelineMarkdown}${marketplacePipelineMarkdown}${marketplaceModuleRollupMarkdown}${sellHubPriceDropRollupMarkdown}${sessionPersistenceMarkdown}${marketplaceSessionsMarkdown}${jobSessionsMarkdown}${verifyTimingMarkdown}${authWindowMarkdown}${(isFullReport || reportCodes.has('BTABS')) ? browserTabRestoreDiagnosticsMarkdown() : ''}${scraperAdaptationMarkdown}${activeEditableMarkdown}${lastSaveErrorMarkdown}${nodeDiagMarkdown}${mediaMarkdown}${imageMarkdown}
 `;
 
   const events = payload.eventLogs || [];

@@ -81,6 +81,26 @@ Shadow measurement: launch the app with `INFINITE_CANVAS_SHADOW_OFFLOAD` (comma 
 
 ## Session log
 
+### 2026-11-15 — posting-facing letter clauses no longer graded as career claims; rejection wording kept; user-directed; counter not reset
+
+Two bundles on 2026-11-15 took 37 and 48 Claude runs; every one of their 10 conversions was rejected for source grounding. The wording was recovered from the private `.local-ai/claude-runs/<jobId>.jsonl` logs and replayed offline with `scripts/application-grounding-replay.mjs` (64 conversions, 24 jobs since 2026-11-01; 79 of the 82 recorded letter findings reproduce). 110 of 120 grounding rejections in that window were in the cover letter, and the largest avoidable group was the sentence the brief itself asks for, the one that says which of the job's needs a paragraph meets: the posting's own names and qualifier words in it were read as claims about the candidate.
+
+Changed in `localAiApplication.js` (letter paragraphs only; résumé bullets untouched):
+- The posting's names and counts are freed per clause in every letter sentence, not only in sentences no other reading judged. A clause is still free only when it has no first-person word and addresses the target, and a term only when every place the sentence writes it is in such a clause. In a sentence about the candidate's own work only the opening clause (with its own subject), a relative tail and a denial can be free; a later coordinated clause, or one that opens on an action verb with no subject, continues the candidate's work and never is.
+- A relative tail (", which meets your need for …", ", where …") is its own clause for this purpose. It must speak to the reader, this role or the posting in so many words; naming the employer is not enough (the 2026-11-08 rule stands), and a tail that reports a result (", which cut …") stays with its head clause.
+- "the posting" / "the listing" address the target, and a sentence that opens by reading the posting ("As I read the <title> posting, …") with no other first-person word is the posting's throughout.
+- A qualifier word (improve, daily, …) in such a clause is the posting's when the posting states it in an accepted form.
+- A plain denial of experience ("I have not yet built …") is not a claim of it: it owes no shared term and its verb is not an authorship claim. What it names must still be something the posting names. "never" and verbs of failing stay claims.
+- A trailing clause that only states intent ("…, and I would like to learn it from your team") owes the quotes no shared term, as it already did standing alone.
+
+Left alone on purpose: `reportsNoPastWork` and the Amendment 6 past-word reading ("need", "speed" still read as past words, so "…, which answers your need to …" is still rejected as an added clause), derived counts ("three years", "two roles"), and summary clauses that point back with "both"/"them".
+
+- Added the same day on Jack's decision: a sentence stating what the work taught the candidate ("… taught me …", "I learned …") owes the quotes no shared term, and neither does a paragraph made only of such sentences and statements of intent. Only that floor is waived; its names, counts, figures, qualifiers and ownership words are still read against the quotes.
+
+Replay, old code → new code: letter findings 96 → 74 (82 before the lesson change); conversions with any letter finding 54 → 48 of 64; no finding appeared that was not either already present or a later-sentence finding the earlier one had hidden. Tests: `scripts/tests/application-posting-facing-clauses.js`. No live generation was run; the writer and converter prompts are unchanged.
+
+Reporting: the bundle's `Generation Log.jsonl` now records the wording of each rejected round (`detail`) beside its check ids, and bug reports gain `APPREJECT` (in `FULL`): the process-local wording of rejected checks, redacted again on export.
+
 ### 2026-11-07 — DeepSeek routing measured; user-directed; counter not reset
 
 Measured DeepSeek routing for the offloaded calls (method and numbers under Hard rules). Only requirements-audit moved to DeepSeek Flash with reasoning off; the other five provisionally routed stages returned to Claude. The Listen matcher stays on Opus. Worker tasks were replayed offline on stored board rows with `scripts/ai-task-replay.mjs` (Claude ×3 as the noise floor, DeepSeek ×3, the app's own validators; the four research tasks with Offload's built-in web search/fetch, added to `offloadTextCall` as `webTools`): job-scoring, job-preference-evaluation, official-posting research and match, and preference research all stay on Claude (numbers under Hard rules); compensation research cannot be replayed. Interview Q&A stays on Claude until the shadow measurement has data. The label in `config/application-model.json` now ends with "DeepSeek audits" (requirements-audit on DeepSeek Flash), which resets the improvement counter on the next app read after rebuilding. Requirements was re-tested after two host changes that stay in place for every provider: `relinkListingQuoteToExactSlice` now forgives whitespace at the quote's edges (never words, punctuation or case), and a routed stage may set `maxRejections` (1-5) before escalating to Claude. It still failed the first-try rule and stays on Claude.

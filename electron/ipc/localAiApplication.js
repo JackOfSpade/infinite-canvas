@@ -7745,13 +7745,25 @@ export async function getLocalApplicationHandoff(args = {}) {
   try {
     return await readLocalApplicationHandoff(args);
   } catch (error) {
-    if (error?.code !== 'ENOENT' && !isJobIntegrityFault(error)) throw error;
     // The direct Claude driver and the IPC dock must share the same lifecycle
     // reconciliation. A successful save renames the private folder before its
     // final cleanup notification, so an in-flight read may lose that path.
+    // What a read trips on while its folder is leaving is not always a
+    // not-found or an integrity fault: it may have loaded the manifest, lost
+    // the rest, and failed on whatever it tried next. So a job the app itself
+    // is removing, or has a record of having removed, is gone whatever the
+    // read raised; only a job still on disk keeps its error.
     if (await isDiscardingJob(args)) {
       logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=discarding`);
       return { gone: true, handoff: null, localJob: null };
+    }
+    if (error?.code !== 'ENOENT' && !isJobIntegrityFault(error)) {
+      const gone = await goneJobPhase(args);
+      if (gone) {
+        logger.info(`[LocalAI] read of gone job job=${String(args?.jobId || '').slice(0, 8)} phase=${gone}`);
+        return { gone: true, handoff: null, localJob: null };
+      }
+      throw error;
     }
     const status = await localApplicationStatus(args.jobId, args.canvasFilePath).catch(() => null);
     if (status?.status === 'importing') {
@@ -8305,7 +8317,12 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
   const status = nextStage === 'completed' ? 'paste-completed' : nextStage === 'write-verify-human-stop' ? 'failed' : 'queued';
   await appendPasteGenerationLog(dir, { type: 'write-verify-stage', jobId, sequence: next.logCount,
     revision: next.revision, stage: outgoingStage, nextStage, responseSha256: pasteJsonHash(rawText),
-    ...(errors.length ? { checkIds: fitRejected ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds } : {}) });
+    ...(errors.length ? { checkIds: fitRejected ? ['measured-one-page-fit'] : pasteRejectionCheckIds(errors).checkIds } : {}),
+    // The wording, not only the check id: this log is exported into the saved
+    // bundle beside the documents it describes, and the private job folder that
+    // held the correction text is removed on save. Without it a finished run
+    // can show THAT a check rejected a draft and never why.
+    ...(errors.length ? { detail: writeVerifyStageLogDetail(errors) } : {}) });
   await atomicJson(path.join(dir, 'manifest.json'), { ...manifest, status, paste: persisted });
   await fs.promises.unlink(path.join(dir, 'render-hold.json')).catch(error => { if (error?.code !== 'ENOENT') throw error; });
   const localJob = { id: jobId, status, mode: 'paste', revision: next.revision, logCount: next.logCount, folder: dir, ...applicationUnitDiagnostics(work) };
@@ -8313,6 +8330,17 @@ async function submitWriteVerifyHandoff({ root, jobId, dir, manifest, input, fro
     terminal: nextStage === 'write-verify-human-stop', localJob, handoff: null, ...(errors.length ? { validationErrors: errors } : {}) };
   return { accepted: !errors.length, completed: false, localJob, ...(plan ? { rejection: rejectionSummary(plan) } : {}),
     ...(errors.length ? { validationErrors: errors } : {}), handoff: await writeVerifyHandoffRecord({ jobId, input, state: next, corrections: work.lastCorrections || [] }) };
+}
+
+const MAX_STAGE_LOG_DETAIL_ITEMS = 12;
+const MAX_STAGE_LOG_DETAIL_CHARS = 1_200;
+
+function writeVerifyStageLogDetail(errors) {
+  const unique = [...new Set((Array.isArray(errors) ? errors : []).filter(error => typeof error === 'string' && error.trim()))];
+  const detail = unique.slice(0, MAX_STAGE_LOG_DETAIL_ITEMS)
+    .map(error => (error.length > MAX_STAGE_LOG_DETAIL_CHARS ? `${error.slice(0, MAX_STAGE_LOG_DETAIL_CHARS - 1)}…` : error));
+  if (unique.length > detail.length) detail.push(`${unique.length - detail.length} further finding(s) not recorded here.`);
+  return detail;
 }
 
 export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, handoffCode, response, route = null, renderRetry = false } = {}) {
@@ -9156,6 +9184,17 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
   });
 }
 
+async function assertJobFolderStillPresent(dir) {
+  const present = await fs.promises.lstat(dir).then(() => true, error => {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  });
+  if (present) return;
+  const gone = new Error('This Local AI job folder is no longer on disk.');
+  gone.code = 'ENOENT';
+  throw gone;
+}
+
 /**
  * End a paste job whose completion failed on app-owned frozen state.
  *
@@ -9176,15 +9215,30 @@ async function failPasteJobForIntegrityFault({ dir, manifest, jobId, state, pers
     observedAt: new Date().toISOString(),
   };
   const logCount = (state.logCount || 0) + 1;
-  await appendPasteGenerationLog(dir, {
-    type: 'job-integrity-fault', jobId, sequence: logCount, revision: state.revision,
-    stage: state.stage, detail: [integrityFault.message],
-    subject: integrityFault.subject, observation: integrityFault.observation,
-    // A re-grade of an already-completed package observes the fault with no
-    // response in hand. Record no response rather than an empty one: the log
-    // would otherwise claim a paste was rejected when none was submitted.
-    ...(parsed === null ? {} : { responseSha256: pasteJsonHash(parsed), response: parsed }),
-  });
+  // A successful save (and a discard) renames the whole job folder away, and
+  // neither holds this job's mutation lock. A read that loaded the manifest
+  // just before that rename then finds every later file missing, which the
+  // frozen-state grade reports as an integrity fault. That is a folder that
+  // left, not a broken job: there is nothing to record a fault in, and the
+  // append below would fail with a sentence about missing log revisions.
+  // Raise the plain not-found instead, so every caller reconciles it against
+  // the job's lifecycle the way it already does for any other vanished file.
+  await assertJobFolderStillPresent(dir);
+  try {
+    await appendPasteGenerationLog(dir, {
+      type: 'job-integrity-fault', jobId, sequence: logCount, revision: state.revision,
+      stage: state.stage, detail: [integrityFault.message],
+      subject: integrityFault.subject, observation: integrityFault.observation,
+      // A re-grade of an already-completed package observes the fault with no
+      // response in hand. Record no response rather than an empty one: the log
+      // would otherwise claim a paste was rejected when none was submitted.
+      ...(parsed === null ? {} : { responseSha256: pasteJsonHash(parsed), response: parsed }),
+    });
+  } catch (appendError) {
+    // The folder can also leave between the check above and the append.
+    await assertJobFolderStillPresent(dir);
+    throw appendError;
+  }
   await fs.promises.unlink(path.join(dir, 'paste-draft.json')).catch(unlinkError => {
     if (unlinkError?.code !== 'ENOENT') throw unlinkError;
   });
@@ -12729,7 +12783,7 @@ function isImpersonalSourceRestatement(sentence, sourceBodyTokens) {
 // only when it speaks to the reader (second person), names the employer, or
 // points at this role, team or position, which is how a sentence about the
 // target's own stack reads whatever its tense.
-const TARGET_ADDRESS_RE = /\b(?:you|your|yours|yourself|you['’](?:re|ll|ve|d))\b|\bthis\s+(?:role|position|job|team|company|organi[sz]ation|opportunity|department)\b/iu;
+const TARGET_ADDRESS_RE = /\b(?:you|your|yours|yourself|you['’](?:re|ll|ve|d))\b|\bthis\s+(?:role|position|job|team|company|organi[sz]ation|opportunity|department)\b|\b(?:the|this)\s+(?:posting|listing|job\s+(?:description|ad|advert|advertisement))\b/iu;
 const COMPANY_SUFFIX_WORDS = new Set(['inc', 'incorporated', 'llc', 'ltd', 'limited', 'corp', 'corporation', 'co', 'company', 'plc', 'gmbh', 'lp', 'llp']);
 
 export function sentenceAddressesTarget(sentence, targetCompany = '') {
@@ -12783,7 +12837,7 @@ function withoutQuotedRomanOne(text, referenceTexts) {
 // "The way I read it" / "As far as I understand the role" and "My reading of
 // the role is that": a narrow list would make this gate a hidden template.
 const STANCE_HEDGE_RE = new RegExp([
-  String.raw`\b(?:as|if)\s+I\s+(?:read|understand|see)\s+(?:it|this|that|(?:the|your|this)\s+(?:posting|role|position|job|listing|team))(?:\s+(?:right|correctly))?`,
+  String.raw`\b(?:as|if)\s+I\s+(?:read|understand|see)\s+(?:it|this|that|(?:the|your|this)\s+(?:[\p{L}\p{N}'’&/-]+\s+){0,6}?(?:posting|role|position|job|listing|team))(?:\s+(?:right|correctly))?`,
   String.raw`\bfrom\s+what\s+I\s+(?:read|understand|gather|can\s+tell|see)`,
   String.raw`\bI\s+(?:suspect|imagine|gather|expect|think|believe|guess|sense)(?:\s+that)?(?![\p{L}\p{N}])`,
   String.raw`\bI['’]d\s+(?:guess|imagine|bet)(?:\s+that)?(?![\p{L}\p{N}])`,
@@ -12802,25 +12856,153 @@ function speaksAsCandidate(text, referenceTexts = []) {
   return FIRST_PERSON_CLAUSE_RE.test(withoutQuotedRomanOne(withoutStanceHedges(text), referenceTexts));
 }
 
-export function postingFreeClauses(sentence, targetCompany = '', verbHints = null, referenceTexts = []) {
-  const clauses = groundingClauses(sentence, verbHints);
-  const free = clauses.map(clause => !speaksAsCandidate(clause.text, referenceTexts) && sentenceAddressesTarget(clause.text, targetCompany));
-  return { clauses, free };
+// A relative tail (", which meets your need for ...", ", where your team ...")
+// is judged as its own piece: said as its own sentence the same words would be
+// about the target, so a first-person head clause does not make them a claim
+// about the candidate. A tail that reports a consequence of the head's work
+// (", which cut ...") stays with its head, as does a participle (", using ...").
+// The tail has to speak to the reader, this role or the posting in so many
+// words: naming the employer is not enough there, so "..., which meets
+// <Employer>'s need" stays a claim the quotes must state (the employer's name is
+// licensed only by targetIdentityNameLicensed's own frames).
+const POSTING_RELATIVE_TAIL_CUT_RE = /,\s+(?=(?:which|where)\b)/giu;
+// The sentence opens by reading the posting ("As I read the <title> posting, ...").
+const POSTING_READING_FRAME_RE = /^\s*(?:as|the\s+way|as\s+far\s+as)\s+I\s+(?:read|understand|see)\s+(?:it|(?:the|your|this)\s+(?:[\p{L}\p{N}'’&/-]+\s+){0,6}?(?:posting|role|position|job|listing))\s*,/iu;
+
+// A clause that says the candidate has NOT done something ("I have not yet built
+// customer authentication") claims no work: its verb is denied, and what it
+// names is what the candidate lacks. Only the plain perfect denial of a verb of
+// doing the work is read this way, at the start of its clause; "never" and
+// verbs of failing ("I have not missed ...") are boasts and stay claims.
+const EXPERIENCE_DENIAL_CLAUSE_RE = /^(?:(?:and|but|though|although|while)\s+)?(?:I|we)\s+(?:(?:have|had)\s+not|haven['’]t|hadn['’]t)\s+(?:yet\s+)?(?:worked|built|used|written|developed|shipped|implemented|designed|led|managed|done|held|practi[cs]ed|studied|handled|run|owned|deployed|maintained|tested|programmed|coded|administered|operated)\b/iu;
+
+function deniesExperience(clauseText) {
+  return EXPERIENCE_DENIAL_CLAUSE_RE.test(String(clauseText ?? '').trim());
+}
+
+// `careerSentence` is set for a sentence another reading already judges as a
+// statement of the candidate's work. There a clause can carry on that work
+// without a first-person word of its own, so only three places can be the
+// posting's: the sentence's opening clause when it has its own subject (not an
+// implicit-subject action, "Built the pipelines in <tool> for your team"), a
+// relative tail whose verb is not a past one (", which fed ..." reports work),
+// and a denial of experience. A later coordinated clause ("... and feed the
+// rotation in <tool>, the way your team works") continues the candidate's
+// predicate and is never free there.
+export function postingFreeClauses(sentence, targetCompany = '', verbHints = null, referenceTexts = [], { careerSentence = false } = {}) {
+  const pastWord = word => Boolean(word) && (CAREER_ASSERTION_ACTION_RE.test(word) || CAREER_ASSERTION_REGULAR_PAST_RE.test(word) || PAST_EFFECT_WORD_RE.test(word));
+  const opensWithAction = piece => pastWord((String(piece).match(/^[^\p{L}]*([\p{L}'’-]+)/u) || [])[1]);
+  const tailReportsWork = piece => pastWord((String(piece).match(/^(?:which|where)\s+(?:[\p{L}]+ly\s+)?([\p{L}'’-]+)/iu) || [])[1]);
+  const text = String(sentence ?? '');
+  const clauses = [];
+  const free = [];
+  const denial = [];
+  // A sentence that only reads the posting back, with no other first-person
+  // word, is about the target from its first word to its last.
+  const readsPosting = POSTING_READING_FRAME_RE.test(text)
+    && !speaksAsCandidate(text.replace(POSTING_READING_FRAME_RE, ' '), referenceTexts);
+  for (const base of groundingClauses(text, verbHints)) {
+    const raw = text.slice(base.start, base.end);
+    const cuts = [0, ...[...raw.matchAll(POSTING_RELATIVE_TAIL_CUT_RE)].map(match => match.index), raw.length];
+    let headFree = false;
+    for (let position = 0; position + 1 < cuts.length; position += 1) {
+      const slice = raw.slice(cuts[position], cuts[position + 1]);
+      const lead = slice.match(/^[\s,]*/u)[0].length;
+      const piece = slice.slice(lead).trimEnd();
+      if (!piece) continue;
+      const start = base.start + cuts[position] + lead;
+      const candidate = speaksAsCandidate(piece, referenceTexts);
+      let pieceFree;
+      if (readsPosting) pieceFree = true;
+      else if (position === 0) {
+        pieceFree = !candidate && sentenceAddressesTarget(piece, targetCompany)
+          && (!careerSentence || (base.start === 0 && !opensWithAction(piece)));
+      } else {
+        pieceFree = !candidate && !POOLING_OUTCOME_MODIFIER_RE.test(piece) && !tailReportsWork(piece)
+          && (headFree || TARGET_ADDRESS_RE.test(piece));
+      }
+      if (position === 0) headFree = pieceFree;
+      const denies = position === 0 && !readsPosting && deniesExperience(piece);
+      clauses.push({ start, end: start + piece.length, text: piece });
+      free.push(pieceFree || denies);
+      denial.push(denies);
+    }
+  }
+  if (!clauses.length) return { clauses: [{ start: 0, end: text.length, text: text.trim() }], free: [false], denial: [false] };
+  return { clauses, free, denial };
 }
 
 // Whether a piece of text WRITES a claim the grounding reads, judged with no
 // quote at all: a name (the employer's own name aside), a count, a figure, a
 // rate interval, a credential, a calendar year or a qualifier, and with
 // `strength` an ownership or authorship word too.
-function textWritesGroundedClaim(text, grounding, targetCompany, { strength = false, ignore = null } = {}) {
+// With `postingText`, a name, count or qualifier the POSTING itself states is
+// not one the text writes of its own: the caller is asking about a clause that
+// only addresses the target, and restating the posting's own words there says
+// nothing about the candidate. A figure is never the posting's to lend.
+function textWritesGroundedClaim(text, grounding, targetCompany, { strength = false, ignore = null, postingText = '' } = {}) {
+  const posting = String(postingText || '').trim();
   const ctx = {
-    ...grounding, postingText: '', postingFree: null, exemptClause: null, targetOwnedFree: false,
+    ...grounding, postingText: posting, postingFree: null, exemptClause: null, targetOwnedFree: false,
     trustedNames: [...(Array.isArray(grounding?.trustedNames) ? grounding.trustedNames : []), ...(targetCompany ? [targetCompany] : [])],
   };
   if (claimGroundingFindings(text, [], ctx).some(finding => finding.code !== 'clause' && !(ignore && ignore(finding)))) return true;
   if (sourceGroundingFigures(text).length) return true;
-  return SOURCE_GROUNDING_QUALIFIER_RULES.some(rule => (strength || !rule.strength)
-    && (rule.assess ? Boolean(rule.assess(text, [], ctx)) : rule.claim.test(text)));
+  return SOURCE_GROUNDING_QUALIFIER_RULES.some((rule) => {
+    if (!strength && rule.strength) return false;
+    if (rule.assess) return Boolean(rule.assess(text, posting ? [posting] : [], ctx));
+    const match = text.match(rule.claim);
+    return Boolean(match) && !(posting && qualifierSourcePattern(rule, match[0]).test(posting));
+  });
+}
+
+// The qualifier words of a clause that only addresses the target ("... your call
+// to improve existing products") are the posting's when the posting states every
+// one of them in an accepted form. Such a clause is blanked, at the same length,
+// from the text the qualifier reading is given; any other clause is left as is.
+function postingStatesClauseQualifiers(clauseText, postingText, grounding) {
+  const posting = String(postingText || '').trim();
+  if (!posting) return false;
+  // A clause with no qualifier word has nothing for the posting to state, and
+  // its other words still say which work the rest of the sentence is about.
+  const writesQualifier = SOURCE_GROUNDING_QUALIFIER_RULES.some(rule => (rule.assess
+    ? Boolean(rule.assess(clauseText, [], grounding)) : rule.claim.test(clauseText)));
+  if (!writesQualifier) return false;
+  return SOURCE_GROUNDING_QUALIFIER_RULES.every((rule) => {
+    if (rule.assess) return !rule.assess(clauseText, [posting], grounding);
+    const match = clauseText.match(rule.claim);
+    return !match || qualifierSourcePattern(rule, match[0]).test(posting);
+  });
+}
+
+// Whether [start, end) lies in a clause whose qualifier words are not the
+// candidate's claims: a denial of experience, or a clause that only addresses
+// the target and uses only qualifier words the posting states.
+function qualifierFreeSpanContains(grant, start, end, postingText, grounding) {
+  return Boolean(grant) && grant.clauses.some((clause, index) => grant.free[index] && start >= clause.start && end <= clause.end
+    && (grant.denial?.[index] || postingStatesClauseQualifiers(clause.text, postingText, grounding)));
+}
+
+function withoutPostingStatedQualifierClauses(sentence, grant, postingText, grounding) {
+  let text = String(sentence ?? '');
+  if (!grant) return text;
+  grant.clauses.forEach((clause, index) => {
+    if (!grant.free[index]) return;
+    if (!grant.denial?.[index] && !postingStatesClauseQualifiers(clause.text, postingText, grounding)) return;
+    text = `${text.slice(0, clause.start)}${' '.repeat(clause.end - clause.start)}${text.slice(clause.end)}`;
+  });
+  return text;
+}
+
+// The sentence with its denials of experience blanked at the same length: what
+// is left is what the sentence says the candidate DID.
+function withoutExperienceDenials(sentence, grant) {
+  let text = String(sentence ?? '');
+  if (!grant?.denial?.some(Boolean)) return text;
+  grant.clauses.forEach((clause, index) => {
+    if (grant.denial[index]) text = `${text.slice(0, clause.start)}${' '.repeat(clause.end - clause.start)}${text.slice(clause.end)}`;
+  });
+  return text;
 }
 
 // A clause that speaks as the candidate ("My <tool> modules run on <tool>",
@@ -12918,7 +13100,7 @@ function termOnlyWrittenAsTargets(sentence, finding) {
   return places.length > 0 && places.every(place => TARGET_OWNER_BEFORE_RE.test(text.slice(0, place.index)));
 }
 
-function clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, referenceTexts) {
+function clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, referenceTexts, postingText = '') {
   const text = String(part ?? '');
   const at = String(sentence ?? '').indexOf(text);
   return at > 0 && TARGET_ONLY_CLAUSE_LEAD_RE.test(String(sentence).slice(0, at))
@@ -12926,7 +13108,7 @@ function clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, ref
     && sentenceAddressesTarget(text, targetCompany)
     && !speaksAsCandidate(text, referenceTexts)
     && !CAREER_ASSERTION_ACTION_RE.test(text) && !CAREER_ASSERTION_REGULAR_PAST_RE.test(text) && !PAST_EFFECT_WORD_RE.test(text)
-    && !textWritesGroundedClaim(text, grounding, targetCompany, { strength: true });
+    && !textWritesGroundedClaim(text, grounding, targetCompany, { strength: true, postingText });
 }
 
 export const __clauseOnlyAddressesTargetForTests = clauseOnlyAddressesTarget;
@@ -13074,6 +13256,8 @@ function poolingClaimRecords(sentence, clauses, grounding, { figures }) {
   clauses.forEach((clause, clauseIndex) => {
     for (const rule of SOURCE_GROUNDING_QUALIFIER_RULES) {
       const found = rule.assess ? rule.assess(clause.text, [], grounding) : (match => (match ? { match: match[0] } : null))(clause.text.match(rule.claim));
+      // A qualifier the posting states, in a clause that only addresses the target, is the posting's (see withoutPostingStatedQualifierClauses).
+      if (found && grounding?.postingText && qualifierFreeSpanContains(grounding.postingFree, clause.start, clause.end, grounding.postingText, grounding)) continue;
       if (found) records.push({ kind: 'qualifier', rule, term: found.match, clauseIndexes: [clauseIndex], clauseText: clause.text });
     }
     if (figures) {
@@ -13377,6 +13561,20 @@ function clipReportedSentence(sentence) {
   return text.length > MAX_REPORTED_SENTENCE_CHARS ? `${text.slice(0, MAX_REPORTED_SENTENCE_CHARS - 1)}…` : text;
 }
 
+// The brief asks the letter to close on what the candidate's past work taught
+// them. That sentence is a reflection, not a restatement of the work, so its
+// words are its own and it owes the cited quotes no shared term (2026-11-15,
+// user-directed: it was the largest remaining group of letter rejections).
+// Only that floor is waived. Every name, count, figure, qualifier and
+// ownership word in it is still read against the quotes like any other
+// sentence's, so "My work taught me to lead teams of 40 in <tool>" is still
+// three claims.
+const LESSON_LEARNED_RE = /\b(?:taught|showed|reminded)\s+(?:me|us)\b|(?<![\p{L}\p{N}])(?:I|[Ww]e)\s+(?:(?:also|then|have|have\s+also)\s+)?(?:learned|learnt)\b/u;
+
+function statesLessonLearned(sentence) {
+  return LESSON_LEARNED_RE.test(String(sentence ?? ''));
+}
+
 export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, index, options) {
   // identityTokens decide which third-person sentences count as candidate
   // career prose. An empty list is a real state; an ABSENT one quietly narrows
@@ -13407,9 +13605,11 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
   const sharedTerms = label === 'coverLetterParagraphs' ? letterSharedTerms(quoteTokens) : tokens => tokens.filter(token => quoteTokens.has(token));
   const shared = sharedTerms(finalTokens);
   const minimumShared = finalTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
+  // A paragraph made only of intent and of what the work taught the candidate
+  // (see statesLessonLearned) restates no work, so it owes no shared term either.
   const applicationIntentOnly = label === 'coverLetterParagraphs' && String(finalText).trim() !== ''
     && groundingSentences(finalText).every(sentence => speaksOnlyOfApplicationIntent(sentence)
-      || speaksOnlyOfIntent(sentence));
+      || speaksOnlyOfIntent(sentence) || statesLessonLearned(sentence));
   if ((!finalTokens.length || shared.length < minimumShared) && !applicationIntentOnly) {
     const unit = label === 'resumeBullets' ? 'résumé bullet' : 'cover-letter paragraph';
     const ordinal = `${unit} ${index + 1}`;
@@ -13450,7 +13650,13 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
   // A clause that only addresses the target owes the quotes no shared term; see clauseOnlyAddressesTarget.
   const letterGrounding = {
     ...grounding,
-    exemptClause: (part, sentence) => clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, referenceTexts),
+    // So does a clause that only states an intent ("..., and I would welcome the
+    // chance to learn it from your team"): standing alone it is exempt already.
+    exemptClause: (part, sentence) => clauseOnlyAddressesTarget(part, sentence, grounding, targetCompany, referenceTexts, postingText)
+      || (speaksOnlyOfIntent(withoutQuotedRomanOne(part, referenceTexts)) && reportsNoPastWork(part)
+        && !textWritesGroundedClaim(part, grounding, targetCompany, { postingText }))
+      // And a clause that denies experience (see deniesExperience) and names only what the posting names.
+      || (deniesExperience(part) && !textWritesGroundedClaim(part, grounding, targetCompany, { postingText })),
   };
   for (const [sentenceIndex, sentence] of groundingSentences(finalText).entries()) {
     if (speaksOnlyOfApplicationIntent(sentence)) continue;
@@ -13472,8 +13678,9 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     // Only a CLAUSE ADDRESSED TO THE TARGET, with no first-person word, in a
     // sentence that NO older reading judged may use the posting's names and
     // counts (never its figures); see postingFreeClauses.
-    const postingGrant = (impersonalRestatement || firstPersonClaim) && postingText.trim() !== '' && !claimSentence
-      ? postingFreeClauses(sentence, targetCompany, sourceVerbHints, referenceTexts)
+    const postingGrant = postingText.trim() !== ''
+      ? postingFreeClauses(sentence, targetCompany, sourceVerbHints, referenceTexts,
+        { careerSentence: !(impersonalRestatement || firstPersonClaim) || claimSentence })
       : null;
     const postingFree = Boolean(postingGrant?.free.some(Boolean));
     const sentenceGrounding = postingFree ? { ...baseGrounding, postingText, postingFree: postingGrant } : baseGrounding;
@@ -13487,7 +13694,12 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
     if (figureSentence) {
       assertSupportedSourceFigures(sentence, sourceQuotes, `${unit}, sentence ${sentenceIndex + 1}`);
     }
-    if (candidateCareerSentence) {
+    // A sentence whose only statement about the candidate's work is that there
+    // is none ("I have not yet worked on ...") has nothing the quotes could
+    // restate, so it owes them no shared term; its other readings still run.
+    const affirmsWork = candidateCareerSentence && !statesLessonLearned(sentence)
+      && (!postingGrant?.denial?.some(Boolean) || isCandidateCareerSentence(withoutExperienceDenials(sentence, postingGrant), identityTokens));
+    if (affirmsWork) {
       const sentenceTokens = meaningfulSourceTokens(sentence);
       const sentenceShared = sharedTerms(sentenceTokens);
       const sentenceMinimum = sentenceTokens.length === 1 ? 1 : MIN_SHARED_SOURCE_TERMS;
@@ -13517,8 +13729,9 @@ export function assertSourceQuoteLinksFinalText(finalText, sourceQuotes, label, 
       continue;
     }
     const sentenceUnit = `${unit}, sentence ${sentenceIndex + 1}`;
+    const qualifierText = postingFree ? withoutPostingStatedQualifierClauses(sentence, postingGrant, postingText, grounding) : sentence;
     const failures = collectGroundingFailures([
-      () => assertSupportedSourceQualifiers(sentence, sourceQuotes, sentenceUnit, grounding),
+      () => assertSupportedSourceQualifiers(qualifierText, sourceQuotes, sentenceUnit, grounding),
     ]);
     failures.push(...claimGroundingFailureParts(sentence, sourceQuotes, sentenceUnit, sentenceGrounding));
     failures.push(...roleStrengthFailureParts(sentence, sourceQuotes, sentenceUnit, options));

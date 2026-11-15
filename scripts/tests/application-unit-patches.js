@@ -282,9 +282,14 @@ export default [
     assert(!result.accepted && result.validationErrors.some(error => error.startsWith('unit-patch: ') && error.includes('p-3')), 'round explains its unit-patch format or settled-unit violation');
     assert(candidate.corrections === 2, 'refusal spends the existing content budget'); nodeAssert.deepEqual(candidate.structured, docs);
   }) })),
-  { name: 'W5 R2 unit patches: an unchanged field has its own no-op correction', run: () => withSeededJob({}, async ({ docs, submit, read }) => {
+  { name: 'W5 R2 unit patches: an unchanged field has its own no-op correction', run: () => withSeededJob({}, async ({ docs, submit, read, file }) => {
     const result = await submit({ patches: [{ unit: 'p-3', op: 'set', fields: { text: docs.coverLetter.paragraphs[2].text } }] });
     assert(result.validationErrors.some(error => error.startsWith('unit-patch: ') && error.includes('"p-3"') && error.includes('text') && error.includes('already equal')), 'no-op names the unit and field');
+    // The bundle's own Generation Log keeps the wording of the rejection, not only its check id: the private folder that
+    // held the correction text is removed on save, and without this a saved run cannot say why a round was rejected.
+    const logged = (await fs.promises.readFile(path.join(path.dirname(file), 'Generation Log.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line)).at(-1);
+    assert(logged.type === 'write-verify-stage' && Array.isArray(logged.checkIds) && logged.checkIds.length > 0, 'the rejected round is logged with its check ids');
+    nodeAssert.deepEqual(logged.detail, [...new Set(result.validationErrors)], 'and with the same wording the responder was sent');
     nodeAssert.deepEqual((await read()).paste.writeVerify.candidates[0].structured, docs);
   }) },
   { name: 'W5 R3 unit patches: returning to an earlier document stops the candidate before its remaining budget is spent', run: () => withSeededJob({ configure: ({ docs }) => { docs.resume.schemaVersion = 'structured-resume.v1'; docs.resume.identity = { name: 'Ada Lovelace', contact: ['ada@example.test'] }; docs.coverLetter.contact = ['ada@example.test']; } }, async ({ docs, submit, read }) => {
