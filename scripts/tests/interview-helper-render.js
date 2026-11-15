@@ -225,6 +225,23 @@ const FOLDERS = [
   { token: 'tok-discord', company: 'Discord', location: 'Remote', role: 'Product Manager', label: 'Discord · Product Manager', modifiedAt: '2026-10-08T00:00:00.000Z' },
   { token: 'tok-acme', company: 'Acme', location: 'Toronto', role: 'Engineer', label: 'Acme · Engineer', modifiedAt: '2026-10-01T00:00:00.000Z' },
 ];
+const OTHER_BUNDLE_ID = '9'.repeat(64);
+// The dropdown is the only way to change the application: picking another
+// folder replaces the current bundle (there is no separate remove control).
+const SWITCH_APPLICATION_API = {
+  listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+  selectInterviewApplicationFolder: async () => publicBundle(OTHER_BUNDLE_ID, '8'.repeat(64)),
+};
+async function switchApplication(bundle, window) {
+  await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+  await settle(bundle);
+  await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
+  await settle(bundle);
+}
+// With an application selected, the list starts with the "None" option.
+function firstFolderOption(window) {
+  return [...window.document.querySelectorAll('[role="option"]')].find(item => item.textContent !== 'None');
+}
 const qaCard = (id, scope, question, extra = {}) => ({ id, scope, question, variants: [], headline: `${question} headline`, bullets: [{ stage: 'action', text: `${id} bullet` }], example: `${id} example`, extensions: [], origin: 'catalog', source: null, author: 'generated', status: 'ready', thinEvidence: false, ...extra });
 function qaFixture() {
   return {
@@ -502,7 +519,7 @@ export default [
             const combobox = window.document.querySelector('[role="combobox"]');
             await bundle.module.act(async () => { combobox.click(); await flush(); });
             await settle(bundle);
-            const option = window.document.querySelector('[role="option"]');
+            const option = firstFolderOption(window);
             await bundle.module.act(async () => { option.click(); await flush(); });
             await settle(bundle, 6);
           };
@@ -557,7 +574,7 @@ export default [
           // compilation merely because both actions update setup state.
           await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
           await settle(bundle);
-          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); pendingParse.resolve({ success: true, careerSnapshotId: SNAPSHOT_A, fingerprint: 'fingerprint', profile: { identity: { name: 'Private Candidate' } }, careerData: 'raw private source' }); await flush(); });
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); pendingParse.resolve({ success: true, careerSnapshotId: SNAPSHOT_A, fingerprint: 'fingerprint', profile: { identity: { name: 'Private Candidate' } }, careerData: 'raw private source' }); await flush(); });
           const persisted = JSON.stringify(updates.map(item => item.patch));
           assert(!persisted.includes('/private/candidate/career.md') && !persisted.includes('Private Candidate') && !persisted.includes('raw private source'), 'career import persistence must contain no path, profile, or raw source');
           assert(updates.some(item => item.patch.interviewHelperCareerFilenames?.[0] === 'career.md'), 'only a safe filename may be retained');
@@ -674,17 +691,19 @@ export default [
           loadInterviewApplicationBundle: async () => publicBundle(),
           prepareInterviewBrief: async () => pending.promise,
           launchInterviewWindow: async args => { launches.push(args); },
+          ...SWITCH_APPLICATION_API,
         };
         const root = await mount(bundle, window, { initialData: { interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
         try {
           await bundle.module.act(async () => { await flush(); });
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
-          // Removing the bundle clears the canonical URL, which must fence the
-          // in-flight preparation so its late response cannot land.
-          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
+          // Switching to an application without a posting link clears the
+          // canonical URL, which must fence the in-flight preparation so its
+          // late response cannot land.
+          await switchApplication(bundle, window);
           await bundle.module.act(async () => { pending.resolve({ brief: publicBrief() }); await flush(); });
           assert(!updates.some(item => item.patch.interviewHelperPreparation?.briefId === publicBrief().briefId), 'a late preparation response must not resurrect a stale brief after URL invalidation');
-          assert(updates.some(item => item.patch.interviewHelperJobUrl === null), 'removing the bundle must clear the job URL binding');
+          assert(updates.some(item => item.patch.interviewHelperJobUrl === null), 'switching to an application without a posting link must clear the job URL binding');
           const binding = `v1:${SNAPSHOT_A}:${JOB_URL}:${BUNDLE_ID}`;
           await bundle.module.act(async () => {
             // Inject an already validated public brief only through the probe's
@@ -835,6 +854,7 @@ export default [
             loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
             loadInterviewApplicationBundle: async () => publicBundle(),
             completeNonApiAiRun: async id => { completions.push(id); return { cleared: true }; },
+            ...SWITCH_APPLICATION_API,
           };
           const root = await mount(bundle, window, { initialData: base(runId), nodes: sourceNodes(), onPersist: (patch, next) => updates.push({ patch, next }) });
           try {
@@ -843,10 +863,22 @@ export default [
           } finally { await bundle.module.act(async () => root.unmount()); }
         };
         await mountCase('interview-helper:prepare:interview-helper:remove-bundle', async (updates, completions) => {
-          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
+          await switchApplication(bundle, window);
           assert(completions[0] === 'interview-helper:prepare:interview-helper:remove-bundle'
+            && updates.some(item => item.patch.interviewHelperApplicationBundle?.artifactId === OTHER_BUNDLE_ID && item.patch.interviewHelperJobUrl === null && item.patch.interviewHelperPreparation === null),
+          'switching the application must retire a settled preparation recovery before replacing its opaque reference and job URL');
+        });
+        await mountCase('interview-helper:prepare:interview-helper:none-option', async (updates, completions) => {
+          await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+          await settle(bundle);
+          const options = [...window.document.querySelectorAll('[role="option"]')];
+          assert(options[0]?.textContent === 'None' && options.length === FOLDERS.length + 1, 'a selected application must offer None ahead of the folders');
+          await bundle.module.act(async () => { options[0].click(); await flush(); });
+          await settle(bundle);
+          assert(completions[0] === 'interview-helper:prepare:interview-helper:none-option'
             && updates.some(item => item.patch.interviewHelperApplicationBundle === null && item.patch.interviewHelperJobUrl === null && item.patch.interviewHelperPreparation === null),
-          'removing a bundle must retire a settled preparation recovery before clearing its opaque reference and job URL');
+          'choosing None must retire a settled preparation recovery before clearing the application and its job URL');
+          assert(window.document.querySelector('[role="combobox"]').getAttribute('aria-expanded') === 'false', 'choosing None must close the listbox');
         });
         await mountCase('interview-helper:prepare:interview-helper:clear-source', async (updates, completions) => {
           await bundle.module.act(async () => { window.document.querySelector('[aria-label="Clear imported career source"]').click(); await flush(); });
@@ -932,6 +964,7 @@ export default [
           loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
           loadInterviewApplicationBundle: async () => publicBundle(),
           prepareInterviewBrief: async () => pending.promise,
+          ...SWITCH_APPLICATION_API,
           completeNonApiAiRun: async runId => {
             completions.push(runId);
             if (cleanupOutcome === 'fail') throw new Error('offline');
@@ -943,7 +976,7 @@ export default [
         try {
           await bundle.module.act(async () => { await flush(); });
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
-          await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
+          await switchApplication(bundle, window);
           assert(completions.length === 0, 'input invalidation must not retire an in-flight manual worker before its response is terminal');
           await bundle.module.act(async () => { pending.resolve({ brief: publicBrief() }); await flush(); });
           assert(completions.length === 1, 'a terminal stale response must be retired exactly once');
@@ -1151,13 +1184,14 @@ export default [
           loadInterviewApplicationBundle: async () => publicBundle(),
           prepareInterviewBrief: async () => stalePending.promise,
           completeNonApiAiRun: async runId => { staleCompletions.push(runId); return { cleared: true }; },
+          ...SWITCH_APPLICATION_API,
         };
         const staleRoot = await mount(bundle, window, { initialData: { interviewHelperCareerMode: 'import', interviewHelperCareerSnapshotId: SNAPSHOT_A, interviewHelperCareerGeneration: 'approved-generation', interviewHelperCareerCompilation: { version: 1, status: 'approved', generation: 'approved-generation', careerSnapshotId: SNAPSHOT_A }, interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme application', digest: BUNDLE_DIGEST } }, nodes: sourceNodes() });
         try {
           await bundle.module.act(async () => { await flush(); });
           await bundle.module.act(async () => { button(window, 'Prepare interview brief').click(); await flush(); });
+          await switchApplication(bundle, window);
           await bundle.module.act(async () => {
-            window.document.querySelector('[aria-label="Remove selected application bundle"]').click();
             assert(staleCompletions.length === 0, 'changing input must not retire a genuinely local preparing worker before it settles');
             stalePending.reject(new Error('terminal preparation rejection'));
             await flush();
@@ -1263,8 +1297,11 @@ export default [
         await runAbandonmentCase({
           suffix: 'url',
           status: 'preparing',
+          // Re-picking the same application after its posting link is gone.
           action: async () => {
-            await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); });
+            await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
+            await settle(bundle);
+            await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
           },
           assertion: updates => assert(updates.some(item => item.patch.interviewHelperJobUrl === null && item.patch.interviewHelperPreparation === null), 'clearing the bundle URL must clear preparation only after retirement'),
         });
@@ -1274,7 +1311,7 @@ export default [
           action: async () => {
             await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
             await settle(bundle);
-            await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+            await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
           },
           assertion: updates => assert(updates.some(item => item.patch.interviewHelperApplicationBundle?.artifactId === '9'.repeat(64) && item.patch.interviewHelperPreparation === null), 'bundle replacement must clear preparation only after retirement'),
         });
@@ -1349,7 +1386,7 @@ export default [
           assert(text(window).includes('Independent career snapshot ready'), 'fixture must show the imported career data before setup changes');
           await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
           await settle(bundle);
-          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
           assert(updates.some(item => item.patch.interviewHelperJobUrl === null), 'choosing another bundle must rewrite the job URL from the chosen bundle');
           assert(text(window).includes('Independent career snapshot ready'), 'bundle setup changes must not clear the imported career data');
           assert(!updates.some(item => Object.hasOwn(item.patch, 'interviewHelperCareerSnapshotId') || Object.hasOwn(item.patch, 'interviewHelperCareerMode')), 'bundle updates must clear only preparation state, never career evidence');
@@ -1372,6 +1409,7 @@ export default [
               loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
               loadInterviewApplicationBundle: loader,
               completeNonApiAiRun: async id => { completions.push(id); return { cleared: true }; },
+              ...SWITCH_APPLICATION_API,
             };
             const root = await mount(bundle, window, {
               initialData: {
@@ -1389,9 +1427,9 @@ export default [
               assert(text(window).includes('The selected application bundle is unavailable'), `${variant}/${status}: the bundle error must be visible`);
               const resume = button(window, 'Resume preparation');
               assert(!resume || resume.disabled, `${variant}/${status}: preparation must stay disabled while the bundle is unverified`);
-              await bundle.module.act(async () => { window.document.querySelector('[aria-label="Remove selected application bundle"]').click(); await flush(); await flush(); });
-              assert(completions.includes(runId), `${variant}/${status}: removing the bundle must retire the recovery run`);
-              assert(updates.some(item => item.patch.interviewHelperApplicationBundle === null && item.patch.interviewHelperPreparationRunId === null), `${variant}/${status}: the recovery is cleared only after retirement`);
+              await switchApplication(bundle, window);
+              assert(completions.includes(runId), `${variant}/${status}: replacing the bundle must retire the recovery run`);
+              assert(updates.some(item => item.patch.interviewHelperApplicationBundle?.artifactId === OTHER_BUNDLE_ID && item.patch.interviewHelperPreparationRunId === null), `${variant}/${status}: the recovery is cleared only after retirement`);
             } finally { await bundle.module.act(async () => root.unmount()); }
           });
         }
@@ -1513,7 +1551,7 @@ export default [
           assert(/^interview-helper:prepare:/u.test(runId || ''), 'prepare must record its durable run id');
           await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
           await settle(bundle);
-          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
           await bundle.module.act(async () => { prep.reject(new Error('worker interrupted')); await flush(); await flush(); await flush(); });
           assert(updates.some(item => item.patch.interviewHelperPreparation?.status === 'failed' && item.patch.interviewHelperPreparationRunId === runId), 'the interrupted prepare must leave a resumable recovery while the picker is open');
           await bundle.module.act(async () => { picker.resolve(publicBundle('9'.repeat(64), '8'.repeat(64))); await flush(); await flush(); await flush(); });
@@ -1552,7 +1590,7 @@ export default [
           const before = updates.length;
           await bundle.module.act(async () => { window.document.querySelector('[role="combobox"]').click(); await flush(); });
           await settle(bundle);
-          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); await flush(); await flush(); });
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); await flush(); await flush(); });
           assert(!updates.slice(before).some(item => item.patch.interviewHelperPreparation === null || item.patch.interviewHelperPreparationRecordId === null), 'an identical bundle must not clear the finished brief');
           assert(button(window, 'Launch interview view'), 'the finished brief must still be launchable after re-picking the same bundle');
         } finally { await bundle.module.act(async () => root.unmount()); }
@@ -1881,7 +1919,7 @@ export default [
           const combobox = window.document.querySelector('[role="combobox"]');
           await bundle.module.act(async () => { combobox.click(); await flush(); });
           await settle(bundle);
-          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
           await settle(bundle, 6);
           assert(updates.some(patch => patch.interviewHelperJobUrl === JOB_URL), `choosing a bundle must overwrite the saved job URL with the bundle URL, got ${JSON.stringify(updates.map(patch => patch.interviewHelperJobUrl))}`);
         } finally { await bundle.module.act(async () => root.unmount()); }
@@ -1908,7 +1946,7 @@ export default [
           const combobox = window.document.querySelector('[role="combobox"]');
           await bundle.module.act(async () => { combobox.click(); await flush(); });
           await settle(bundle);
-          await bundle.module.act(async () => { window.document.querySelector('[role="option"]').click(); await flush(); });
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
           await settle(bundle, 6);
           assert(text(window).includes('This application has no job posting link, so preparation cannot research it. Regenerate the application, then choose it again.'), 'a bundle without a job URL must explain that preparation cannot research it');
           assert(button(window, 'Prepare interview brief').disabled, 'preparation must stay disabled without a canonical job URL');

@@ -397,14 +397,16 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
       return false;
     }
   }, [data.interviewHelperJobUrl, data.locked, id, invalidatePreparation, persist, retireRecoverableManualAiRun]);
-  const removeBundle = useCallback(async () => {
-    if (data.locked || !data.interviewHelperApplicationBundle) return;
-    // Fence an open picker so it cannot restore the removed bundle afterwards.
+  // Reached through the dropdown's "None" option; nothing on disk is touched.
+  const clearBundle = useCallback(async () => {
+    if (data.locked || !data.interviewHelperApplicationBundle) return false;
+    // Fence an open picker so it cannot restore the cleared bundle afterwards.
     bundleOperationRef.current += 1;
     setBundlePickerError(null);
-    if (recoverablePreparationRunId && !await retireRecoverableManualAiRun('preparation', recoverablePreparationRunId)) return;
+    if (recoverablePreparationRunId && !await retireRecoverableManualAiRun('preparation', recoverablePreparationRunId)) return false;
     invalidatePreparation();
     persist({ interviewHelperApplicationBundle: null, interviewHelperJobUrl: null, ...clearPreparationState() });
+    return true;
   }, [data.interviewHelperApplicationBundle, data.locked, invalidatePreparation, persist, recoverablePreparationRunId, retireRecoverableManualAiRun]);
   const compileCareerFiles = useCallback(async files => {
     let filePaths = (Array.isArray(files) ? files : []).map(file => file?.filePath || file?.path).filter(path => typeof path === 'string' && path.trim() && !/\.app[\\/]*$/iu.test(path));
@@ -572,8 +574,8 @@ export const InterviewHelperNode = React.memo(function InterviewHelperNode({ id,
       {activeSnapshotId && loaded.status === 'loading' && <p role="status" className="text-xs text-white/50">Loading the pinned career snapshot…</p>}{activeSnapshotId && loaded.status === 'error' && <p role="alert" className="text-xs text-red-200">The selected career snapshot is unavailable. Choose or compile another source.</p>}
       <section className="break-inside-avoid space-y-2 border-t border-white/10 pt-3" aria-label="2. Application">
         <p className="text-[11px] font-medium text-violet-200">2. Application</p>
-        <InterviewApplicationPicker nodeId={id} canvasFilePath={navigation?.getCurrentFile?.() || navigation?.currentFile || null} selectedLabel={persistedBundle?.label} disabled={data.locked} onSelect={chooseBundle} />
-        {data.interviewHelperApplicationBundle && <><p className="text-[11px] text-white/60">{persistedBundle?.label || 'Selected application bundle'}{persistedBundle?.integritySummary ? ` · ${persistedBundle.integritySummary}` : ''}{bundleLoadStatus === 'loading' ? ' · checking…' : ''}</p><button type="button" className="text-xs text-violet-200 underline disabled:opacity-50" onClick={removeBundle} disabled={data.locked} aria-label="Remove selected application bundle">Remove application bundle</button></>}
+        <InterviewApplicationPicker nodeId={id} canvasFilePath={navigation?.getCurrentFile?.() || navigation?.currentFile || null} selectedLabel={persistedBundle?.label} disabled={data.locked} hasSelection={Boolean(data.interviewHelperApplicationBundle)} onSelect={chooseBundle} onClear={clearBundle} />
+        {data.interviewHelperApplicationBundle && <><p className="text-[11px] text-white/60">{persistedBundle?.label || 'Selected application bundle'}{persistedBundle?.integritySummary ? ` · ${persistedBundle.integritySummary}` : ''}{bundleLoadStatus === 'loading' ? ' · checking…' : ''}</p></>}
         {bundlePickerError && <p role="alert" className="text-[11px] text-red-200">{bundlePickerError}</p>}{bundleLoadStatus === 'error' && <p role="alert" className="text-[11px] text-red-200">The selected application bundle is unavailable, changed, or cannot be checked in this app version. Replace it to prepare.</p>}
         {persistedBundle && !canonicalInterviewJobUrl(data.interviewHelperJobUrl) && <p role="status" className="text-[11px] text-amber-100">This application has no job posting link, so preparation cannot research it. Regenerate the application, then choose it again.</p>}
       </section>

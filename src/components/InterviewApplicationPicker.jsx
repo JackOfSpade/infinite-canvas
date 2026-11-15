@@ -1,7 +1,9 @@
 import React, { useId, useRef, useState } from 'react';
 
 /** Tokens, not filesystem paths, cross this searchable Applied Jobs chooser. */
-export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disabled, selectedLabel, onSelect }) {
+const NONE_OPTION = { none: true, token: '__none__' };
+
+export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disabled, selectedLabel, hasSelection = false, onSelect, onClear }) {
   const id = useId();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -15,6 +17,9 @@ export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disa
   const selectionBusy = useRef(false);
   const options = result.folders.filter(folder => [folder.company, folder.role, folder.location, folder.label]
     .some(value => String(value || '').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())));
+  // "None" clears the current choice; it is offered only while something is
+  // selected and the list is not being searched.
+  const items = hasSelection && onClear && !query.trim() ? [NONE_OPTION, ...options] : options;
 
   const close = () => { openRef.current = false; sequence.current += 1; setOpen(false); setActive(-1); setLoading(false); };
   const show = async () => {
@@ -34,7 +39,7 @@ export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disa
     if (!folder || disabled || selectionBusy.current) return;
     selectionBusy.current = true; setSelecting(true); setError('');
     try {
-      const accepted = await onSelect(folder.token);
+      const accepted = folder.none ? await onClear() : await onSelect(folder.token);
       if (accepted !== false) { setQuery(''); close(); }
     } catch (failure) { setError(failure?.message || 'Could not select this application. Try again.'); }
     finally { selectionBusy.current = false; setSelecting(false); }
@@ -45,35 +50,37 @@ export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disa
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
       if (!open) { void show(); return; }
-      const n = options.length;
+      const n = items.length;
       // ArrowUp from the unselected state (-1) wraps to the last option.
       const next = !n ? -1 : event.key === 'ArrowDown' ? (active + 1) % n : active < 0 ? n - 1 : (active - 1 + n) % n;
       setActive(next);
       document.getElementById(`${id}-option-${next}`)?.scrollIntoView?.({ block: 'nearest' });
-    } else if (event.key === 'Enter' && open) { event.preventDefault(); if (!loading) void select(options[active]); }
+    } else if (event.key === 'Enter' && open) { event.preventDefault(); if (!loading) void select(items[active]); }
   };
 
   return <div className="relative" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(); }}>
-    <label htmlFor={id} className="mb-1 block text-[10px] font-semibold text-[var(--text-muted)]">Application under Applied Jobs</label>
+    <label htmlFor={id} className="mb-1 block text-[10px] font-semibold text-white/60">Application under Applied Jobs</label>
     <input id={id} role="combobox" aria-autocomplete="list" aria-expanded={open} aria-controls={`${id}-list`}
-      aria-activedescendant={open && !loading && options[active] ? `${id}-option-${active}` : undefined}
+      aria-activedescendant={open && !loading && items[active] ? `${id}-option-${active}` : undefined}
       aria-describedby={`${id}-help`} autoComplete="off" value={query} disabled={disabled || selecting}
       placeholder={selectedLabel || 'Search company, role or location…'}
       onFocus={() => { void show(); }} onClick={() => { void show(); }} onKeyDown={keyDown}
       onChange={event => { setQuery(event.target.value); setActive(-1); void show(); }}
-      className="nodrag nowheel w-full rounded-md border border-[var(--border-main)] bg-[var(--bg-input)] px-2 py-2 text-xs text-[var(--text-main)] focus-visible:outline-2 focus-visible:outline-blue-400" />
-    <p id={`${id}-help`} className="mt-1 text-[10px] text-[var(--text-muted)]">{selecting ? 'Selecting application…' : selectedLabel ? `Selected: ${selectedLabel}` : 'Choose the application you submitted.'}</p>
-    {open && <div className="absolute z-50 mt-1 max-h-56 w-full overflow-auto rounded-md border border-[var(--border-main)] bg-[var(--bg-node)] p-1 shadow-xl nodrag nowheel">
+      className="nodrag nowheel w-full rounded-md border border-white/15 bg-[#0f0e14] px-2 py-2 text-xs text-white placeholder:text-white/50 focus-visible:outline-2 focus-visible:outline-blue-400" />
+    <p id={`${id}-help`} className="mt-1 text-[10px] text-white/60">{selecting ? 'Selecting application…' : selectedLabel ? `Selected: ${selectedLabel}` : 'Choose the application you submitted.'}</p>
+    {open && <div className="absolute z-50 mt-1 max-h-56 w-full overflow-auto rounded-md border border-white/15 bg-[#1d1a26] p-1 shadow-xl nodrag nowheel">
       <ul id={`${id}-list`} role="listbox" aria-label="Application folders" aria-busy={loading || selecting}>
-        {!loading && options.map((folder, index) => <li key={folder.token} id={`${id}-option-${index}`} role="option" aria-selected={active === index}
-          className={`cursor-pointer rounded p-2 text-xs text-[var(--text-main)] ${active === index ? 'bg-blue-500/20' : 'hover:bg-blue-500/10'}`}
+        {!loading && items.map((folder, index) => <li key={folder.token} id={`${id}-option-${index}`} role="option" aria-selected={active === index}
+          className={`cursor-pointer rounded p-2 text-xs text-white ${active === index ? 'bg-blue-500/20' : 'hover:bg-blue-500/10'}`}
           onMouseDown={event => event.preventDefault()} onMouseMove={() => setActive(index)} onClick={() => { void select(folder); }}>
-          <span className="block font-medium">{folder.label || [folder.company, folder.role].filter(Boolean).join(' · ')}</span>
-          <span className="block text-[10px] text-[var(--text-muted)]">{[folder.company, folder.role, folder.location].filter(Boolean).join(' · ')}</span>
+          {folder.none ? <span className="block font-medium text-white/70">None</span> : <>
+            <span className="block font-medium">{folder.label || [folder.company, folder.role].filter(Boolean).join(' · ')}</span>
+            <span className="block text-[10px] text-white/60">{[folder.company, folder.role, folder.location].filter(Boolean).join(' · ')}</span>
+          </>}
         </li>)}
       </ul>
-      {loading ? <p role="status" className="p-2 text-xs text-[var(--text-muted)]">Loading applications…</p>
-        : !error && !options.length && <p role="status" className="p-2 text-xs text-[var(--text-muted)]">{result.reason === 'canvas-unsaved' ? 'Save your canvas to list applications' : query.trim() && result.folders.length ? 'No matching applications.' : 'No application folders found under Applied Jobs.'}</p>}
+      {loading ? <p role="status" className="p-2 text-xs text-white/60">Loading applications…</p>
+        : !error && !options.length && <p role="status" className="p-2 text-xs text-white/60">{result.reason === 'canvas-unsaved' ? 'Save your canvas to list applications' : query.trim() && result.folders.length ? 'No matching applications.' : 'No application folders found under Applied Jobs.'}</p>}
     </div>}
     {error && <p role="alert" className="mt-1 text-xs text-amber-500">{error}</p>}
   </div>;

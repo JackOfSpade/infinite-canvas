@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { exactInterviewAnswerMatch } from '../utils/interviewAnswerMatching.js';
 import PreparedAnswer from '../interview-window/PreparedAnswer.jsx';
 
-const inputClass = 'mt-1 w-full rounded-md border border-[var(--border-main)] bg-[var(--bg-input)] px-2 py-1.5 text-xs text-[var(--text-main)]';
+const inputClass = 'mt-1 w-full rounded-md border border-white/15 bg-[#0f0e14] px-2 py-1.5 text-xs text-white';
 
 const statementOf = value => typeof value === 'string' ? value : (typeof value?.text === 'string' ? value.text : '');
 const evidenceIdsOf = value => Array.isArray(value?.evidenceIds) ? value.evidenceIds : [];
@@ -50,7 +50,7 @@ export function InterviewCardPreview({ card, scope }) {
     <div className="interview-window interview-card-preview" data-testid="interview-card-preview">
       <PreparedAnswer card={qaCardToDisplayCard(card, scope)} />
     </div>
-    {hasCitedEvidence(card) && <p className="text-[11px] text-[var(--text-muted)]">Cited evidence quotes appear in the live window.</p>}
+    {hasCitedEvidence(card) && <p className="text-[11px] text-white/60">Cited evidence quotes appear in the live window.</p>}
   </div>;
 }
 
@@ -61,14 +61,14 @@ export function InterviewQaMatchTester({ foundationCards = [], companyCards = []
   const scopeOf = new Map(candidates.map(item => [item.card, item.scope]));
   const result = exactInterviewAnswerMatch(question, candidates.map(item => item.card));
   const scopeLabel = scope => scope === 'foundation' ? 'Foundation' : (company || 'Company');
-  return <section aria-label="Preview on the interview card" className="space-y-2 rounded-lg border border-[var(--border-main)] p-3">
+  return <section aria-label="Preview on the interview card" className="space-y-2 rounded-lg border border-white/15 p-3">
     <h3 className="text-sm font-semibold">Preview on the interview card</h3>
-    <p className="text-xs text-[var(--text-muted)]">Exact question and variant matching only; the live window also uses AI matching.</p>
+    <p className="text-xs text-white/60">Exact question and variant matching only; the live window also uses AI matching.</p>
     <label className="block text-xs">Test a question<textarea className={inputClass} rows={2} placeholder="Type the question as the interviewer would ask it" value={question} onChange={event => setQuestion(event.target.value)} /></label>
     <p role="status" className="text-xs">{result.status === 'none' && 'No exact match. The live window\'s AI matching may still choose a card.'}
       {result.status === 'ambiguous' && `Matches ${result.cards.length} cards exactly — the live window will not pick one:`}
       {result.status === 'match' && `Exact match: ${result.card.question} · ${scopeLabel(scopeOf.get(result.card))}`}</p>
-    {result.status === 'ambiguous' && <ul className="list-disc pl-4 text-xs text-[var(--text-muted)]">{result.cards.map((card, index) => <li key={`${card.id ?? 'card'}-${index}`}>{card.question}</li>)}</ul>}
+    {result.status === 'ambiguous' && <ul className="list-disc pl-4 text-xs text-white/60">{result.cards.map((card, index) => <li key={`${card.id ?? 'card'}-${index}`}>{card.question}</li>)}</ul>}
     {result.status === 'match' && <InterviewCardPreview card={result.card} scope={scopeOf.get(result.card)} />}
   </section>;
 }

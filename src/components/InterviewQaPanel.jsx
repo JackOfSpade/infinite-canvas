@@ -5,8 +5,8 @@ import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { InterviewQaBadges } from './InterviewQaBadges';
 import { InterviewCardPreview, InterviewQaMatchTester } from './InterviewQaCardPreview';
 
-const buttonClass = 'rounded-md border border-[var(--border-main)] px-2 py-1 text-xs hover:bg-blue-500/10 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-blue-400';
-const inputClass = 'mt-1 w-full rounded-md border border-[var(--border-main)] bg-[var(--bg-input)] px-2 py-1.5 text-xs text-[var(--text-main)]';
+const buttonClass = 'rounded-md border border-white/15 px-2 py-1 text-xs hover:bg-blue-500/10 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-blue-400';
+const inputClass = 'mt-1 w-full rounded-md border border-white/15 bg-[#0f0e14] px-2 py-1.5 text-xs text-white';
 const emptyQa = () => ({ foundation: { status: 'missing', cards: [] }, company: { status: 'missing', company: '', cards: [], foundationLinks: [] } });
 const sameQuestion = (left, right) => String(left || '').trim().toLocaleLowerCase() === String(right || '').trim().toLocaleLowerCase();
 
@@ -59,20 +59,20 @@ function QaCard({ card, scope, company, links, mutate, busy, readOnly }) {
     try { await mutate('delete', scope, card); setConfirmDelete(false); }
     catch (failure) { setError(failure?.message || 'Could not delete this card. Try again.'); }
   };
-  return <article className="space-y-2 rounded-lg border border-[var(--border-main)] p-3" aria-label={card.question}>
+  return <article className="space-y-2 rounded-lg border border-white/15 p-3" aria-label={card.question}>
     {editing ? <CardForm card={card} scope={scope} busy={busy || readOnly} onCancel={() => setEditing(false)} onSave={async draft => { await mutate('save', scope, draft); setEditing(false); }} /> : <>
       <h4 className="text-sm font-semibold">{card.question}</h4>
       <InterviewQaBadges card={card} details />
-      {card.variants?.length > 0 && <details className="text-xs text-[var(--text-muted)]"><summary className="cursor-pointer">Question variants ({card.variants.length})</summary><ul className="list-disc pl-4">{card.variants.map((variant, index) => <li key={index}>{variant}</li>)}</ul></details>}
+      {card.variants?.length > 0 && <details className="text-xs text-white/60"><summary className="cursor-pointer">Question variants ({card.variants.length})</summary><ul className="list-disc pl-4">{card.variants.map((variant, index) => <li key={index}>{variant}</li>)}</ul></details>}
       {(card.status === 'needs-prep' || card.status === 'empty') && <p className="text-xs text-amber-500">No prepared answer yet. Write your own answer, or Prepare to fill empty answers.</p>}
       {card.headline && <p className="whitespace-pre-wrap text-sm font-medium">{card.headline}</p>}
-      {card.bullets?.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs">{card.bullets.map((bullet, index) => <li key={index}>{bullet.stage && <span className="text-[var(--text-muted)]">{bullet.stage}: </span>}{bullet.text}</li>)}</ul>}
+      {card.bullets?.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs">{card.bullets.map((bullet, index) => <li key={index}>{bullet.stage && <span className="text-white/60">{bullet.stage}: </span>}{bullet.text}</li>)}</ul>}
       {card.example && <div className="text-xs"><p className="font-medium">Example</p><p className="whitespace-pre-wrap">{card.example}</p></div>}
       {card.extensions?.length > 0 && <details className="text-xs"><summary className="cursor-pointer">Extension points (optional)</summary><ul className="list-disc pl-4">{card.extensions.map((item, index) => <li key={item.id || index}>{item.text}</li>)}</ul></details>}
       {card.thinEvidence && <p className="text-xs text-amber-500">Thin evidence — use only details you can support.</p>}
       <div className="flex gap-2"><button type="button" className={buttonClass} disabled={busy || readOnly} onClick={() => { setEditing(true); setError(''); }}>Edit</button><button type="button" className={buttonClass} disabled={busy || readOnly} onClick={() => setConfirmDelete(true)}>Delete</button></div>
     </>}
-    {links?.length > 0 && <ul className="space-y-1 border-t border-[var(--border-main)] pt-2 text-xs text-[var(--text-muted)]">{links.map((link, index) => <li key={index}>Also asked at {company || 'this company'}: “{link.question}”{(/^https?:\/\//i.test(link.sourceUrl || '')) && <> — <a className="underline" href={link.sourceUrl} target="_blank" rel="noreferrer">source</a></>}</li>)}</ul>}
+    {links?.length > 0 && <ul className="space-y-1 border-t border-white/15 pt-2 text-xs text-white/60">{links.map((link, index) => <li key={index}>Also asked at {company || 'this company'}: “{link.question}”{(/^https?:\/\//i.test(link.sourceUrl || '')) && <> — <a className="underline" href={link.sourceUrl} target="_blank" rel="noreferrer">source</a></>}</li>)}</ul>}
     {confirmDelete && <div role="group" aria-label="Confirm card deletion" className="space-y-2 rounded-md border border-amber-500/40 p-2 text-xs">
       <p>Delete “{card.question}”?{scope === 'foundation' ? ' This applies to every interview.' : ''}</p>
       <div className="flex gap-2"><button type="button" className={buttonClass} disabled={busy || readOnly} onClick={() => { void remove(); }}>Confirm delete</button><button type="button" className={buttonClass} disabled={busy} onClick={() => setConfirmDelete(false)}>Keep card</button></div>
@@ -86,8 +86,8 @@ function QaSection({ scope, section, company, foundationLinks, mutate, busy, rea
   const title = scope === 'foundation' ? 'Foundation Q&A · shared across all interviews' : `${company || 'Company'} Q&A`;
   return <section className="space-y-3" aria-label={title}>
     <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">{title}</h3><button type="button" className={buttonClass} disabled={busy || readOnly || adding} onClick={() => setAdding(true)}>Add card</button></div>
-    {scope === 'foundation' && <p className="text-xs text-[var(--text-muted)]">Editing this shared set applies to every interview.</p>}
-    {!section.cards.length && <p className="text-xs text-[var(--text-muted)]">No cards yet. Add your own question or Prepare to get started.</p>}
+    {scope === 'foundation' && <p className="text-xs text-white/60">Editing this shared set applies to every interview.</p>}
+    {!section.cards.length && <p className="text-xs text-white/60">No cards yet. Add your own question or Prepare to get started.</p>}
     {section.cards.map(card => <QaCard key={card.id} card={card} scope={scope} company={company} links={scope === 'foundation' ? foundationLinks.filter(link => sameQuestion(link.foundationQuestion, card.question)) : []} mutate={mutate} busy={busy} readOnly={readOnly} />)}
     {adding && <CardForm scope={scope} card={{ scope, question: '', variants: [], headline: '', bullets: [], example: '', extensions: [], origin: 'user', source: null, author: 'user', status: 'empty', thinEvidence: false }} busy={busy || readOnly}
       onCancel={() => setAdding(false)} onSave={async draft => { await mutate('add', scope, draft); setAdding(false); }} />}
@@ -113,11 +113,11 @@ function QaDialog({ qa, error, loading, reload, mutate, busy, readOnly, onClose 
     else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
   };
   return createPortal(<div className="nodrag nowheel fixed inset-0 z-[10000] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
-    <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={trap} className="flex max-h-[90vh] w-[720px] max-w-full flex-col rounded-xl border border-[var(--border-main)] bg-[var(--bg-node)] text-[var(--text-main)] shadow-2xl">
-      <header className="flex items-center justify-between border-b border-[var(--border-main)] p-4"><h2 id={titleId} className="text-base font-semibold">Edit Q&A</h2><button ref={closeRef} type="button" className={buttonClass} disabled={busy} onClick={onClose}>Close</button></header>
+    <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={trap} className="flex max-h-[90vh] w-[720px] max-w-full flex-col rounded-xl border border-white/15 bg-[#1d1a26] text-white shadow-2xl">
+      <header className="flex items-center justify-between border-b border-white/15 p-4"><h2 id={titleId} className="text-base font-semibold">Edit Q&A</h2><button ref={closeRef} type="button" className={buttonClass} disabled={busy} onClick={onClose}>Close</button></header>
       <div className="space-y-6 overflow-y-auto p-4">
         <InterviewQaMatchTester foundationCards={qa.foundation.cards} companyCards={qa.company.cards} company={qa.company.company} />
-        {readOnly && <p className="text-xs text-[var(--text-muted)]">Q&A editing is disabled while this helper is locked or preparing.</p>}
+        {readOnly && <p className="text-xs text-white/60">Q&A editing is disabled while this helper is locked or preparing.</p>}
         {loading && <p role="status" className="text-xs">Loading Q&A…</p>}
         {error && <p role="alert" className="text-xs text-amber-500">{error} <button type="button" className={buttonClass} disabled={loading || busy} onClick={reload}>Retry loading Q&A</button></p>}
         <QaSection scope="foundation" section={qa.foundation} company={qa.company.company} foundationLinks={qa.company.foundationLinks || []} mutate={mutate} busy={busy} readOnly={readOnly} />
