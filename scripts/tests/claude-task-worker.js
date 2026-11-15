@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
+  BUILT_IN_WEB_TASKS,
   CLAUDE_TASK_IDS,
   CLAUDE_TASK_PROFILES,
   profile,
@@ -52,7 +53,8 @@ function harness({ entries, runStage, submit, prompts = {}, ...options }) {
     clearTimer: (timer) => { state.timers = state.timers.filter(item => item !== timer); },
     runStage: async (options_) => { state.stages.push(options_); return runStage(options_, state); },
     // Never the real network in tests: a fake Parallel (its stage is always injected too) that is on
-    // unless a test turns it off, so web tasks run on Parallel Search and never on built-in search.
+    // unless a test turns it off, so Parallel web tasks run on Parallel Search. A test that wants the
+    // built-in-web task (job-official-posting-match) gets its own search and never touches this.
     parallel: { enabled: async () => true, plainLeads: async () => [] },
     ...options,
   });
@@ -81,6 +83,16 @@ export default [
       assert.deepEqual(CLAUDE_TASK_PROFILES['job-listing-liveness'], profile('haiku', 'medium'), 'liveness keeps the measured Haiku medium profile');
       assert.deepEqual(CLAUDE_TASK_PROFILES['job-gap-review'], profile('haiku', 'high'), 'the gap review keeps the measured Haiku high profile');
       assert.deepEqual(CLAUDE_TASK_PROFILES['job-compensation-assessment-batch'], profile('sonnet', 'low'), 'compensation assessment keeps the measured Sonnet low profile');
+      // One exception to Parallel-only web search: the official posting match runs on Claude's own web tools.
+      assert.deepEqual(BUILT_IN_WEB_TASKS, ['job-official-posting-match']);
+      assert.deepEqual(CLAUDE_TASK_PROFILES['job-official-posting-match'], profile('sonnet', 'medium', 'WebSearch,WebFetch'),
+        'the match keeps Sonnet medium but gets WebSearch and WebFetch');
+      for (const [task, taskProfile] of Object.entries(CLAUDE_TASK_PROFILES)) {
+        if (!taskProfile.tools || BUILT_IN_WEB_TASKS.includes(task)) continue;
+        const names = String(taskProfile.tools).split(',');
+        assert.equal(names.every(name => name.startsWith('mcp__parallel__')), true, `${task} names only Parallel tools`);
+        assert.equal(names.some(name => name === 'WebSearch' || name === 'WebFetch'), false, `${task} never names a built-in web tool`);
+      }
       for (const profile of Object.values(CLAUDE_TASK_PROFILES)) {
         assert(['haiku', 'sonnet', 'opus'].includes(profile.model), 'only the latest of these three models');
         assert(['low', 'medium', 'high', 'xhigh'].includes(profile.effort), 'max effort is excluded');
@@ -1213,7 +1225,6 @@ export default [
         ['job-compensation-research-batch', roleFamily],
         ['job-compensation-research-batch', location],
         ['job-preference-research-batch', 'preference research prompt'],
-        ['job-official-posting-match', 'official posting match prompt'],
       ];
       for (const [task, prompt] of cases) {
         const { worker, state } = harness({ entries: [entry('a', { task })], prompts: { a: prompt }, runStage: () => answer });
@@ -1224,8 +1235,64 @@ export default [
         assert.deepEqual(Object.keys(state.stages[0].mcpServers), ['parallel']);
         assert.equal(state.stages[0].tools.includes('WebSearch'), false);
         assert.equal(state.stages[0].tools.includes('WebFetch'), false);
+        assert.equal('allowBuiltInWebTools' in state.stages[0], false, `${task} never opts in to built-in web tools`);
         assert.equal(state.submits[0].response, 'answer');
       }
+    },
+  },
+  {
+    name: 'claude task worker: the official posting match runs on Claude\'s own WebSearch and WebFetch, with no Parallel server',
+    async run() {
+      const { worker, state } = harness({ entries: [entry('a', { task: 'job-official-posting-match' })], prompts: { a: 'official posting match prompt' }, runStage: () => answer });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1, 'the match runs on Claude');
+      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch'], 'exactly the built-in web tools');
+      assert.equal(state.stages[0].allowBuiltInWebTools, true, 'the runner guard is opened for this task only');
+      assert.equal('mcpServers' in state.stages[0], false, 'no Parallel MCP server');
+      assert.equal('onToolResult' in state.stages[0], false, 'no Parallel tool-result callback');
+      assert(state.stages[0].maxTurns > 1, 'the research turn budget still applies');
+      assert.equal(state.submits[0].response, 'answer');
+    },
+  },
+  {
+    name: 'claude task worker: the official posting match still runs while Parallel is exhausted, where a Parallel web task pauses',
+    async run() {
+      const builtIn = harness({
+        entries: [entry('a', { task: 'job-official-posting-match' })], prompts: { a: 'official posting match prompt' },
+        parallel: { enabled: async () => false, plainLeads: async () => { throw new Error('no plain leads without Parallel'); } }, runStage: () => answer,
+      });
+      builtIn.worker.start();
+      await settle();
+      assert.equal(builtIn.state.stages.length, 1, 'built-in search does not wait for Parallel');
+      assert.equal(builtIn.worker.status().paused, false, 'no Parallel pause for a built-in-web task');
+      assert.equal(builtIn.state.pending.size, 0);
+      assert.equal(builtIn.state.submits.length, 1, 'the match answer comes back');
+      const parallelWeb = harness({
+        entries: [entry('a', { task: 'job-preference-research-batch' })], prompts: { a: 'preference research prompt' },
+        parallel: { enabled: async () => false, plainLeads: async () => [] }, runStage: () => answer,
+      });
+      parallelWeb.worker.start();
+      await settle();
+      assert.equal(parallelWeb.state.stages.length, 0, 'the Parallel web task makes no call');
+      assert.equal(parallelWeb.worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+      assert.equal(parallelWeb.state.pending.size, 1, 'the Parallel web task stays queued');
+    },
+  },
+  {
+    name: 'claude task worker: a task outside BUILT_IN_WEB_TASKS never passes allowBuiltInWebTools, even with built-in tools in its profile',
+    async run() {
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-scoring' })],
+        profileFor: () => profile('sonnet', 'medium', 'WebSearch,WebFetch'),
+        runStage: () => answer,
+      });
+      worker.start();
+      await settle();
+      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch'], 'the injected profile tools are sent');
+      assert.equal('allowBuiltInWebTools' in state.stages[0], false, 'the runner guard is left closed');
+      assert.equal('mcpServers' in state.stages[0], false, 'built-in tools bring no Parallel server');
+      assert.equal(state.submits[0].response, 'answer');
     },
   },
   {
@@ -1233,7 +1300,7 @@ export default [
     async run() {
       resetParallelLimit();
       try {
-        const { worker, state } = harness({ entries: [entry('a', { task: 'job-official-posting-match' })], runStage: () => answer });
+        const { worker, state } = harness({ entries: [entry('a', { task: 'job-preference-research-batch' })], runStage: () => answer });
         worker.start();
         await settle();
         const onToolResult = state.stages[0].onToolResult;

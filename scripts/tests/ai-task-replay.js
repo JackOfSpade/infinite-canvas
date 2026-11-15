@@ -361,6 +361,44 @@ export default [
     },
   },
   {
+    name: 'ai task replay: the official posting match baseline mirrors its built-in-web profile, with no MCP server and search native',
+    async run() {
+      const seen = [];
+      const keysRead = [];
+      const serverCalls = [];
+      const fakeApp = {
+        claudeTaskProfile: () => ({ model: 'sonnet', effort: 'medium', tools: 'WebSearch,WebFetch' }),
+        cachedPromptParts: prompt => ({ prompt }),
+        resolveClaudeBinary: () => '/bin/claude',
+        claudeChildEnv: () => ({}),
+        readParallelKey: async () => { keysRead.push('read'); return 'key'; },
+        parallelMcpServers: key => { serverCalls.push(key); return { parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp' } }; },
+        PARALLEL_RESEARCH_TOOLS,
+        runClaudeSdkStage: async args => { seen.push(args); return { text: 't' }; },
+        offloadTextCall: async () => { throw new Error('offload is not expected here'); },
+      };
+      const call = { prompt: 'p', cachedPrefix: '' };
+      const execute = appExecute(fakeApp, 'job-official-posting-match', null);
+      await execute({ config: { id: 'claude', kind: 'claude' }, call });
+      await execute({ config: { id: 'claude:sonnet:medium', kind: 'claude-setting', model: 'sonnet', effort: 'medium' }, call });
+      await execute({ config: { id: 'claude-parallel', kind: 'claude-search', search: 'parallel' }, call });
+      await execute({ config: { id: 'claude-native', kind: 'claude-search', search: 'native', tools: ['WebSearch', 'WebFetch'], mcpServers: {} }, call });
+      assert.deepEqual(seen[0].tools, ['WebSearch', 'WebFetch'], 'the match baseline asks for the built-in web tools');
+      assert.equal(seen[0].allowBuiltInWebTools, true, 'the baseline opts in to built-in web tools');
+      assert.deepEqual(seen[0].mcpServers, {}, 'the built-in profile gets no Parallel MCP server');
+      assert.equal(seen[0].maxTurns, 16);
+      assert.deepEqual(seen[1].mcpServers, {}, 'a claude-setting config on the match also stays off Parallel');
+      assert.equal(seen[1].allowBuiltInWebTools, true);
+      assert.deepEqual(seen[2].tools, PARALLEL_RESEARCH_TOOLS, 'claude-parallel still measures Parallel on a built-in profile');
+      assert.deepEqual(Object.keys(seen[2].mcpServers), ['parallel'], 'claude-parallel asks for the Parallel server');
+      assert.equal(seen[2].allowBuiltInWebTools, false);
+      assert.deepEqual(seen[3].tools, ['WebSearch', 'WebFetch'], 'claude-native stays on the built-in tools');
+      assert.equal(seen[3].allowBuiltInWebTools, true);
+      assert.deepEqual(keysRead, ['read'], 'only the claude-parallel arm reads the Parallel key');
+      assert.deepEqual(serverCalls, ['key'], 'only the claude-parallel arm builds the Parallel server');
+    },
+  },
+  {
     name: 'ai task replay: tool usage is counted from onActivity and web rows record which search answered',
     async run() {
       const baseApp = {
@@ -396,6 +434,9 @@ export default [
         const scoring = fakeHarness(dir);
         await replayTask(scoring.args({ task: 'job-scoring', configs: [{ id: 'claude', kind: 'claude' }], reps: 1, claudeReps: 1, batches: 1,
           execute: async ({ config, rep, call: promptCall }) => ({ ...okReply(config, rep, promptCall), toolCalls: {} }) }));
+        const match = fakeHarness(dir);
+        await replayTask(match.args({ task: 'job-official-posting-match', configs: [{ id: 'claude', kind: 'claude' }], reps: 1, claudeReps: 1, batches: 1,
+          execute: async ({ config, rep, call: promptCall }) => ({ ...okReply(config, rep, promptCall), toolCalls: { WebSearch: 2 } }) }));
         const rows = fs.readFileSync(path.join(dir, 'results.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
         const webRows = rows.filter(row => row.task === 'job-official-posting-research');
         assert.deepEqual(webRows.map(row => [row.config, row.search]).sort(), [['claude', 'parallel'], ['claude-native', 'native']],
@@ -405,6 +446,9 @@ export default [
         const scoringRow = rows.find(row => row.task === 'job-scoring');
         assert.equal('search' in scoringRow, false, 'a task without web tools records no search');
         assert.deepEqual(scoringRow.toolCalls, {}, 'a call without tools records an empty toolCalls');
+        const matchRow = rows.find(row => row.task === 'job-official-posting-match' && row.config === 'claude');
+        assert.equal(matchRow.search, 'native', 'the match baseline records built-in search');
+        assert.deepEqual(matchRow.toolCalls, { WebSearch: 2 });
       } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     },
   },

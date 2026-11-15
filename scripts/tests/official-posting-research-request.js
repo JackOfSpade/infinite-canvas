@@ -6,7 +6,7 @@ import {
 } from '../../electron/ipc/officialPostingBridge.js';
 import { officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
 import {
-  PARALLEL_KEY_NOTICE, PARALLEL_KEYCHAIN_SERVICE, PARALLEL_LIMIT_NOTICE, PARALLEL_MCP_URL, PARALLEL_REST_URL, PARALLEL_RESEARCH_TOOLS, isMirrorHost, isParallelLimitSignal, parallelBlocked, parallelExtract,
+  PARALLEL_EXTRACT_MAX_AGE_MS, PARALLEL_KEY_NOTICE, PARALLEL_KEYCHAIN_SERVICE, PARALLEL_LIMIT_NOTICE, PARALLEL_MCP_URL, PARALLEL_REST_URL, PARALLEL_RESEARCH_TOOLS, isMirrorHost, isParallelLimitSignal, parallelBlocked, parallelExtract,
   parallelKeyRejected, parallelMcpServers, parallelPlainLeads, parallelSearchNotice, readParallelKey, resetParallelLimit,
 } from '../../electron/ipc/parallelSearch.js';
 
@@ -383,7 +383,11 @@ export default [
           assert.match(JSON.parse(call.options.body).session_id, /^[0-9a-f]{32}$/u);
         }
         assert.equal(JSON.parse(sent[0].options.body).mode, 'fast');
-        assert.deepEqual(JSON.parse(sent[1].options.body).advanced_settings, { full_content: true });
+        // The page read asks for a live fetch: a page whose live fetch fails must not come back as a stored copy.
+        const extractBody = JSON.parse(sent[1].options.body);
+        assert.deepEqual(extractBody.advanced_settings.fetch_policy, { max_age_seconds: 600, disable_cache_fallback: true });
+        assert.equal(extractBody.advanced_settings.full_content, true);
+        assert.deepEqual(extractBody.advanced_settings, { full_content: true, fetch_policy: { max_age_seconds: 600, disable_cache_fallback: true } });
       } finally { resetParallelLimit(); }
     },
   },
@@ -525,6 +529,55 @@ export default [
       const unreadable = await parallelExtract({ url, fetch: mcpReply({ results: [], errors: [{ url, error_type: 'fetch_error', http_status_code: null, content: null }] }) });
       assert.equal(unreadable, '');
       assert.equal(await parallelExtract({ url, fetch: mcpReply({ results: [{ url, full_content: '   ' }], errors: [] }) }), '');
+    },
+  },
+  {
+    name: 'parallelExtract drops a page copy acquired more than 48 hours ago on both the REST and the anonymous MCP path',
+    async run() {
+      resetParallelLimit();
+      try {
+        const KEY = 'pk-test-key-0123456789';
+        const url = 'https://careers.ibm.test/job/1';
+        const now = () => Date.parse('2026-11-15T12:00:00Z');
+        const mcp = result => mcpReply({ results: [result], errors: [] });
+        const rest = result => async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ results: [result], errors: [] }) });
+        const stale = { url, full_content: 'Old posting text', acquired_at: '2026-11-01T00:00:00Z' };
+        const fresh = { url, full_content: 'Live posting text', acquired_at: '2026-11-15T00:00:00Z' };
+        const undated = { url, full_content: 'Undated posting text' };
+        // The anonymous MCP path cannot ask for a fresh fetch, so the freshness check is what stops a stored copy.
+        assert.equal(await parallelExtract({ url, fetch: mcp(stale), now }), '');
+        assert.equal(await parallelExtract({ url, fetch: mcp(fresh), now }), 'Live posting text');
+        assert.equal(await parallelExtract({ url, fetch: mcp(undated), now }), 'Undated posting text');
+        // The REST path gets the fetch policy as well as the same check.
+        assert.equal(await parallelExtract({ url, key: KEY, fetch: rest(stale), now }), '');
+        assert.equal(await parallelExtract({ url, key: KEY, fetch: rest(fresh), now }), 'Live posting text');
+        assert.equal(await parallelExtract({ url, key: KEY, fetch: rest(undated), now }), 'Undated posting text');
+        // 48 hours is the rule itself, not a hint: one minute past is a stored copy, one minute short is a read.
+        const aged = ms => ({ url, full_content: 'Borderline text', acquired_at: new Date(ms).toISOString() });
+        assert.equal(await parallelExtract({ url, fetch: mcp(aged(now() - PARALLEL_EXTRACT_MAX_AGE_MS - 60_000)), now }), '');
+        assert.equal(await parallelExtract({ url, fetch: mcp(aged(now() - PARALLEL_EXTRACT_MAX_AGE_MS + 60_000)), now }), 'Borderline text');
+        assert.equal(await parallelExtract({ url, key: KEY, fetch: rest(aged(now() - PARALLEL_EXTRACT_MAX_AGE_MS - 60_000)), now }), '');
+        // A missing or unparseable acquired_at is accepted as before, and the real clock rejects a months-old copy too.
+        assert.equal(await parallelExtract({ url, fetch: mcp({ url, full_content: 'Odd date text', acquired_at: 'not a date' }), now }), 'Odd date text');
+        assert.equal(await parallelExtract({ url, fetch: mcp({ url, full_content: 'Ancient text', acquired_at: '2020-01-01T00:00:00Z' }) }), '');
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'parallelExtract returns empty text for a reply with no result and an errors entry for the page, on both paths',
+    async run() {
+      resetParallelLimit();
+      try {
+        const KEY = 'pk-test-key-0123456789';
+        const url = 'https://careers.ibm.test/job/gone';
+        const now = () => Date.parse('2026-11-15T12:00:00Z');
+        for (const httpStatusCode of [404, 410]) {
+          const errors = [{ url, error_type: 'http_error', http_status_code: httpStatusCode, content: null }];
+          assert.equal(await parallelExtract({ url, fetch: mcpReply({ results: [], errors }), now }), '');
+          const rest = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ results: [], errors }) });
+          assert.equal(await parallelExtract({ url, key: KEY, fetch: rest, now }), '');
+        }
+      } finally { resetParallelLimit(); }
     },
   },
   {

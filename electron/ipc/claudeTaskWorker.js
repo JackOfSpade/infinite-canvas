@@ -2,10 +2,12 @@
 // It serves pending handoffs through the worker seam in nonApiAi.js, so
 // validation, saved progress and correction rounds stay there. Each
 // answer starts a fresh session from the full prompt, so nothing carries over.
-// A web task (a profile with tools) is answered by Parallel Search only: never
-// by Claude's built-in WebSearch/WebFetch and never by the cheaper offload route.
-// When Parallel is out of usage the worker pauses with PARALLEL_SEARCH_EXHAUSTED
-// and keeps the queued work, so the owner can add credits and press Resume.
+// A web task (a profile with tools) is answered by Parallel Search, except the
+// single task in BUILT_IN_WEB_TASKS, which offers Claude's built-in
+// WebSearch/WebFetch instead; no web task ever takes the cheaper offload route.
+// When a Parallel web task's search is out of usage the worker pauses with
+// PARALLEL_SEARCH_EXHAUSTED and keeps the queued work, so the owner can add
+// credits and press Resume. A built-in-web task never pauses for Parallel.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,7 +21,7 @@ import {
 import { CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
 import { claudeUsageLimit, claudeUsageWaitMs, clearClaudeUsageLimit, drainClaudeCalls, heldClaudeKeys, holdClaude, isClaudeHeld, isClaudePauseKey, releaseClaude, reportClaudeUsageLimit, subscribeClaudeHolds } from './claudePause.js';
 import { createClaudeTaskActivity, standaloneClaudeActivity, subscribeStandaloneClaudeActivity } from './claudeTaskActivity.js';
-import { CLAUDE_TASK_IDS, claudeTaskProfile } from './claudeTaskProfiles.js';
+import { BUILT_IN_WEB_TASKS, CLAUDE_TASK_IDS, claudeTaskProfile } from './claudeTaskProfiles.js';
 import {
   listWorkerHandoffs,
   markWorkerHandoffAssigned,
@@ -53,8 +55,23 @@ const IMAGE_MAX_EDGE = 1568;
 const ACTIVITY_NOTIFY_MS = 500;
 const OFFLOAD_BLOCK_MS = 30 * 60_000;
 const OFFLOAD_REJECTION_LIMIT = 2;
-// Parallel Search is the only web search in this app, so a limit pauses the worker.
+// A Parallel web task waits for a limit to pass: its search has no fallback.
 const PARALLEL_PAUSE_MS = 10 * 60_000;
+const PARALLEL_TOOL_PREFIX = 'mcp__parallel__';
+const BUILT_IN_WEB_TOOL_NAMES = Object.freeze(['WebSearch', 'WebFetch']);
+
+/**
+ * Which search a profile's tools name: Parallel's MCP tools, Claude's built-in web tools, or
+ * neither. Keeping them apart is what stops Parallel-only handling (its MCP server, its
+ * tool-result callback, its exhaustion pause) from reaching a built-in-web task.
+ */
+export function toolSearchKind(tools) {
+  const names = String(tools ?? '').split(',').map(name => name.trim()).filter(Boolean);
+  return Object.freeze({
+    usesParallel: names.some(name => name.startsWith(PARALLEL_TOOL_PREFIX)),
+    usesBuiltInWeb: names.some(name => BUILT_IN_WEB_TOOL_NAMES.includes(name)),
+  });
+}
 // Research runs Parallel alone. Measured 2026-11-14, two seeds, Parallel against built-in web search
 // and both together: experience bands over 12 families with two verified hosts 11 and 10 against 1 and
 // 4, together 12 and 12; salary over 12 cohorts with a verified source 12 and 9 against 4 and 4,
@@ -208,8 +225,8 @@ export function createClaudeTaskWorker({
   shadow = createShadowMeasure(),
   shadowValidator = workerShadowValidator,
   // Parallel's free MCP needs no key, so it is on unless `enabled` says otherwise: tests turn it off,
-  // and it reports off for ten minutes after a reply says Parallel is out of usage. A web task waits
-  // for the pause to pass; there is no other search to fall back to.
+  // and it reports off for ten minutes after a reply says Parallel is out of usage. A Parallel web
+  // task waits for that pause to pass; a built-in-web task never asks, as its own search remains.
   parallel = { enabled: async () => !parallelBlocked(), readKey: readParallelKey, plainLeads: parallelPlainLeads },
 } = {}) {
   const allowTasks = new Set(taskIds);
@@ -352,9 +369,9 @@ export function createClaudeTaskWorker({
   }
 
   /**
-   * The tool-result callback every web task's stage gets. A Parallel tool that reports a limit means
-   * research cannot go on anywhere, so the limit is noted (the dock and the next task see it) and the
-   * exhaustion error ends the stage, which pauses the worker with the queued work kept.
+   * The tool-result callback every Parallel web task's stage gets. A Parallel tool that reports a
+   * limit means that search cannot go on, so the limit is noted (the dock and the next task see it)
+   * and the exhaustion error ends the stage, which pauses the worker with the queued work kept.
    */
   function parallelToolResult({ toolName, isError, text }) {
     if (!isParallelToolName(toolName) || isError !== true || !isParallelLimitSignal({ text })) return;
@@ -362,7 +379,7 @@ export function createClaudeTaskWorker({
     throw parallelExhaustedError();
   }
 
-  /** False while Parallel is out of usage: a web task then waits instead of being answered elsewhere. */
+  /** False while Parallel is out of usage: a Parallel web task then waits instead of being answered elsewhere. */
   async function parallelAvailable() {
     try { return typeof parallel.enabled === 'function' ? (await parallel.enabled()) !== false : true; } catch { return false; }
   }
@@ -393,10 +410,13 @@ export function createClaudeTaskWorker({
 
   async function serve(entry, controller) {
     const profile = profileFor(entry.task);
-    // A web task (a profile with tools) can only be answered by Parallel Search. While Parallel is
-    // out of usage the worker pauses and this entry stays queued: nothing is failed or dropped, and
-    // the owner's Resume or the ten minutes retry it.
-    if (profile.tools && !(await parallelAvailable())) {
+    // The profile's tools decide the search: Parallel's MCP tools, Claude's built-in web tools, or
+    // neither. Only a Parallel web task waits on Parallel; the built-in-web task named in
+    // BUILT_IN_WEB_TASKS is never paused for it, since its own search still answers. While Parallel
+    // is out of usage the entry stays queued: nothing is failed or dropped, and the owner's Resume
+    // or the ten minutes retry it.
+    const searchKind = toolSearchKind(profile.tools);
+    if (searchKind.usesParallel && !(await parallelAvailable())) {
       activity.released(entry.requestId);
       return pause(PARALLEL_EXHAUSTED_CODE, PARALLEL_PAUSE_MS);
     }
@@ -411,7 +431,7 @@ export function createClaudeTaskWorker({
     activity.begin(entry.requestId, { task: entry.task, model: profile.model, effort: profile.effort, maxTurns: profile.tools ? RESEARCH_MAX_TURNS : null, rejections: entry.rejections, nodeId: entry.nodeId });
     const cached = cachedPromptParts(handoff.prompt, handoff.cachedPrefix);
     // A task with a table entry and no photos may be answered off Claude when it has no tools. A web
-    // task never is: only Parallel Search may answer it, so a cheaper model cannot step in either.
+    // task never is: only its own search may answer it, so a cheaper model cannot step in either.
     let route = !profile.tools && !entry.hasAttachments && !escalated.has(entry.requestId) && now() >= offloadBlockedUntil
       ? routeFor(entry.task) : null;
     let reply = null;
@@ -433,7 +453,7 @@ export function createClaudeTaskWorker({
       const stage = binding();
       // Marked before the call so a failure is known to carry Claude's spend.
       claudeAttempts.add(entry.requestId);
-      const key = profile.tools ? await parallelKeyForTask() : '';
+      const key = searchKind.usesParallel ? await parallelKeyForTask() : '';
       const claudeCall = () => runStage({
         ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
         pageImages, signal: controller.signal,
@@ -441,11 +461,14 @@ export function createClaudeTaskWorker({
         model: profile.model, effort: profile.effort, persistSession: false,
         // Ultracode is off unless a profile records the opt-in.
         ...(profile.ultracode === true ? { ultracode: true } : {}),
-        // A web task gets Parallel Search alone: its six tools, its server, and the callback that
-        // ends the stage when a Parallel tool reports a limit.
+        // A web task gets its profile's tools and the research turn budget. Only a Parallel web task
+        // gets Parallel's MCP server and the tool-result callback that ends the stage on a limit; and
+        // only the task named in BUILT_IN_WEB_TASKS may pass allowBuiltInWebTools, the runner's
+        // guard still refuses Claude's built-in web tools for every other task.
         ...(profile.tools ? {
           tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS,
-          mcpServers: parallelMcpServers(key), onToolResult: parallelToolResult,
+          ...(searchKind.usesParallel ? { mcpServers: parallelMcpServers(key), onToolResult: parallelToolResult } : {}),
+          ...(BUILT_IN_WEB_TASKS.includes(entry.task) ? { allowBuiltInWebTools: true } : {}),
         } : {}),
       });
       // Official-posting research merges the plain Parallel leads with its single reply; every other

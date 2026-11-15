@@ -2373,7 +2373,7 @@ Recorded cost so far: $15.61.
 - Across searches the same posting was chosen in 71 of 92 pairs (77%). Against the majority answer of the five runs per batch: built-in 30 of 32, Parallel 36 of 46. Status "open" was reported in 18 of 46 Parallel answers and 9 of 32 built-in answers.
 - No ground truth was scored, so this measures consistency and validity, not correctness. Built-in was more consistent with itself. Every call used web tools in this replay (pages are downloaded without rendering here), unlike the 2026-11-08 finding that tools were rarely needed in production.
 - No merged arm: the call returns one judgment per lead.
-- Decision: Parallel only, by the owner rule (no built-in search anywhere). Flagged to the owner as the one call where the data leans to built-in.
+- Decision: first kept on Parallel only by the owner rule (2026-11-14). Changed 2026-11-15: the owner moved this one call back to built-in search at Sonnet medium, after the consistency gap here and the finding that Parallel's fetch can return old copies of removed postings.
 
 Recorded cost so far: about $15.6 (Parallel $8.9, built-in $6.7).
 <!-- /ai-test-run:2026-11-14-posting-match-search -->
@@ -2528,3 +2528,91 @@ Recorded cost so far: $0.855.
 
 Recorded cost so far: $1.084.
 <!-- /ai-test-run:2026-11-15T04-17-23-390Z-web-research-ab-743be9 -->
+
+<!-- ai-test-run:2026-11-14-parallel-features -->
+### 2026-11-14 · Other Parallel features against what the app does today · finished (report only, nothing applied)
+
+- Status: **finished**. Question: since the app now depends on Parallel, do its page reader (Extract), typed answers (Decisions) or research agent (Task) do an existing job better? Keyed account. Out dirs under `~/Library/Application Support/infinite-canvas/ai-test-runs/`: `2026-11-14-parallel-extract`, `2026-11-14-parallel-decisions`, `2026-11-14-{compensation,role-family,location}-task-core`.
+
+**1. Page reader** — `scripts/parallel-extract-ab.mjs --count 40 --seed 1` (new). 40 confirmed official posting URLs from `canvas.json.before-content-pool-2026-11-04.bak`. "Usable" = read, 600+ characters and the job title's words present.
+
+| Reader | Read | Usable | Median chars | Median time |
+|---|---|---|---|---|
+| App plain download (`fetchOfficialPosting`, no browser render) | 32 | 25 | 4,164 | 0.26 s |
+| Parallel Extract, live (`max_age_seconds: 600`) | 40 | 35 | 6,796 | 3.0 s |
+| Parallel Extract, default fetch policy | 40 | 35 | 7,209 | 0.56 s |
+
+Usable only through Parallel: 12 pages; only through the app: 2. Live and default agreed on every page. No page showed a closed-posting signal in any arm, so freshness of the default (possibly cached) mode was not exercised. The app's hidden-browser render step was not part of this test (it needs Electron), so this compares Parallel with the first download step only.
+
+**2. Decisions** — `scripts/parallel-decisions-ab.mjs --results 2026-11-14-preference-parallel/results.jsonl` (new). The 172 preference checks (40 companies) already answered by two Claude research runs; one Decisions request per company, choice questions excluded / not_excluded / unknown, probability floor 0.6. 40 requests, 0 failed, median 2.0 s.
+
+| Source | Confirmed | Conflicts | Unverified |
+|---|---|---|---|
+| Decisions | 164 | 4 | 4 |
+| Claude, built-in search | 166 | 2 | 4 |
+| Claude, Parallel search | 158 | 2 | 12 |
+
+Agreement: Decisions vs built-in 162 of 172, Decisions vs Claude-Parallel 156, the two Claude runs with each other 162. Decisions found both conflicts the Claude runs found (deCircle). Its two extra conflicts (Black Diamond Group, Envisio) were cleared by both Claude runs, came at probability 0.64, and one cites a similarly named staffing site; they look wrong. Its evidence leaned on job-board pages.
+
+**3. Task research agent** — `scripts/web-research-ab.mjs --second task --task-processor core` (new arm; no Claude call, the Task run answers the same prompt), same seeds as the Claude-with-Parallel runs earlier today.
+
+| Task | Claude + Parallel search (earlier today) | Parallel Task `core` |
+|---|---|---|
+| Salary, seed 4: cohorts of 12 with a verified source / verified sources | 9 / 20 | 5 / 8 |
+| Experience bands, seed 2: families of 12 with two verified hosts / verified sources | 10 / 45 | 2 / 7 |
+| Job location, seed 2: correct / wrong of 24 | 9 / 0 | 6 / 1 |
+
+All 18 Task replies passed the format. Each took 47 to 228 s (Claude with Parallel: about 21 to 34 s). Only the `core` processor was tried.
+
+Reading: the page reader is clearly better than the plain download; Decisions matches Claude on agreement but produced two likely false exclusions; the Task agent is worse than Claude with Parallel search on all three tasks.
+
+Recorded cost so far: Parallel usage only (not metered here), plus the built-in comparison arms of the three Task runs (Claude, about $3).
+<!-- /ai-test-run:2026-11-14-parallel-features -->
+
+<!-- ai-test-run:2026-11-15T05-05-02-269Z-parallel-render-ab-612278 -->
+### 2026-11-15 05:05 UTC · parallel-render-ab · hidden-browser render vs Parallel page reader · render,parallel
+
+- Status: **finished** (updated 2026-11-15 05:10:08 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-render-vs-parallel`
+- Command: `--canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-render-vs-parallel --closed 20 --open 20 --seed 1`
+- canvas: canvas.json.before-content-pool-2026-11-04.bak
+- closed: 20
+- open: 20
+- seed: 1
+- completed: 40
+- total: 40
+- selected: 40
+- records: 80
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| closed/render | 20 | 8 | 0 |  | closedDetected 8; median 4709 chars / 3082 ms |
+| closed/parallel | 20 | 11 | 1 |  | closedDetected 3; median 7686 chars / 6168 ms |
+| open/render | 20 | 17 | 0 |  | closedDetected 3; median 4473 chars / 2437 ms |
+| open/parallel | 20 | 17 | 0 |  | closedDetected 0; median 5189 chars / 4077 ms |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-15T05-05-02-269Z-parallel-render-ab-612278 -->
+
+<!-- ai-test-run:2026-11-15-render-vs-parallel -->
+### 2026-11-15 · App hidden-browser render vs Parallel page reader · official posting pages · finished (nothing applied)
+
+- Status: **finished**. Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-render-vs-parallel` (log beside it).
+- Command: `node_modules/.bin/electron scripts/parallel-render-ab.electron.mjs --canvas "Job Search/canvas.json.before-content-pool-2026-11-04.bak" --closed 20 --open 20 --seed 1` (new; runs the real `renderOfficialPostingPage` in Electron with a throwaway profile, then Parallel Extract with `full_content` and `fetch_policy.max_age_seconds: 600` on the same URL). 20 postings stored as closed, 20 stored as found (open on 2026-11-04).
+
+| Group | Reader | Read | Usable (600+ chars, title present) | Closed detected by the script's wording check |
+|---|---|---|---|---|
+| Stored closed (20) | Render | 20 | 8 | 8 |
+| Stored closed (20) | Parallel | 19 | 11 | 3 |
+| Stored open (20) | Render | 20 | 17 | 3 |
+| Stored open (20) | Parallel | 20 | 17 | 0 |
+
+- Closed detected by the render only: 5 (stored closed) and 3 (stored open); by Parallel only: 0.
+- Read by hand, the disagreements are real. On 5 pages the render got HTTP 404 or 410 while Parallel returned the full posting from an older copy (Amazon acquired 2026-10-20, Oshkosh 2026-11-02, Truist 2026-11-01, Brex 2026-09-14, one Ashby posting 2026-10-22), even though a 10-minute maximum age was requested: when the live fetch fails Parallel falls back to its stored copy. On 3 Greenhouse pages fetched the same day, Parallel's text left out the sentence "The job you are looking for is no longer open" that the render shows.
+- On the open group both readers gave usable text for 17 of 20 (one page each way), so Parallel adds no readable pages over the render.
+- The wording check is crude: several pages both readers showed as gone ("Job not found", "Job removed", "page doesn't exist") were not counted for either. It under-counts both equally.
+
+Reading: the render must stay first. Parallel's reader can present a removed posting as live. The existing last-resort use of Parallel's reader (`parallelExtract`, default fetch policy) has the same exposure; Fixed the same day: `parallelExtract` now sends `fetch_policy { max_age_seconds: 600, disable_cache_fallback: true }` and rejects any result acquired more than 48 hours ago. Checked live on the 8 pages the render saw as 404/410: before, 6 returned an old copy; after, 0 of 8 return text, and a live page still reads.
+
+Recorded cost so far: Parallel usage only (40 page reads).
+<!-- /ai-test-run:2026-11-15-render-vs-parallel -->

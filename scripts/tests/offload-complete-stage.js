@@ -509,7 +509,8 @@ export default [
       assert.equal(entry.maxRejections, 3);
       assert.deepEqual(entry.webTools, { maxUsd: 0.2 });
       assert(Object.isFrozen(entry) && Object.isFrozen(entry.webTools));
-      // Web task profiles name the Parallel Search tools since 2026-11-14, never built-in web tools.
+      // This Parallel web task's profile names the Parallel Search tools, never built-in web tools
+      // (job-official-posting-match is the one built-in-web exception).
       assert.equal(entry.claude.tools.split(',').every(tool => tool.startsWith('mcp__parallel__')), true);
       assert.equal(entry.claude.tools.includes('WebSearch'), false);
       const bare = taskEntry('job-scoring');

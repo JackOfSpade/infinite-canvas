@@ -10,6 +10,9 @@
 // web research pauses with its queued work kept (PARALLEL_SEARCH_EXHAUSTED). There is no fallback:
 // this app never lets Claude use its built-in WebSearch/WebFetch, so research waits for credits.
 // Measured 2026-11-14 (docs/ai-test-runs.md): Parallel alone matched built-in and Parallel merged, so research runs Parallel alone.
+// The plain page reader (parallelExtract) only accepts a fresh read: Parallel otherwise falls back to a stored copy of a
+// page whose live fetch failed, which can show a removed posting as live (measured 2026-11-15, docs/ai-test-runs.md entry
+// 2026-11-15-render-vs-parallel). Never use that reader to decide whether a posting is open.
 import crypto from 'node:crypto';
 import { execFile as nodeExecFile } from 'node:child_process';
 
@@ -221,20 +224,30 @@ export async function parallelPlainLeads({ member, key = '', fetch: fetchImpl = 
   return leads;
 }
 
+/** Newest page copy the reader accepts: an older one is a stored copy, not a read. */
+export const PARALLEL_EXTRACT_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+const pageMs = value => { if (typeof value !== 'string' || !value.trim()) return null; const ms = Date.parse(value); return Number.isFinite(ms) ? ms : null; };
+
 /**
  * The text of one page Parallel's fetch tool read, or '' when it could not read it. No AI: the
  * tool returns the page's own text. A site that blocks the app's download (a bot challenge, a
  * 403) often serves this reader the page anyway. A page that fails inside a successful reply
  * comes back under `errors`, not as a tool error, and is '' here too.
+ * The reader only accepts a fresh read: Parallel otherwise falls back to a stored copy that can
+ * show a removed posting as live (measured 2026-11-15, docs/ai-test-runs.md entry
+ * 2026-11-15-render-vs-parallel). The REST call asks for a live fetch (fetch_policy, no cache
+ * fallback); the anonymous MCP cannot, so the chosen result's `acquired_at` is checked against
+ * PARALLEL_EXTRACT_MAX_AGE_MS here as well. Never use this reader to decide whether a posting is open.
  */
-export async function parallelExtract({ url, key = '', fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = 20_000, now } = {}) {
+export async function parallelExtract({ url, key = '', fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = 45_000, now } = {}) {
   let page;
   try { page = new URL(String(url ?? '')); } catch { return ''; }
   if (page.protocol !== 'https:' || page.username || page.password) return '';
   const objective = 'The full text of this job posting page.';
   const body = await callParallel({
     tool: 'web_fetch', args: { urls: [page.href], objective, full_content: true },
-    restPath: '/v1/extract', restBody: { urls: [page.href], objective, advanced_settings: { full_content: true } },
+    restPath: '/v1/extract',
+    restBody: { urls: [page.href], objective, advanced_settings: { full_content: true, fetch_policy: { max_age_seconds: 600, disable_cache_fallback: true } } },
     key, fetch: fetchImpl, signal, timeoutMs, now,
   });
   if (!body) return '';
@@ -242,5 +255,8 @@ export async function parallelExtract({ url, key = '', fetch: fetchImpl = global
   if (failed.some(entry => entry?.url && String(entry.url) === page.href)) return '';
   const results = Array.isArray(body.results) ? body.results : [];
   const result = results.find(entry => String(entry?.url ?? '') === page.href) || results[0];
+  // An old stored copy is not a read; a missing or unparseable acquired_at is accepted as before.
+  const acquiredAt = pageMs(result?.acquired_at);
+  if (acquiredAt !== null && (typeof now === 'function' ? now() : Date.now()) - acquiredAt > PARALLEL_EXTRACT_MAX_AGE_MS) return '';
   return String(result?.full_content ?? '').trim();
 }

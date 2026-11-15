@@ -5,10 +5,17 @@
 // defects were still caught. Fable and max effort are excluded.
 // docs/ai-model-selection.md records the selection policy, every measured result
 // and the open gaps; read it before re-testing or changing a profile here.
-// Web tasks run on Parallel Search only: this app never offers Claude's built-in
-// WebSearch or WebFetch, and a Parallel limit pauses the work instead of falling back.
+// Web tasks run on Parallel Search only, except the tasks named in BUILT_IN_WEB_TASKS: those
+// offer Claude's built-in WebSearch/WebFetch instead. A Parallel limit pauses the work instead of
+// falling back.
 import { PARALLEL_RESEARCH_TOOLS } from './parallelSearch.js';
 const WEB = PARALLEL_RESEARCH_TOOLS.join(',');
+const BUILT_IN_WEB = 'WebSearch,WebFetch';
+// The one exception to Parallel-only web search: measured 2026-11-14 over 16 batches, Claude's
+// built-in tools chose the same posting between their own runs in 15 of 16 pairs (94%) with 0 of 32
+// replies invalid, Parallel 37 of 44 (84%) with 2 of 48 invalid, and Parallel's fetch can return an
+// old stored copy of a removed posting.
+export const BUILT_IN_WEB_TASKS = Object.freeze(['job-official-posting-match']);
 // Ultracode is off for every task (measured 2026-11-09: no quality gain, 3-5x cost
 // on the research tasks where it acted). A profile records only an explicit opt-in.
 export const profile = (model, effort, tools = '', options = {}) => Object.freeze({
@@ -74,7 +81,8 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // 2026-11-02 on 8 real postings, A and B per setting: every setting chose the right lead and none a wrong one, so
   // the host validator decided it. Sonnet medium passed 16 of 16 at the lowest cost of the settings that matched
   // Opus xhigh (15 of 16); Haiku failed 3 to 4 of 16 and Sonnet low 1 of 16.
-  'job-official-posting-match': profile('sonnet', 'medium', WEB),
+  // 2026-11-15: built-in web tools instead of Parallel (same posting between own runs 15 of 16 pairs vs 37 of 44; see BUILT_IN_WEB_TASKS).
+  'job-official-posting-match': profile('sonnet', 'medium', BUILT_IN_WEB),
 });
 
 export const CLAUDE_TASK_IDS = Object.freeze(Object.keys(CLAUDE_TASK_PROFILES));

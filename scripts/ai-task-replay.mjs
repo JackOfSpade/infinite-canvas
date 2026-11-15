@@ -9,13 +9,15 @@
 //     --task job-scoring --canvas <file> --user-data <dir> --out <dir> [--dry-run]
 //
 // --configs takes `claude`, `claude:<model>:<effort>`, `claude-native`, `claude-parallel` or the
-// deepseek ladder (flash|pro:<reasoning>), defaulting to `claude` plus the ladder. Since 2026-11-14
-// the app's web task profiles offer Parallel Search only, so the `claude` baseline and every
-// claude:<model>:<effort> config pass the profile's Parallel tools with the Parallel MCP server (the
-// key comes from the Keychain; '' uses the anonymous server). `claude-native` measures Claude's
-// built-in WebSearch/WebFetch and `claude-parallel` a second Parallel Search run; both use the task
-// profile's model/effort and are refused for a task whose profile has no tools. Each Claude row on a
-// web task records which `search` answered it, and tool usage under `toolCalls`.
+// deepseek ladder (flash|pro:<reasoning>), defaulting to `claude` plus the ladder. The `claude`
+// baseline and every claude:<model>:<effort> config mirror claudeTaskWorker.serve() for the task's
+// profile: Parallel profile tools get the Parallel MCP server (the key comes from the Keychain; ''
+// uses the anonymous server), and the one built-in-web profile (BUILT_IN_WEB_PROFILE_TASKS) gets
+// Claude's WebSearch/WebFetch, no MCP server and allowBuiltInWebTools. `claude-native` forces
+// Claude's built-in WebSearch/WebFetch and `claude-parallel` forces a Parallel Search run (the app's
+// Parallel research tools when the profile is built-in); both use the task profile's model/effort
+// and are refused for a task whose profile has no tools. Each Claude row on a web task records which
+// `search` answered it ('parallel' or 'native'), and tool usage under `toolCalls`.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -28,8 +30,28 @@ export const TASKS = ['job-preference-evaluation', 'job-scoring', 'job-official-
   'job-compensation-research-batch', 'job-preference-research-batch'];
 // Tasks whose worker profile carries web tools: raw (unschematized) grounded research answers.
 export const RESEARCH_TASKS = ['job-official-posting-research', 'job-compensation-research-batch', 'job-preference-research-batch'];
-// Tasks whose claudeTaskProfiles profile carries tools (Parallel Search); mirrors claudeTaskProfiles.js.
+// Tasks whose claudeTaskProfiles profile carries web tools; mirrors claudeTaskProfiles.js.
 export const WEB_TASKS = [...RESEARCH_TASKS, 'job-official-posting-match'];
+// The one task whose profile offers Claude's built-in web tools instead of Parallel Search (mirrors
+// claudeTaskProfiles.BUILT_IN_WEB_TASKS); replayMain still reads the real profile, this only names the default.
+export const BUILT_IN_WEB_PROFILE_TASKS = ['job-official-posting-match'];
+const PARALLEL_TOOL_PREFIX = 'mcp__parallel__';
+const BUILT_IN_WEB_TOOL_NAMES = ['WebSearch', 'WebFetch'];
+
+/** Mirrors claudeTaskWorker.toolSearchKind(): which search a profile's tool names ask for. */
+export function toolSearchKind(tools) {
+  const names = String(tools ?? '').split(',').map(name => name.trim()).filter(Boolean);
+  return {
+    usesParallel: names.some(name => name.startsWith(PARALLEL_TOOL_PREFIX)),
+    usesBuiltInWeb: names.some(name => BUILT_IN_WEB_TOOL_NAMES.includes(name)),
+  };
+}
+
+/** The `search` a Claude baseline row records for a profile: 'native' for built-in web tools, else 'parallel'. */
+export function baselineSearchOf(tools) {
+  const { usesParallel, usesBuiltInWeb } = toolSearchKind(tools);
+  return usesBuiltInWeb ? 'native' : usesParallel ? 'parallel' : null;
+}
 // Tasks that cannot be replayed faithfully from stored data. --task stops with this one-line, evidenced reason.
 export const UNREPLAYABLE_TASKS = {
   'job-compensation-research-batch': 'electron/ipc/jobs.js runFreshCompensationPipeline calls the module-level callLLMRaw (no caller seam) with cohorts built live from the profile and earlier grounded role-band/location lookups (researchParameters via compensationResearchParametersForGroup); board rows persist none of roleFamily, experienceBand or seniority.',
@@ -52,8 +74,9 @@ function positiveInt(name, value) {
   return number;
 }
 
-// Claude-only web-search comparison configs: `claude-native` offers Claude's own WebSearch/WebFetch with no MCP
-// server, `claude-parallel` repeats the baseline (the profile's Parallel tools plus the Parallel MCP server).
+// Claude-only web-search comparison configs: `claude-native` forces Claude's own WebSearch/WebFetch with no MCP
+// server, `claude-parallel` forces a Parallel Search run (the profile's Parallel tools plus the Parallel MCP
+// server, or the app's Parallel research tools when the profile itself is built-in).
 const SEARCH_CONFIGS = {
   'claude-native': { search: 'native', tools: ['WebSearch', 'WebFetch'], mcpServers: {} },
   'claude-parallel': { search: 'parallel' },
@@ -292,7 +315,10 @@ const safeName = value => String(value).replace(/[^A-Za-z0-9._-]/g, '_');
  *   execute({ config, rep, call }) -> { text, costUsd, durationMs, model, usage }
  *   validate(call, text)          -> parsed value, throwing when invalid
  */
-export async function replayTask({ task, outDir, startFlow, materialize, execute, validate, configs, reps, claudeReps, batches, concurrency, dryRun = false, log = () => {}, journal = null }) {
+export async function replayTask({ task, outDir, startFlow, materialize, execute, validate, configs, reps, claudeReps, batches, concurrency, dryRun = false, log = () => {}, journal = null,
+  // Which search the baseline (and each claude:<model>:<effort>) records for this task. replayMain passes the
+  // task profile's own answer; the default mirrors claudeTaskProfiles.js for callers that do not.
+  baselineSearch = BUILT_IN_WEB_PROFILE_TASKS.includes(task) ? 'native' : WEB_TASKS.includes(task) ? 'parallel' : null }) {
   const done = loadResults(outDir);
   // journal: validity and cost per config in docs/ai-test-runs.md, rewritten as rows land.
   const recordJournal = force => journal?.update({ rows: replayJournalRows([...done.values()]) }, { force });
@@ -312,10 +338,11 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
       if (fatal) return null;
       const started = Date.now();
       const base = { task, batch: call.batch, config: config.id, rep, promptSha: call.promptSha };
-      // A Claude call on a web task records which search answered it: Parallel for the baseline and claude-parallel.
+      // A Claude call on a web task records which search answered it: the profile's own (Parallel, or built-in
+      // for the one built-in-web task) for the baseline and claude:<model>:<effort>, and the forced choice of
+      // claude-native/claude-parallel.
       const searchOf = config.kind === 'offload' ? null
-        : config.kind === 'claude-search' ? config.search
-          : WEB_TASKS.includes(task) ? 'parallel' : null;
+        : config.kind === 'claude-search' ? config.search : baselineSearch;
       let row;
       try {
         const reply = await execute({ config, rep, call });
@@ -327,7 +354,7 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
         row = { ...base, ok: true, valid: code === null, code, costUsd: Number.isFinite(reply?.costUsd) ? reply.costUsd : null,
           latencyMs: Number.isFinite(reply?.durationMs) ? reply.durationMs : Date.now() - started,
           model: reply?.model ?? null, usage: reply?.usage ?? null, ...(reply?.webTools ? { webTools: reply.webTools } : {}),
-          // Which search answered a Claude call on a web task: Parallel unless a claude-native run says otherwise.
+          // Which search answered a Claude call on a web task: the profile's, or the one a comparison config forces.
           ...(searchOf ? { search: searchOf } : {}), ...(reply?.toolCalls ? { toolCalls: reply.toolCalls } : {}),
           answer: code === null ? answer : null };
       } catch (error) {
@@ -439,8 +466,11 @@ export function replayChildEnv(env) {
 /** Mirrors claudeTaskWorker.serve(): Claude through the SDK stage, DeepSeek through offloadTextCall. */
 export function appExecute(app, task, signal) {
   const profile = app.claudeTaskProfile(task);
-  // Same as claudeTaskWorker.serve(): a profile with tools gets them plus the research turn budget.
+  // Same as claudeTaskWorker.serve(): a profile with tools gets them plus the research turn budget, and the tool
+  // names say which search answers the task (Parallel's MCP tools or Claude's built-in web tools).
   const tools = profile.tools ? String(profile.tools).split(',') : [];
+  const kind = toolSearchKind(profile.tools);
+  const baselineSearch = baselineSearchOf(profile.tools);
   // The Parallel key is read once per appExecute, as the worker reads it once per task; a throw or '' is the anonymous server.
   let parallelServers = null;
   const serversForWebTask = async () => {
@@ -470,14 +500,18 @@ export function appExecute(app, task, signal) {
     const stage = { binary, env: app.claudeChildEnv(replayChildEnv(process.env), path.dirname(binary)), cwd: os.tmpdir() };
     // A claude-setting config is the baseline call with its own model/effort; the baseline keeps the task profile's.
     const setting = config.kind === 'claude-setting' ? { model: config.model, effort: config.effort } : { model: profile.model, effort: profile.effort };
-    // A claude-native config swaps Parallel Search for Claude's built-in web tools; every other Claude config uses Parallel.
-    const search = config.kind === 'claude-search' ? config.search : (tools.length ? 'parallel' : null);
-    const searchTools = search === 'native' ? config.tools : tools;
+    // The baseline and claude:<model>:<effort> mirror the worker for this task's profile: Parallel tools get the
+    // Parallel MCP server, built-in tools get none and opt in to the runner's allowBuiltInWebTools. claude-native
+    // forces the built-in tools and claude-parallel forces Parallel Search (the app's Parallel research tools on a
+    // task whose profile is itself built-in).
+    const search = config.kind === 'claude-search' ? config.search : baselineSearch;
+    const searchTools = search === 'native' ? (config.tools ?? tools)
+      : search === 'parallel' && !kind.usesParallel ? (app.PARALLEL_RESEARCH_TOOLS || tools) : tools;
     const mcpServers = search === 'native' ? (config.mcpServers || {}) : search === 'parallel' ? await serversForWebTask() : null;
     const reply = await app.runClaudeSdkStage({
       ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
       pageImages: [], signal, ...setting, persistSession: false, onActivity,
-      // Only the claude-native comparison config may offer WebSearch/WebFetch.
+      // Only a built-in-web run (the built-in profile's baseline or claude-native) may offer WebSearch/WebFetch.
       allowBuiltInWebTools: search === 'native',
       ...(searchTools.length ? { tools: searchTools, maxTurns: RESEARCH_MAX_TURNS } : {}),
       ...(mcpServers ? { mcpServers } : {}),
@@ -628,6 +662,8 @@ async function replayMain(opts, outDir, journal) {
     const { calls, results } = await replayTask({
       task, outDir, startFlow: flow.startFlow, materialize: appMaterialize(app), execute: appExecute(app, task, controller.signal), validate: appValidate(app),
       configs: opts.configs, reps: opts.reps, claudeReps: opts.claudeReps, batches: opts.batches, concurrency: opts.concurrency, dryRun: opts.dryRun, log: line => console.log(line),
+      // The baseline records the search this task's own profile asks for, exactly as appExecute runs it.
+      baselineSearch: baselineSearchOf(profile.tools),
       journal,
     });
     if (opts.dryRun) {
