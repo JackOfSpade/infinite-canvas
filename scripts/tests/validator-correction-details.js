@@ -121,6 +121,14 @@ export default [
     const prompt = taxonomy.buildJobTaxonomyPlanPrompt({});
     assert(prompt.includes('Unspecified entry (minSalary=0, maxSalary=0) LAST') && prompt.includes('must equal the minSalary of the range listed just before it'), 'taxonomy builder must teach the exact ordering and contiguity rules');
   } },
+  { name: 'W4 repro R5: taxonomy builder counts the Unspecified entry inside the 2–5 salaryRanges total', run: () => {
+    const prompt = taxonomy.buildJobTaxonomyPlanPrompt({});
+    assert(prompt.includes('2–5 entries IN TOTAL'), 'taxonomy builder must state the salaryRanges total as 2–5 entries');
+    assert(prompt.includes('the Unspecified entry counts toward that total'), 'taxonomy builder must say the Unspecified entry counts toward the salaryRanges total');
+    assert(prompt.includes('1–4 real global annual ranges'), 'taxonomy builder must state the 1–4 real-range limit that leaves room for Unspecified');
+    assert(prompt.includes('Never return more than 5 salaryRanges entries'), 'taxonomy builder must state the hard 5-entry cap');
+    assert(!prompt.includes('2–5 global annual ranges'), 'taxonomy builder must not keep the ambiguous real-ranges-plus-Unspecified phrasing');
+  } },
   { name: 'W4 repro R5: display-only suffixes teach their hidden validator rules', run: () => {
     for (const [name, phrase, count] of [['COMPENSATION_SECTION_FORMAT_SUFFIX', 'nothing outside', 4], ['ROLE_FAMILY_LADDER_SUFFIX', 'whole numbers', 2], ['COHORT_PROVENANCE_SUFFIX', 'at least 8 characters', 1]]) {
       assert(typeof jobs[name] === 'string' && jobs[name].includes(phrase), `${name} must expose its rule`);
