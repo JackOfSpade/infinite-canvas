@@ -28,7 +28,12 @@ const applicationEntry = (stage, route = 'deepseek-flash', reasoning = 'high', w
   ...(options?.maxRejections !== undefined ? { maxRejections: options.maxRejections } : {}),
 });
 
-/** A `task:<id>` entry; its Claude fallback is the task's own profile. `webTools` lets a WebSearch/WebFetch task route. */
+/**
+ * A `task:<id>` entry; its Claude fallback is the task's own profile. A `webTools`
+ * option can still be attached, but the task worker no longer honors it for web
+ * tasks: a web task never routes off Claude, because its research runs on Parallel
+ * Search instead of Claude's built-in web tools.
+ */
 export const taskEntry = (task, route = 'deepseek-flash', reasoning = 'high', why = WHY, options = {}) => Object.freeze({
   provider: 'offload',
   route,
@@ -54,7 +59,8 @@ export const taskEntry = (task, route = 'deepseek-flash', reasoning = 'high', wh
 // Worker tasks (task:<id>), replayed offline on board rows 2026-11-07: none matched Claude.
 // job-scoring 0/36 schema-valid; preference-evaluation agreement 69-80% vs Claude's 91-97%;
 // with web tools, official-posting research <=2/18 valid, match 73-76% vs 87-97%, preference
-// research 56% agreement vs 74%. A web-only task routes only with a `webTools` option (taskEntry).
+// research 56% agreement vs 74%. A web-only task does not route off Claude at all:
+// its research uses Parallel Search, so the `webTools` option no longer applies.
 export const AI_CALL_PROVIDERS = Object.freeze({
   'application:requirements-audit': applicationEntry('requirements-audit', 'deepseek-flash', 'off',
     'Live 14/14 accepted (Claude 9/9); replay agreement with Claude 98.4% vs Claude-Claude 99.2%; $0.001 vs $0.058 per call, p50 4.9 s vs 17.4 s. Reasoning adds cost and latency with no gain.'),

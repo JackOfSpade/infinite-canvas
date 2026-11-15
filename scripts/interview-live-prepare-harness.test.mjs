@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { careerWritingStageProfile } from '../electron/ipc/careerWritingCore.js';
-import { TAVILY_RESEARCH_TOOLS } from '../electron/ipc/tavily.js';
+import { TAVILY_RESEARCH_TOOLS } from './lib/tavily-arm.mjs';
+import { PARALLEL_RESEARCH_TOOLS, parallelMcpServers } from '../electron/ipc/parallelSearch.js';
 import { createInterviewClaudeTransport, interviewClaudeStage } from '../electron/ipc/interviewClaudeTransport.js';
 import {
   parseHarnessArgs, withUltracode, createCallRecorder, createMeasuredRunStage, workflowToolCalls,
-  summarizeStageTotals, runHarness, createTavilyResearchCall, createResearchRouter, buildMergedResearchText,
-  readResearchResponse, RESEARCH_MAX_CHARS, RESEARCH_SOURCE_LABELS, parseResearchProfile,
+  summarizeStageTotals, runHarness, createTavilyResearchCall, createParallelResearchCall, createResearchRouter,
+  createNativeResearchCall, NATIVE_RESEARCH_TOOLS,
+  buildMergedResearchText,
+  readResearchResponse, RESEARCH_MAX_CHARS, RESEARCH_SOURCE_LABELS, RESEARCH_MODES, parseResearchProfile,
   effectiveResearchProfile, createResearchProfileRunStage, RESEARCH_PROFILE_MODELS, RESEARCH_PROFILE_EFFORTS,
 } from './interview-live-prepare-harness.mjs';
 
@@ -349,6 +352,7 @@ test('the tavily research call passes the qa-research profile, Tavily tools/MCP,
   assert.equal(requests[0].model, qaResearchProfile.model);
   assert.equal(requests[0].effort, qaResearchProfile.effort);
   assert.deepEqual(requests[0].tools, TAVILY_RESEARCH_TOOLS);
+  assert.equal(Object.hasOwn(requests[0], 'allowBuiltInWebTools'), false, 'the Tavily arm never opts in to built-in web tools');
   assert.deepEqual(requests[0].mcpServers, { tavily: { type: 'http', url: `https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_TEST_KEY_ENCODED}` } });
   assert.equal(requests[0].maxTurns, 24);
   assert.equal(requests[0].persistSession, false);
@@ -499,27 +503,32 @@ test('createResearchProfileRunStage leaves an unoverridden runStage untouched an
   assert.deepEqual(seen, [{ text: 'research', model: 'haiku', effort: 'low', sessionId: 's1', tools: 'WebSearch,WebFetch' }]);
 });
 
-// Drives the production transport with a fake runner, the way runHarness does:
-// the measured runStage records what each stage's runStage call received.
-async function runTransportStages({ profile = null } = {}) {
+// Drives the production transport with fake runners, the way runHarness does:
+// research always leaves through runResearchStage (Parallel), so each runner
+// records what its stage's call received.
+async function runTransportStages() {
   const seen = [];
+  const research = [];
   const io = fakeTranscripts();
   let currentCall = null;
   const recorder = createCallRecorder({ save: io.save, append: io.append, now: () => 0 });
-  const measured = createResearchProfileRunStage({
-    runStage: createMeasuredRunStage({
-      runStage: async args => {
-        seen.push({ stage: currentCall.stage, model: args.model, effort: args.effort, tools: args.tools });
-        return { text: '{"ok":true}', model: `resolved-${args.model}` };
-      },
-      recorder,
-      currentCall: () => currentCall,
-    }),
-    profile,
+  const measured = createMeasuredRunStage({
+    runStage: async args => {
+      seen.push({ stage: currentCall.stage, model: args.model, effort: args.effort, tools: args.tools });
+      return { text: '{"ok":true}', model: `resolved-${args.model}` };
+    },
+    recorder,
     currentCall: () => currentCall,
   });
   const transport = createInterviewClaudeTransport({
     runStage: measured,
+    runResearchStage: async args => {
+      research.push({ stage: currentCall.stage, model: args.model, effort: args.effort, tools: args.tools,
+        mcpServers: args.mcpServers, maxTurns: args.maxTurns, persistSession: args.persistSession });
+      return { text: '{"ok":true}', model: `resolved-${args.model}` };
+    },
+    // Parallel is available and has a key-shaped key; no network is touched.
+    parallel: { enabled: async () => true, readKey: async () => PARALLEL_TEST_KEY },
     resolveBinary: () => path.join('/tmp', 'claude-research-profile'),
     env: {},
     routeFor: () => null,
@@ -531,37 +540,44 @@ async function runTransportStages({ profile = null } = {}) {
     currentCall = { task, stage: interviewClaudeStage(task), attempts: 0 };
     await transport.callText(`prompt:${task}`, { task });
   }
-  return { seen, rows: io.lines.map(line => JSON.parse(line)) };
+  return { seen, research, rows: io.lines.map(line => JSON.parse(line)) };
 }
 
-test('--research-profile reaches the native research stage and no other stage', async () => {
-  const override = parseResearchProfile('haiku:low');
-  const { seen, rows } = await runTransportStages({ profile: override });
+test('the transport answers research through Parallel and keeps the other stages on runStage', async () => {
+  const { seen, research, rows } = await runTransportStages();
   const production = task => careerWritingStageProfile(interviewClaudeStage(task));
+  const researchProfile = production('interview-brief-research');
+  assert.deepEqual(research, [{
+    stage: 'qa-research',
+    model: researchProfile.model,
+    effort: researchProfile.effort,
+    tools: [...PARALLEL_RESEARCH_TOOLS],
+    mcpServers: parallelMcpServers(PARALLEL_TEST_KEY),
+    maxTurns: 24,
+    persistSession: false,
+  }]);
+  // RunStage saw the other stages only: the built-in research path is gone.
   assert.deepEqual(seen, [
-    { stage: 'qa-research', model: 'haiku', effort: 'low', tools: 'WebSearch,WebFetch' },
     { stage: 'qa-brief', model: production('interview-brief-assessment').model,
       effort: production('interview-brief-assessment').effort, tools: '' },
     { stage: 'qa-write', model: production('interview-answer-bank').model,
       effort: production('interview-answer-bank').effort, tools: '' },
   ]);
-  // The brief stage must not inherit the research override.
-  assert.notDeepEqual({ model: seen[1].model, effort: seen[1].effort }, override);
+  assert.equal(seen.some(entry => entry.stage === 'qa-research'), false);
+  // The recorded attempts of the other stages keep their production profiles.
   assert.deepEqual(rows.map(row => [row.task, row.stage, row.requestedModel, row.effort]), [
-    ['interview-brief-research', 'qa-research', 'haiku', 'low'],
     ['interview-brief-assessment', 'qa-brief', production('interview-brief-assessment').model,
       production('interview-brief-assessment').effort],
     ['interview-answer-bank', 'qa-write', production('interview-answer-bank').model,
       production('interview-answer-bank').effort],
   ]);
-  // rows[0].model keeps what the reply reported; requestedModel is what was sent.
-  assert.equal(rows[0].model, 'resolved-haiku');
 });
 
-test('without --research-profile the native research stage keeps the production profile', async () => {
-  const { seen, rows } = await runTransportStages({ profile: null });
-  assert.deepEqual(seen[0], { stage: 'qa-research', model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
-  assert.deepEqual([rows[0].stage, rows[0].requestedModel, rows[0].effort], ['qa-research', 'opus', 'high']);
+test('the transport never offers WebSearch or WebFetch to a stage', async () => {
+  const { seen, research } = await runTransportStages();
+  const offered = [...seen.map(entry => entry.tools), ...research.map(entry => entry.tools.join(','))].join(',');
+  assert.equal(offered.includes('WebSearch'), false);
+  assert.equal(offered.includes('WebFetch'), false);
 });
 
 test('the tavily research call sends and records the effective research profile', async () => {
@@ -584,4 +600,124 @@ test('the tavily research call sends and records the effective research profile'
   const record = JSON.parse(io.lines[0]);
   assert.deepEqual([record.stage, record.requestedModel, record.effort, record.model],
     ['qa-research', 'haiku', 'low', 'claude-haiku-4-5']);
+});
+
+const PARALLEL_TEST_KEY = 'k'.repeat(32);
+
+test('parseHarnessArgs accepts the parallel research mode and --merge-second', () => {
+  assert.deepEqual([...RESEARCH_MODES], ['native', 'tavily', 'parallel', 'merged']);
+  const parallel = parseHarnessArgs(argv(['--research', 'parallel']));
+  assert.equal(parallel.research, 'parallel');
+  // Set B defaults to Tavily, so an existing merged run keeps its label.
+  assert.equal(parallel['merge-second'], 'tavily');
+  assert.equal(parallel.mergeSecond, 'tavily');
+  const merged = parseHarnessArgs(argv(['--research', 'merged', '--merge-from', '/tmp/a,/tmp/b', '--merge-second', 'parallel']));
+  assert.equal(merged.research, 'merged');
+  assert.equal(merged['merge-second'], 'parallel');
+  assert.equal(merged.mergeSecond, 'parallel');
+  assert.throws(() => parseHarnessArgs(argv(['--research', 'merged', '--merge-from', '/tmp/a,/tmp/b',
+    '--merge-second', 'google'])), invalidArguments);
+  assert.throws(() => parseHarnessArgs(argv(['--research', 'merged', '--merge-from', '/tmp/a,/tmp/b',
+    '--merge-second', 'Parallel'])), invalidArguments);
+  assert.throws(() => parseHarnessArgs(argv(['--research', 'merged', '--merge-from', '/tmp/a,/tmp/b',
+    '--merge-second'])), invalidArguments);
+});
+
+test('the native research arm sends WebSearch/WebFetch with empty MCP servers and no key', async () => {
+  const requests = [];
+  const validated = [];
+  const profile = effectiveResearchProfile({ production: qaResearchProfile, override: parseResearchProfile('haiku:low') });
+  const research = createNativeResearchCall({
+    runClaudeSdkStage: async request => {
+      requests.push(request);
+      return { text: 'built-in research', model: 'claude-haiku-4-5', costUsd: 0.01, usage: { input_tokens: 5 }, durationMs: 10 };
+    },
+    profile,
+  });
+  const text = await research('prompt', { task: 'interview-brief-research',
+    responseValidator: value => { validated.push(value); } });
+  assert.equal(text, 'built-in research');
+  assert.deepEqual(validated, ['built-in research']);
+  assert.deepEqual(requests[0].tools, ['WebSearch', 'WebFetch']);
+  assert.deepEqual(requests[0].tools, [...NATIVE_RESEARCH_TOOLS]);
+  assert.equal(requests[0].allowBuiltInWebTools, true, 'the native comparison arm opts in to the built-in web tools');
+  assert.deepEqual(requests[0].mcpServers, {}, 'the native arm is measured without an MCP server');
+  assert.equal(Object.keys(requests[0].mcpServers).length, 0);
+  assert.deepEqual([requests[0].model, requests[0].effort], ['haiku', 'low']);
+  assert.equal(requests[0].maxTurns, 24);
+  assert.equal(requests[0].persistSession, false);
+  assert.equal(requests[0].ultracode, false);
+  assert.throws(() => createNativeResearchCall({ readKey: async () => '', profile: qaResearchProfile }),
+    error => error instanceof TypeError && error.message === 'NATIVE_RESEARCH_NEEDS_RUN_CLAUDE_SDK_STAGE');
+  assert.throws(() => createNativeResearchCall({ runClaudeSdkStage: async () => ({}), readKey: null, profile: qaResearchProfile }),
+    error => error instanceof TypeError && error.message === 'NATIVE_RESEARCH_NEEDS_READ_KEY');
+  assert.throws(() => createNativeResearchCall({ runClaudeSdkStage: async () => ({}), readKey: async () => '', profile: {} }),
+    error => error instanceof TypeError && error.message === 'NATIVE_RESEARCH_NEEDS_QA_RESEARCH_PROFILE');
+});
+
+test('the parallel research call sends the Parallel tools, servers and profile', async () => {
+  const io = fakeTranscripts();
+  const recorder = createCallRecorder({ save: io.save, append: io.append, now: () => 0 });
+  const requests = [];
+  const profile = effectiveResearchProfile({ production: qaResearchProfile, override: parseResearchProfile('sonnet:high') });
+  const research = createParallelResearchCall({
+    runClaudeSdkStage: async request => {
+      requests.push(request);
+      return { text: 'parallel research', model: 'claude-sonnet-4-5', costUsd: 0.02, usage: { input_tokens: 7 }, durationMs: 12 };
+    },
+    readKey: async () => PARALLEL_TEST_KEY,
+    profile,
+    recorder,
+  });
+  assert.equal(await research('prompt', { task: 'interview-brief-research' }), 'parallel research');
+  assert.deepEqual(requests[0].tools, PARALLEL_RESEARCH_TOOLS);
+  assert.equal(Object.hasOwn(requests[0], 'allowBuiltInWebTools'), false, 'the Parallel arm never opts in to built-in web tools');
+  assert.deepEqual(requests[0].mcpServers, parallelMcpServers(PARALLEL_TEST_KEY));
+  // A key-shaped key is sent (a keyless server would be a different object).
+  assert.notDeepEqual(requests[0].mcpServers, parallelMcpServers(''));
+  assert.deepEqual([requests[0].model, requests[0].effort], ['sonnet', 'high']);
+  assert.equal(requests[0].maxTurns, 24);
+  assert.equal(requests[0].persistSession, false);
+  assert.equal(requests[0].ultracode, false);
+  const record = JSON.parse(io.lines[0]);
+  assert.deepEqual([record.task, record.stage, record.requestedModel, record.effort, record.model],
+    ['interview-brief-research', 'qa-research', 'sonnet', 'high', 'claude-sonnet-4-5']);
+});
+
+test('the parallel research call runs the SDK without a key and guards its arguments', async () => {
+  const requests = [];
+  const research = createParallelResearchCall({
+    runClaudeSdkStage: async request => {
+      requests.push(request);
+      return { text: 'anonymous research' };
+    },
+    readKey: async () => '',
+    profile: qaResearchProfile,
+  });
+  assert.equal(await research('prompt', { task: 'interview-brief-research' }), 'anonymous research');
+  // No key is not an error: the keyless Parallel MCP server is sent as is.
+  assert.deepEqual(requests[0].mcpServers, { parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp' } });
+  assert.deepEqual([requests[0].model, requests[0].effort], [qaResearchProfile.model, qaResearchProfile.effort]);
+  assert.throws(() => createParallelResearchCall({ readKey: async () => '', profile: qaResearchProfile }),
+    error => error instanceof TypeError && error.message === 'PARALLEL_RESEARCH_NEEDS_RUN_CLAUDE_SDK_STAGE');
+  assert.throws(() => createParallelResearchCall({ runClaudeSdkStage: async () => ({}), readKey: null, profile: qaResearchProfile }),
+    error => error instanceof TypeError && error.message === 'PARALLEL_RESEARCH_NEEDS_READ_KEY');
+  assert.throws(() => createParallelResearchCall({ runClaudeSdkStage: async () => ({}), readKey: async () => '', profile: {} }),
+    error => error instanceof TypeError && error.message === 'PARALLEL_RESEARCH_NEEDS_QA_RESEARCH_PROFILE');
+});
+
+test('buildMergedResearchText labels set B for Parallel, and Tavily by default', () => {
+  const parallel = buildMergedResearchText({ builtIn: 'built-in research', tavily: 'parallel research', second: 'parallel' });
+  assert.equal(parallel.text, `${RESEARCH_SOURCE_LABELS.builtIn}:\nbuilt-in research\n\n${RESEARCH_SOURCE_LABELS.parallel}:\nparallel research`);
+  assert.equal(parallel.text.includes('SOURCE SET B (Parallel search)'), true);
+  assert.equal(parallel.text.includes('Tavily'), false);
+  assert.deepEqual(parallel.sets.map(set => set.source), ['built-in-web-search', 'parallel']);
+  assert.deepEqual(parallel.sets.map(set => set.label), [RESEARCH_SOURCE_LABELS.builtIn, RESEARCH_SOURCE_LABELS.parallel]);
+  assert.deepEqual(parallel.sets.map(set => [set.source, set.length, set.kept === set.length]),
+    [['built-in-web-search', 17, true], ['parallel', 17, true]]);
+  const tavily = buildMergedResearchText({ builtIn: 'a', tavily: 'b' });
+  assert.equal(tavily.text, `${RESEARCH_SOURCE_LABELS.builtIn}:\na\n\n${RESEARCH_SOURCE_LABELS.tavily}:\nb`);
+  assert.deepEqual(tavily.sets.map(set => set.source), ['built-in-web-search', 'tavily']);
+  assert.throws(() => buildMergedResearchText({ second: 'google' }),
+    error => error instanceof TypeError && error.message === 'MERGED_RESEARCH_NEEDS_SECOND');
 });

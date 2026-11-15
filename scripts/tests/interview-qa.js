@@ -7,7 +7,8 @@ import {
   loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
-import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_TOOLS, resetInterviewOffloadBlock } from '../../electron/ipc/interviewClaudeTransport.js';
+import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS, resetInterviewOffloadBlock } from '../../electron/ipc/interviewClaudeTransport.js';
+import { PARALLEL_RESEARCH_TOOLS, PARALLEL_EXHAUSTED_CODE, parallelBlocked, parallelExhaustedError, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { attachInterviewLiveCards, cardsOf } from '../../electron/interviewWindow.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
 import { applyInterviewFactFindings, factCheckInterviewCards, interviewCardUnits, interviewFactCheckPrompt } from '../../electron/ipc/interviewQaFactCheck.js';
@@ -166,23 +167,27 @@ export default [
     assert(calls.every(opts => opts.claudeStage === 'qa-disclosures'));
     assert.deepEqual(await mapInterviewDisclosures({ rawResearch: '', ...context, callText }), [], 'no research, no disclosures');
   } },
-  { name: 'interview Claude transport: application stage profiles, research-only web tools, same-session retry on rejection', async run() {
+  { name: 'interview Claude transport: application stage profiles and same-session retry on rejection', async run() {
     assert.equal(interviewClaudeStage('interview-brief-research'), 'qa-research');
     assert.equal(interviewClaudeStage('interview-answer-bank', 'qa-fact-check'), 'qa-fact-check');
     assert.equal(interviewClaudeStage('interview-answer-bank'), 'qa-write');
     assert.deepEqual(firstJsonObject('Sure: {"a":"b}"} trailing'), { a: 'b}' });
     const runs = [];
+    const research = [];
     let replies = ['not json', '{"ok":false}', '{"ok":true}'];
-    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, runStage: async args => { runs.push(args); return { text: replies.shift(), model: 'claude-opus-5-5' }; } });
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true },
+      runStage: async args => { runs.push(args); return { text: replies.shift(), model: 'claude-opus-5-5' }; },
+      runResearchStage: async args => { research.push(args); return { text: 'Research prose with https://x.test', model: 'claude-opus-5-5' }; } });
     const value = await transport.callText('PROMPT', { task: 'interview-answer-bank', responseSchema: { type: 'object' }, responseValidator: v => { if (!v.ok) throw new Error('not ok'); } });
     assert.deepEqual(value, { ok: true });
     assert.deepEqual(runs.map(run => [run.model, run.effort, run.resume, run.tools]), [['opus', 'medium', false, ''], ['opus', 'medium', true, ''], ['opus', 'medium', true, '']]);
     assert.equal(new Set(runs.map(run => run.sessionId)).size, 1, 'retries stay in one Claude session');
     assert.match(runs[0].text, /REPLY FORMAT: one JSON object/u);
     assert.match(runs[2].text, /^YOUR PREVIOUS REPLY WAS REJECTED BY THE APP\..*\nnot ok$/su);
-    runs.length = 0; replies = ['Research prose with https://x.test'];
+    runs.length = 0;
     assert.equal(await transport.callRaw('R', { task: 'interview-brief-research' }), 'Research prose with https://x.test');
-    assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'high', INTERVIEW_RESEARCH_TOOLS]);
+    assert.equal(runs.length, 0, 'research never runs on the built-in runStage');
+    assert.deepEqual([research[0].model, research[0].effort, research[0].tools], ['opus', 'high', [...PARALLEL_RESEARCH_TOOLS]]);
     runs.length = 0; replies = ['{}'];
     await transport.callText('C', { task: 'interview-answer-bank', claudeStage: 'qa-fact-check', responseSchema: { type: 'object' } });
     assert.deepEqual([runs[0].model, runs[0].effort, runs[0].tools], ['opus', 'high', '']);
@@ -282,14 +287,18 @@ export default [
   { name: 'interview Q&A offload: qa-research and qa-fact-* stages never route even with a table entry', async run() {
     resetInterviewOffloadBlock();
     const runs = [];
+    const research = [];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      parallel: { enabled: async () => true },
       runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      runResearchStage: async args => { research.push(args); return { text: '{"ok":true}', model: 'claude-parallel' }; },
       routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
       offloadCall: async () => { throw new Error('offload must not be called'); } });
     for (const stage of ['qa-research', 'qa-fact-check', 'qa-fact-verify', 'qa-answer-entailment', 'qa-card-repair']) await transport.callText('P', { claudeStage: stage });
-    assert.equal(runs.length, 5);
-    assert.equal(runs[0].tools, INTERVIEW_RESEARCH_TOOLS);
-    assert.equal(runs[1].tools, '');
+    assert.equal(runs.length, 4, 'research is not a runStage stage any more');
+    assert.equal(research.length, 1);
+    assert.deepEqual(research[0].tools, [...PARALLEL_RESEARCH_TOOLS]);
+    assert.deepEqual(runs.map(run => run.tools), ['', '', '', '']);
     assert.equal(interviewStageMayOffload('qa-answer-entailment'), false);
     assert.equal(interviewStageMayOffload('qa-card-repair'), false);
     assert.equal(interviewStageMayOffload('qa-fact-recheck'), false);
@@ -360,5 +369,148 @@ export default [
     assert.deepEqual(jobs[0].validate('{"ok":true}'), { valid: true, code: null });
     assert.deepEqual(jobs[0].validate('{"ok":false}'), { valid: false, code: 'NOT_OK' });
     assert.equal(jobs[0].validate('no json').valid, false);
+  } },
+  { name: 'interview Claude transport: qa-research always calls runResearchStage with the six Parallel tools and MCP server', async run() {
+    const runs = []; const research = []; const samples = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true, readKey: async () => 'pk-test-key-0123456789' },
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      runResearchStage: async args => { research.push(args); return { text: '{"ok":true}', model: 'claude-parallel' }; },
+      recordSample: sample => samples.push(sample),
+      routeFor: () => null });
+    assert.deepEqual(await transport.callText('RESEARCH', { task: 'interview-brief-research' }), { ok: true });
+    assert.equal(runs.length, 0, 'runStage is never called for qa-research');
+    assert.equal(research.length, 1);
+    const request = research[0];
+    assert.deepEqual(request.tools, [...PARALLEL_RESEARCH_TOOLS]);
+    assert.equal(request.tools.length, 6);
+    assert.equal(request.tools.some(name => name === 'WebSearch' || name === 'WebFetch'), false);
+    assert.equal(request.mcpServers.parallel.url, 'https://mcp.parallel.ai/mcp');
+    assert.deepEqual(request.mcpServers.parallel.headers, { Authorization: 'Bearer pk-test-key-0123456789' });
+    assert.equal(typeof request.onToolResult, 'function');
+    assert.equal(request.maxTurns, INTERVIEW_RESEARCH_MAX_TURNS);
+    assert.equal(request.maxTurns, 24);
+    assert.equal(request.persistSession, false);
+    assert.equal(request.resume, false);
+    assert.equal(request.ultracode, false);
+    assert.equal(request.model, 'opus');
+    assert.equal(request.effort, 'high');
+    assert.equal(samples[0].tools, PARALLEL_RESEARCH_TOOLS.join(','));
+    assert.equal(samples[0].tools.split(',').length, 6);
+  } },
+  { name: 'interview Claude transport: a research error other than exhaustion propagates and never reaches runStage', async run() {
+    const runs = []; let researchCalls = 0;
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, maxAttempts: 3,
+      parallel: { enabled: async () => true, readKey: async () => '' },
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      runResearchStage: async () => { researchCalls += 1; throw Object.assign(new Error('mcp down'), { code: 'CLAUDE_RUN_FAILED' }); },
+      routeFor: () => null });
+    await assert.rejects(transport.callText('RESEARCH', { task: 'interview-brief-research' }),
+      error => error.code === 'CLAUDE_RUN_FAILED' && error.message === 'mcp down');
+    assert.equal(researchCalls, 1, 'a thrown research error is not retried');
+    assert.equal(runs.length, 0, 'runStage is never called for qa-research');
+  } },
+  { name: 'interview Claude transport: PARALLEL_SEARCH_EXHAUSTED from research propagates at once and is never retried', async run() {
+    const runs = []; const research = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, maxAttempts: 3,
+      parallel: { enabled: async () => true },
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      runResearchStage: async args => { research.push(args); throw parallelExhaustedError(); },
+      routeFor: () => null });
+    await assert.rejects(transport.callText('RESEARCH', { task: 'interview-brief-research' }),
+      error => error.code === PARALLEL_EXHAUSTED_CODE);
+    assert.equal(research.length, 1, 'exhaustion is not retried');
+    assert.equal(runs.length, 0, 'runStage is never called for qa-research');
+  } },
+  { name: 'interview Claude transport: a rejected research reply is retried through Parallel with the original prompt and rejection', async run() {
+    const runs = []; const research = [];
+    const replies = ['{"ok":false}', '{"ok":true}'];
+    const validator = value => { if (value.ok !== true) throw Object.assign(new Error('ok must be true'), { code: 'NOT_OK' }); };
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, maxAttempts: 3,
+      parallel: { enabled: async () => true },
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      runResearchStage: async args => { research.push(args); return { text: replies.shift(), model: 'claude-parallel' }; },
+      routeFor: () => null });
+    assert.deepEqual(await transport.callText('ORIGINAL', { task: 'interview-brief-research', responseValidator: validator }), { ok: true });
+    assert.equal(research.length, 2, 'the rejection is retried, not abandoned');
+    assert.equal(research[0].text, 'ORIGINAL');
+    assert.equal(research[1].resume, false, 'a Parallel session is never persisted, so it cannot be resumed');
+    assert.equal(research[1].persistSession, false);
+    assert.match(research[1].text, /^ORIGINAL\n\nYOUR PREVIOUS REPLY WAS REJECTED BY THE APP[\s\S]*ok must be true$/u);
+    assert.equal(runs.length, 0, 'the retry is another Parallel call, never the built-in runner');
+    const spent = [];
+    const exhausted = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, maxAttempts: 1,
+      parallel: { enabled: async () => true },
+      runStage: async args => { spent.push(args); return { text: '{"ok":true}' }; },
+      runResearchStage: async args => { spent.push(args); return { text: '{"ok":false}' }; },
+      routeFor: () => null });
+    await assert.rejects(exhausted.callText('ORIGINAL', { task: 'interview-brief-research', responseValidator: validator }),
+      error => error.code === 'NOT_OK');
+    assert.equal(spent.length, 1, 'a rejected research reply consumes an attempt, never a built-in one');
+  } },
+  { name: 'interview Claude transport: Parallel exhausted before the call rejects with PARALLEL_SEARCH_EXHAUSTED and calls neither runner', async run() {
+    const runs = []; const research = [];
+    const stage = async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; };
+    const researchStage = async args => { research.push(args); return { text: '{"ok":true}' }; };
+    const off = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => false },
+      runStage: stage, runResearchStage: researchStage, routeFor: () => null });
+    await assert.rejects(off.callText('R', { task: 'interview-brief-research' }), error => error.code === PARALLEL_EXHAUSTED_CODE);
+    assert.equal(runs.length, 0, 'runStage is never a research fallback');
+    assert.equal(research.length, 0, 'Claude is not called when Parallel is exhausted');
+    const throwing = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => { throw new Error('no keychain'); } },
+      runStage: stage, runResearchStage: researchStage, routeFor: () => null });
+    await assert.rejects(throwing.callText('R', { task: 'interview-brief-research' }), error => error.code === PARALLEL_EXHAUSTED_CODE);
+    assert.equal(runs.length, 0, 'a throwing enabled() also means exhausted, never built-in');
+    assert.equal(research.length, 0);
+  } },
+  { name: 'interview Claude transport: a non-research stage never calls runResearchStage or consults Parallel', async run() {
+    let researchCalls = 0;
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      parallel: { enabled: async () => { throw new Error('Parallel must not be consulted'); } },
+      runStage: async () => ({ text: '{"ok":true}', model: 'claude-x' }),
+      runResearchStage: async () => { researchCalls += 1; return { text: '{"ok":true}' }; },
+      routeFor: () => null });
+    await transport.callText('Q', { task: 'interview-answer-bank', claudeStage: 'qa-fact-check' });
+    await transport.callText('Q', { task: 'interview-brief-assessment' });
+    await transport.callText('Q', { task: 'interview-answer-bank' });
+    assert.equal(researchCalls, 0);
+  } },
+  { name: 'interview Claude transport: research onToolResult throws only for a Parallel tool error that reports a limit', async run() {
+    const research = [];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true, readKey: async () => '' },
+      runStage: async () => { throw new Error('runStage must not run for research'); },
+      runResearchStage: async args => { research.push(args); return { text: '{"ok":true}', model: 'claude-parallel' }; },
+      routeFor: () => null });
+    await transport.callText('SEARCH', { task: 'interview-brief-research' });
+    const { onToolResult } = research[0];
+    assert.equal(typeof onToolResult, 'function');
+    try {
+      assert.equal(onToolResult({ toolName: 'mcp__tavily__search', isError: true, text: '429 rate limit exceeded' }), undefined);
+      assert.equal(onToolResult({ toolName: 'mcp__parallel__web_search', isError: false, text: '429 rate limit exceeded' }), undefined);
+      assert.equal(onToolResult({ toolName: 'mcp__parallel__web_search', isError: true, text: 'failed to fetch https://x.test' }), undefined);
+      assert.throws(() => onToolResult({ toolName: 'mcp__parallel__web_search', isError: true, text: '429 rate limit exceeded, try again later' }),
+        error => error.code === PARALLEL_EXHAUSTED_CODE);
+      assert.equal(parallelBlocked(), true, 'the limit is noted for the dock and the next call');
+    } finally { resetParallelLimit(); }
+  } },
+  { name: 'interview Claude transport: recorded samples name the Parallel tools research used', async run() {
+    const samples = []; const research = [];
+    const replies = ['{"ok":false}', '{"ok":true}'];
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      parallel: { enabled: async () => true },
+      runStage: async () => ({ text: '{"ok":true}', model: 'claude-x' }),
+      runResearchStage: async args => { research.push(args); return { text: replies.shift(), model: 'claude-parallel' }; },
+      recordSample: sample => samples.push(sample),
+      routeFor: () => null });
+    const validator = value => { if (value.ok !== true) throw new Error('ok must be true'); };
+    await transport.callText('ORIGINAL', { task: 'interview-brief-research', responseValidator: validator });
+    await transport.callText('BRIEF', { task: 'interview-brief-assessment' });
+    assert.deepEqual(samples.map(sample => [sample.stage, sample.tools]), [
+      ['qa-research', PARALLEL_RESEARCH_TOOLS.join(',')],
+      ['qa-research', PARALLEL_RESEARCH_TOOLS.join(',')],
+      ['qa-brief', null],
+    ]);
+    assert.deepEqual(samples.map(sample => sample.outcome), ['rejected', 'accepted', 'accepted']);
+    assert.match(samples[1].text, /^ORIGINAL\n\nYOUR PREVIOUS REPLY WAS REJECTED BY THE APP/u);
+    assert.equal(samples.some(sample => String(sample.tools || '').includes('WebSearch')), false);
   } },
 ];

@@ -1279,7 +1279,7 @@ export default [
       assert(handoff.indexOf('STATIC SCORING RUBRIC') < handoff.indexOf('DYNAMIC JOBS PAYLOAD')
         && handoff.indexOf('DYNAMIC JOBS PAYLOAD') < handoff.indexOf(JSON.stringify(schema, null, 2))
         && handoff.includes('Return JSON only')
-        && handoff.includes('Use WebSearch and WebFetch to research this.'),
+        && handoff.includes('Use the web search tools you have been given to research this.'),
       'the task comes first, then the exact schema, the JSON-only rule and the web tools for a grounded task');
       assert(!/Transport:|copy\/paste|chat application|paste attachment|file cards|download chips|code block|Maximum output tokens|Retry-on-truncation|Output-cap|HANDOFF SETTINGS|Handoff code|STRICT JSON/u.test(handoff)
         && !handoff.includes('/tmp/resume.pdf'),
@@ -1298,7 +1298,9 @@ export default [
       });
       assert(freeText === 'SUMMARIZE THIS', 'a schema-less handoff carries no response rules at all');
       const grounded = materializeNonApiPrompt({ prompt: 'RESEARCH THIS', task: 'job-compensation-research-batch', grounding: true });
-      assert(grounded === 'RESEARCH THIS\n\nUse WebSearch and WebFetch to research this.', 'a grounded task is told to use WebSearch and WebFetch');
+      assert(grounded === 'RESEARCH THIS\n\nUse the web search tools you have been given to research this.',
+        'a grounded task is told to use the web search tools it was given');
+      assert(!grounded.includes('WebSearch'), 'the grounded prompt never names the built-in WebSearch tool');
       const structured = materializeNonApiPrompt({
         prompt: 'EXTRACT THIS',
         task: 'career-profile-compile',

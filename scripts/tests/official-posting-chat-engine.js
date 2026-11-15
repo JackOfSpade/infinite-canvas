@@ -1309,13 +1309,15 @@ export default [
     },
   },
   {
-    name: 'The judge prompt makes the app\'s page snapshots the main input and keeps WebFetch and WebSearch for leads without one',
+    name: 'The judge prompt makes the app\'s page snapshots the main input and keeps web search tools for leads without one',
     run() {
       const snapshots = [{ id: 'P1', at: '2026-11-02T00:00:00.000Z', source: 'page', read: true, title: 'Dispatch Engineer', description: DESCRIPTION }];
       const withSnaps = buildOfficialPostingJudgeRequest({ job: job(), leads, run: 'A', snapshots }).prompt;
       assert.match(withSnaps, /^Independent official posting judgment run A\./u);
       assert.match(withSnaps, /Judge the supplied page text\./u);
-      assert.match(withSnaps, /Use WebFetch or WebSearch only for a lead that has no usable snapshot/u);
+      assert.match(withSnaps, /Use your web search tools only for a lead that has no usable snapshot/u);
+      // The app's prompt never names a built-in Claude web tool.
+      assert.doesNotMatch(withSnaps, /WebSearch|WebFetch/u);
       assert.match(withSnaps, /copy only text that a fetch returns word for word, and never present a summary as a copy/u);
       assert.match(withSnaps, /description is the complete job description copied verbatim from the posting's snapshot/u);
       assert.ok(withSnaps.includes('BEGIN UNTRUSTED APP PAGE SNAPSHOTS JSON'));
@@ -1327,6 +1329,7 @@ export default [
       assert.ok(!without.includes('BEGIN UNTRUSTED APP PAGE SNAPSHOTS JSON'));
       // The truth rules are unchanged: quotes still come from the scraped evidence and the judge's own copy.
       for (const text of [withSnaps, without]) {
+        assert.doesNotMatch(text, /WebSearch|WebFetch/u);
         assert.match(text, /scrapedQuote copied verbatim from the scraped evidenceText and officialQuote copied verbatim from your own title, location, salary or description/u);
         assert.match(text, /Never force a match\./u);
       }

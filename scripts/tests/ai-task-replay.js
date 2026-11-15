@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appExecute, appValidate, assertOutsideRepo, findBoardNode, main, matchFlow, parseArgs, parseConfigs, prepareOutDir, replayChildEnv, replayTask, resetResearchedMatches, selectRowsForTask, selectScoringGroup, StopCapture, storedPostingUrls, UNREPLAYABLE_TASKS } from '../ai-task-replay.mjs';
+import { PARALLEL_RESEARCH_TOOLS } from '../../electron/ipc/parallelSearch.js';
 import { compensationMap, normalizePostingUrl, officialPostingMap, percentile, preferenceResearchMap, renderText, summarize } from '../ai-task-replay-score.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -264,32 +265,147 @@ export default [
     },
   },
   {
-    name: 'ai task replay: Claude gets tools+maxTurns 16 for a tool task, offload gets webTools, a no-tool task gets neither',
+    name: 'ai task replay: Claude gets tools+maxTurns 16 with the Parallel server for a tool task, offload gets webTools, a no-tool task gets neither',
     async run() {
       const seen = [];
+      const servers = { parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp' } };
+      const keysRead = [];
       const fakeApp = tools => ({
         claudeTaskProfile: () => ({ model: 'opus', effort: 'high', ...(tools ? { tools } : {}) }),
         cachedPromptParts: prompt => ({ prompt }),
         handoffMessages: () => [],
         resolveClaudeBinary: () => '/bin/claude',
         claudeChildEnv: () => ({}),
+        readParallelKey: async () => { keysRead.push('read'); return ''; },
+        parallelMcpServers: key => { keysRead.push(key); return servers; },
         runClaudeSdkStage: async args => { seen.push({ kind: 'claude', args }); return { text: 't' }; },
         offloadTextCall: async args => { seen.push({ kind: 'offload', args }); return { text: 't' }; },
       });
       const call = { prompt: 'p', cachedPrefix: '' };
       const offload = { id: 'flash:low', kind: 'offload', route: 'deepseek-flash', reasoning: 'low' };
-      const research = appExecute(fakeApp('WebSearch,WebFetch'), 'job-official-posting-research', null);
+      const research = appExecute(fakeApp(PARALLEL_RESEARCH_TOOLS.join(',')), 'job-official-posting-research', null);
       await research({ config: { id: 'claude', kind: 'claude' }, call });
+      await research({ config: { id: 'claude:haiku:low', kind: 'claude-setting', model: 'haiku', effort: 'low' }, call });
       await research({ config: offload, call });
-      assert.deepEqual(seen[0].args.tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(seen[0].args.tools, PARALLEL_RESEARCH_TOOLS);
+      assert.deepEqual(seen[0].args.mcpServers, servers, 'the baseline gives Claude the Parallel server with its tools');
       assert.equal(seen[0].args.maxTurns, 16);
-      assert.deepEqual(seen[1].args.webTools, {});
+      assert.deepEqual(seen[1].args.mcpServers, servers, 'a claude-setting config on a web task also gets the Parallel server');
+      assert.equal(seen[0].args.allowBuiltInWebTools, false, 'the baseline web task never offers built-in web tools');
+      assert.equal(seen[1].args.allowBuiltInWebTools, false, 'a claude-setting web task never offers built-in web tools');
+      assert.deepEqual(seen[2].args.webTools, {});
+      assert.equal('mcpServers' in seen[2].args, false, 'offload never gets an MCP server');
+      assert.deepEqual(keysRead, ['read', ''], 'the Parallel key is read once per appExecute, not per call');
       const plain = appExecute(fakeApp(''), 'job-scoring', null);
       await plain({ config: { id: 'claude', kind: 'claude' }, call });
       await plain({ config: offload, call });
-      assert.equal('tools' in seen[2].args, false);
-      assert.equal('maxTurns' in seen[2].args, false);
-      assert.equal('webTools' in seen[3].args, false);
+      assert.equal('tools' in seen[3].args, false);
+      assert.equal('maxTurns' in seen[3].args, false);
+      assert.equal('mcpServers' in seen[3].args, false, 'a task without tools gets no MCP server');
+      assert.equal('webTools' in seen[4].args, false);
+      assert.deepEqual(keysRead, ['read', ''], 'a task without tools never reads the Parallel key');
+    },
+  },
+  {
+    name: 'ai task replay: claude-native and claude-parallel are accepted only for a task whose profile has web tools',
+    async run() {
+      assert.deepEqual(parseConfigs('claude-native,claude-parallel'), [
+        { id: 'claude', kind: 'claude' },
+        { id: 'claude-native', kind: 'claude-search', search: 'native', tools: ['WebSearch', 'WebFetch'], mcpServers: {} },
+        { id: 'claude-parallel', kind: 'claude-search', search: 'parallel' },
+      ], 'both comparison configs parse next to the baseline');
+      const web = parseArgs(['--task', 'job-official-posting-research', '--canvas', 'c', '--out', 'o', '--configs', 'claude-native,claude-parallel']);
+      assert.deepEqual(web.configs.map(config => config.id), ['claude', 'claude-native', 'claude-parallel']);
+      assert.equal(parseArgs(['--task', 'job-official-posting-match', '--canvas', 'c', '--out', 'o', '--configs', 'claude-native']).configs.length, 2);
+      for (const id of ['claude-native', 'claude-parallel']) {
+        assert.throws(() => parseArgs(['--task', 'job-scoring', '--canvas', 'c', '--user-data', 'u', '--out', 'o', '--configs', id]),
+          new RegExp(`${id} needs a task with web tools`), `${id} is refused for a task without tools`);
+      }
+    },
+  },
+  {
+    name: 'ai task replay: claude-native asks for WebSearch/WebFetch without a server, claude-parallel repeats the Parallel baseline',
+    async run() {
+      const seen = [];
+      const servers = { parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp' } };
+      const fakeApp = tools => ({
+        claudeTaskProfile: () => ({ model: 'sonnet', effort: 'medium', ...(tools ? { tools } : {}) }),
+        cachedPromptParts: prompt => ({ prompt }),
+        resolveClaudeBinary: () => '/bin/claude',
+        claudeChildEnv: () => ({}),
+        readParallelKey: async () => 'key',
+        parallelMcpServers: key => ({ ...servers, key }),
+        runClaudeSdkStage: async args => { seen.push(args); return { text: 't' }; },
+        offloadTextCall: async () => { throw new Error('offload is not expected here'); },
+      });
+      const call = { prompt: 'p', cachedPrefix: '' };
+      const baseline = { id: 'claude', kind: 'claude' };
+      const native = { id: 'claude-native', kind: 'claude-search', search: 'native', tools: ['WebSearch', 'WebFetch'], mcpServers: {} };
+      const parallel = { id: 'claude-parallel', kind: 'claude-search', search: 'parallel' };
+      const research = appExecute(fakeApp(PARALLEL_RESEARCH_TOOLS.join(',')), 'job-preference-research-batch', null);
+      await research({ config: baseline, call });
+      await research({ config: parallel, call });
+      await research({ config: native, call });
+      assert.deepEqual(seen[0].tools, PARALLEL_RESEARCH_TOOLS);
+      assert.deepEqual(seen[1].tools, PARALLEL_RESEARCH_TOOLS, 'claude-parallel asks for the same tools as the baseline');
+      assert.deepEqual(seen[1].mcpServers, seen[0].mcpServers, 'claude-parallel asks for the same Parallel server as the baseline');
+      assert.deepEqual(seen[2].tools, ['WebSearch', 'WebFetch'], "claude-native asks for Claude's own web tools");
+      assert.equal(seen[2].allowBuiltInWebTools, true, 'claude-native opts in to the built-in web tools');
+      assert.deepEqual(seen[2].mcpServers, {}, 'claude-native gets no MCP server');
+      assert.equal(seen[0].allowBuiltInWebTools, false, 'the baseline Parallel arm never opts in');
+      assert.equal(seen[1].allowBuiltInWebTools, false, 'claude-parallel never opts in');
+      for (const args of seen) {
+        assert.equal(args.maxTurns, 16);
+        assert.deepEqual({ model: args.model, effort: args.effort }, { model: 'sonnet', effort: 'medium' }, 'both use the task profile model and effort');
+      }
+    },
+  },
+  {
+    name: 'ai task replay: tool usage is counted from onActivity and web rows record which search answered',
+    async run() {
+      const baseApp = {
+        claudeTaskProfile: () => ({ model: 'opus', effort: 'high', tools: PARALLEL_RESEARCH_TOOLS.join(',') }),
+        cachedPromptParts: prompt => ({ prompt }),
+        resolveClaudeBinary: () => '/bin/claude',
+        claudeChildEnv: () => ({}),
+        readParallelKey: async () => '',
+        parallelMcpServers: () => ({ parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp' } }),
+        offloadTextCall: async () => { throw new Error('offload is not expected here'); },
+      };
+      const call = { prompt: 'p', cachedPrefix: '' };
+      const counted = appExecute({ ...baseApp, runClaudeSdkStage: async args => {
+        args.onActivity({ kind: 'tool', calls: [{ tool: 'mcp__parallel__web_search' }, { tool: 'mcp__parallel__fetch' }] });
+        args.onActivity({ kind: 'text', calls: [{ tool: 'mcp__parallel__web_search' }] });
+        args.onActivity({ kind: 'tool' });
+        args.onActivity({ kind: 'tool', calls: [{ tool: 'mcp__parallel__web_search' }] });
+        return { text: 't', costUsd: 0.01, durationMs: 5, model: 'm', usage: {} };
+      } }, 'job-official-posting-research', null);
+      const reply = await counted({ config: { id: 'claude', kind: 'claude' }, call });
+      assert.deepEqual(reply.toolCalls, { mcp__parallel__web_search: 2, mcp__parallel__fetch: 1 }, 'only tool events are counted');
+      assert.equal(reply.text, 't', 'the stage reply is passed through');
+      const quiet = appExecute({ ...baseApp, runClaudeSdkStage: async () => ({ text: 't' }) }, 'job-official-posting-research', null);
+      assert.deepEqual((await quiet({ config: { id: 'claude', kind: 'claude' }, call })).toolCalls, {}, 'no tool means an empty object');
+
+      const dir = tempDir();
+      try {
+        prepareOutDir(dir);
+        const configs = [{ id: 'claude', kind: 'claude' }, { id: 'claude-native', kind: 'claude-search', search: 'native', tools: ['WebSearch', 'WebFetch'], mcpServers: {} }];
+        const web = fakeHarness(dir);
+        await replayTask(web.args({ task: 'job-official-posting-research', configs, reps: 1, claudeReps: 1, batches: 1,
+          execute: async ({ config, rep, call: promptCall }) => ({ ...okReply(config, rep, promptCall), toolCalls: { [config.id === 'claude' ? 'mcp__parallel__web_search' : 'WebSearch']: 2 } }) }));
+        const scoring = fakeHarness(dir);
+        await replayTask(scoring.args({ task: 'job-scoring', configs: [{ id: 'claude', kind: 'claude' }], reps: 1, claudeReps: 1, batches: 1,
+          execute: async ({ config, rep, call: promptCall }) => ({ ...okReply(config, rep, promptCall), toolCalls: {} }) }));
+        const rows = fs.readFileSync(path.join(dir, 'results.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        const webRows = rows.filter(row => row.task === 'job-official-posting-research');
+        assert.deepEqual(webRows.map(row => [row.config, row.search]).sort(), [['claude', 'parallel'], ['claude-native', 'native']],
+          'the baseline names Parallel, claude-native names its search');
+        assert.deepEqual(webRows.find(row => row.config === 'claude').toolCalls, { mcp__parallel__web_search: 2 });
+        assert.deepEqual(webRows.find(row => row.config === 'claude-native').toolCalls, { WebSearch: 2 });
+        const scoringRow = rows.find(row => row.task === 'job-scoring');
+        assert.equal('search' in scoringRow, false, 'a task without web tools records no search');
+        assert.deepEqual(scoringRow.toolCalls, {}, 'a call without tools records an empty toolCalls');
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     },
   },
   {
@@ -434,21 +550,24 @@ export default [
         cachedPromptParts: (prompt, cachedPrefix) => ({ prompt, cachedPrefix, systemAppend: '' }),
         resolveClaudeBinary: () => '/bin/claude',
         claudeChildEnv: env => { childEnvs.push(env); return { ...env, CHILD: '1' }; },
+        readParallelKey: async () => '',
+        parallelMcpServers: key => ({ parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp', key } }),
         runClaudeSdkStage: async args => { seen.push(args); return { text: 't' }; },
         offloadTextCall: async () => { throw new Error('offload is not expected here'); },
       });
       const call = { prompt: 'p', cachedPrefix: 'c' };
       const baseline = { id: 'claude', kind: 'claude' };
       const setting = { id: 'claude:haiku:low', kind: 'claude-setting', model: 'haiku', effort: 'low' };
-      const strip = args => { const rest = { ...args }; delete rest.model; delete rest.effort; return rest; };
-      const research = appExecute(fakeApp('WebSearch,WebFetch'), 'job-official-posting-research', null);
+      const strip = args => { const rest = { ...args }; delete rest.model; delete rest.effort; delete rest.onActivity; return rest; };
+      const research = appExecute(fakeApp(PARALLEL_RESEARCH_TOOLS.join(',')), 'job-official-posting-research', null);
       await research({ config: baseline, call });
       await research({ config: setting, call });
       assert.deepEqual({ model: seen[0].model, effort: seen[0].effort }, { model: 'opus', effort: 'high' }, 'the baseline uses the task profile');
       assert.deepEqual({ model: seen[1].model, effort: seen[1].effort }, { model: 'haiku', effort: 'low' }, 'the setting uses its own model/effort');
       assert.deepEqual(strip(seen[1]), strip(seen[0]), 'cached parts, caching rule, tools, maxTurns and persistSession are identical');
       assert.equal(seen[1].persistSession, false);
-      assert.deepEqual(seen[1].tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(seen[1].tools, PARALLEL_RESEARCH_TOOLS);
+      assert.deepEqual(seen[1].mcpServers, seen[0].mcpServers, 'the setting gets the same Parallel server');
       assert.equal(seen[1].maxTurns, 16);
       assert.equal(seen[1].env.DISABLE_PROMPT_CACHING, '1');
 

@@ -19,7 +19,7 @@ import { mergeBoardClosedTelemetry } from './officialPostingBoardClosed.js';
 import { buildOfficialPostingResearchRequest, parseOfficialPostingResearchResponse } from './officialPostingBridge.js';
 import { CLAUDE_TASK_CONCURRENCY } from './claudeTaskWorker.js';
 import { createOfficialPostingReadMonitor } from './officialPostingReadHealth.js';
-import { readTavilyKey, tavilyExtract } from './tavily.js';
+import { parallelExtract, readParallelKey } from './parallelSearch.js';
 import { snapshotOfficialPostingLeads, trimOfficialPostingSnapshots } from './officialPostingSnapshot.js';
 import { createOfficialPostingRenderSession, renderOfficialPostingPage } from './officialPostingRenderedPage.js';
 import { buildOfficialPostingJudgeRequest, decideOfficialPostingJudgments, rankJudgeCitations, validateOfficialPostingJudgeResponse, MAX_JUDGE_LEADS, UNREADABLE_PAGE_TEXT_CHARS } from './officialPostingJudge.js';
@@ -694,15 +694,14 @@ export async function resolveOfficialPostings(jobs, {
   const snapshotSession = createOfficialPostingFetchSession({ fetch: snapshotFetch, signal, cacheFailures: false, hostBreaker: false });
   // Injected downloads are a test or replay, which must not raise alarms about the real network.
   const readHealth = snapshotFetch === fetchOfficialPosting ? createOfficialPostingReadMonitor({ signal }) : { observe: undefined, flush() {} };
-  // A page a site blocks the app from downloading may still be readable through Tavily's extract API (no AI). Only the
-  // real network path uses it: an injected download is a test or replay and must never reach Tavily. The key is read
-  // once, on the first page that needs it, and a missing key simply means no reader.
+  // A page a site blocks the app from downloading may still be readable through Parallel's fetch tool (no AI). Only
+  // the real network path uses it: an injected download is a test or replay and must never reach Parallel.
+  // The optional API key is read once, on the first page that needs it; without one the anonymous endpoint is used.
   const pageReader = readPage || (snapshotFetch === fetchOfficialPosting ? (() => {
     let key = null;
     return async (url, options = {}) => {
-      key ||= readTavilyKey();
-      const stored = await key;
-      return stored ? tavilyExtract({ key: stored, url, signal: options.signal || signal }) : '';
+      key ||= readParallelKey();
+      return parallelExtract({ url, key: await key, signal: options.signal || signal });
     };
   })() : null);
   // One job is someone waiting on this card (Generate or its own lookup), so it goes ahead of a Board's queue.

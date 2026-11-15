@@ -6,6 +6,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   answeringModel,
+  assertNoBuiltInWebTools,
+  BUILT_IN_WEB_TOOLS,
   CLAUDE_ACTIVITY_EMIT_INTERVAL_MS,
   CLAUDE_HANDOFF_SYSTEM_PROMPT,
   CLAUDE_MAX_RUNS_PER_JOB,
@@ -960,18 +962,61 @@ export default [
   {
     name: 'claude runner: research tools are offered and allowed without Workflow by default and with it only on an explicit opt-in; effort is never ultracode',
     run() {
-      const args = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
+      // A measurement script's built-in arm: the only caller allowed to opt in.
+      const args = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', allowBuiltInWebTools: true });
       const at = args.indexOf('--tools');
       assert.deepEqual(args.slice(at, at + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch']);
       assert.equal(args[args.indexOf('--effort') + 1], 'high');
       assert.equal(args.includes('ultracode'), false);
-      const optedIn = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', ultracode: true });
+      const optedIn = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', ultracode: true, allowBuiltInWebTools: true });
       const onAt = optedIn.indexOf('--tools');
       assert.deepEqual(optedIn.slice(onAt, onAt + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow']);
       assert.equal(optedIn[optedIn.indexOf('--effort') + 1], 'high', 'ultracode is a setting; the stage effort is unchanged');
       assert.deepEqual(optedIn.slice(optedIn.indexOf('--settings'), optedIn.indexOf('--settings') + 2), ['--settings', '{"ultracode":true}']);
       assert.deepEqual(withWorkflowTool('Workflow'), ['Workflow']);
       assert.deepEqual(withWorkflowTool(['WebSearch']), ['WebSearch', 'Workflow']);
+    },
+  },
+  {
+    name: 'claude runner: WebSearch and WebFetch are refused for the CLI args and the stage, as a string or an array, before anything is spawned',
+    async run() {
+      assert.deepEqual([...BUILT_IN_WEB_TOOLS], ['WebSearch', 'WebFetch']);
+      assert.equal(Object.isFrozen(BUILT_IN_WEB_TOOLS), true);
+      // Alone or mixed with Parallel Search tool names, as a comma string or an array.
+      for (const tools of ['WebSearch', 'WebFetch', 'mcp__parallel__web_search,WebFetch', ['WebSearch', 'mcp__parallel__web_fetch'], ['  webfetch  ']]) {
+        assert.throws(() => claudeCliArgs({ tools }), error => error instanceof ClaudeRunnerError
+          && error.code === 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED'
+          && error.message === "Claude's built-in web search is disabled in this app; web research uses Parallel Search.");
+        assert.throws(() => assertNoBuiltInWebTools(tools), { code: 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED' });
+        const { calls, spawnImpl } = fakeSpawnFactory();
+        const error = await rejection(runClaudeStage({ text: 't', binary: '/bin/claude', env: {}, cwd: '/tmp', spawnImpl, tools }));
+        assert.equal(error.code, 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED');
+        assert.equal(calls.length, 0, 'refused before any process is spawned');
+      }
+      // Parallel Search tools, Workflow and an empty list are unaffected.
+      for (const tools of ['mcp__parallel__web_search,mcp__parallel__web_fetch', ['mcp__parallel__web_search'], '', []]) {
+        assert.doesNotThrow(() => assertNoBuiltInWebTools(tools));
+        assert.doesNotThrow(() => claudeCliArgs({ tools }));
+      }
+      const parallel = claudeCliArgs({ tools: 'mcp__parallel__web_search' });
+      assert.deepEqual(parallel.slice(parallel.indexOf('--tools'), parallel.indexOf('--tools') + 4),
+        ['--tools', 'mcp__parallel__web_search', '--allowedTools', 'mcp__parallel__web_search']);
+    },
+  },
+  {
+    name: 'claude runner: allowBuiltInWebTools true lets the built-in comparison arm spawn with WebSearch and WebFetch',
+    async run() {
+      const args = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', allowBuiltInWebTools: true });
+      assert.deepEqual(args.slice(args.indexOf('--tools'), args.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch']);
+      const { promise, calls } = await stageWith({ stdout: `${resultLine()}\n` }, { tools: ['WebSearch', 'WebFetch'], allowBuiltInWebTools: true });
+      assert.deepEqual(await promise, { text: 'final answer', model: 'claude-sonnet-5-5', durationMs: 42 });
+      const at = calls[0].args.indexOf('--tools');
+      assert.deepEqual(calls[0].args.slice(at, at + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch']);
+      // An explicit false is still refused, before the spawn.
+      const { calls: refusedCalls, spawnImpl } = fakeSpawnFactory();
+      const error = await rejection(runClaudeStage({ text: 't', binary: '/bin/claude', env: {}, cwd: '/tmp', spawnImpl, tools: 'WebSearch', allowBuiltInWebTools: false }));
+      assert.equal(error.code, 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED');
+      assert.equal(refusedCalls.length, 0);
     },
   },
   {

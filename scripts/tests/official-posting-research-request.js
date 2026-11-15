@@ -6,11 +6,13 @@ import {
 } from '../../electron/ipc/officialPostingBridge.js';
 import { officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
 import {
-  TAVILY_KEYCHAIN_SERVICE, TAVILY_RESEARCH_TOOLS, TAVILY_SEARCH_URL, TAVILY_EXTRACT_URL,
-  isMirrorHost, readTavilyKey, tavilyExtract, tavilyMcpServers, tavilyPlainLeads,
-} from '../../electron/ipc/tavily.js';
+  PARALLEL_KEY_NOTICE, PARALLEL_KEYCHAIN_SERVICE, PARALLEL_LIMIT_NOTICE, PARALLEL_MCP_URL, PARALLEL_REST_URL, PARALLEL_RESEARCH_TOOLS, isMirrorHost, isParallelLimitSignal, parallelBlocked, parallelExtract,
+  parallelKeyRejected, parallelMcpServers, parallelPlainLeads, parallelSearchNotice, readParallelKey, resetParallelLimit,
+} from '../../electron/ipc/parallelSearch.js';
 
 const A = 'a'.repeat(24); const B = 'b'.repeat(24);
+// A Parallel MCP tools/call reply: the tool's JSON payload inside a JSON-RPC result.
+const mcpReply = payload => async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify(payload) }] } }) });
 const section = (id, body) => `BEGIN OFFICIAL POSTING RESEARCH ${id}\n${body}\nEND OFFICIAL POSTING RESEARCH ${id}`;
 const candidate = (extra = {}) => ({ careersPageUrl: 'https://northwind.example.test/careers?utm_source=board#jobs',
   postingUrl: 'https://jobs.ashbyhq.com/northwind-synthetic/platform', employer: 'Northwind Labs',
@@ -162,7 +164,7 @@ export default [
     },
   },
   {
-    name: 'tavily mirror-host detection names job boards and their subdomains but no employer domain',
+    name: 'parallel mirror-host detection names job boards and their subdomains but no employer domain',
     run() {
       for (const host of ['www.linkedin.com', 'ca.linkedin.com', 'ca.indeed.com', 'jobs.google.com']) {
         assert.equal(isMirrorHost(host), true, host);
@@ -173,44 +175,37 @@ export default [
     },
   },
   {
-    name: 'tavily keychain reads the injected security command and resolves an empty key on callback error or synchronous throw',
-    async run() {
-      const calls = [];
-      const fakeExecFile = (bin, args, options, callback) => { calls.push({ bin, args, options }); callback(null, ' tvly-abc \n'); };
-      assert.equal(await readTavilyKey({ execFile: fakeExecFile }), 'tvly-abc');
-      assert.equal(calls.length, 1);
-      assert.equal(calls[0].bin, '/usr/bin/security');
-      assert.deepEqual(calls[0].args, ['find-generic-password', '-s', TAVILY_KEYCHAIN_SERVICE, '-w']);
-      assert.equal(await readTavilyKey({ execFile: (bin, args, options, callback) => callback(new Error('keychain locked')) }), '');
-      assert.equal(await readTavilyKey({ execFile: () => { throw new Error('security missing'); } }), '');
-    },
-  },
-  {
-    name: 'tavily MCP server URL encodes the key and exposes the frozen research tools',
+    name: 'parallel MCP server is the anonymous free endpoint and exposes the frozen research tools',
     run() {
-      assert.deepEqual(tavilyMcpServers('k y&z'), { tavily: { type: 'http', url: 'https://mcp.tavily.com/mcp/?tavilyApiKey=k%20y%26z' } });
-      assert.ok(Object.isFrozen(TAVILY_RESEARCH_TOOLS));
-      assert.deepEqual([...TAVILY_RESEARCH_TOOLS], ['mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract']);
+      assert.equal(PARALLEL_MCP_URL, 'https://mcp.parallel.ai/mcp');
+      assert.deepEqual(parallelMcpServers(), { parallel: { type: 'http', url: 'https://mcp.parallel.ai/mcp' } });
+      assert.ok(Object.isFrozen(PARALLEL_RESEARCH_TOOLS));
+      assert.deepEqual([...PARALLEL_RESEARCH_TOOLS], ['mcp__parallel__web_search', 'mcp__parallel__web_fetch', 'mcp__parallel__web_decisions', 'mcp__parallel__find_verticals', 'mcp__parallel__search_vertical', 'mcp__parallel__image_search']);
+      assert.equal(PARALLEL_RESEARCH_TOOLS.includes('mcp__parallel__send_feedback'), false, 'a report to a third party is never offered');
     },
   },
   {
-    name: 'tavily plain leads post an advanced ten-result search with the key only in the authorization header',
+    name: 'parallel plain leads make one keyless web_search tool call with a session id and two short queries',
     async run() {
       const calls = [];
-      const fakeFetch = async (url, options) => { calls.push({ url, options }); return { ok: true, json: async () => ({ results: [] }) }; };
-      assert.deepEqual(await tavilyPlainLeads({ key: 'tvly-test-key', member: { title: 'Staff Platform Engineer', poster: 'Northwind Labs' }, fetch: fakeFetch }), []);
+      const fakeFetch = async (url, options) => { calls.push({ url, options }); return mcpReply({ results: [] })(); };
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Staff Platform Engineer', poster: 'Northwind Labs' }, fetch: fakeFetch }), []);
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].url, TAVILY_SEARCH_URL);
+      assert.equal(calls[0].url, PARALLEL_MCP_URL);
       assert.equal(calls[0].options.method, 'POST');
-      assert.equal(calls[0].options.headers.Authorization, 'Bearer tvly-test-key');
       assert.equal(calls[0].options.headers['content-type'], 'application/json');
-      assert.deepEqual(JSON.parse(calls[0].options.body), {
-        query: 'Staff Platform Engineer Northwind Labs job posting', search_depth: 'advanced', max_results: 10,
-      });
+      assert.equal(Object.keys(calls[0].options.headers).some(name => /authorization/iu.test(name)), false, 'no key is ever sent');
+      const body = JSON.parse(calls[0].options.body);
+      assert.equal(body.method, 'tools/call');
+      assert.equal(body.params.name, 'web_search');
+      assert.match(body.params.arguments.session_id, /^[0-9a-f]{32}$/u);
+      assert.deepEqual(body.params.arguments.search_queries, [
+        'Staff Platform Engineer Northwind Labs job posting', 'Northwind Labs careers Staff Platform Engineer']);
+      assert.match(body.params.arguments.objective, /Staff Platform Engineer/u);
     },
   },
   {
-    name: 'tavily plain leads keep the first four unique employer https URLs in result order',
+    name: 'parallel plain leads keep the first four unique employer https URLs in result order',
     async run() {
       const results = [
         'https://www.linkedin.com/jobs/view/1', 'http://careers.example.test/insecure',
@@ -219,26 +214,39 @@ export default [
         'https://jobs.example.test/two', 'https://jobs.example.test/three',
         'https://jobs.example.test/four', 'https://jobs.example.test/five',
       ].map(url => ({ url }));
-      const fakeFetch = async () => ({ ok: true, json: async () => ({ results }) });
-      assert.deepEqual(await tavilyPlainLeads({ key: 'tvly-test-key', member: { title: 'Engineer' }, fetch: fakeFetch }), [
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: mcpReply({ results }) }), [
         'https://jobs.example.test/one', 'https://jobs.example.test/two',
         'https://jobs.example.test/three', 'https://jobs.example.test/four',
       ]);
     },
   },
   {
-    name: 'tavily plain leads skip fetching without a key or title and return empty whenever the request fails',
+    name: 'parallel plain leads read a one-event stream reply and long titles are cut to six words per query',
+    async run() {
+      const message = { jsonrpc: '2.0', id: 1, result: { content: [{ type: 'text', text: JSON.stringify({ results: [{ url: 'https://jobs.example.test/one' }] }) }] } };
+      let sent;
+      const fakeFetch = async (url, options) => { sent = JSON.parse(options.body); return { ok: true, status: 200, text: async () => `event: message\ndata: ${JSON.stringify(message)}\n\n` }; };
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Senior Staff Principal Platform Reliability Engineer Americas', poster: 'Northwind' }, fetch: fakeFetch }),
+        ['https://jobs.example.test/one']);
+      assert.equal(sent.params.arguments.search_queries[0], 'Senior Staff Principal Platform Reliability Engineer Northwind job posting');
+    },
+  },
+  {
+    name: 'parallel plain leads skip fetching without a title and return empty whenever the call fails',
     async run() {
       let calls = 0;
-      const fakeFetch = async () => { calls += 1; return { ok: true, json: async () => ({ results: [{ url: 'https://jobs.example.test/one' }] }) }; };
-      assert.deepEqual(await tavilyPlainLeads({ key: '', member: { title: 'Engineer' }, fetch: fakeFetch }), []);
-      assert.deepEqual(await tavilyPlainLeads({ key: 'tvly-test-key', member: { title: '   ' }, fetch: fakeFetch }), []);
+      const counted = reply => async () => { calls += 1; return reply(); };
+      assert.deepEqual(await parallelPlainLeads({ member: { title: '   ' }, fetch: counted(mcpReply({ results: [{ url: 'https://jobs.example.test/one' }] })) }), []);
       assert.equal(calls, 0);
-      const notOk = async () => { calls += 1; return { ok: false, status: 401, json: async () => ({ results: [] }) }; };
-      assert.deepEqual(await tavilyPlainLeads({ key: 'tvly-test-key', member: { title: 'Engineer' }, fetch: notOk }), []);
-      const throwing = async () => { calls += 1; throw new Error('network down'); };
-      assert.deepEqual(await tavilyPlainLeads({ key: 'tvly-test-key', member: { title: 'Engineer' }, fetch: throwing }), []);
-      assert.equal(calls, 2);
+      const notOk = counted(async () => ({ ok: false, status: 500, text: async () => 'internal error' }));
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: notOk }), []);
+      const toolError = counted(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text: 'bad arguments' }] } }) }));
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: toolError }), []);
+      const garbage = counted(async () => ({ ok: true, status: 200, text: async () => 'not json at all' }));
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: garbage }), []);
+      const throwing = counted(async () => { throw new Error('network down'); });
+      assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: throwing }), []);
+      assert.equal(calls, 4);
     },
   },
   {
@@ -333,58 +341,209 @@ export default [
     },
   },
   {
-    name: 'tavilyExtract posts one https page to the extract API and returns its own text',
+    name: 'parallel API key is optional: read from the keychain, only a key-shaped value counts, sent only in a header, never in the URL or body',
+    async run() {
+      const KEY = 'pk-test-key-0123456789';
+      const calls = [];
+      const fakeExecFile = (bin, args, options, callback) => { calls.push({ bin, args }); callback(null, ` ${KEY} \n`); };
+      assert.equal(await readParallelKey({ execFile: fakeExecFile }), KEY);
+      assert.equal(calls[0].bin, '/usr/bin/security');
+      assert.deepEqual(calls[0].args, ['find-generic-password', '-s', PARALLEL_KEYCHAIN_SERVICE, '-w']);
+      assert.equal(await readParallelKey({ execFile: (bin, args, options, callback) => callback(new Error('keychain locked')) }), '');
+      assert.equal(await readParallelKey({ execFile: () => { throw new Error('security missing'); } }), '');
+      for (const stored of ['a pasted sentence with spaces in it', 'short', 'x'.repeat(201), 'two\nlines-of-key-0123456789']) {
+        assert.equal(await readParallelKey({ execFile: (bin, args, options, callback) => callback(null, stored) }), '', stored);
+      }
+      assert.deepEqual(parallelMcpServers(KEY), { parallel: { type: 'http', url: PARALLEL_MCP_URL, headers: { Authorization: `Bearer ${KEY}` } } });
+      assert.deepEqual(parallelMcpServers('not a key'), { parallel: { type: 'http', url: PARALLEL_MCP_URL } });
+      assert.equal(JSON.stringify(parallelMcpServers(KEY)).includes(`${PARALLEL_MCP_URL}?`), false, 'no key in the URL');
+    },
+  },
+  {
+    name: 'parallel with a key: plain leads and page reads use the REST API (x-api-key, fast search, full_content), never the URL or body',
+    async run() {
+      resetParallelLimit();
+      try {
+        const KEY = 'pk-test-key-0123456789';
+        const sent = [];
+        const fakeFetch = async (url, options) => {
+          sent.push({ url, options });
+          const body = url.endsWith('/v1/search')
+            ? { results: [{ url: 'https://jobs.example.test/one' }] }
+            : { results: [{ url: 'https://careers.ibm.test/job/1', full_content: ' Full posting text ' }], errors: [] };
+          return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+        };
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer', poster: 'Acme' }, key: KEY, fetch: fakeFetch }), ['https://jobs.example.test/one']);
+        assert.equal(await parallelExtract({ url: 'https://careers.ibm.test/job/1', key: KEY, fetch: fakeFetch }), 'Full posting text');
+        assert.deepEqual(sent.map(call => call.url), [`${PARALLEL_REST_URL}/v1/search`, `${PARALLEL_REST_URL}/v1/extract`]);
+        for (const call of sent) {
+          assert.equal(call.options.headers['x-api-key'], KEY);
+          assert.equal(call.url.includes(KEY), false);
+          assert.equal(call.options.body.includes(KEY), false);
+          assert.match(JSON.parse(call.options.body).session_id, /^[0-9a-f]{32}$/u);
+        }
+        assert.equal(JSON.parse(sent[0].options.body).mode, 'fast');
+        assert.deepEqual(JSON.parse(sent[1].options.body).advanced_settings, { full_content: true });
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'parallel with a rejected key (401): falls back to the anonymous MCP at once, drops the key for ten minutes and shows a notice',
+    async run() {
+      resetParallelLimit();
+      try {
+        let clock = Date.now();
+        const now = () => clock;
+        const urls = [];
+        const fakeFetch = async (url) => {
+          urls.push(url);
+          if (url.startsWith(PARALLEL_REST_URL)) return { ok: false, status: 401, text: async () => '{"code":16,"message":"Invalid API key (C.1)"}' };
+          return mcpReply({ results: [{ url: 'https://jobs.example.test/one' }] })();
+        };
+        const KEY = 'pk-test-key-0123456789';
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, key: KEY, fetch: fakeFetch, now }), ['https://jobs.example.test/one']);
+        assert.deepEqual(urls, [`${PARALLEL_REST_URL}/v1/search`, PARALLEL_MCP_URL]);
+        assert.equal(parallelKeyRejected(now()), true);
+        assert.equal(parallelBlocked(now()), false, 'a rejected key is not a limit');
+        assert.equal(parallelSearchNotice(now()), PARALLEL_KEY_NOTICE);
+        assert.ok(PARALLEL_KEY_NOTICE.length <= 300, 'fits the dock status store cap');
+        assert.deepEqual(parallelMcpServers(KEY), { parallel: { type: 'http', url: PARALLEL_MCP_URL } }, 'the rejected key is not sent to the MCP');
+        urls.length = 0;
+        await parallelPlainLeads({ member: { title: 'Engineer' }, key: KEY, fetch: fakeFetch, now });
+        assert.deepEqual(urls, [PARALLEL_MCP_URL], 'no REST attempt while the key is dropped');
+        clock += 11 * 60_000;
+        assert.equal(parallelKeyRejected(now()), false);
+        assert.equal(parallelSearchNotice(now()), null);
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'parallel limit: the real free-tier error (HTTP 200, JSON-RPC code -32000) blocks and the notice names the fix',
+    async run() {
+      resetParallelLimit();
+      try {
+        const now = () => 9_000_000;
+        const real = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, error: { code: -32000,
+          message: "You've hit the free-tier rate limit for Parallel MCP. To continue with higher limits, sign in by connecting https://mcp.parallel.ai/mcp?login, or add your own API key." } }) });
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: real, now }), []);
+        assert.equal(parallelBlocked(now()), true);
+        assert.match(PARALLEL_LIMIT_NOTICE, /rate limit or credits/u);
+        assert.match(PARALLEL_LIMIT_NOTICE, /web research is paused/u);
+        assert.equal(/built-in search/u.test(PARALLEL_LIMIT_NOTICE), false, 'there is no built-in fallback to talk about');
+        assert.match(PARALLEL_LIMIT_NOTICE, new RegExp(PARALLEL_KEYCHAIN_SERVICE, 'u'));
+        assert.ok(PARALLEL_LIMIT_NOTICE.length <= 300, 'fits the dock status store cap');
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'parallel limit signals: 429 or 402, or limit wording in an error, count; a bare timeout or a plain failure does not',
+    run() {
+      assert.equal(isParallelLimitSignal({ status: 429 }), true);
+      assert.equal(isParallelLimitSignal({ status: 402 }), true);
+      for (const text of ['Rate limit exceeded', 'rate_limit', 'Quota exhausted', 'Too many requests', 'usage limit reached', 'free limit exceeded']) {
+        assert.equal(isParallelLimitSignal({ status: 200, text }), true, text);
+      }
+      for (const text of ['timeout exceeded', 'internal error', 'fetch_error', '']) assert.equal(isParallelLimitSignal({ status: 500, text }), false, text);
+      assert.equal(isParallelLimitSignal({ status: 403 }), false);
+      assert.equal(isParallelLimitSignal(), false);
+    },
+  },
+  {
+    name: 'parallel limit: a 429 stops all Parallel calls for ten minutes, shows one notice, then Parallel is tried again',
+    async run() {
+      resetParallelLimit();
+      try {
+        let clock = 1_000_000;
+        const now = () => clock;
+        let calls = 0;
+        const limited = async () => { calls += 1; return { ok: false, status: 429, text: async () => 'Too many requests' }; };
+        assert.equal(parallelBlocked(clock), false);
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: limited, now }), []);
+        assert.equal(calls, 1);
+        assert.equal(parallelBlocked(clock), true);
+        assert.equal(parallelSearchNotice(clock), PARALLEL_LIMIT_NOTICE);
+        assert.match(PARALLEL_LIMIT_NOTICE, /paused and queued work is kept/u);
+        // Blocked: neither the lead search nor the page reader reaches the network.
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: limited, now }), []);
+        assert.equal(await parallelExtract({ url: 'https://careers.ibm.test/job/1', fetch: limited, now }), '');
+        assert.equal(calls, 1);
+        clock += 9 * 60_000;
+        assert.equal(parallelBlocked(clock), true, 'still blocked before ten minutes');
+        clock += 61_000;
+        assert.equal(parallelBlocked(clock), false);
+        assert.equal(parallelSearchNotice(clock), null);
+        const ok = mcpReply({ results: [{ url: 'https://jobs.example.test/one' }] });
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: ok, now }), ['https://jobs.example.test/one']);
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'parallel limit: limit wording in a tool-level error blocks, but a page failing inside a normal reply does not',
+    async run() {
+      resetParallelLimit();
+      try {
+        const now = () => 5_000_000;
+        const toolError = async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [{ type: 'text', text: 'Rate limit exceeded for this session' }] } }) });
+        assert.equal(await parallelExtract({ url: 'https://careers.ibm.test/job/1', fetch: toolError, now }), '');
+        assert.equal(parallelBlocked(now()), true, 'a tool-level limit error blocks');
+        resetParallelLimit();
+        // A target site's own 429 comes back under errors in an ok reply: not Parallel's limit.
+        const pageFailed = mcpReply({ results: [], errors: [{ url: 'https://careers.ibm.test/job/1', error_type: 'fetch_error', http_status_code: 429, content: 'Too many requests' }] });
+        assert.equal(await parallelExtract({ url: 'https://careers.ibm.test/job/1', fetch: pageFailed, now }), '');
+        assert.equal(parallelBlocked(now()), false);
+        const plainFailure = async () => ({ ok: false, status: 500, text: async () => 'internal error' });
+        assert.deepEqual(await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: plainFailure, now }), []);
+        assert.equal(parallelBlocked(now()), false, 'an ordinary failure never blocks');
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'parallelExtract makes one keyless web_fetch call for an https page and returns its own text',
     async run() {
       const calls = [];
-      const reply = { results: [{ url: 'https://careers.ibm.test/job/123', raw_content: '  Dispatch Engineer\nApply now  ' }], failed_results: [] };
-      const text = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://careers.ibm.test/job/123',
-        fetch: async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, json: async () => reply }; } });
+      const reply = { results: [{ url: 'https://careers.ibm.test/job/123', full_content: '  Dispatch Engineer\nApply now  ' }], errors: [] };
+      const text = await parallelExtract({ url: 'https://careers.ibm.test/job/123',
+        fetch: async (url, options) => { calls.push({ url, options }); return mcpReply(reply)(); } });
       assert.equal(text, 'Dispatch Engineer\nApply now');
-      assert.equal(TAVILY_EXTRACT_URL, 'https://api.tavily.com/extract');
       assert.equal(calls.length, 1);
-      assert.equal(calls[0].url, TAVILY_EXTRACT_URL);
+      assert.equal(calls[0].url, PARALLEL_MCP_URL);
       assert.equal(calls[0].options.method, 'POST');
-      assert.equal(calls[0].options.headers['content-type'], 'application/json');
-      assert.equal(calls[0].options.headers.Authorization, 'Bearer synthetic-tavily-key');
-      assert.deepEqual(JSON.parse(calls[0].options.body), {
-        urls: ['https://careers.ibm.test/job/123'], extract_depth: 'advanced', format: 'markdown' });
-      assert.ok(!calls[0].options.body.includes('synthetic-tavily-key'));
+      assert.equal(Object.keys(calls[0].options.headers).some(name => /authorization/iu.test(name)), false);
+      const body = JSON.parse(calls[0].options.body);
+      assert.equal(body.params.name, 'web_fetch');
+      assert.deepEqual(body.params.arguments.urls, ['https://careers.ibm.test/job/123']);
+      assert.equal(body.params.arguments.full_content, true);
     },
   },
   {
-    name: 'tavilyExtract returns empty text for a non-ok response or a page it could not read',
+    name: 'parallelExtract returns empty text for a non-ok reply, a tool error, a page under errors or empty content',
     async run() {
-      const failedPage = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://www.wellfound.test/jobs/1',
-        fetch: async () => ({ ok: false, status: 403, json: async () => ({ detail: 'synthetic-tavily-key rejected' }) }) });
-      assert.equal(failedPage, '');
-      const unreadable = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://www.wellfound.test/jobs/1',
-        fetch: async () => ({ ok: true, status: 200, json: async () => ({ results: [],
-          failed_results: [{ url: 'https://www.wellfound.test/jobs/1', error: 'blocked' }] }) }) });
+      const url = 'https://www.wellfound.test/jobs/1';
+      assert.equal(await parallelExtract({ url, fetch: async () => ({ ok: false, status: 403, text: async () => 'forbidden' }) }), '');
+      assert.equal(await parallelExtract({ url, fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ jsonrpc: '2.0', id: 1, result: { isError: true, content: [] } }) }) }), '');
+      // A page Parallel could not read comes back as a normal reply with an errors entry (seen 2026-11-14).
+      const unreadable = await parallelExtract({ url, fetch: mcpReply({ results: [], errors: [{ url, error_type: 'fetch_error', http_status_code: null, content: null }] }) });
       assert.equal(unreadable, '');
-      assert.ok(!String(unreadable).includes('synthetic-tavily-key'));
-      const empty = await tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://www.wellfound.test/jobs/1',
-        fetch: async () => ({ ok: true, status: 200, json: async () => ({ results: [{ url: 'https://www.wellfound.test/jobs/1', raw_content: '   ' }] }) }) });
-      assert.equal(empty, '');
+      assert.equal(await parallelExtract({ url, fetch: mcpReply({ results: [{ url, full_content: '   ' }], errors: [] }) }), '');
     },
   },
   {
-    name: 'tavilyExtract never calls the API without a key or for an http url',
+    name: 'parallelExtract never calls Parallel for an http url or a malformed one',
     async run() {
       const calls = [];
-      const fetch = async (url, options) => { calls.push({ url, options }); return { ok: true, status: 200, json: async () => ({ results: [] }) }; };
-      assert.equal(await tavilyExtract({ key: '', url: 'https://careers.ibm.test/job/123', fetch }), '');
-      assert.equal(await tavilyExtract({ url: 'https://careers.ibm.test/job/123', fetch }), '');
-      assert.equal(await tavilyExtract({ key: 'synthetic-tavily-key', url: 'http://careers.ibm.test/job/123', fetch }), '');
-      assert.equal(await tavilyExtract({ key: 'synthetic-tavily-key', url: 'not a url', fetch }), '');
+      const fetch = async (url, options) => { calls.push({ url, options }); return mcpReply({ results: [] })(); };
+      assert.equal(await parallelExtract({ url: 'http://careers.ibm.test/job/123', fetch }), '');
+      assert.equal(await parallelExtract({ url: 'https://user:pw@careers.ibm.test/job/123', fetch }), '');
+      assert.equal(await parallelExtract({ url: 'not a url', fetch }), '');
       assert.equal(calls.length, 0);
     },
   },
   {
-    name: 'tavilyExtract returns empty text when the request is aborted',
+    name: 'parallelExtract returns empty text when the request is aborted',
     async run() {
       const controller = new AbortController();
       let seen;
-      const pending = tavilyExtract({ key: 'synthetic-tavily-key', url: 'https://careers.ibm.test/job/123', signal: controller.signal,
+      const pending = parallelExtract({ url: 'https://careers.ibm.test/job/123', signal: controller.signal,
         fetch: (url, options) => {
           seen = options;
           return new Promise((resolve, reject) => {

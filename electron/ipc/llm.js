@@ -264,9 +264,10 @@ export async function callLLMText(prompt, opts = {}) {
  * Free-text generation — returns the model's raw string (NOT JSON-parsed).
  * Use for prose / HTML / research where a JSON envelope would be wrong.
  *
- * `grounding: true` adds an instruction to use WebSearch and WebFetch
- * (see materializeNonApiPrompt); the task's profile decides which tools the
- * worker is actually given.
+ * `grounding: true` adds an instruction to use the web search tools the worker
+ * gives the task — Parallel Search (mcp__parallel__web_search, and friends),
+ * not WebSearch and WebFetch (see materializeNonApiPrompt); the task's profile
+ * decides which tools are actually attached.
  */
 export async function callLLMRaw(prompt, opts = {}) {
   // These reviewed decisions use the same injected caller as research while

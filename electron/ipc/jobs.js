@@ -10153,7 +10153,7 @@ function researchRequestIds(prompt, opening) {
 /**
  * The research ids of a prompt built by buildCompensationResearchPrompt, in
  * prompt order; [] for any other prompt. Cohort salary research is the one
- * measured as worth running built-in and via Tavily at once, so the worker
+ * answered with Parallel Search alone since 2026-11-14 (built-in search as fallback), so the worker
  * recognizes it by its builder's fixed opening sentence and then reads the ids
  * from its BEGIN REQUEST lines. The role-family prompt shares the task id but
  * not this opening, and the location lookup has neither.

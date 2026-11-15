@@ -2,6 +2,10 @@
 // It serves pending handoffs through the worker seam in nonApiAi.js, so
 // validation, saved progress and correction rounds stay there. Each
 // answer starts a fresh session from the full prompt, so nothing carries over.
+// A web task (a profile with tools) is answered by Parallel Search only: never
+// by Claude's built-in WebSearch/WebFetch and never by the cheaper offload route.
+// When Parallel is out of usage the worker pauses with PARALLEL_SEARCH_EXHAUSTED
+// and keeps the queued work, so the owner can add credits and press Resume.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -31,11 +35,11 @@ import { routedCall } from './aiCallProviders.js';
 import { configureAiRecording, recordAiReplaySample } from './aiReplaySamples.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
 import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
-import { compensationCohortResearchIds, compensationRoleFamilyResearchIds } from './jobs.js';
-import { jobLocationLookupPromptRequests, mergeJobLocationLookupReplies } from './jobLocationLookup.js';
 import { mergeOfficialPostingResearchReplies, officialPostingResearchMembers, OFFICIAL_POSTING_RESEARCH_TASK } from './officialPostingBridge.js';
-import { mergeResearchSections } from './researchSectionMerge.js';
-import { readTavilyKey, tavilyMcpServers, tavilyPlainLeads, TAVILY_RESEARCH_TOOLS } from './tavily.js';
+import {
+  isParallelLimitSignal, isParallelToolName, noteParallelLimit, parallelBlocked, parallelExhaustedError, parallelMcpServers,
+  parallelPlainLeads, parallelSearchNotice, PARALLEL_EXHAUSTED_CODE, readParallelKey, resetParallelLimit,
+} from './parallelSearch.js';
 
 export const CLAUDE_TASK_CONCURRENCY = 4;
 export const CLAUDE_TASK_USAGE_FILE = 'claude-task-usage.jsonl';
@@ -45,14 +49,18 @@ const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 10 * 60_000;
 const USAGE_LIMIT_WAIT_MS = 10 * 60_000;
 const RESEARCH_MAX_TURNS = 16;
-// Cohort salary research, role-family research and the job location lookup share
-// this task id; the prompt itself decides which of them it is.
-const COMPENSATION_RESEARCH_TASK = 'job-compensation-research-batch';
 const IMAGE_MAX_EDGE = 1568;
 const ACTIVITY_NOTIFY_MS = 500;
 const OFFLOAD_BLOCK_MS = 30 * 60_000;
 const OFFLOAD_REJECTION_LIMIT = 2;
-const WEB_TOOLS = new Set(['WebSearch', 'WebFetch']);
+// Parallel Search is the only web search in this app, so a limit pauses the worker.
+const PARALLEL_PAUSE_MS = 10 * 60_000;
+// Research runs Parallel alone. Measured 2026-11-14, two seeds, Parallel against built-in web search
+// and both together: experience bands over 12 families with two verified hosts 11 and 10 against 1 and
+// 4, together 12 and 12; salary over 12 cohorts with a verified source 12 and 9 against 4 and 4,
+// together 9 on the second seed; location cards correct 2 and 9 of 24 against 1 and 4, together 2 and
+// 8; preference research over 172 checks answered by both decided 166 confirmed / 2 conflicts / 4
+// unverified with built-in against 158 / 2 / 12 with Parallel, the same two conflicts decided.
 export const OFFLOAD_CREDIT_NOTICE = 'DeepSeek credit is exhausted; AI tasks continue on Claude. Top up DeepSeek to resume savings.';
 
 const SEAM = Object.freeze({
@@ -68,7 +76,7 @@ const SEAM = Object.freeze({
 
 export const CLAUDE_TASK_STATUS_CHANNEL = 'get-claude-task-status';
 // Only these stops are shown to the person; anything else just retries quietly.
-export const CLAUDE_TASK_PAUSE_CODES = Object.freeze(['CLAUDE_USAGE_LIMIT', 'CLAUDE_NOT_SIGNED_IN', 'CLAUDE_CLI_MISSING']);
+export const CLAUDE_TASK_PAUSE_CODES = Object.freeze(['CLAUDE_USAGE_LIMIT', 'CLAUDE_NOT_SIGNED_IN', 'CLAUDE_CLI_MISSING', PARALLEL_EXHAUSTED_CODE]);
 export const CLAUDE_TASK_ACTIVITY_CHANNEL = 'get-claude-task-activity';
 export const CLAUDE_TASK_ACTIVITY_EVENT = 'claude-task:activity';
 
@@ -78,7 +86,8 @@ let current = null;
 export function claudeTaskStatusView(workerStatus) {
   const pauseCode = CLAUDE_TASK_PAUSE_CODES.includes(workerStatus?.pauseCode) ? workerStatus.pauseCode : null;
   const providerNotice = typeof workerStatus?.providerNotice === 'string' && workerStatus.providerNotice ? workerStatus.providerNotice : null;
-  return Object.freeze({ paused: Boolean(pauseCode), pauseCode, ...(providerNotice ? { providerNotice } : {}) });
+  const searchNotice = typeof workerStatus?.searchNotice === 'string' && workerStatus.searchNotice ? workerStatus.searchNotice : null;
+  return Object.freeze({ paused: Boolean(pauseCode), pauseCode, ...(providerNotice ? { providerNotice } : {}), ...(searchNotice ? { searchNotice } : {}) });
 }
 
 export function claudeTaskWorkerStatus() {
@@ -198,7 +207,10 @@ export function createClaudeTaskWorker({
   offloadCall = offloadTextCall,
   shadow = createShadowMeasure(),
   shadowValidator = workerShadowValidator,
-  tavily = { readKey: readTavilyKey, plainLeads: tavilyPlainLeads },
+  // Parallel's free MCP needs no key, so it is on unless `enabled` says otherwise: tests turn it off,
+  // and it reports off for ten minutes after a reply says Parallel is out of usage. A web task waits
+  // for the pause to pass; there is no other search to fall back to.
+  parallel = { enabled: async () => !parallelBlocked(), readKey: readParallelKey, plainLeads: parallelPlainLeads },
 } = {}) {
   const allowTasks = new Set(taskIds);
   let offloadBlockedUntil = 0;
@@ -285,6 +297,13 @@ export function createClaudeTaskWorker({
       return pause(error.code, Number.isFinite(error.detail?.resetsAt) ? claudeUsageWaitMs(error.detail.resetsAt, now()) : USAGE_LIMIT_WAIT_MS, error.detail?.resetsAt ?? null);
     }
     if (error?.code === 'CLAUDE_NOT_SIGNED_IN' || error?.code === 'CLAUDE_CLI_MISSING') { activity.released(entry.requestId); return pause(error.code, RETRY_BASE_MS * 2); }
+    if (error?.code === PARALLEL_EXHAUSTED_CODE) {
+      // Parallel Search is out of usage and no other search may answer, so this
+      // request waits for credits in the queue: no failed attempt, nothing given up.
+      failures.delete(entry.requestId);
+      activity.released(entry.requestId);
+      return pause(error.code, PARALLEL_PAUSE_MS);
+    }
     if (error?.code === CLAUDE_PROMPT_TOO_LONG) {
       // No retry or manual paste can make this prompt fit, so its caller is told.
       failures.delete(entry.requestId);
@@ -327,104 +346,60 @@ export function createClaudeTaskWorker({
     return images.map((image, i) => ({ ...image, label: `Photo ${i + 1}` }));
   }
 
+  /** The Parallel API key for one web task, or '' (the anonymous server) when there is none. */
+  async function parallelKeyForTask() {
+    try { return typeof parallel.readKey === 'function' ? (await parallel.readKey()) || '' : ''; } catch { return ''; }
+  }
+
   /**
-   * Official-posting research as three independent lookups combined: Claude with its
-   * built-in search, Claude with Tavily, and a plain Tavily search per job (no AI). Each
-   * finds postings the others miss (measured 2026-11-08: 17, 21 and 10 of 30 alone, 26
-   * together). Without a Tavily key, or if Tavily fails, it is the built-in lookup alone.
+   * The tool-result callback every web task's stage gets. A Parallel tool that reports a limit means
+   * research cannot go on anywhere, so the limit is noted (the dock and the next task see it) and the
+   * exhaustion error ends the stage, which pauses the worker with the queued work kept.
    */
-  async function researchThreeWays(prompt, claudeCall, signal) {
-    let key = '';
-    try { key = await tavily.readKey(); } catch { key = ''; }
-    if (!key) return claudeCall();
+  function parallelToolResult({ toolName, isError, text }) {
+    if (!isParallelToolName(toolName) || isError !== true || !isParallelLimitSignal({ text })) return;
+    noteParallelLimit({ text }, now());
+    throw parallelExhaustedError();
+  }
+
+  /** False while Parallel is out of usage: a web task then waits instead of being answered elsewhere. */
+  async function parallelAvailable() {
+    try { return typeof parallel.enabled === 'function' ? (await parallel.enabled()) !== false : true; } catch { return false; }
+  }
+
+  /**
+   * Official-posting research: the Parallel reply plus a plain Parallel search per job (no AI), merged.
+   * Measured on 2026-11-14, two seeds, 30 confirmed postings: built-in web search found 18 and 18,
+   * Parallel 28 and 27, both together 28 and 28, so the single Parallel reply carries the search and
+   * the plain leads only add pages it did not name. There is no built-in fallback: a Parallel limit
+   * pauses the worker instead.
+   */
+  async function researchPosting({ prompt, claudeCall, key, signal }) {
     const members = officialPostingResearchMembers(prompt);
-    const [native, viaTavily, plain] = await Promise.allSettled([
+    const [lookup, plain] = await Promise.allSettled([
       claudeCall(),
-      claudeCall({ tools: [...TAVILY_RESEARCH_TOOLS], mcpServers: tavilyMcpServers(key) }),
-      Promise.all(members.map(async member => [member.id, await tavily.plainLeads({ key, member, signal })])),
+      Promise.all(members.map(async member => [member.id, await parallel.plainLeads({ member, key, signal })])),
     ]);
-    const replies = [native, viaTavily].filter(result => result.status === 'fulfilled').map(result => result.value);
-    if (!replies.length) throw native.reason;
+    if (lookup.status === 'rejected') throw lookup.reason;
+    const reply = lookup.value;
     const merged = mergeOfficialPostingResearchReplies({
       ids: members.map(member => member.id),
-      replies: replies.map(reply => reply.text),
+      replies: [reply.text],
       extraLeads: plain.status === 'fulfilled' ? Object.fromEntries(plain.value) : {},
     });
-    const base = native.status === 'fulfilled' ? native.value : viaTavily.value;
-    // No member list (an unexpected prompt) or nothing valid: the built-in answer as it came.
-    return researchSpend(base, replies, members.length && merged ? merged : base.text);
-  }
-
-  // Lookups run side by side are one answer's spend: sum cost and numeric usage
-  // over the replies that succeeded, keeping only what they actually reported.
-  function researchSpend(base, replies, text) {
-    const sum = field => replies.reduce((total, reply) => total + (Number(reply[field]) || 0), 0);
-    const usage = {};
-    for (const reply of replies) {
-      for (const [name, value] of Object.entries(reply.usage || {})) if (typeof value === 'number') usage[name] = (usage[name] || 0) + value;
-    }
-    return {
-      ...base,
-      text,
-      ...(replies.some(reply => typeof reply.costUsd === 'number') ? { costUsd: sum('costUsd') } : {}),
-      ...(Object.keys(usage).length ? { usage } : {}),
-    };
-  }
-
-  /**
-   * How a job-compensation-research-batch prompt combines two lookups, or null when it is
-   * answered once. The prompt itself decides: cohort salary research and experience-band
-   * (role-family) research are sectioned the same way, so both merge per section; the job
-   * location lookup picks one host-validated reply per posting.
-   */
-  function compensationMergePlan(prompt) {
-    const sections = ids => ({ native, tavily }) => mergeResearchSections({
-      ids,
-      replies: [
-        { label: 'built-in web search', text: native },
-        { label: 'Tavily search', text: tavily },
-      ],
-      begin: id => `BEGIN COMPENSATION RESEARCH ${id}`,
-      end: id => `END COMPENSATION RESEARCH ${id}`,
-    });
-    const cohortIds = compensationCohortResearchIds(prompt);
-    if (cohortIds.length) return sections(cohortIds);
-    const roleFamilyIds = compensationRoleFamilyResearchIds(prompt);
-    if (roleFamilyIds.length) return sections(roleFamilyIds);
-    const requests = jobLocationLookupPromptRequests(prompt);
-    if (requests.length) return ({ native, tavily }) => mergeJobLocationLookupReplies({ requests, replies: [native, tavily] });
-    return null;
-  }
-
-  /**
-   * Built-in web search and Tavily as two lookups at once: Claude with its own tools and
-   * Claude with Tavily, combined by `merge` (which receives each arm's reply text, null
-   * when that arm failed) and falling back to whichever reply succeeded. Measured
-   * 2026-11-09: cohort salary research gave 10 of 12 cohorts two independently verified
-   * sources against 7 built-in and 9 Tavily alone; experience-band research gave 8 of 12
-   * role families two against 4 and 4; the job location lookup gave 7 of 24 correct with
-   * none wrong against 5 and 6, and Tavily alone broke the format in 2 of 6 calls. Either
-   * lookup alone sometimes fails, so the other still answers.
-   */
-  async function researchTwoWays(claudeCall, merge) {
-    let key = '';
-    try { key = await tavily.readKey(); } catch { key = ''; }
-    if (!key) return claudeCall();
-    const [native, viaTavily] = await Promise.allSettled([
-      claudeCall(),
-      claudeCall({ tools: [...TAVILY_RESEARCH_TOOLS], mcpServers: tavilyMcpServers(key) }),
-    ]);
-    const replies = [native, viaTavily].filter(result => result.status === 'fulfilled').map(result => result.value);
-    if (!replies.length) throw native.reason;
-    const base = native.status === 'fulfilled' ? native.value : viaTavily.value;
-    const merged = merge({
-      native: native.status === 'fulfilled' ? native.value.text ?? null : null,
-      tavily: viaTavily.status === 'fulfilled' ? viaTavily.value.text ?? null : null,
-    });
-    return researchSpend(base, replies, merged ?? base.text);
+    // No member list (an unexpected prompt) or nothing valid: the answer as it came.
+    return members.length && merged ? { ...reply, text: merged } : reply;
   }
 
   async function serve(entry, controller) {
+    const profile = profileFor(entry.task);
+    // A web task (a profile with tools) can only be answered by Parallel Search. While Parallel is
+    // out of usage the worker pauses and this entry stays queued: nothing is failed or dropped, and
+    // the owner's Resume or the ten minutes retry it.
+    if (profile.tools && !(await parallelAvailable())) {
+      activity.released(entry.requestId);
+      return pause(PARALLEL_EXHAUSTED_CODE, PARALLEL_PAUSE_MS);
+    }
     const comparisonProvenance = entry.comparisonGroup ? {
       version: 2, transport: 'worker', observed: true, comparisonGroup: entry.comparisonGroup, comparisonRun: entry.comparisonRun,
       // Every answer is its own session, which is the isolation the comparison needs.
@@ -433,22 +408,18 @@ export function createClaudeTaskWorker({
     const handoff = seam.read({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks, ...(comparisonProvenance ? { comparisonProvenance } : {}) });
     if (!handoff?.ok) return;
     seam.assigned({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks });
-    const profile = profileFor(entry.task);
     activity.begin(entry.requestId, { task: entry.task, model: profile.model, effort: profile.effort, maxTurns: profile.tools ? RESEARCH_MAX_TURNS : null, rejections: entry.rejections, nodeId: entry.nodeId });
     const cached = cachedPromptParts(handoff.prompt, handoff.cachedPrefix);
-    // A task with a table entry and no photos may be answered off Claude when it has no tools, or
-    // when its only tools are web search and fetch and the entry carries a webTools budget.
-    const webOnly = Boolean(profile.tools) && profile.tools.split(',').every(tool => WEB_TOOLS.has(tool));
-    let route = (!profile.tools || webOnly) && !entry.hasAttachments && !escalated.has(entry.requestId) && now() >= offloadBlockedUntil
+    // A task with a table entry and no photos may be answered off Claude when it has no tools. A web
+    // task never is: only Parallel Search may answer it, so a cheaper model cannot step in either.
+    let route = !profile.tools && !entry.hasAttachments && !escalated.has(entry.requestId) && now() >= offloadBlockedUntil
       ? routeFor(entry.task) : null;
-    if (route && profile.tools && !(route.webTools && typeof route.webTools === 'object')) route = null;
     let reply = null;
     let provider = 'claude';
     if (route) {
       try {
         reply = await offloadCall({
           messages: handoffMessages(cached), route: route.route, reasoning: route.reasoning, tag: entry.task, signal: controller.signal,
-          ...(profile.tools ? { webTools: route.webTools } : {}),
         });
         provider = 'offload';
       } catch (error) {
@@ -462,28 +433,29 @@ export function createClaudeTaskWorker({
       const stage = binding();
       // Marked before the call so a failure is known to carry Claude's spend.
       claudeAttempts.add(entry.requestId);
-      const claudeCall = extra => runStage({
+      const key = profile.tools ? await parallelKeyForTask() : '';
+      const claudeCall = () => runStage({
         ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
         pageImages, signal: controller.signal,
         onActivity: event => activity.event(entry.requestId, event),
         model: profile.model, effort: profile.effort, persistSession: false,
         // Ultracode is off unless a profile records the opt-in.
         ...(profile.ultracode === true ? { ultracode: true } : {}),
-        ...(profile.tools ? { tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS } : {}),
-        ...extra,
+        // A web task gets Parallel Search alone: its six tools, its server, and the callback that
+        // ends the stage when a Parallel tool reports a limit.
+        ...(profile.tools ? {
+          tools: profile.tools.split(','), maxTurns: RESEARCH_MAX_TURNS,
+          mcpServers: parallelMcpServers(key), onToolResult: parallelToolResult,
+        } : {}),
       });
-      // Cohort salary research, experience-band research and the job location lookup
-      // are each measured as worth running built-in and via Tavily at once; the prompt
-      // decides which combination it needs.
-      const compensationMerge = entry.task === COMPENSATION_RESEARCH_TASK && !entry.hasAttachments
-        ? compensationMergePlan(handoff.prompt) : null;
+      // Official-posting research merges the plain Parallel leads with its single reply; every other
+      // web task is that reply as it came.
       reply = entry.task === OFFICIAL_POSTING_RESEARCH_TASK && !entry.hasAttachments
-        ? await researchThreeWays(handoff.prompt, claudeCall, controller.signal)
-        : compensationMerge ? await researchTwoWays(claudeCall, compensationMerge)
+        ? await researchPosting({ prompt: handoff.prompt, claudeCall, key, signal: controller.signal })
         : await claudeCall();
     }
     recordUsage(provider === 'offload'
-      ? { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: route.reasoning, usage: reply.usage, costUsd: reply.costUsd, provider, route: route.route, reasoning: route.reasoning, ...(reply.webTools ? { webTools: reply.webTools } : {}) }
+      ? { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: route.reasoning, usage: reply.usage, costUsd: reply.costUsd, provider, route: route.route, reasoning: route.reasoning }
       : { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: profile.effort, usage: reply.usage, costUsd: reply.costUsd, provider });
     claudeAttempts.delete(entry.requestId);
     failures.delete(entry.requestId);
@@ -614,7 +586,8 @@ export function createClaudeTaskWorker({
       for (const run of running.values()) run.controller.abort();
     },
     status: () => Object.freeze({ running: running.size, retrying: failures.size, paused: now() < pausedUntil, pauseCode,
-      providerNotice: now() < offloadBlockedUntil ? OFFLOAD_CREDIT_NOTICE : null }),
+      providerNotice: now() < offloadBlockedUntil ? OFFLOAD_CREDIT_NOTICE : null,
+      searchNotice: parallelSearchNotice() }),
     activity: () => activity.snapshot(),
     // Resolves when this node's running calls have ended and their answers are in.
     drain: nodeId => new Promise((resolve) => {
@@ -626,6 +599,8 @@ export function createClaudeTaskWorker({
       pausedUntil = 0;
       pauseCode = null;
       pausedAt = null;
+      // Resume also drops the Parallel block, so a web task retries Parallel at once.
+      resetParallelLimit();
       activity.setPause(false, null);
       pump();
     },

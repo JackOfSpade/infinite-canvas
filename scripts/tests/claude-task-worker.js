@@ -8,6 +8,7 @@ import {
   profile,
 } from '../../electron/ipc/claudeTaskProfiles.js';
 import { cachedPromptParts, claudeTaskStatusView, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
+import { noteParallelLimit, PARALLEL_LIMIT_NOTICE, parallelBlocked, parallelExhaustedError, parallelPlainLeads, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { createShadowMeasure } from '../../electron/ipc/aiShadowMeasure.js';
 import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { answeringModel, buildClaudeInputMessage } from '../../electron/ipc/claudeApplicationRunner.js';
@@ -50,8 +51,9 @@ function harness({ entries, runStage, submit, prompts = {}, ...options }) {
     setTimer: (fn, ms) => { const timer = { fn, ms }; state.timers.push(timer); return timer; },
     clearTimer: (timer) => { state.timers = state.timers.filter(item => item !== timer); },
     runStage: async (options_) => { state.stages.push(options_); return runStage(options_, state); },
-    // Never the real keychain in tests: no Tavily unless a test supplies one.
-    tavily: { readKey: async () => '', plainLeads: async () => [] },
+    // Never the real network in tests: a fake Parallel (its stage is always injected too) that is on
+    // unless a test turns it off, so web tasks run on Parallel Search and never on built-in search.
+    parallel: { enabled: async () => true, plainLeads: async () => [] },
     ...options,
   });
   return { worker, state };
@@ -123,17 +125,19 @@ export default [
     },
   },
   {
-    name: 'claude task worker: research tasks get only the web tools and more than one turn',
+    name: 'claude task worker: research tasks get only the six Parallel tools, the Parallel server and more than one turn',
     async run() {
       const { worker, state } = harness({ entries: [entry('a', { task: 'job-compensation-research-batch' })], runStage: () => answer });
       worker.start();
       await settle();
-      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(state.stages[0].tools, ['mcp__parallel__web_search', 'mcp__parallel__web_fetch', 'mcp__parallel__web_decisions', 'mcp__parallel__find_verticals', 'mcp__parallel__search_vertical', 'mcp__parallel__image_search']);
+      assert.deepEqual(Object.keys(state.stages[0].mcpServers), ['parallel']);
+      assert.equal(typeof state.stages[0].onToolResult, 'function');
       assert(state.stages[0].maxTurns > 1);
     },
   },
   {
-    name: 'claude task worker: official posting research combines built-in search, Claude with Tavily and plain Tavily leads',
+    name: 'claude task worker: official posting research is one Claude call with the Parallel tools plus plain Parallel leads',
     async run() {
       const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://www.linkedin.com/jobs/view/1', snippet: 'desc' }]);
       const [{ id }] = officialPostingResearchMembers(request.prompt);
@@ -144,68 +148,147 @@ export default [
         entries: [entry('a', { task: 'job-official-posting-research' })],
         prompts: { a: request.prompt },
         recordUsage: row => rows.push(row),
-        tavily: {
-          readKey: async () => 'tvly-test-key',
-          plainLeads: async ({ key, member }) => { leadCalls.push({ key, title: member.title }); return ['https://acme.com/jobs/platform-engineer']; },
+        parallel: {
+          enabled: async () => true,
+          plainLeads: async ({ member }) => { leadCalls.push({ title: member.title }); return ['https://acme.com/jobs/platform-engineer', 'https://jobs.lever.co/acme/2']; },
         },
-        runStage: options => (options.mcpServers?.tavily
-          ? { text: `Based on my research:\n${section(['https://jobs.lever.co/acme/2', 'https://jobs.lever.co/acme/1/'])}`, model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 }
-          : { text: section(['https://jobs.lever.co/acme/1']), model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 }),
+        runStage: options => {
+          if (!options.mcpServers?.parallel) throw Object.assign(new Error('the built-in lookup must not run'), { code: 'CLAUDE_FAILED' });
+          return { text: `Based on my research:\n${section(['https://jobs.lever.co/acme/2', 'https://jobs.lever.co/acme/1/'])}`, model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 };
+        },
       });
       worker.start();
       await until(() => state.submits.length === 1);
-      assert.equal(state.stages.length, 2, 'two Claude lookups');
-      const native = state.stages.find(stage => !stage.mcpServers);
-      const viaTavily = state.stages.find(stage => stage.mcpServers);
-      assert.deepEqual(native.tools, ['WebSearch', 'WebFetch']);
-      assert.deepEqual(viaTavily.tools, ['mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract']);
-      assert.deepEqual(Object.keys(viaTavily.mcpServers), ['tavily']);
-      assert.equal(viaTavily.mcpServers.tavily.url.includes('tavilyApiKey=tvly-test-key'), true);
-      assert.deepEqual(leadCalls, [{ key: 'tvly-test-key', title: 'Platform Engineer' }]);
+      assert.equal(state.stages.length, 1, 'one Claude lookup');
+      const viaParallel = state.stages[0];
+      assert.deepEqual(viaParallel.tools, ['mcp__parallel__web_search', 'mcp__parallel__web_fetch', 'mcp__parallel__web_decisions', 'mcp__parallel__find_verticals', 'mcp__parallel__search_vertical', 'mcp__parallel__image_search']);
+      assert.deepEqual(Object.keys(viaParallel.mcpServers), ['parallel']);
+      assert.equal(viaParallel.mcpServers.parallel.url, 'https://mcp.parallel.ai/mcp');
+      assert.deepEqual(leadCalls, [{ title: 'Platform Engineer' }]);
       const rowsOut = request.responseValidator(state.submits[0].response);
       assert.deepEqual(rowsOut[0].candidates.map(candidate => candidate.postingUrl),
-        ['https://jobs.lever.co/acme/1', 'https://jobs.lever.co/acme/2', 'https://acme.com/jobs/platform-engineer'],
-        'built-in first, then Tavily, then plain leads; the duplicate lever link appears once');
-      assert.equal(rows[0].costUsd, 0.45, 'both Claude lookups are recorded as spend');
-      assert.deepEqual(rows[0].usage, { output_tokens: 12 });
-      assert.equal(JSON.stringify(rows).includes('tvly-test-key'), false, 'the key is never recorded');
+        ['https://jobs.lever.co/acme/2', 'https://jobs.lever.co/acme/1/', 'https://acme.com/jobs/platform-engineer'],
+        'Parallel\'s own order first, then plain leads; the duplicate lever link appears once');
+      assert.equal(rows[0].costUsd, 0.25, 'the one Claude lookup is recorded as spend');
+      assert.deepEqual(rows[0].usage, { output_tokens: 7 });
     },
   },
   {
-    name: 'claude task worker: official posting research without a Tavily key is the built-in lookup alone',
+    name: 'claude task worker: a stored Parallel API key goes to the research server header and the plain search, never into recorded spend',
     async run() {
-      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
-      const { worker, state } = harness({ entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt }, runStage: () => answer });
+      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://www.linkedin.com/jobs/view/1', snippet: 'desc' }]);
+      const keysSeen = [];
+      const rows = [];
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt }, recordUsage: row => rows.push(row),
+        parallel: { enabled: async () => true, readKey: async () => 'pk-test-key-0123456789', plainLeads: async ({ key }) => { keysSeen.push(key); return []; } },
+        runStage: () => answer,
+      });
       worker.start();
       await until(() => state.submits.length === 1);
-      assert.equal(state.stages.length, 1);
-      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
-      assert.equal('mcpServers' in state.stages[0], false);
-      assert.equal(state.submits[0].response, 'answer', 'the built-in answer goes through unchanged');
+      const viaParallel = state.stages.find(stage => stage.mcpServers);
+      assert.deepEqual(viaParallel.mcpServers.parallel.headers, { Authorization: 'Bearer pk-test-key-0123456789' });
+      assert.equal(viaParallel.mcpServers.parallel.url, 'https://mcp.parallel.ai/mcp');
+      assert.deepEqual(keysSeen, ['pk-test-key-0123456789']);
+      assert.equal(JSON.stringify(rows).includes('pk-test-key-0123456789'), false, 'the key is never recorded');
+      worker.stop();
     },
   },
   {
-    name: 'claude task worker: official posting research keeps whichever lookup succeeded',
+    name: 'claude task worker: official posting research with Parallel exhausted makes no call, pauses and keeps the entry',
+    async run() {
+      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
+      // Parallel is out of usage before the call, so no search may answer this task.
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt },
+        parallel: { enabled: async () => false, plainLeads: async () => { throw new Error('no plain leads without Parallel'); } }, runStage: () => answer,
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 0, 'no Claude call is made while Parallel is exhausted');
+      assert.equal(worker.status().paused, true);
+      assert.equal(worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+      assert.equal(state.pending.size, 1, 'the entry stays queued');
+      assert.equal(state.failed.length, 0, 'nothing is failed');
+      assert.equal(state.timers.length, 1, 'the worker waits instead of running');
+      assert.equal(state.timers[0].ms, 10 * 60_000, 'the pause lasts ten minutes');
+    },
+  },
+  {
+    name: 'claude task worker: a Parallel rate limit shows a dock notice and pauses web research until it clears',
+    async run() {
+      resetParallelLimit();
+      try {
+        const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
+        // A reply that says Parallel is limiting starts the ten-minute block.
+        await parallelPlainLeads({ member: { title: 'Engineer' }, fetch: async () => ({ ok: false, status: 429, text: async () => 'Too many requests' }) });
+        // `parallel: undefined` keeps the worker's own default (on unless Parallel is blocked).
+        const { worker, state } = harness({ entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt }, parallel: undefined, runStage: () => answer });
+        assert.equal(claudeTaskStatusView(worker.status()).searchNotice, PARALLEL_LIMIT_NOTICE);
+        worker.start();
+        await settle();
+        assert.equal(state.stages.length, 0, 'no call is made while Parallel is blocked');
+        assert.equal(worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+        assert.equal(state.pending.size, 1, 'the entry stays queued');
+        worker.stop();
+        resetParallelLimit();
+        assert.equal(claudeTaskStatusView(worker.status()).searchNotice, undefined, 'the notice is gone once Parallel is usable again');
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'claude task worker: a failing Parallel lookup is an ordinary failed attempt, never a built-in call',
+    async run() {
+      const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt },
+        parallel: { enabled: async () => true, plainLeads: async () => { throw new Error('search down'); } },
+        runStage: () => { throw Object.assign(new Error('boom'), { code: 'CLAUDE_FAILED' }); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1, 'the one Parallel call is the only call');
+      assert.equal(state.stages[0].tools.includes('mcp__parallel__web_search'), true);
+      assert.equal(state.submits.length, 0);
+      assert.equal(state.failed.length, 0, 'the request keeps its queue place');
+      assert.equal(state.timers.length, 1, 'an ordinary failure still backs off and retries on Parallel');
+      assert.equal(state.timers[0].ms, 30_000);
+    },
+  },
+  {
+    name: 'claude task worker: a retried official posting research still runs on Parallel',
     async run() {
       const request = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]);
       const [{ id }] = officialPostingResearchMembers(request.prompt);
-      const reply = url => ({ text: `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: '', postingUrl: url, employer: '', employerDomain: '', ats: '' })}\nEND OFFICIAL POSTING RESEARCH ${id}`, model: 'claude-opus-5-5', usage: {}, costUsd: 0.1 });
-      for (const failing of ['tavily', 'native']) {
-        const { worker, state } = harness({
-          entries: [entry('a', { task: 'job-official-posting-research' })], prompts: { a: request.prompt },
-          tavily: { readKey: async () => 'k', plainLeads: async () => { throw new Error('search down'); } },
-          runStage: options => {
-            const isTavily = Boolean(options.mcpServers);
-            if ((failing === 'tavily') === isTavily) throw Object.assign(new Error('boom'), { code: 'CLAUDE_FAILED' });
-            return reply(isTavily ? 'https://t.test/job' : 'https://n.test/job');
-          },
-        });
-        worker.start();
-        await until(() => state.submits.length === 1);
-        const candidates = request.responseValidator(state.submits[0].response)[0].candidates.map(candidate => candidate.postingUrl);
-        assert.deepEqual(candidates, [failing === 'tavily' ? 'https://n.test/job' : 'https://t.test/job'], failing);
-        worker.stop();
-      }
+      const section = url => `BEGIN OFFICIAL POSTING RESEARCH ${id}\nCANDIDATE: ${JSON.stringify({ careersPageUrl: '', postingUrl: url, employer: 'Acme', employerDomain: '', ats: '' })}\nEND OFFICIAL POSTING RESEARCH ${id}`;
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-official-posting-research', rejections: 1 })], prompts: { a: request.prompt },
+        parallel: { enabled: async () => true, plainLeads: async () => ['https://acme.com/jobs/1'] },
+        runStage: () => ({ text: section('https://t.test/job'), model: 'claude-opus-5-5', usage: {}, costUsd: 0.1 }),
+      });
+      worker.start();
+      await until(() => state.submits.length === 1);
+      assert.equal(state.stages.length, 1, 'one Parallel lookup on a retry too');
+      assert.equal(Boolean(state.stages[0].mcpServers?.parallel), true, 'the retry asks Parallel, not built-in search');
+      assert.equal(state.stages[0].tools.length, 6);
+      const candidates = request.responseValidator(state.submits[0].response)[0].candidates.map(candidate => candidate.postingUrl);
+      assert.deepEqual(candidates, ['https://t.test/job', 'https://acme.com/jobs/1'], 'the retry still gets the plain Parallel leads');
+    },
+  },
+  {
+    name: 'claude task worker: a retried salary cohort research still runs on Parallel',
+    async run() {
+      const text = COHORT_IDS.map(id => compensationSection(id, `parallel ${id}`)).join('\n');
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch', rejections: 1 })], prompts: { a: cohortResearchPrompt() },
+        parallel: { enabled: async () => true, plainLeads: async () => [] },
+        runStage: () => ({ text, model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 }),
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1, 'one Parallel lookup on a retry too');
+      assert.equal(Boolean(state.stages[0].mcpServers?.parallel), true, 'the retry asks Parallel, not built-in search');
+      assert.deepEqual(state.submits.map(item => item.response), [text]);
     },
   },
   {
@@ -758,25 +841,23 @@ export default [
     },
   },
   {
-    name: 'claude task worker web offload: a WebSearch,WebFetch task with a webTools entry routes to offload with its budget and logs counts',
+    name: 'claude task worker web offload: a web task never routes to offload, even when the entry carries webTools',
     async run() {
       const rows = []; const offloads = [];
-      const webTools = { searchCount: 3, maxUsd: 0.2 };
       const { worker, state } = harness({
-        entries: [entry('a', { task: 'job-compensation-research-batch' })], runStage: () => { throw new Error('claude must not run'); },
+        entries: [entry('a', { task: 'job-compensation-research-batch' })], runStage: () => answer,
         recordUsage: row => rows.push(row),
-        routeFor: () => ({ ...OFFLOAD_ROUTE, webTools }),
-        offloadCall: async (args) => { offloads.push(args); return { text: 'web answer', model: 'deepseek-v4-flash', usage: {}, costUsd: 0.02, webTools: { turns: 2, toolCalls: 3 } }; },
+        routeFor: () => ({ ...OFFLOAD_ROUTE, webTools: { searchCount: 3, maxUsd: 0.2 } }),
+        offloadCall: async (args) => { offloads.push(args); return { text: 'web answer', model: 'deepseek-v4-flash', usage: {}, costUsd: 0.02 }; },
       });
       worker.start();
       await settle();
-      assert.equal(offloads.length, 1);
-      assert.deepEqual(offloads[0].webTools, webTools);
-      assert.equal(offloads[0].tag, 'job-compensation-research-batch');
-      assert.equal(state.stages.length, 0);
-      assert.equal(state.submits[0].response, 'web answer');
-      assert.equal(rows[0].provider, 'offload');
-      assert.deepEqual(rows[0].webTools, { turns: 2, toolCalls: 3 });
+      assert.equal(offloads.length, 0, 'only Parallel Search may answer a web task');
+      assert.equal(state.stages.length, 1);
+      assert.equal(state.stages[0].tools.length, 6);
+      assert.equal(state.submits[0].response, 'answer');
+      assert.equal(rows[0].provider, 'claude');
+      assert.equal(rows[0].webTools, undefined);
     },
   },
   {
@@ -790,12 +871,12 @@ export default [
       worker.start();
       await settle();
       assert.equal(state.stages.length, 1);
-      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
+      assert.equal(state.stages[0].tools.length, 6);
       assert(state.stages[0].maxTurns > 1);
     },
   },
   {
-    name: 'claude task worker web offload: an OFFLOAD_ failure on the web route falls back to Claude with tools and maxTurns',
+    name: 'claude task worker web offload: a web task never takes the offload route, so no OFFLOAD_ outcome involves it',
     async run() {
       const rows = []; let calls = 0;
       const { worker, state } = harness({
@@ -805,9 +886,9 @@ export default [
       });
       worker.start();
       await settle();
-      assert.equal(calls, 1);
+      assert.equal(calls, 0, 'a web task is never sent to a non-Parallel search');
       assert.equal(state.stages.length, 1);
-      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'WebFetch']);
+      assert.equal(state.stages[0].tools.length, 6);
       assert(state.stages[0].maxTurns > 1);
       assert.equal(state.submits[0].response, 'answer');
       assert.equal(rows[0].provider, 'claude');
@@ -815,9 +896,9 @@ export default [
     },
   },
   {
-    name: 'claude task worker web offload: a task with any tool besides WebSearch/WebFetch never routes, even with webTools',
+    name: 'claude task worker web offload: a task with any tools never routes, even with a webTools entry',
     async run() {
-      const profileFor = task => ({ model: 'opus', effort: 'low', tools: task === 'job-scoring' ? 'WebSearch,Bash' : 'WebSearch,WebFetch' });
+      const profileFor = task => ({ model: 'opus', effort: 'low', tools: task === 'job-scoring' ? 'mcp__parallel__web_search,Bash' : 'mcp__parallel__web_search' });
       const { worker, state } = harness({
         entries: [entry('a', { task: 'job-scoring' })], profileFor, runStage: () => answer,
         routeFor: () => ({ ...OFFLOAD_ROUTE, webTools: {} }),
@@ -826,7 +907,7 @@ export default [
       worker.start();
       await settle();
       assert.equal(state.stages.length, 1);
-      assert.deepEqual(state.stages[0].tools, ['WebSearch', 'Bash']);
+      assert.deepEqual(state.stages[0].tools, ['mcp__parallel__web_search', 'Bash']);
     },
   },
   {
@@ -859,14 +940,14 @@ export default [
     run() {
       const replies = texts => [
         { label: 'built-in web search', text: texts[0] },
-        { label: 'Tavily search', text: texts[1] },
+        { label: 'Parallel search', text: texts[1] },
       ];
       const both = mergeResearchSections({
         ids: ['c1'],
-        replies: replies([compensationSection('c1', 'native body'), compensationSection('c1', 'tavily body')]),
+        replies: replies([compensationSection('c1', 'native body'), compensationSection('c1', 'parallel body')]),
         begin: compensationBegin, end: compensationEnd,
       });
-      assert.equal(both, compensationSection('c1', 'SOURCE SET A (built-in web search):\nnative body\n\nSOURCE SET B (Tavily search):\ntavily body'));
+      assert.equal(both, compensationSection('c1', 'SOURCE SET A (built-in web search):\nnative body\n\nSOURCE SET B (Parallel search):\nparallel body'));
       const one = mergeResearchSections({
         ids: ['c1'],
         replies: replies([compensationSection('c1', 'only body'), null]),
@@ -918,74 +999,71 @@ export default [
     },
   },
   {
-    name: 'claude task worker: cohort salary research runs built-in and Tavily at once, joins the sections and sums the spend',
+    name: 'claude task worker: cohort salary research is one Parallel call whose text and spend come back unmerged',
     async run() {
       const prompt = cohortResearchPrompt();
-      const body = id => `native ${id}`;
-      const viaTavilyBody = id => `tavily ${id}`;
+      const viaParallelBody = id => `parallel ${id}`;
       const reply = textFor => COHORT_IDS.map(id => compensationSection(id, textFor(id))).join('\n');
       const rows = [];
       const { worker, state } = harness({
         entries: [entry('a', { task: 'job-compensation-research-batch' })],
         prompts: { a: prompt },
         recordUsage: row => rows.push(row),
-        tavily: { readKey: async () => 'tvly-test-key', plainLeads: async () => [] },
-        runStage: options => (options.mcpServers
-          ? { text: reply(viaTavilyBody), model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 }
-          : { text: reply(body), model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 }),
-      });
-      worker.start();
-      await settle();
-      assert.equal(state.stages.length, 2, 'one built-in lookup and one Tavily lookup');
-      const native = state.stages.find(stage => !stage.mcpServers);
-      const viaTavily = state.stages.find(stage => stage.mcpServers);
-      assert.deepEqual(native.tools, ['WebSearch', 'WebFetch']);
-      assert.equal(viaTavily.tools.includes('mcp__tavily__tavily_search'), true);
-      assert.equal(viaTavily.mcpServers.tavily.url.includes('tavilyApiKey=tvly-test-key'), true);
-      assert.deepEqual(state.submits.map(item => item.response), [COHORT_IDS.map(id => compensationSection(id,
-        `SOURCE SET A (built-in web search):\nnative ${id}\n\nSOURCE SET B (Tavily search):\ntavily ${id}`)).join('\n')]);
-      assert.equal(rows.length, 1);
-      assert.equal(rows[0].costUsd, 0.45, 'both lookups are recorded as this answer\'s spend');
-      assert.deepEqual(rows[0].usage, { output_tokens: 12 });
-      assert.equal(JSON.stringify(rows).includes('tvly-test-key'), false, 'the key is never recorded');
-    },
-  },
-  {
-    name: 'claude task worker: cohort salary research with a failing Tavily lookup keeps the built-in answer unchanged',
-    async run() {
-      const nativeText = COHORT_IDS.map(id => compensationSection(id, `native ${id}`)).join('\n');
-      const { worker, state } = harness({
-        entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: cohortResearchPrompt() },
-        tavily: { readKey: async () => 'tvly-test-key', plainLeads: async () => [] },
+        parallel: { enabled: async () => true, plainLeads: async () => [] },
         runStage: options => {
-          if (options.mcpServers) throw Object.assign(new Error('Tavily is down.'), { code: 'CLAUDE_TASK_FAILED' });
-          return { text: nativeText, model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 };
+          if (!options.mcpServers) throw Object.assign(new Error('the built-in lookup must not run'), { code: 'CLAUDE_FAILED' });
+          return { text: reply(viaParallelBody), model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 };
         },
       });
       worker.start();
       await settle();
-      assert.equal(state.stages.length, 2);
-      assert.deepEqual(state.submits.map(item => item.response), [nativeText]);
+      assert.equal(state.stages.length, 1, 'one Parallel lookup and no built-in lookup');
+      const viaParallel = state.stages[0];
+      assert.equal(viaParallel.tools.includes('mcp__parallel__web_search'), true);
+      assert.equal(viaParallel.mcpServers.parallel.url, 'https://mcp.parallel.ai/mcp');
+      assert.deepEqual(state.submits.map(item => item.response), [reply(viaParallelBody)],
+        'the reply comes back exactly as it came, with no SOURCE SET labels');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].costUsd, 0.25, 'the one lookup is recorded as this answer\'s spend');
+      assert.deepEqual(rows[0].usage, { output_tokens: 7 });
     },
   },
   {
-    name: 'claude task worker: cohort salary research without a usable Tavily key is the built-in lookup alone',
+    name: 'claude task worker: cohort salary research whose Parallel call fails is an ordinary failed attempt with no built-in call',
     async run() {
-      for (const readKey of [async () => '', async () => { throw new Error('no key'); }]) {
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: cohortResearchPrompt() },
+        parallel: { enabled: async () => true, plainLeads: async () => [] },
+        runStage: () => { throw Object.assign(new Error('Parallel is down.'), { code: 'CLAUDE_TASK_FAILED' }); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1, 'the failed Parallel call is the only call');
+      assert.equal(state.submits.length, 0);
+      assert.equal(state.failed.length, 0);
+      assert.equal(state.timers.length, 1, 'an ordinary failure backs off and retries on Parallel');
+    },
+  },
+  {
+    name: 'claude task worker: cohort salary research pauses with PARALLEL_SEARCH_EXHAUSTED when Parallel is out of usage',
+    async run() {
+      for (const enabled of [async () => false, async () => { throw new Error('flag unreadable'); }]) {
         const { worker, state } = harness({
           entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: cohortResearchPrompt() },
-          tavily: { readKey, plainLeads: async () => [] }, runStage: () => answer,
+          parallel: { enabled, plainLeads: async () => [] }, runStage: () => answer,
         });
         worker.start();
         await settle();
-        assert.equal(state.stages.length, 1);
-        assert.equal('mcpServers' in state.stages[0], false);
-        assert.equal(state.submits[0].response, 'answer');
+        assert.equal(state.stages.length, 0, 'no Claude call without Parallel');
+        assert.equal(worker.status().paused, true);
+        assert.equal(worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+        assert.equal(state.pending.size, 1, 'the entry stays queued');
+        assert.equal(state.failed.length, 0);
       }
     },
   },
   {
-    name: 'claude task worker: role-family experience-band research runs built-in and Tavily at once, joins the sections and sums the spend',
+    name: 'claude task worker: role-family experience-band research is one Parallel call whose text and spend come back unmerged',
     async run() {
       const prompt = buildRoleFamilyBatchResearchPrompt(COHORT_IDS.map(researchId => ({ researchId, role: 'Platform Engineer' })));
       const reply = prefix => COHORT_IDS.map(id => compensationSection(id, `${prefix} ${id}`)).join('\n');
@@ -994,25 +1072,23 @@ export default [
         entries: [entry('a', { task: 'job-compensation-research-batch' })],
         prompts: { a: prompt },
         recordUsage: row => rows.push(row),
-        tavily: { readKey: async () => 'tvly-test-key', plainLeads: async () => [] },
-        runStage: options => (options.mcpServers
-          ? { text: reply('tavily'), model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 }
-          : { text: reply('native'), model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 }),
+        parallel: { enabled: async () => true, plainLeads: async () => [] },
+        runStage: options => {
+          if (!options.mcpServers) throw Object.assign(new Error('the built-in lookup must not run'), { code: 'CLAUDE_FAILED' });
+          return { text: reply('parallel'), model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 };
+        },
       });
       worker.start();
       await settle();
-      assert.equal(state.stages.length, 2, 'one built-in lookup and one Tavily lookup');
-      const native = state.stages.find(stage => !stage.mcpServers);
-      const viaTavily = state.stages.find(stage => stage.mcpServers);
-      assert.deepEqual(native.tools, ['WebSearch', 'WebFetch']);
-      assert.equal(viaTavily.tools.includes('mcp__tavily__tavily_search'), true);
-      assert.equal(viaTavily.mcpServers.tavily.url.includes('tavilyApiKey=tvly-test-key'), true);
-      assert.deepEqual(state.submits.map(item => item.response), [COHORT_IDS.map(id => compensationSection(id,
-        `SOURCE SET A (built-in web search):\nnative ${id}\n\nSOURCE SET B (Tavily search):\ntavily ${id}`)).join('\n')]);
+      assert.equal(state.stages.length, 1, 'one Parallel lookup and no built-in lookup');
+      const viaParallel = state.stages[0];
+      assert.equal(viaParallel.tools.includes('mcp__parallel__web_search'), true);
+      assert.equal(viaParallel.mcpServers.parallel.url, 'https://mcp.parallel.ai/mcp');
+      assert.deepEqual(state.submits.map(item => item.response), [reply('parallel')],
+        'the reply comes back exactly as it came, with no SOURCE SET labels');
       assert.equal(rows.length, 1);
-      assert.equal(rows[0].costUsd, 0.45, 'both lookups are recorded as this answer\'s spend');
-      assert.deepEqual(rows[0].usage, { output_tokens: 12 });
-      assert.equal(JSON.stringify(rows).includes('tvly-test-key'), false, 'the key is never recorded');
+      assert.equal(rows[0].costUsd, 0.25, 'the one lookup is recorded as this answer\'s spend');
+      assert.deepEqual(rows[0].usage, { output_tokens: 7 });
     },
   },
   {
@@ -1029,78 +1105,77 @@ export default [
     },
   },
   {
-    name: 'claude task worker: job location lookup runs built-in and Tavily at once and returns the merged choice per posting',
+    name: 'claude task worker: job location lookup is one Parallel call whose text comes back as it came',
     async run() {
       const ids = ['c1d2e3f40516273849a5b6c7', 'd2e3f40516273849a5b6c7d8'];
       const prompt = buildJobLocationLookupPrompt(ids.map(id => ({ id, title: 'Senior Software Engineer', company: 'Acme Robotics', scrapedLocation: 'Toronto, ON, Canada' })));
       const found = 'RESULT: FOUND\nSOURCE URL: https://boards.greenhouse.io/acmerobotics/jobs/12345\nPOSTING TITLE: Senior Software Engineer\nCOMPANY: Acme Robotics Inc.\nLOCATION: Toronto, ON, Canada\nWORK MODE: onsite\nREMOTE COUNTRY RESTRICTION: none\nEVIDENCE QUOTE: Location: Toronto, ON, Canada';
       const missing = 'RESULT: NOT FOUND\nREASON: only on a job board';
       const section = (id, body) => `BEGIN JOB LOCATION LOOKUP ${id}\n${body}\nEND JOB LOCATION LOOKUP ${id}`;
-      const nativeText = `${section(ids[0], found)}\n\n${section(ids[1], missing)}`;
-      const tavilyText = `${section(ids[0], missing)}\n\n${section(ids[1], found)}`;
+      const parallelText = `${section(ids[0], missing)}\n\n${section(ids[1], found)}`;
       const rows = [];
       const { worker, state } = harness({
         entries: [entry('a', { task: 'job-compensation-research-batch' })],
         prompts: { a: prompt },
         recordUsage: row => rows.push(row),
-        tavily: { readKey: async () => 'tvly-test-key', plainLeads: async () => [] },
-        runStage: options => (options.mcpServers
-          ? { text: tavilyText, model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 }
-          : { text: nativeText, model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 }),
+        parallel: { enabled: async () => true, plainLeads: async () => [] },
+        runStage: options => {
+          if (!options.mcpServers) throw Object.assign(new Error('the built-in lookup must not run'), { code: 'CLAUDE_FAILED' });
+          return { text: parallelText, model: 'claude-opus-5-5', usage: { output_tokens: 7 }, costUsd: 0.25 };
+        },
       });
       worker.start();
       await settle();
-      assert.equal(state.stages.length, 2, 'one built-in lookup and one Tavily lookup');
-      assert.equal(state.stages.filter(stage => stage.mcpServers).length, 1);
-      assert.deepEqual(state.submits.map(item => item.response), [`${section(ids[0], found)}\n${section(ids[1], found)}`],
-        'each posting takes the accepted FOUND row from whichever lookup got it, in request order');
-      assert.equal(rows[0].costUsd, 0.45, 'both lookups are recorded as this answer\'s spend');
-      assert.deepEqual(rows[0].usage, { output_tokens: 12 });
+      assert.equal(state.stages.length, 1, 'one Parallel lookup and no built-in lookup');
+      assert.equal(state.stages[0].mcpServers.parallel.url, 'https://mcp.parallel.ai/mcp');
+      assert.deepEqual(state.submits.map(item => item.response), [parallelText],
+        'the Parallel text is not re-merged by posting');
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].costUsd, 0.25, 'the one lookup is recorded as this answer\'s spend');
+      assert.deepEqual(rows[0].usage, { output_tokens: 7 });
     },
   },
   {
-    name: 'claude task worker: role-family and location prompts without a usable Tavily key are one built-in call',
+    name: 'claude task worker: role-family and location prompts pause with PARALLEL_SEARCH_EXHAUSTED when Parallel is out of usage',
     async run() {
       const prompts = [
         buildRoleFamilyBatchResearchPrompt(COHORT_IDS.map(researchId => ({ researchId, role: 'Platform Engineer' }))),
         buildJobLocationLookupPrompt([{ id: 'c1d2e3f40516273849a5b6c7', title: 'Senior Software Engineer', company: 'Acme Robotics', scrapedLocation: 'Toronto, ON, Canada' }]),
       ];
       for (const prompt of prompts) {
-        for (const readKey of [async () => '', async () => { throw new Error('no key'); }]) {
+        for (const enabled of [async () => false, async () => { throw new Error('flag unreadable'); }]) {
           const { worker, state } = harness({
             entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: prompt },
-            tavily: { readKey, plainLeads: async () => [] }, runStage: () => answer,
+            parallel: { enabled, plainLeads: async () => [] }, runStage: () => answer,
           });
           worker.start();
           await settle();
-          assert.equal(state.stages.length, 1);
-          assert.equal('mcpServers' in state.stages[0], false);
-          assert.equal(state.submits[0].response, 'answer');
+          assert.equal(state.stages.length, 0);
+          assert.equal(worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+          assert.equal(state.pending.size, 1, 'the entry stays queued');
+          assert.equal(state.failed.length, 0);
         }
       }
     },
   },
   {
-    name: 'claude task worker: a failing Tavily lookup leaves the built-in role-family and location answers unchanged',
+    name: 'claude task worker: a failing Parallel role-family or location call is an ordinary failed attempt, not a built-in answer',
     async run() {
       const roleFamily = buildRoleFamilyBatchResearchPrompt(COHORT_IDS.map(researchId => ({ researchId, role: 'Platform Engineer' })));
       const location = buildJobLocationLookupPrompt([{ id: 'c1d2e3f40516273849a5b6c7', title: 'Senior Software Engineer', company: 'Acme Robotics', scrapedLocation: 'Toronto, ON, Canada' }]);
-      const roleFamilyText = COHORT_IDS.map(id => compensationSection(id, `native ${id}`)).join('\n');
-      const locationText = 'BEGIN JOB LOCATION LOOKUP c1d2e3f40516273849a5b6c7\nRESULT: NOT FOUND\nREASON: only on a job board\nEND JOB LOCATION LOOKUP c1d2e3f40516273849a5b6c7';
-      const cases = [[roleFamily, roleFamilyText], [location, locationText]];
-      for (const [prompt, nativeText] of cases) {
+      const cases = [roleFamily, location];
+      for (const prompt of cases) {
         const { worker, state } = harness({
           entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: prompt },
-          tavily: { readKey: async () => 'tvly-test-key', plainLeads: async () => [] },
-          runStage: options => {
-            if (options.mcpServers) throw Object.assign(new Error('Tavily is down.'), { code: 'CLAUDE_TASK_FAILED' });
-            return { text: nativeText, model: 'claude-opus-5-5', usage: { output_tokens: 5 }, costUsd: 0.2 };
-          },
+          parallel: { enabled: async () => true, plainLeads: async () => [] },
+          runStage: () => { throw Object.assign(new Error('Parallel is down.'), { code: 'CLAUDE_TASK_FAILED' }); },
         });
         worker.start();
         await settle();
-        assert.equal(state.stages.length, 2);
-        assert.deepEqual(state.submits.map(item => item.response), [nativeText]);
+        assert.equal(state.stages.length, 1, 'the failed Parallel call is the only call');
+        assert.equal(state.submits.length, 0);
+        assert.equal(state.failed.length, 0);
+        assert.equal(state.timers.length, 1, 'the retry waits and asks Parallel again');
       }
     },
   },
@@ -1123,6 +1198,102 @@ export default [
       on.worker.start();
       await settle();
       assert.equal('ultracode' in on.state.stages[0], false, 'a default profile passes no ultracode field');
+    },
+  },
+  {
+    name: 'claude task worker: every web task sends the six Parallel tools with the Parallel server',
+    async run() {
+      const six = ['mcp__parallel__web_search', 'mcp__parallel__web_fetch', 'mcp__parallel__web_decisions', 'mcp__parallel__find_verticals', 'mcp__parallel__search_vertical', 'mcp__parallel__image_search'];
+      const posting = buildOfficialPostingResearchRequest([{ title: 'Platform Engineer', company: 'Acme', location: 'Toronto', url: 'https://x.test/1', snippet: 'd' }]).prompt;
+      const location = buildJobLocationLookupPrompt([{ id: 'c1d2e3f40516273849a5b6c7', title: 'Senior Software Engineer', company: 'Acme Robotics', scrapedLocation: 'Toronto, ON, Canada' }]);
+      const roleFamily = buildRoleFamilyBatchResearchPrompt(COHORT_IDS.map(researchId => ({ researchId, role: 'Platform Engineer' })));
+      const cases = [
+        ['job-official-posting-research', posting],
+        ['job-compensation-research-batch', cohortResearchPrompt()],
+        ['job-compensation-research-batch', roleFamily],
+        ['job-compensation-research-batch', location],
+        ['job-preference-research-batch', 'preference research prompt'],
+        ['job-official-posting-match', 'official posting match prompt'],
+      ];
+      for (const [task, prompt] of cases) {
+        const { worker, state } = harness({ entries: [entry('a', { task })], prompts: { a: prompt }, runStage: () => answer });
+        worker.start();
+        await settle();
+        assert.equal(state.stages.length, 1, `${task} runs on Claude with its tools`);
+        assert.deepEqual(state.stages[0].tools, six, `${task} gets exactly the six Parallel tools`);
+        assert.deepEqual(Object.keys(state.stages[0].mcpServers), ['parallel']);
+        assert.equal(state.stages[0].tools.includes('WebSearch'), false);
+        assert.equal(state.stages[0].tools.includes('WebFetch'), false);
+        assert.equal(state.submits[0].response, 'answer');
+      }
+    },
+  },
+  {
+    name: 'claude task worker: the tool-result callback throws PARALLEL_SEARCH_EXHAUSTED only for a limited Parallel tool',
+    async run() {
+      resetParallelLimit();
+      try {
+        const { worker, state } = harness({ entries: [entry('a', { task: 'job-official-posting-match' })], runStage: () => answer });
+        worker.start();
+        await settle();
+        const onToolResult = state.stages[0].onToolResult;
+        assert.equal(typeof onToolResult, 'function');
+        assert.doesNotThrow(() => onToolResult({ toolName: 'mcp__parallel__web_search', isError: false, text: 'results mention a rate limit in passing' }));
+        assert.equal(parallelBlocked(state.clock), false, 'a successful result never blocks Parallel');
+        assert.doesNotThrow(() => onToolResult({ toolName: 'Bash', isError: true, text: 'rate limit exceeded' }), 'another tool is not Parallel');
+        assert.equal(parallelBlocked(state.clock), false);
+        assert.throws(() => onToolResult({ toolName: 'mcp__parallel__web_search', isError: true, text: 'Rate limit exceeded: out of credits' }),
+          error => error.code === 'PARALLEL_SEARCH_EXHAUSTED' && error.message === 'Parallel Search is out of usage. Research is paused.');
+        assert.equal(parallelBlocked(state.clock), true, 'the limit is noted for the dock and the next task');
+      } finally { resetParallelLimit(); }
+    },
+  },
+  {
+    name: 'claude task worker: a call rejecting with PARALLEL_SEARCH_EXHAUSTED pauses without failing the entry',
+    async run() {
+      const { worker, state } = harness({
+        entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: cohortResearchPrompt() },
+        parallel: { enabled: async () => true, plainLeads: async () => [] },
+        runStage: () => { throw parallelExhaustedError(); },
+      });
+      worker.start();
+      await settle();
+      assert.equal(state.stages.length, 1);
+      assert.equal(worker.status().paused, true);
+      assert.equal(worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+      assert.equal(state.pending.size, 1, 'the entry stays queued');
+      assert.equal(state.failed.length, 0, 'no seam.fail');
+      assert.equal(state.submits.length, 0);
+      assert.equal(state.timers.length, 1);
+      assert.equal(state.timers[0].ms, 10 * 60_000);
+    },
+  },
+  {
+    name: 'claude task worker: resumeNow clears the pause and the Parallel block so the web task runs again',
+    async run() {
+      resetParallelLimit();
+      try {
+        noteParallelLimit({ status: 429, text: 'Too many requests' });
+        assert.equal(parallelBlocked(), true);
+        const { worker, state } = harness({
+          entries: [entry('a', { task: 'job-compensation-research-batch' })], prompts: { a: cohortResearchPrompt() },
+          parallel: { enabled: async () => !parallelBlocked(), plainLeads: async () => [] },
+          runStage: () => answer,
+        });
+        worker.start();
+        await settle();
+        assert.equal(worker.status().paused, true);
+        assert.equal(worker.status().pauseCode, 'PARALLEL_SEARCH_EXHAUSTED');
+        assert.equal(state.stages.length, 0, 'nothing is asked while Parallel is blocked');
+        assert.equal(state.submits.length, 0);
+        worker.resumeNow();
+        await settle();
+        assert.equal(worker.status().paused, false, 'resume clears the pause');
+        assert.equal(parallelBlocked(), false, 'resume clears the Parallel block');
+        assert.equal(state.stages.length, 1);
+        assert.equal(state.submits.length, 1, 'the queued web task runs on Parallel at once');
+        assert.equal(state.submits[0].response, 'answer');
+      } finally { resetParallelLimit(); }
     },
   },
 ];

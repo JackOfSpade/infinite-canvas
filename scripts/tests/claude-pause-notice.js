@@ -13,7 +13,7 @@ import {
   createClaudeTaskWorker,
   registerClaudeTaskStatusHandler,
 } from '../../electron/ipc/claudeTaskWorker.js';
-import { CLAUDE_PAUSE_COPY, claudeLimitLabel, claudePauseNotice, claudeUsageLimitNotice } from '../../src/utils/claudeTaskPause.js';
+import { CLAUDE_PAUSE_COPY, claudeLimitLabel, claudePauseNotice, claudeUsageLimitNotice, searchLimitNotice } from '../../src/utils/claudeTaskPause.js';
 import { normalizeClaudeTaskActivity } from '../../src/utils/claudeTaskActivityStore.js';
 import { claudeAccountAddMessage } from '../../src/utils/claudeAccountsActions.js';
 import { applyClaudeTaskStatus, getClaudeTaskStatus, subscribeClaudeTaskStatus } from '../../src/utils/claudeTaskStatusStore.js';
@@ -50,7 +50,7 @@ export default [
           onEvent: () => () => {},
         },
         binding: () => ({ binary: 'claude', env: {}, cwd: '/tmp' }),
-        tavily: { readKey: async () => '', plainLeads: async () => [] },
+        parallel: { enabled: async () => false, plainLeads: async () => [] },
         now: () => clock,
         setTimer: (fn, ms) => ({ fn, ms }),
         clearTimer: () => {},
@@ -97,6 +97,28 @@ export default [
         assert(notice.headline.includes('paused') && notice.headline.includes('resume'));
         assert(notice.reason.length > 20 && !notice.reason.includes('ChatGPT'));
       }
+    },
+  },
+  {
+    name: 'claude pause notice: a limited web-search service shows its own line and reaches the dock store',
+    run() {
+      assert.equal(searchLimitNotice(null), null);
+      assert.equal(searchLimitNotice({ searchNotice: '   ' }), null);
+      assert.equal(searchLimitNotice({ searchNotice: 42 }), null);
+      const notice = searchLimitNotice({ searchNotice: ' Parallel Search looks rate-limited. ' });
+      assert.deepEqual(notice, { headline: 'Web search is limited', reason: 'Parallel Search looks rate-limited.' });
+      let calls = 0;
+      const stop = subscribeClaudeTaskStatus(() => { calls += 1; });
+      try {
+        applyClaudeTaskStatus({ paused: false, pauseCode: null, searchNotice: 'Limited.' });
+        applyClaudeTaskStatus({ paused: false, pauseCode: null, searchNotice: 'Limited.' });
+        assert.equal(calls, 1, 'an unchanged notice does not notify again');
+        assert.equal(getClaudeTaskStatus().searchNotice, 'Limited.');
+        applyClaudeTaskStatus({ paused: false, pauseCode: null });
+        assert.equal(getClaudeTaskStatus().searchNotice, null, 'the notice clears when the worker stops reporting it');
+        applyClaudeTaskStatus(null);
+      } finally { stop(); }
+      assert(source('src/components/ClaudePauseNotice.jsx').includes('searchLimitNotice(status)'), 'the dock notice renders it');
     },
   },
   {
@@ -338,6 +360,21 @@ export default [
         await bundle?.dispose();
         await fsPromises.rm(directory, { recursive: true, force: true });
       }
+    },
+  },
+  {
+    name: 'claude pause notice: exhausted Parallel Search shows its own paused message with the fix',
+    run() {
+      const notice = claudePauseNotice({ active: true, paused: true, pauseCode: 'PARALLEL_SEARCH_EXHAUSTED' });
+      assert.equal(notice.headline, CLAUDE_PAUSE_COPY.headline);
+      assert.equal(notice.reason, CLAUDE_PAUSE_COPY.reasons.PARALLEL_SEARCH_EXHAUSTED);
+      assert(notice.reason.includes('Parallel Search is out of usage, so web research is paused. Queued work is saved.'));
+      assert(notice.reason.includes('platform.parallel.ai'), 'the message names where to add credits or a key');
+      assert(notice.reason.includes('then press Resume'));
+      assert.equal(/built-in search/u.test(notice.reason), false, 'no built-in fallback is ever mentioned');
+      // The same notice renders for every pause code the worker reports.
+      assert.equal(claudePauseNotice({ active: false, paused: false, pauseCode: null }), null);
+      assert.equal(claudePauseNotice({ active: true, paused: false, pauseCode: 'PARALLEL_SEARCH_EXHAUSTED' }), null);
     },
   },
 ];

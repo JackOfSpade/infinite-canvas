@@ -38,8 +38,9 @@ function workerHarness({ entries, runStage, submit, ...options }) {
     clearTimer: (timer) => { state.timers = state.timers.filter(item => item !== timer); },
     onActivityChange: snapshot => state.notified.push(snapshot),
     runStage,
-    // Never the real keychain in tests: no Tavily unless a test supplies one.
-    tavily: { readKey: async () => '', plainLeads: async () => [] },
+    // Never the real network in tests: a fake Parallel that is on unless a test turns it off, so web
+    // tasks run on Parallel Search rather than pausing.
+    parallel: { enabled: async () => true, plainLeads: async () => [] },
     ...options,
   });
   return { worker, state };
@@ -73,6 +74,14 @@ export default [
       ]) assert(!JSON.stringify(describeClaudeSdkMessage(message)).includes(secret));
       const fetched = describeClaudeSdkMessage({ type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', name: 'WebFetch', input: { url: 'https://jobs.example.com/apply/1?token=abc#top' } }] } });
       assert.deepEqual(fetched.calls, [{ tool: 'WebFetch', target: 'jobs.example.com/apply/1' }]);
+      const parallelFetch = describeClaudeSdkMessage({ type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', name: 'mcp__parallel__web_fetch', input: { urls: ['https://jobs.example.com/apply/2?token=abc'], objective: 'x' } }] } });
+      assert.deepEqual(parallelFetch.calls, [{ tool: 'mcp__parallel__web_fetch', target: 'jobs.example.com/apply/2' }], 'the page address loses its query string');
+      const parallelSearch = describeClaudeSdkMessage({ type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', name: 'mcp__parallel__web_search', input: { search_queries: ['Acme jobs'] } }] } });
+      assert.deepEqual(parallelSearch.calls, [{ tool: 'mcp__parallel__web_search', target: 'Acme jobs' }]);
+      const parallelObjective = describeClaudeSdkMessage({ type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', name: 'mcp__parallel__web_search', input: { objective: 'Find the Acme careers page' } }] } });
+      assert.deepEqual(parallelObjective.calls, [{ tool: 'mcp__parallel__web_search', target: 'Find the Acme careers page' }]);
+      const parallelOther = describeClaudeSdkMessage({ type: 'assistant', message: { id: 'm', content: [{ type: 'tool_use', name: 'mcp__parallel__web_decisions', input: { objective: 'x' } }] } });
+      assert.deepEqual(parallelOther.calls, [{ tool: 'mcp__parallel__web_decisions', target: null }], 'only the two named web tools label a target');
       const searched = describeClaudeSdkMessage({ type: 'assistant', message: { content: [{ type: 'server_tool_use', name: 'WebSearch', input: { query: 'x'.repeat(500) } }] } });
       assert.equal(searched.calls[0].target.length, 120);
       const unknown = describeClaudeSdkMessage({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Other', input: { query: secret, url: secret } }] } });
@@ -303,6 +312,13 @@ export default [
       const searching = view({ ...base, phase: 'tool', tool: 'WebSearch', target: 'Acme jobs' });
       assert.equal(searching.headline, 'Searching the web');
       assert.equal(searching.detail, 'Acme jobs');
+      assert.equal(view({ ...base, phase: 'tool', tool: 'mcp__parallel__web_search', target: 'Acme jobs' }).headline, 'Searching the web');
+      assert.equal(view({ ...base, phase: 'tool', tool: 'mcp__parallel__web_decisions', target: null }).headline, 'Searching the web');
+      assert.equal(view({ ...base, phase: 'tool', tool: 'mcp__parallel__find_verticals' }).headline, 'Searching the web');
+      assert.equal(view({ ...base, phase: 'tool', tool: 'mcp__parallel__image_search' }).headline, 'Searching the web');
+      const parallelPage = view({ ...base, phase: 'tool', tool: 'mcp__parallel__web_fetch', target: 'jobs.example.com/apply/1' });
+      assert.equal(parallelPage.headline, 'Reading a page');
+      assert.equal(parallelPage.detail, 'jobs.example.com/apply/1');
       assert.equal(view({ ...base, phase: 'tool', tool: 'WebFetch' }).headline, 'Reading a page');
       assert.equal(view({ ...base, phase: 'waiting' }).headline, 'Waiting for Claude to respond');
       const finishedTool = createClaudeTaskActivity();

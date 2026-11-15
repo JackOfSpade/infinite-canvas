@@ -7,6 +7,15 @@
 //
 //   node --import ./scripts/test-stubs/register.mjs scripts/ai-task-replay.mjs \
 //     --task job-scoring --canvas <file> --user-data <dir> --out <dir> [--dry-run]
+//
+// --configs takes `claude`, `claude:<model>:<effort>`, `claude-native`, `claude-parallel` or the
+// deepseek ladder (flash|pro:<reasoning>), defaulting to `claude` plus the ladder. Since 2026-11-14
+// the app's web task profiles offer Parallel Search only, so the `claude` baseline and every
+// claude:<model>:<effort> config pass the profile's Parallel tools with the Parallel MCP server (the
+// key comes from the Keychain; '' uses the anonymous server). `claude-native` measures Claude's
+// built-in WebSearch/WebFetch and `claude-parallel` a second Parallel Search run; both use the task
+// profile's model/effort and are refused for a task whose profile has no tools. Each Claude row on a
+// web task records which `search` answered it, and tool usage under `toolCalls`.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -19,6 +28,8 @@ export const TASKS = ['job-preference-evaluation', 'job-scoring', 'job-official-
   'job-compensation-research-batch', 'job-preference-research-batch'];
 // Tasks whose worker profile carries web tools: raw (unschematized) grounded research answers.
 export const RESEARCH_TASKS = ['job-official-posting-research', 'job-compensation-research-batch', 'job-preference-research-batch'];
+// Tasks whose claudeTaskProfiles profile carries tools (Parallel Search); mirrors claudeTaskProfiles.js.
+export const WEB_TASKS = [...RESEARCH_TASKS, 'job-official-posting-match'];
 // Tasks that cannot be replayed faithfully from stored data. --task stops with this one-line, evidenced reason.
 export const UNREPLAYABLE_TASKS = {
   'job-compensation-research-batch': 'electron/ipc/jobs.js runFreshCompensationPipeline calls the module-level callLLMRaw (no caller seam) with cohorts built live from the profile and earlier grounded role-band/location lookups (researchParameters via compensationResearchParametersForGroup); board rows persist none of roleFamily, experienceBand or seniority.',
@@ -41,10 +52,18 @@ function positiveInt(name, value) {
   return number;
 }
 
+// Claude-only web-search comparison configs: `claude-native` offers Claude's own WebSearch/WebFetch with no MCP
+// server, `claude-parallel` repeats the baseline (the profile's Parallel tools plus the Parallel MCP server).
+const SEARCH_CONFIGS = {
+  'claude-native': { search: 'native', tools: ['WebSearch', 'WebFetch'], mcpServers: {} },
+  'claude-parallel': { search: 'parallel' },
+};
+
 export function parseConfigs(list) {
   const configs = [];
   for (const raw of String(list || '').split(',').map(part => part.trim()).filter(Boolean)) {
     if (raw === 'claude') { configs.push({ id: 'claude', kind: 'claude' }); continue; }
+    if (SEARCH_CONFIGS[raw]) { configs.push({ id: raw, kind: 'claude-search', ...SEARCH_CONFIGS[raw] }); continue; }
     if (raw.startsWith('claude:')) {
       // claude:<model>:<effort> runs the same Claude stage as the baseline with a cheaper or stronger setting.
       const [family, model, effort, extra] = raw.split(':');
@@ -81,6 +100,11 @@ export function parseArgs(argv) {
   if (opts.task === 'job-scoring' && !opts.userData) throw new Error('--user-data <dir> is required for job-scoring.');
   for (const name of ['batches', 'reps', 'claudeReps', 'concurrency']) opts[name] = positiveInt(`--${name.replace(/[A-Z]/g, c => `-${c.toLowerCase()}`)}`, opts[name]);
   opts.configs = parseConfigs(opts.configs);
+  // claude-native/claude-parallel compare a web task's search; a task without tools has none to compare.
+  const searchConfig = opts.configs.find(config => config.kind === 'claude-search');
+  if (searchConfig && !WEB_TASKS.includes(opts.task)) {
+    throw new Error(`${searchConfig.id} needs a task with web tools (${WEB_TASKS.join(', ')}); ${opts.task} has none.`);
+  }
   return opts;
 }
 
@@ -288,6 +312,10 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
       if (fatal) return null;
       const started = Date.now();
       const base = { task, batch: call.batch, config: config.id, rep, promptSha: call.promptSha };
+      // A Claude call on a web task records which search answered it: Parallel for the baseline and claude-parallel.
+      const searchOf = config.kind === 'offload' ? null
+        : config.kind === 'claude-search' ? config.search
+          : WEB_TASKS.includes(task) ? 'parallel' : null;
       let row;
       try {
         const reply = await execute({ config, rep, call });
@@ -299,6 +327,8 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
         row = { ...base, ok: true, valid: code === null, code, costUsd: Number.isFinite(reply?.costUsd) ? reply.costUsd : null,
           latencyMs: Number.isFinite(reply?.durationMs) ? reply.durationMs : Date.now() - started,
           model: reply?.model ?? null, usage: reply?.usage ?? null, ...(reply?.webTools ? { webTools: reply.webTools } : {}),
+          // Which search answered a Claude call on a web task: Parallel unless a claude-native run says otherwise.
+          ...(searchOf ? { search: searchOf } : {}), ...(reply?.toolCalls ? { toolCalls: reply.toolCalls } : {}),
           answer: code === null ? answer : null };
       } catch (error) {
         if (error?.code === 'OFFLOAD_CREDIT_EXHAUSTED') { fatal = error; return null; }
@@ -369,11 +399,11 @@ export async function replayTask({ task, outDir, startFlow, materialize, execute
 
 async function loadApp() {
   const ipc = rel => import(new URL(`../electron/ipc/${rel}`, import.meta.url).href);
-  const [nonApi, worker, offload, profiles, sdk, runner] = await Promise.all([
+  const [nonApi, worker, offload, profiles, sdk, runner, parallel] = await Promise.all([
     ipc('nonApiAi.js'), ipc('claudeTaskWorker.js'), ipc('offloadTextCall.js'), ipc('claudeTaskProfiles.js'),
-    ipc('claudeApplicationSdkStage.js'), ipc('claudeApplicationRunner.js'),
+    ipc('claudeApplicationSdkStage.js'), ipc('claudeApplicationRunner.js'), ipc('parallelSearch.js'),
   ]);
-  return { ...nonApi, ...worker, ...offload, ...profiles, ...sdk, ...runner };
+  return { ...nonApi, ...worker, ...offload, ...profiles, ...sdk, ...runner, ...parallel };
 }
 
 /** The same prompt/cachedPrefix pair requestNonApiAi hands a worker. */
@@ -411,8 +441,24 @@ export function appExecute(app, task, signal) {
   const profile = app.claudeTaskProfile(task);
   // Same as claudeTaskWorker.serve(): a profile with tools gets them plus the research turn budget.
   const tools = profile.tools ? String(profile.tools).split(',') : [];
+  // The Parallel key is read once per appExecute, as the worker reads it once per task; a throw or '' is the anonymous server.
+  let parallelServers = null;
+  const serversForWebTask = async () => {
+    if (!parallelServers) {
+      let key = '';
+      try { key = (await app.readParallelKey()) || ''; } catch { key = ''; }
+      parallelServers = app.parallelMcpServers(key);
+    }
+    return parallelServers;
+  };
   return async ({ config, call }) => {
     const cached = app.cachedPromptParts(call.prompt, call.cachedPrefix);
+    // Claude counts its tool use per call so the result row can name the tools that answered it.
+    const toolCalls = {};
+    const onActivity = event => {
+      if (event?.kind !== 'tool') return;
+      for (const used of event.calls || []) toolCalls[used.tool] = (toolCalls[used.tool] || 0) + 1;
+    };
     if (config.kind === 'offload') {
       // REPLAY_MAX_TOKENS measures a larger output cap than the app's default.
       const maxTokens = Number(process.env.REPLAY_MAX_TOKENS) || undefined;
@@ -424,11 +470,19 @@ export function appExecute(app, task, signal) {
     const stage = { binary, env: app.claudeChildEnv(replayChildEnv(process.env), path.dirname(binary)), cwd: os.tmpdir() };
     // A claude-setting config is the baseline call with its own model/effort; the baseline keeps the task profile's.
     const setting = config.kind === 'claude-setting' ? { model: config.model, effort: config.effort } : { model: profile.model, effort: profile.effort };
-    return app.runClaudeSdkStage({
+    // A claude-native config swaps Parallel Search for Claude's built-in web tools; every other Claude config uses Parallel.
+    const search = config.kind === 'claude-search' ? config.search : (tools.length ? 'parallel' : null);
+    const searchTools = search === 'native' ? config.tools : tools;
+    const mcpServers = search === 'native' ? (config.mcpServers || {}) : search === 'parallel' ? await serversForWebTask() : null;
+    const reply = await app.runClaudeSdkStage({
       ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
-      pageImages: [], signal, ...setting, persistSession: false,
-      ...(tools.length ? { tools, maxTurns: RESEARCH_MAX_TURNS } : {}),
+      pageImages: [], signal, ...setting, persistSession: false, onActivity,
+      // Only the claude-native comparison config may offer WebSearch/WebFetch.
+      allowBuiltInWebTools: search === 'native',
+      ...(searchTools.length ? { tools: searchTools, maxTurns: RESEARCH_MAX_TURNS } : {}),
+      ...(mcpServers ? { mcpServers } : {}),
     });
+    return { ...reply, toolCalls };
   };
 }
 
@@ -562,6 +616,12 @@ async function replayMain(opts, outDir, journal) {
     if (!eligible) throw new Error('No row carries a Claude result for this task.');
     prepareOutDir(outDir);
     const app = await loadApp();
+    const profile = app.claudeTaskProfile(task) || {};
+    // claude-native/claude-parallel need a profile with web tools; refuse early with one line rather than a broken stage.
+    const searchConfig = opts.configs.find(config => config.kind === 'claude-search');
+    if (searchConfig && !String(profile.tools ?? '').trim()) {
+      throw Object.assign(new Error(`${searchConfig.id} needs a task whose profile has web tools; ${task} has none.`), { userFacing: true });
+    }
     const controller = new AbortController();
     const flow = await buildFlow({ task, opts, node, rows, app, signal: controller.signal });
     writePrivate(path.join(outDir, 'meta.json'), `${JSON.stringify(flow.meta)}\n`);
@@ -570,7 +630,6 @@ async function replayMain(opts, outDir, journal) {
       configs: opts.configs, reps: opts.reps, claudeReps: opts.claudeReps, batches: opts.batches, concurrency: opts.concurrency, dryRun: opts.dryRun, log: line => console.log(line),
       journal,
     });
-    const profile = app.claudeTaskProfile(task);
     if (opts.dryRun) {
       for (const call of calls) console.log(`batch ${call.batch}: prompt ${call.promptChars} chars, ${call.itemCount ?? '?'} items, profile ${profile.model}/${profile.effort}`);
       console.log(`dry run: ${calls.length} batch(es) captured, no AI call made`);

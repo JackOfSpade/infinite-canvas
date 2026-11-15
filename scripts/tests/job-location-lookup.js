@@ -453,22 +453,22 @@ export default [{
     const requests = jobLocationLookupPromptRequests(buildJobLocationLookupPrompt(built));
     const accepted = section(first.id, FOUND);
     const builtIn = `${section(built[0].id, FOUND)}\n${section(built[1].id, { result: 'NOT FOUND', reason: 'only on a job board' })}`;
-    const tavilyAccepted = section(first.id, { ...FOUND, company: 'Acme Robotics', 'source url': 'https://acme-robotics.myworkdayjobs.com/en-US/careers/job/123' });
-    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [accepted, tavilyAccepted] }) === accepted,
+    const parallelAccepted = section(first.id, { ...FOUND, company: 'Acme Robotics', 'source url': 'https://acme-robotics.myworkdayjobs.com/en-US/careers/job/123' });
+    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [accepted, parallelAccepted] }) === accepted,
       'the first accepted row wins, even when the second reply is accepted too');
     const rejectedBuiltIn = section(first.id, { ...FOUND, 'source url': 'https://www.linkedin.com/jobs/view/999' });
-    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [rejectedBuiltIn, tavilyAccepted] }) === tavilyAccepted,
-      'a host-rejected built-in FOUND row defers to an accepted Tavily row');
-    const rejectedTavily = section(first.id, { ...FOUND, 'source url': 'https://random-blog.example.org/acme' });
-    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [rejectedBuiltIn, rejectedTavily] }) === rejectedBuiltIn,
+    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [rejectedBuiltIn, parallelAccepted] }) === parallelAccepted,
+      'a host-rejected built-in FOUND row defers to an accepted Parallel row');
+    const rejectedParallel = section(first.id, { ...FOUND, 'source url': 'https://random-blog.example.org/acme' });
+    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [rejectedBuiltIn, rejectedParallel] }) === rejectedBuiltIn,
       'with no accepted row at all, the first FOUND section is still the built-in one');
     const builtInNotFound = section(first.id, { result: 'NOT FOUND', reason: 'no employer posting found' });
-    const tavilyNotFound = section(first.id, { result: 'NOT FOUND', reason: 'only on a job board' });
-    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [builtInNotFound, tavilyNotFound] }) === builtInNotFound,
+    const parallelNotFound = section(first.id, { result: 'NOT FOUND', reason: 'only on a job board' });
+    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [builtInNotFound, parallelNotFound] }) === builtInNotFound,
       'two NOT FOUND answers keep the built-in section');
-    assert(mergeJobLocationLookupReplies({ requests: [first], replies: ['Here you go!', tavilyAccepted] }) === tavilyAccepted,
+    assert(mergeJobLocationLookupReplies({ requests: [first], replies: ['Here you go!', parallelAccepted] }) === parallelAccepted,
       'a reply that fails as a whole contributes nothing, leaving the other reply');
-    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [null, tavilyAccepted] }) === tavilyAccepted,
+    assert(mergeJobLocationLookupReplies({ requests: [first], replies: [null, parallelAccepted] }) === parallelAccepted,
       'a missing reply contributes nothing');
     assert(mergeJobLocationLookupReplies({ requests: [first], replies: [null, null] }) === null,
       'nothing from either reply is null, never an empty string');

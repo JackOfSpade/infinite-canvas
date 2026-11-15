@@ -10,14 +10,21 @@ function clipped(value, max = 300) {
 }
 
 const ACTIVITY_TARGET_LIMIT = 120;
+const PARALLEL_TOOL_PREFIX = 'mcp__parallel__';
+const isParallelTool = name => typeof name === 'string' && name.startsWith(PARALLEL_TOOL_PREFIX);
 
 // What a person may see of a tool call. Only a search query and a page address
 // (no query string, which can hold tokens) ever leave this file.
 function toolTarget(name, input) {
   if (name === 'WebSearch' && typeof input?.query === 'string') return clipped(input.query, ACTIVITY_TARGET_LIMIT) || null;
-  if (name !== 'WebFetch' || typeof input?.url !== 'string') return null;
+  if (name === 'mcp__parallel__web_search') {
+    const query = Array.isArray(input?.search_queries) && typeof input.search_queries[0] === 'string' ? input.search_queries[0] : input?.objective;
+    return typeof query === 'string' ? clipped(query, ACTIVITY_TARGET_LIMIT) || null : null;
+  }
+  const page = name === 'WebFetch' ? input?.url : name === 'mcp__parallel__web_fetch' ? (Array.isArray(input?.urls) ? input.urls[0] : null) : null;
+  if (typeof page !== 'string') return null;
   try {
-    const url = new URL(input.url);
+    const url = new URL(page);
     return clipped(`${url.host}${url.pathname === '/' ? '' : url.pathname}`, ACTIVITY_TARGET_LIMIT) || null;
   } catch { return null; }
 }
@@ -88,8 +95,10 @@ export const CLAUDE_TASK_FAILURE_LABELS = Object.freeze({
 export const claudeTaskFailureLabel = code => CLAUDE_TASK_FAILURE_LABELS[code] || 'The attempt failed';
 
 function toolLabel({ tool, target }) {
-  if (tool === 'WebSearch') return target ? `Searching the web: ${target}` : 'Searching the web';
-  if (tool === 'WebFetch') return target ? `Reading ${target}` : 'Reading a page';
+  if (tool === 'WebSearch' || tool === 'mcp__parallel__web_search') return target ? `Searching the web: ${target}` : 'Searching the web';
+  if (tool === 'WebFetch' || tool === 'mcp__parallel__web_fetch') return target ? `Reading ${target}` : 'Reading a page';
+  // web_decisions, find_verticals, search_vertical and image_search all search.
+  if (isParallelTool(tool)) return 'Searching the web';
   return `Using ${tool}`;
 }
 

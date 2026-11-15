@@ -93,25 +93,26 @@ export default [
   {
     name: 'claude SDK: ultracode is off by default and drops the ultracode setting and Workflow but keeps every other option; an explicit opt-in adds both',
     async run() {
-      const tavily = { type: 'http', url: 'https://mcp.example.test/mcp' };
+      const parallel = { type: 'http', url: 'https://mcp.example.test/mcp' };
       const off = fakeQuery();
       await stage(off.queryImpl, {
-        tools: ['WebFetch', 'Workflow', 'mcp__tavily__tavily_search'],
-        mcpServers: { tavily },
+        tools: ['WebFetch', 'Workflow', 'mcp__parallel__web_search'],
+        mcpServers: { parallel },
+        allowBuiltInWebTools: true,
       });
       const offOptions = off.calls[0].options;
       assert.deepEqual(offOptions.settings, {});
       assert.equal(offOptions.tools.includes('Workflow'), false, 'ultracode off offers no Workflow');
       assert.deepEqual(offOptions.tools, ['WebFetch']);
-      assert.deepEqual(offOptions.allowedTools, ['WebFetch', 'mcp__tavily__tavily_search']);
-      assert.deepEqual(offOptions.mcpServers, { tavily });
+      assert.deepEqual(offOptions.allowedTools, ['WebFetch', 'mcp__parallel__web_search']);
+      assert.deepEqual(offOptions.mcpServers, { parallel });
 
       const on = fakeQuery();
-      await stage(on.queryImpl, { ultracode: true, tools: ['WebFetch', 'mcp__tavily__tavily_search'], mcpServers: { tavily } });
+      await stage(on.queryImpl, { ultracode: true, tools: ['WebFetch', 'mcp__parallel__web_search'], mcpServers: { parallel }, allowBuiltInWebTools: true });
       const onOptions = on.calls[0].options;
       assert.deepEqual(onOptions.settings, { ultracode: true });
       assert.deepEqual(onOptions.tools, ['WebFetch', 'Workflow']);
-      assert.deepEqual(onOptions.allowedTools, ['WebFetch', 'Workflow', 'mcp__tavily__tavily_search']);
+      assert.deepEqual(onOptions.allowedTools, ['WebFetch', 'Workflow', 'mcp__parallel__web_search']);
 
       // Every option except the three ultracode ones is identical, key for key.
       const differs = new Set(['settings', 'tools', 'allowedTools', 'abortController']);
@@ -134,7 +135,8 @@ export default [
   {
     name: 'claude CLI args: ultracode is off by default and an explicit true adds the setting and Workflow; nothing else changes',
     run() {
-      const fixed = { model: 'opus', effort: 'high', sessionId: '11111111-1111-4111-8111-111111111111', tools: 'WebSearch,WebFetch' };
+      // allowBuiltInWebTools is the measurement script's built-in-arm opt-in.
+      const fixed = { model: 'opus', effort: 'high', sessionId: '11111111-1111-4111-8111-111111111111', tools: 'WebSearch,WebFetch', allowBuiltInWebTools: true };
       const head = ['-p', '--session-id', fixed.sessionId, '--model', 'opus', '--effort', 'high',
         '--append-system-prompt', CLAUDE_HANDOFF_SYSTEM_PROMPT, '--restricted', '--strict-mcp-config'];
       const tail = ['--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
@@ -184,30 +186,33 @@ export default [
     name: 'claude SDK: an explicit MCP server adds only its named tools by default, an explicit opt-in adds Workflow, and nothing else loosens',
     async run() {
       const fake = fakeQuery();
-      const tavily = { type: 'http', url: 'https://mcp.example.test/mcp' };
+      const parallel = { type: 'http', url: 'https://mcp.example.test/mcp' };
       await stage(fake.queryImpl, {
-        tools: ['WebFetch', 'mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract'],
-        mcpServers: { tavily },
+        tools: ['WebFetch', 'mcp__parallel__web_search', 'mcp__parallel__web_fetch'],
+        mcpServers: { parallel },
+        // The built-in arm of a measurement script opts in explicitly.
+        allowBuiltInWebTools: true,
       });
       const { options } = fake.calls[0];
-      assert.deepEqual(options.mcpServers, { tavily });
-      assert.equal(options.tools.includes('mcp__tavily__tavily_search'), false, 'MCP tools are not built-in tools');
+      assert.deepEqual(options.mcpServers, { parallel });
+      assert.equal(options.tools.includes('mcp__parallel__web_search'), false, 'MCP tools are not built-in tools');
       assert.deepEqual([...options.tools].sort(), ['WebFetch']);
-      assert.deepEqual([...options.allowedTools].sort(), ['WebFetch', 'mcp__tavily__tavily_extract', 'mcp__tavily__tavily_search']);
+      assert.deepEqual([...options.allowedTools].sort(), ['WebFetch', 'mcp__parallel__web_fetch', 'mcp__parallel__web_search']);
       assert.deepEqual(options.settings, {});
       assert.equal(options.strictMcpConfig, true);
       assert.deepEqual(options.settingSources, []);
       const on = fakeQuery();
       await stage(on.queryImpl, {
         ultracode: true,
-        tools: ['WebFetch', 'mcp__tavily__tavily_search', 'mcp__tavily__tavily_extract'],
-        mcpServers: { tavily },
+        tools: ['WebFetch', 'mcp__parallel__web_search', 'mcp__parallel__web_fetch'],
+        mcpServers: { parallel },
+        allowBuiltInWebTools: true,
       });
       const onOptions = on.calls[0].options;
       assert.deepEqual([...onOptions.tools].sort(), ['WebFetch', 'Workflow']);
-      assert.deepEqual([...onOptions.allowedTools].sort(), ['WebFetch', 'Workflow', 'mcp__tavily__tavily_extract', 'mcp__tavily__tavily_search']);
+      assert.deepEqual([...onOptions.allowedTools].sort(), ['WebFetch', 'Workflow', 'mcp__parallel__web_fetch', 'mcp__parallel__web_search']);
       assert.deepEqual(onOptions.settings, { ultracode: true });
-      assert.deepEqual(onOptions.mcpServers, { tavily });
+      assert.deepEqual(onOptions.mcpServers, { parallel });
       assert.equal(onOptions.strictMcpConfig, true);
       const bad = fakeQuery();
       await stage(bad.queryImpl, { mcpServers: ['not', 'a', 'map'] });
@@ -688,19 +693,49 @@ export default [
     name: 'claude SDK: research tools are offered and allowed without Workflow by default and with it only on an explicit opt-in',
     async run() {
       const fake = fakeQuery();
-      await stage(fake.queryImpl, { tools: ['WebSearch', 'WebFetch'], maxTurns: 16 });
+      // allowBuiltInWebTools is the measurement script's built-in-arm opt-in.
+      await stage(fake.queryImpl, { tools: ['WebSearch', 'WebFetch'], maxTurns: 16, allowBuiltInWebTools: true });
       const { options } = fake.calls[0];
       assert.deepEqual(options.tools, ['WebSearch', 'WebFetch']);
       assert.deepEqual(options.allowedTools, ['WebSearch', 'WebFetch']);
       assert.deepEqual(options.settings, {});
       assert.equal(options.maxTurns, 16);
       const on = fakeQuery();
-      await stage(on.queryImpl, { ultracode: true, tools: ['WebSearch', 'WebFetch'], maxTurns: 16 });
+      await stage(on.queryImpl, { ultracode: true, tools: ['WebSearch', 'WebFetch'], maxTurns: 16, allowBuiltInWebTools: true });
       const onOptions = on.calls[0].options;
       assert.deepEqual(onOptions.tools, ['WebSearch', 'WebFetch', 'Workflow']);
       assert.deepEqual(onOptions.allowedTools, ['WebSearch', 'WebFetch', 'Workflow']);
       assert.deepEqual(onOptions.settings, { ultracode: true });
       assert.equal(onOptions.maxTurns, 16);
+    },
+  },
+  {
+    name: 'claude SDK: WebSearch and WebFetch are refused before the query starts, as a string or an array, unless allowBuiltInWebTools is true',
+    async run() {
+      for (const tools of ['WebSearch', 'WebFetch', 'mcp__parallel__web_search,WebFetch', ['WebFetch', 'mcp__parallel__web_fetch'], [' websearch ']]) {
+        const fake = fakeQuery();
+        const error = await rejected(stage(fake.queryImpl, { tools }), 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED');
+        assert.equal(error.message, "Claude's built-in web search is disabled in this app; web research uses Parallel Search.");
+        assert.equal(fake.calls.length, 0, 'refused before the SDK query starts');
+      }
+      // Parallel Search tool names and an empty list are unaffected.
+      const parallel = fakeQuery();
+      await stage(parallel.queryImpl, { tools: ['mcp__parallel__web_search', 'mcp__parallel__web_fetch'] });
+      assert.deepEqual(parallel.calls[0].options.tools, [], 'MCP tools are not built-in tools');
+      assert.deepEqual(parallel.calls[0].options.allowedTools, ['mcp__parallel__web_search', 'mcp__parallel__web_fetch']);
+      const empty = fakeQuery();
+      await stage(empty.queryImpl, { tools: [] });
+      assert.deepEqual(empty.calls[0].options.tools, []);
+      // The measurement scripts' built-in arm opts in explicitly.
+      const allowed = fakeQuery();
+      const value = await stage(allowed.queryImpl, { tools: ['WebSearch', 'WebFetch'], allowBuiltInWebTools: true });
+      assert.equal(value.text, 'answer');
+      assert.deepEqual(allowed.calls[0].options.tools, ['WebSearch', 'WebFetch']);
+      assert.deepEqual(allowed.calls[0].options.allowedTools, ['WebSearch', 'WebFetch']);
+      // An explicit false is still refused, before the query.
+      const refused = fakeQuery();
+      await rejected(stage(refused.queryImpl, { tools: ['WebFetch'], allowBuiltInWebTools: false }), 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED');
+      assert.equal(refused.calls.length, 0);
     },
   },
   {
@@ -868,6 +903,51 @@ export default [
       const value = await stage(fake.queryImpl);
       assert.equal(value.text, 'final answer');
       assert.equal(value.model, SONNET);
+    },
+  },
+  {
+    name: 'claude SDK: onToolResult is told each tool result by tool name, error flag and clipped text',
+    async run() {
+      const seen = [];
+      const long = 'x'.repeat(3000);
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__parallel__web_search', input: { search_queries: ['q'] } }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_1', is_error: false, content: [{ type: 'text', text: 'two results' }, { type: 'text', text: long }] },
+        ] } },
+        assistant([{ type: 'tool_use', id: 'toolu_2', name: 'mcp__parallel__web_fetch', input: { urls: ['https://x.test/1'] } }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_2', is_error: true, content: 'Rate limit exceeded' },
+        ] } },
+        assistant([{ type: 'text', text: 'answer' }]),
+        result(),
+      ]);
+      const value = await stage(fake.queryImpl, { onToolResult: ({ toolName, isError, text }) => { seen.push({ toolName, isError, text }); } });
+      assert.equal(value.text, 'answer');
+      assert.deepEqual(seen.map(item => [item.toolName, item.isError]), [['mcp__parallel__web_search', false], ['mcp__parallel__web_fetch', true]]);
+      assert(seen[0].text.startsWith('two results'), 'the text parts are joined');
+      assert.equal(seen[0].text.length, 2000, 'the text is clipped');
+      assert.equal(seen[1].text, 'Rate limit exceeded');
+    },
+  },
+  {
+    name: 'claude SDK: a throwing onToolResult interrupts the stage with exactly that error',
+    async run() {
+      const limit = Object.assign(new Error('Parallel Search is out of usage. Research is paused.'), { code: 'PARALLEL_SEARCH_EXHAUSTED' });
+      const fake = fakeQuery([
+        assistant([{ type: 'tool_use', id: 'toolu_1', name: 'mcp__parallel__web_search', input: {} }]),
+        { type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [
+          { type: 'tool_result', tool_use_id: 'toolu_1', is_error: true, content: [{ type: 'text', text: 'quota used up' }] },
+        ] } },
+        result(),
+      ]);
+      try {
+        await stage(fake.queryImpl, { onToolResult: () => { throw limit; } });
+        assert.fail('the stage must reject');
+      } catch (error) {
+        assert.equal(error, limit, 'the exact error a web task turns into a pause');
+      }
+      assert.equal(fake.calls[0].closed, true, 'the interrupted stage is closed');
     },
   },
 ];

@@ -6,7 +6,8 @@
  *   --user-data "<dir>" --snapshot-id <id> --job-url <url> \
  *   --bundle-dir "<applied-job folder>" --out /tmp/interview-live-prep \
  *   [--transport claude|replay] [--ultracode on|off] \
- *   [--research native|tavily|merged] [--merge-from "<dirA>,<dirB>"] [--stop-after all|brief] \
+ *   [--research native|tavily|parallel|merged] [--merge-from "<dirA>,<dirB>"] \
+ *   [--merge-second tavily|parallel] [--stop-after all|brief] \
  *   [--research-profile <model>:<effort>]
  *
  * The Claude transport feeds the real Prepare handoffs (buildInterviewBrief
@@ -15,13 +16,18 @@
  * forwards ultracode:true to every stage, so one run can be compared with
  * --ultracode off (the default, as everywhere in the app).
  *
- * --research picks how the one 'interview-brief-research' call is answered:
- * native (default) is the transport's own CLI call with Claude's built-in web
- * search; tavily calls runClaudeSdkStage directly with the Tavily MCP tools and
- * the qa-research profile; merged researches nothing and reads the two source
+ * --research picks how the one 'interview-brief-research' call is answered.
+ * The transport itself is Parallel-only for research, so native (the default)
+ * is a measurement arm beside the others and answers through runClaudeSdkStage
+ * directly with Claude's built-in WebSearch/WebFetch tools, no MCP servers and
+ * no key; tavily calls runClaudeSdkStage with the Tavily MCP tools and
+ * the qa-research profile; parallel does the same with the app's own Parallel
+ * Search MCP tools and an optional Parallel key (no key is fine, Parallel runs
+ * anonymously); merged researches nothing and reads the two source
  * sets from two earlier harness output dirs (--merge-from <dirA>,<dirB>, where
- * A is the built-in-search dir and B the Tavily dir), labelled and
- * proportionally trimmed to the research validator's maximum. Every other call
+ * A is the built-in-search dir and B the second research dir), labelled and
+ * proportionally trimmed to the research validator's maximum. --merge-second
+ * picks set B's label (tavily, the default, or parallel) for that run. Every other call
  * keeps using the transport. --stop-after brief stops after final-brief.json
  * and still writes report.json and calls.jsonl.
  *
@@ -42,24 +48,31 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TAVILY_RESEARCH_TOOLS, readTavilyKey, tavilyMcpServers } from '../electron/ipc/tavily.js';
+import { TAVILY_RESEARCH_TOOLS, readTavilyKey, tavilyMcpServers } from './lib/tavily-arm.mjs';
+import { PARALLEL_RESEARCH_TOOLS, readParallelKey, parallelMcpServers } from '../electron/ipc/parallelSearch.js';
 
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const WORKFLOW_TOOL = 'Workflow';
 const TRANSPORTS = Object.freeze(['claude', 'replay']);
 const ULTRACODE_SETTINGS = Object.freeze(['on', 'off']);
-export const RESEARCH_MODES = Object.freeze(['native', 'tavily', 'merged']);
+export const RESEARCH_MODES = Object.freeze(['native', 'tavily', 'parallel', 'merged']);
 export const STOP_AFTER_SETTINGS = Object.freeze(['all', 'brief']);
+export const MERGE_SECOND_SETTINGS = Object.freeze(['tavily', 'parallel']);
 export const RESEARCH_PROFILE_MODELS = Object.freeze(['haiku', 'sonnet', 'opus']);
 export const RESEARCH_PROFILE_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh']);
 export const RESEARCH_TASK = 'interview-brief-research';
 export const RESEARCH_STAGE = 'qa-research';
 export const TAVILY_RESEARCH_MAX_TURNS = 24;
+export const PARALLEL_RESEARCH_MAX_TURNS = 24;
+// The built-in arm is measurement only: the app's transport never offers these.
+export const NATIVE_RESEARCH_TOOLS = Object.freeze(['WebSearch', 'WebFetch']);
+export const NATIVE_RESEARCH_MAX_TURNS = 24;
 // The responseValidator buildInterviewBrief attaches (validateGroundedResearchText).
 export const RESEARCH_MAX_CHARS = 80_000;
 export const RESEARCH_SOURCE_LABELS = Object.freeze({
   builtIn: 'SOURCE SET A (built-in web search)',
   tavily: 'SOURCE SET B (Tavily search)',
+  parallel: 'SOURCE SET B (Parallel search)',
 });
 const INPUT_FILES = ['Application.html', 'Original Job Listing.md', 'Generation Audit.json', 'Resume.pdf', 'Cover Letter.pdf'];
 const inside = (parent, child) => child === parent || (!path.relative(parent, child).startsWith(`..${path.sep}`)
@@ -76,9 +89,9 @@ export function parseResearchProfile(value) {
 }
 
 export function parseHarnessArgs(argv) {
-  const args = { transport: 'claude', ultracode: 'off', research: 'native', 'stop-after': 'all' };
+  const args = { transport: 'claude', ultracode: 'off', research: 'native', 'stop-after': 'all', 'merge-second': 'tavily' };
   const allowed = new Set(['user-data', 'snapshot-id', 'job-url', 'bundle-dir', 'out', 'transport', 'ultracode', 'ultracode-off-tasks',
-    'research', 'merge-from', 'stop-after', 'research-profile']);
+    'research', 'merge-from', 'merge-second', 'stop-after', 'research-profile']);
   const seen = new Set();
   for (let index = 0; index < argv.length; index += 2) {
     const key = argv[index]?.slice(2);
@@ -89,7 +102,11 @@ export function parseHarnessArgs(argv) {
   for (const key of ['user-data', 'snapshot-id', 'job-url', 'bundle-dir', 'out']) if (!args[key]) fail('MISSING_ARGUMENTS');
   if (!/^[a-f0-9]{64}$/u.test(args['snapshot-id']) || !TRANSPORTS.includes(args.transport)
     || !ULTRACODE_SETTINGS.includes(args.ultracode) || !RESEARCH_MODES.includes(args.research)
-    || !STOP_AFTER_SETTINGS.includes(args['stop-after'])) fail('INVALID_ARGUMENTS');
+    || !STOP_AFTER_SETTINGS.includes(args['stop-after']) || !MERGE_SECOND_SETTINGS.includes(args['merge-second'])) {
+    fail('INVALID_ARGUMENTS');
+  }
+  // --merge-second names set B of a merged run: Tavily (the default) or Parallel.
+  args.mergeSecond = args['merge-second'];
   // --research-profile re-labels the one research handoff; null (the flag is
   // omitted) keeps every recorded profile exactly as before.
   args.researchProfile = args['research-profile'] === undefined ? null : parseResearchProfile(args['research-profile']);
@@ -354,13 +371,16 @@ export function createMeasuredRunStage({ runStage, recorder, currentCall = () =>
   };
 }
 
-/** The Tavily key never reaches a transcript, a report or console output. */
-export function redactTavilyKey(value, key) {
+/** A research key never reaches a transcript, a report or console output. */
+function redactResearchKey(value, key) {
   const text = String(value ?? '');
   const secret = String(key ?? '');
   if (!secret) return text;
   return text.split(secret).join('[REDACTED]').split(encodeURIComponent(secret)).join('[REDACTED]');
 }
+
+/** The Tavily key's redaction, still exported under its original name for callers of it. */
+export function redactTavilyKey(value, key) { return redactResearchKey(value, key); }
 
 /**
  * The effective research profile: the production qa-research pair unless
@@ -397,33 +417,71 @@ export function createResearchProfileRunStage({ runStage, profile = null, curren
 }
 
 const redactedError = (error, key) => {
-  const copy = new Error(redactTavilyKey(error?.message ?? '', key));
+  const copy = new Error(redactResearchKey(error?.message ?? '', key));
   if (typeof error?.code === 'string' && error.code) copy.code = error.code;
   return copy;
 };
 
+// Each MCP research arm differs only in its tools, its server builder, whether
+// it needs a key and the error codes it reports; the call body is shared.
+const MCP_RESEARCH_ARMS = Object.freeze({
+  native: Object.freeze({
+    // Built-in web tools for measurement only; no MCP server, no key. The
+    // guard needs this explicit opt-in.
+    tools: NATIVE_RESEARCH_TOOLS,
+    allowBuiltInWebTools: true,
+    mcpServers: () => ({}),
+    requiresKey: false,
+    codes: Object.freeze({
+      runStage: 'NATIVE_RESEARCH_NEEDS_RUN_CLAUDE_SDK_STAGE',
+      readKey: 'NATIVE_RESEARCH_NEEDS_READ_KEY',
+      profile: 'NATIVE_RESEARCH_NEEDS_QA_RESEARCH_PROFILE',
+      missingKey: null,
+    }),
+  }),
+  tavily: Object.freeze({
+    tools: TAVILY_RESEARCH_TOOLS,
+    mcpServers: key => tavilyMcpServers(key),
+    requiresKey: true,
+    codes: Object.freeze({
+      runStage: 'TAVILY_RESEARCH_NEEDS_RUN_CLAUDE_SDK_STAGE',
+      readKey: 'TAVILY_RESEARCH_NEEDS_READ_KEY',
+      profile: 'TAVILY_RESEARCH_NEEDS_QA_RESEARCH_PROFILE',
+      missingKey: 'TAVILY_KEY_MISSING',
+    }),
+  }),
+  parallel: Object.freeze({
+    tools: PARALLEL_RESEARCH_TOOLS,
+    mcpServers: key => parallelMcpServers(key),
+    // Parallel also answers anonymously, so an empty key is not an error.
+    requiresKey: false,
+    codes: Object.freeze({
+      runStage: 'PARALLEL_RESEARCH_NEEDS_RUN_CLAUDE_SDK_STAGE',
+      readKey: 'PARALLEL_RESEARCH_NEEDS_READ_KEY',
+      profile: 'PARALLEL_RESEARCH_NEEDS_QA_RESEARCH_PROFILE',
+      missingKey: null,
+    }),
+  }),
+});
+
 /**
  * Answers the one 'interview-brief-research' call with runClaudeSdkStage
  * directly (no CLI transport): the qa-research profile's model and effort (the
- * effective pair, so --research-profile reaches this path too), the Tavily MCP
+ * effective pair, so --research-profile reaches this path too), the arm's MCP
  * tools, maxTurns 24, persistSession false and ultracode off. The
  * SDK reply is recorded like a transport attempt (duration, cost, usage and
  * Workflow/tool counts), then validated by the same responseValidator the
  * transport's call carried.
  */
-export function createTavilyResearchCall({
-  runClaudeSdkStage, readKey = readTavilyKey, profile, recorder = null,
-  beginCall = () => ({ task: RESEARCH_TASK, stage: RESEARCH_STAGE, attempt: 0 }),
-  maxTurns = TAVILY_RESEARCH_MAX_TURNS,
-} = {}) {
-  if (typeof runClaudeSdkStage !== 'function') throw new TypeError('TAVILY_RESEARCH_NEEDS_RUN_CLAUDE_SDK_STAGE');
-  if (typeof readKey !== 'function') throw new TypeError('TAVILY_RESEARCH_NEEDS_READ_KEY');
+function createMcpResearchCall({ arm, runClaudeSdkStage, readKey, profile, recorder = null, beginCall, maxTurns }) {
+  if (typeof runClaudeSdkStage !== 'function') throw new TypeError(arm.codes.runStage);
+  if (typeof readKey !== 'function') throw new TypeError(arm.codes.readKey);
   if (!profile || typeof profile.model !== 'string' || !profile.model
-    || typeof profile.effort !== 'string' || !profile.effort) throw new TypeError('TAVILY_RESEARCH_NEEDS_QA_RESEARCH_PROFILE');
-  return async function tavilyResearch(prompt, opts = {}) {
+    || typeof profile.effort !== 'string' || !profile.effort) throw new TypeError(arm.codes.profile);
+  return async function mcpResearch(prompt, opts = {}) {
     let key = '';
     try { key = String((await readKey()) ?? '').trim(); } catch { key = ''; }
-    if (!key) fail('TAVILY_KEY_MISSING');
+    if (!key && arm.requiresKey) fail(arm.codes.missingKey);
     const call = recorder && typeof recorder.begin === 'function' ? recorder.begin({
       ...beginCall({
         task: typeof opts.task === 'string' && opts.task ? opts.task : RESEARCH_TASK, stage: RESEARCH_STAGE,
@@ -440,8 +498,10 @@ export function createTavilyResearchCall({
         signal: opts.signal,
         model: profile.model,
         effort: profile.effort,
-        tools: [...TAVILY_RESEARCH_TOOLS],
-        mcpServers: tavilyMcpServers(key),
+        tools: [...arm.tools],
+        // Only the native comparison arm sets this; Tavily and Parallel never do.
+        ...(arm.allowBuiltInWebTools === true ? { allowBuiltInWebTools: true } : {}),
+        mcpServers: arm.mcpServers(key),
         maxTurns,
         persistSession: false,
         ultracode: false,
@@ -476,6 +536,52 @@ export function createTavilyResearchCall({
   };
 }
 
+/**
+ * The SDK stage with the signed-in CLI's binary, child environment and working
+ * directory, as the app's worker binds it. Without them the SDK call is not signed in.
+ */
+async function boundSdkStage(runClaudeSdkStage) {
+  const runner = await import('../electron/ipc/claudeApplicationRunner.js');
+  const os = await import('node:os');
+  const binary = runner.resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
+  const stage = { binary, env: runner.claudeChildEnv(process.env, path.dirname(binary)), cwd: os.tmpdir() };
+  return request => runClaudeSdkStage({ ...stage, ...request });
+}
+
+/**
+ * The native arm: built-in WebSearch/WebFetch for measurement only, with no MCP
+ * servers and no key. The app's transport no longer answers research this way.
+ */
+export function createNativeResearchCall({
+  runClaudeSdkStage, readKey = async () => '', profile, recorder = null,
+  beginCall = () => ({ task: RESEARCH_TASK, stage: RESEARCH_STAGE, attempt: 0 }),
+  maxTurns = NATIVE_RESEARCH_MAX_TURNS,
+} = {}) {
+  return createMcpResearchCall({ arm: MCP_RESEARCH_ARMS.native, runClaudeSdkStage, readKey, profile, recorder, beginCall, maxTurns });
+}
+
+/** The Tavily arm: needs its key and sends the Tavily MCP tools. */
+export function createTavilyResearchCall({
+  runClaudeSdkStage, readKey = readTavilyKey, profile, recorder = null,
+  beginCall = () => ({ task: RESEARCH_TASK, stage: RESEARCH_STAGE, attempt: 0 }),
+  maxTurns = TAVILY_RESEARCH_MAX_TURNS,
+} = {}) {
+  return createMcpResearchCall({ arm: MCP_RESEARCH_ARMS.tavily, runClaudeSdkStage, readKey, profile, recorder, beginCall, maxTurns });
+}
+
+/**
+ * The Parallel arm: the same body with the app's Parallel MCP tools and
+ * servers. A missing or empty key is not an error (Parallel answers
+ * anonymously); the key is only used, and redacted, when one is present.
+ */
+export function createParallelResearchCall({
+  runClaudeSdkStage, readKey = readParallelKey, profile, recorder = null,
+  beginCall = () => ({ task: RESEARCH_TASK, stage: RESEARCH_STAGE, attempt: 0 }),
+  maxTurns = PARALLEL_RESEARCH_MAX_TURNS,
+} = {}) {
+  return createMcpResearchCall({ arm: MCP_RESEARCH_ARMS.parallel, runClaudeSdkStage, readKey, profile, recorder, beginCall, maxTurns });
+}
+
 /** Sends only the research task to the alternative path; every other handoff keeps the transport. */
 export function createResearchRouter({ call, research = null } = {}) {
   if (typeof call !== 'function') throw new TypeError('RESEARCH_ROUTER_NEEDS_TRANSPORT_CALL');
@@ -486,16 +592,20 @@ export function createResearchRouter({ call, research = null } = {}) {
 }
 
 /**
- * The merged research text: both source sets labelled in a fixed order. When
- * it would exceed the validator's maximum, each set loses the same fraction of
- * its length, so neither source's share of the evidence grows or shrinks.
+ * The merged research text: both source sets labelled in a fixed order, where
+ * set B is whichever second arm (Tavily by default, or Parallel) the run
+ * measured. When it would exceed the validator's maximum, each set loses the
+ * same fraction of its length, so neither source's share of the evidence grows
+ * or shrinks.
  */
-export function buildMergedResearchText({ builtIn = '', tavily = '', maxLength = RESEARCH_MAX_CHARS } = {}) {
+export function buildMergedResearchText({ builtIn = '', tavily = '', second = 'tavily', maxLength = RESEARCH_MAX_CHARS } = {}) {
   if (!Number.isInteger(maxLength) || maxLength <= 0) throw new TypeError('MERGED_RESEARCH_NEEDS_MAX_LENGTH');
+  if (!MERGE_SECOND_SETTINGS.includes(second)) throw new TypeError('MERGED_RESEARCH_NEEDS_SECOND');
   const a = String(builtIn ?? '');
   const b = String(tavily ?? '');
+  const secondLabel = RESEARCH_SOURCE_LABELS[second];
   const head = `${RESEARCH_SOURCE_LABELS.builtIn}:\n`;
-  const separator = `\n\n${RESEARCH_SOURCE_LABELS.tavily}:\n`;
+  const separator = `\n\n${secondLabel}:\n`;
   const budget = Math.max(0, maxLength - (head.length + separator.length));
   const total = a.length + b.length;
   let keptA = a.length;
@@ -512,7 +622,7 @@ export function buildMergedResearchText({ builtIn = '', tavily = '', maxLength =
     maxLength,
     sets: [
       { source: 'built-in-web-search', label: RESEARCH_SOURCE_LABELS.builtIn, length: a.length, kept: keptA, dropped: a.length - keptA },
-      { source: 'tavily', label: RESEARCH_SOURCE_LABELS.tavily, length: b.length, kept: keptB, dropped: b.length - keptB },
+      { source: second, label: secondLabel, length: b.length, kept: keptB, dropped: b.length - keptB },
     ],
   };
 }
@@ -605,13 +715,13 @@ export async function runHarness(args) {
   };
   let recorder = null;
   const transportCalls = [];
-  // The research setup is reported, never the Tavily key (it only rides in the
-  // MCP server URL handed to the SDK inside this process).
+  // The research setup is reported, never the Tavily or Parallel key (each only
+  // rides in the MCP server headers/URL handed to the SDK inside this process).
   const report = {
     version: 4, transport: args.transport, ultracode: args.ultracode, ultracodeOffTasks: args.ultracodeOffTasks,
     stopAfter: args['stop-after'], status: 'running',
     research: { mode: args.research, task: RESEARCH_TASK, stage: RESEARCH_STAGE, mergeFrom: mergeDirectories,
-      maxLength: RESEARCH_MAX_CHARS, mergeSources: [], sets: [], trimmed: false },
+      mergeSecond: args.mergeSecond ?? 'tavily', maxLength: RESEARCH_MAX_CHARS, mergeSources: [], sets: [], trimmed: false },
     callsFile: 'calls.jsonl', calls: [], stageTotals: {}, totals: {}, transportStages: [],
     answerValidationRounds: [], timings: {},
   };
@@ -733,13 +843,28 @@ export async function runHarness(args) {
       // With --research-profile, keep the production pair beside the effective one.
       ...(researchOverride ? { profileOverride: true, productionModel: productionResearchProfile.model,
         productionEffort: productionResearchProfile.effort } : {}),
-      callPath: args.research === 'native' ? 'transport' : args.research === 'tavily' ? 'runClaudeSdkStage' : 'merged' });
+      callPath: args.research === 'merged' ? 'merged' : 'runClaudeSdkStage' });
     const transportRaw = measured(transport.callRaw);
     let researchCall = null;
-    if (args.research === 'tavily') {
+    if (args.research === 'native') {
+      const sdkStage = await import('../electron/ipc/claudeApplicationSdkStage.js');
+      researchCall = createNativeResearchCall({
+        runClaudeSdkStage: await boundSdkStage(sdkStage.runClaudeSdkStage),
+        profile: researchProfile,
+        recorder,
+        // Booked like a transport call, so stageTotals counts the research handoff.
+        beginCall: ({ task, stage: researchStage }) => {
+          currentCall = { task, stage: researchStage, attempts: 0 };
+          transportCalls.push(currentCall);
+          return { task, stage: researchStage, attempt: 0 };
+        },
+      });
+      Object.assign(report.research, { tools: [...NATIVE_RESEARCH_TOOLS], mcpServer: null,
+        maxTurns: NATIVE_RESEARCH_MAX_TURNS, persistSession: false, ultracode: false });
+    } else if (args.research === 'tavily') {
       const sdkStage = await import('../electron/ipc/claudeApplicationSdkStage.js');
       researchCall = createTavilyResearchCall({
-        runClaudeSdkStage: sdkStage.runClaudeSdkStage,
+        runClaudeSdkStage: await boundSdkStage(sdkStage.runClaudeSdkStage),
         readKey: readTavilyKey,
         profile: researchProfile,
         recorder,
@@ -752,11 +877,29 @@ export async function runHarness(args) {
       });
       Object.assign(report.research, { tools: [...TAVILY_RESEARCH_TOOLS], mcpServer: 'tavily',
         maxTurns: TAVILY_RESEARCH_MAX_TURNS, persistSession: false, ultracode: false });
+    } else if (args.research === 'parallel') {
+      const sdkStage = await import('../electron/ipc/claudeApplicationSdkStage.js');
+      researchCall = createParallelResearchCall({
+        runClaudeSdkStage: await boundSdkStage(sdkStage.runClaudeSdkStage),
+        // An unset or unreadable key is fine: Parallel also answers anonymously.
+        readKey: readParallelKey,
+        profile: researchProfile,
+        recorder,
+        // Booked like a transport call, so stageTotals counts the research handoff.
+        beginCall: ({ task, stage: researchStage }) => {
+          currentCall = { task, stage: researchStage, attempts: 0 };
+          transportCalls.push(currentCall);
+          return { task, stage: researchStage, attempt: 0 };
+        },
+      });
+      Object.assign(report.research, { tools: [...PARALLEL_RESEARCH_TOOLS], mcpServer: 'parallel',
+        maxTurns: PARALLEL_RESEARCH_MAX_TURNS, persistSession: false, ultracode: false });
     } else if (args.research === 'merged') {
       // No research: both source sets come from two earlier runs' accepted research.
       const sources = [];
       for (const directory of mergeDirectories) sources.push(await readResearchResponse({ directory }));
-      const merged = buildMergedResearchText({ builtIn: sources[0].text, tavily: sources[1].text, maxLength: RESEARCH_MAX_CHARS });
+      const merged = buildMergedResearchText({ builtIn: sources[0].text, tavily: sources[1].text,
+        second: args.mergeSecond ?? 'tavily', maxLength: RESEARCH_MAX_CHARS });
       report.research.mergeSources = sources.map(({ text, ...rest }) => ({ ...rest, textLength: text.length }));
       report.research.sets = merged.sets;
       report.research.trimmed = merged.trimmed;

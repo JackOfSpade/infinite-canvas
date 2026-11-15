@@ -163,7 +163,7 @@ function taskWorker({ prompt = 'HEAD\nSHARED BLOCK\nTAIL', cachedPrefix = 'SHARE
     clearTimer: (timer) => { state.timers = state.timers.filter(item => item !== timer); },
     shadow: { enabled: false, measure: () => {} },
     recordUsage: () => {},
-    tavily: { readKey: async () => '', plainLeads: async () => [] },
+    parallel: { enabled: async () => false, plainLeads: async () => [] },
     onActivityChange: null,
     isHeld: () => false,
   });

@@ -2020,3 +2020,511 @@ Recorded cost so far: $5.703.
 
 Recorded cost so far: $0.415.
 <!-- /ai-test-run:2026-11-12T22-56-03-811Z-blindjudgeDeepSeekFlashagreement-121799 -->
+
+<!-- ai-test-run:2026-11-14-posting-parallel-vs-tavily -->
+### 2026-11-14 · Parallel Search vs Tavily · official-posting research (30 confirmed postings, seed 2) · finished
+
+- Status: **finished**. A first attempt on the default CLI login (contact@jackwu.ca) failed all 90 calls with CLAUDE_USAGE_LIMIT ($0, that account's weekly limit); the run below used the jacksterwu@gmail.com account through its CLAUDE_CONFIG_DIR.
+- Out dirs: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-posting-parallel-vs-tavily-jacksterwu` (results.jsonl, summary.json, plain-leads-perjob.json) and `.../2026-11-14-posting-parallel-vs-tavily` (the failed first attempt, plain-leads-and-size.json)
+- Command: `scripts/official-research-search-ab.mjs --canvas "Job Search/canvas.json.before-content-pool-2026-11-04.bak" --found 30 --missed 0 --seed 2 --concurrency 3 --arms native,tavily,parallel` (new `parallel` arm). One run, n=30.
+
+| Arm | Valid | Exact posting | Right employer site | Avg s | Cost (30 lookups) | Search calls |
+|---|---|---|---|---|---|---|
+| native (built-in) | 30 | 18/30 | 25/30 | 22 | $5.10 ($0.170 each) | 41 WebSearch, 50 WebFetch |
+| tavily | 30 | 23/30 | 26/30 | 10 | $4.57 ($0.152 each) | 37 search, 3 extract, 2 map |
+| **parallel** | 30 | **28/30** | 28/30 | 10 | **$3.99 ($0.133 each)** | 30 search (one per job) |
+
+Merged per job (any arm or plain search found the confirmed posting): built-in + Tavily 25; built-in + Parallel 28; **old pipeline** (built-in + Tavily + plain Tavily leads) **26**; **new pipeline** (built-in + Parallel + plain Parallel leads) **28**; all five sources 28. Parallel alone already gets 28, and nothing adds to it: the two misses (Capital One, Kinaxis) were missed by every source.
+
+Plain (no-AI) leads, same jobs: Tavily 9 to 10/30 exact (two runs), Parallel 20/30; right site 17 vs 27.
+
+Response size per search (6 queries): Tavily 7,740 chars basic-5, 20,137 advanced-10; Parallel 27,984. Despite the larger responses Parallel was the cheapest arm end to end, because Claude needed one search per job and no page reads.
+
+Caveats: single run on one task. The Tavily and built-in numbers moved by 1 to 2 jobs against the 2026-11-08 run (21 and 17), so differences of 1 to 2 are noise; Parallel's 5-job lead over Tavily is larger than that. Salary, role-family and location research were not re-measured.
+
+Recorded cost so far: $13.66 (native $5.10 + tavily $4.57 + parallel $3.99).
+<!-- /ai-test-run:2026-11-14-posting-parallel-vs-tavily -->
+
+<!-- ai-test-run:2026-11-14T13-59-59-351Z-web-research-ab-44119b -->
+### 2026-11-14 13:59 UTC · web-research-ab · role-family · production profile
+
+- Status: **finished** (updated 2026-11-14 14:04:44 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-parallel`
+- Command: `node scripts/web-research-ab.mjs --task role-family --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-parallel --second parallel --count 12 --seed 1 --concurrency 3`
+- Count: 12
+- Seed: 1
+- summary roleFamilies: 54
+- summary sampledRoleFamilies: 12
+- summary batches: 6
+- summary distinctSourceUrls: 72
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 1 | 5 | $1.109 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.708 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.817.
+<!-- /ai-test-run:2026-11-14T13-59-59-351Z-web-research-ab-44119b -->
+
+<!-- ai-test-run:2026-11-14T14-04-44-719Z-web-research-ab-d532cd -->
+### 2026-11-14 14:04 UTC · web-research-ab · location · production profile
+
+- Status: **finished** (updated 2026-11-14 14:08:03 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-parallel`
+- Command: `node scripts/web-research-ab.mjs --task location --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-parallel --second parallel --count 24 --seed 1 --concurrency 3`
+- Count: 24
+- Seed: 1
+- summary eligibleRows: 106
+- summary skippedWithoutIdentity: 0
+- summary requests: 24
+- summary batches: 6
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research native | 6 | 6 | 0 | $1.258 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.967 | outcome per arm: summary.json |
+
+Recorded cost so far: $2.226.
+<!-- /ai-test-run:2026-11-14T14-04-44-719Z-web-research-ab-d532cd -->
+
+<!-- ai-test-run:2026-11-14T14-08-03-406Z-web-research-ab-acbbf9 -->
+### 2026-11-14 14:08 UTC · web-research-ab · compensation · production profile
+
+- Status: **finished** (updated 2026-11-14 14:13:47 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel --second parallel --count 12 --seed 3 --concurrency 3`
+- Count: 12
+- Seed: 3
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 25
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 3 | 3 | $1.480 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.503 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.983.
+<!-- /ai-test-run:2026-11-14T14-08-03-406Z-web-research-ab-acbbf9 -->
+
+<!-- ai-test-run:2026-11-14-research-parallel-batch -->
+### 2026-11-14 · Parallel Search as the second research toolset · role-family, location, salary · finished (salary confounded)
+
+- Status: **finished**. Command: `scripts/web-research-ab.mjs --task <task> --second parallel --seed <n> --count <n>` on `canvas.json.before-content-pool-2026-11-04.bak`, the default Sonnet medium profile. New `--second parallel` option: the arm that the output files still label `tavily` ran Parallel Search; the `merged` arm is built-in + Parallel.
+- Out dirs: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-{role-family,location,compensation}-parallel`, log `2026-11-14-research-parallel-batch.log`. One run each.
+
+| Task | Built-in | Parallel | Merged |
+|---|---|---|---|
+| Role-family bands (12 families, seed 1): answered / with 2+ verified hosts / verified sources / cost | 2 / 1 / 3 / $1.11 (5 of 6 replies failed the format) | **12 / 11 / 52 / $0.71** | 12 / 12 / 56 |
+| Job location (24 cards, seed 1): correct / wrong / not found / cost | 1 / 1 / 22 / $1.26 | 2 / 1 / 21 / $0.97 | 2 / 1 / 21 |
+| Salary (12 cohorts, seed 3): sections with a verified source / verified sources | 3 / 7 | 1 / 1 | 3 / 8 |
+
+- Role-family: Parallel answered every family with verified sources; the Tavily-era run (older profile) had built-in 4, Tavily 4, merged 8 families with 2+ hosts, but the profile differs, so only the direction compares.
+- Location: all arms are low (the 2026-11-09 Opus-era run got 5 / 6 / 7 correct). The profile changed in between (Sonnet medium since 2026-11-09), so this is probably the profile and not Parallel; not verified. Parallel is no worse than built-in here.
+- Salary is **not a valid measurement**: Parallel's replies in this run quote "You've hit the free-tier rate limit for Parallel MCP" (checked in sections.json and research-cache). My Parallel fetches of the 25 cited pages for a fair rescoring all failed for the same reason. Rerun after the limit clears or with an API key.
+- The free anonymous endpoint DID hit a rate limit after about 170 calls in under three hours (searches, fetches, the 30-job posting test and these three runs, concurrency 3): JSON-RPC error code -32000, HTTP 200. The app now stops calling Parallel for ten minutes on that signal and says so in the dock; an optional key (Keychain item `infinite-canvas-parallel-api-key`) raises the limits.
+
+Recorded cost so far: $6.03 (role-family $1.82, location $2.23, salary $1.98 across the built-in and Parallel arms).
+<!-- /ai-test-run:2026-11-14-research-parallel-batch -->
+
+<!-- ai-test-run:2026-11-14T23-19-41-046Z-web-research-ab-594d2b -->
+### 2026-11-14 23:19 UTC · web-research-ab · compensation · production profile
+
+- Status: **interrupted (SIGTERM) before finishing; rows above are complete up to that point** (updated 2026-11-14 23:21:57 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-keyed`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-keyed --second parallel --count 12 --seed 3 --concurrency 3`
+- Count: 12
+- Seed: 3
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 2 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 2 | 0 | 2 | $0.344 | outcome per arm: summary.json |
+| research tavily | 3 | 3 | 0 | $0.417 | outcome per arm: summary.json |
+
+Recorded cost so far: $0.761.
+<!-- /ai-test-run:2026-11-14T23-19-41-046Z-web-research-ab-594d2b -->
+
+<!-- ai-test-run:2026-11-14T23-24-10-872Z-web-research-ab-1b5f47 -->
+### 2026-11-14 23:24 UTC · web-research-ab · compensation · production profile
+
+- Status: **interrupted (SIGTERM) before finishing; rows above are complete up to that point** (updated 2026-11-14 23:24:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-mcp2`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-mcp2 --second parallel --count 12 --seed 3 --concurrency 3`
+- Count: 12
+- Seed: 3
+
+No results yet.
+<!-- /ai-test-run:2026-11-14T23-24-10-872Z-web-research-ab-1b5f47 -->
+
+<!-- ai-test-run:2026-11-14T23-24-27-648Z-web-research-ab-da0273 -->
+### 2026-11-14 23:24 UTC · web-research-ab · compensation · production profile
+
+- Status: **finished** (updated 2026-11-14 23:29:11 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-keyed2`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-keyed2 --second parallel --count 12 --seed 3 --concurrency 3`
+- Count: 12
+- Seed: 3
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 83
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 2 | 4 | $0.955 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $1.194 | outcome per arm: summary.json |
+
+Recorded cost so far: $2.149.
+<!-- /ai-test-run:2026-11-14T23-24-27-648Z-web-research-ab-da0273 -->
+
+## 2026-11-14 Salary (compensation) research, Parallel with a valid API key (rerun)
+
+- Status: **finished**. Command: `node scripts/web-research-ab.mjs --task compensation --second parallel --seed 3 --count 12 --concurrency 3` on `canvas.json.before-content-pool-2026-11-04.bak`, Sonnet medium. The arm the files label `tavily` ran Parallel on `mcp.parallel.ai/mcp` with the Keychain key (Bearer). Output: `ai-test-runs/2026-11-14-compensation-parallel-keyed2/`.
+- Replaces the invalid earlier salary run (free-tier limit hit). No reply quoted a rate limit or an invalid key.
+- 12 cohorts, 6 calls per arm. Sections with at least one verified source: built-in 4/12 (4 of 6 replies failed the section format), **Parallel 12/12**; verified sources 11 vs 26; research cost $0.955 vs $1.19 (the merged arm is two replies, not charged separately). The earlier two-or-more-host measure was not recomputed here.
+- A first attempt used a Keychain value that was not a key (a pasted sentence) and was stopped; its output was deleted.
+
+<!-- ai-test-run:2026-11-14T23-51-30-946Z-web-research-ab-abe8f6 -->
+### 2026-11-14 23:51 UTC · web-research-ab · preference · production profile
+
+- Status: **finished** (updated 2026-11-15 00:12:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-preference-parallel`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-preference-parallel --second parallel --count 40 --seed 3 --concurrency 3`
+- Count: 40
+- Seed: 3
+- summary disagreements: 120
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 2 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 4 | 3 | 1 | $10.71 | outcome per arm: summary.json |
+| research tavily | 4 | 2 | 2 | $14.81 | outcome per arm: summary.json |
+
+Recorded cost so far: $25.52.
+<!-- /ai-test-run:2026-11-14T23-51-30-946Z-web-research-ab-abe8f6 -->
+
+<!-- ai-test-run:2026-11-15T00-12-24-824Z-web-research-ab-11e826 -->
+### 2026-11-15 00:12 UTC · web-research-ab · role-family · production profile
+
+- Status: **finished** (updated 2026-11-15 00:16:17 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-parallel-seed2`
+- Command: `node scripts/web-research-ab.mjs --task role-family --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-parallel-seed2 --second parallel --count 12 --seed 2 --concurrency 3`
+- Count: 12
+- Seed: 2
+- summary roleFamilies: 54
+- summary sampledRoleFamilies: 12
+- summary batches: 6
+- summary distinctSourceUrls: 52
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 3 | 3 | $0.843 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.743 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.586.
+<!-- /ai-test-run:2026-11-15T00-12-24-824Z-web-research-ab-11e826 -->
+
+<!-- ai-test-run:2026-11-15T00-16-17-359Z-web-research-ab-82d7cf -->
+### 2026-11-15 00:16 UTC · web-research-ab · compensation · production profile
+
+- Status: **finished** (updated 2026-11-15 00:22:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-seed4`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-parallel-seed4 --second parallel --count 12 --seed 4 --concurrency 3`
+- Count: 12
+- Seed: 4
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 48
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 5 | 1 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 2 | 4 | $1.007 | outcome per arm: summary.json |
+| research tavily | 6 | 5 | 1 | $1.055 | outcome per arm: summary.json |
+
+Recorded cost so far: $2.062.
+<!-- /ai-test-run:2026-11-15T00-16-17-359Z-web-research-ab-82d7cf -->
+
+<!-- ai-test-run:2026-11-15T00-22-20-416Z-web-research-ab-d1e8f2 -->
+### 2026-11-15 00:22 UTC · web-research-ab · location · production profile
+
+- Status: **finished** (updated 2026-11-15 00:25:31 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-parallel-seed2`
+- Command: `node scripts/web-research-ab.mjs --task location --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-parallel-seed2 --second parallel --count 24 --seed 2 --concurrency 3`
+- Count: 24
+- Seed: 2
+- summary eligibleRows: 106
+- summary skippedWithoutIdentity: 0
+- summary requests: 24
+- summary batches: 6
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research native | 6 | 6 | 0 | $1.224 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $1.235 | outcome per arm: summary.json |
+
+Recorded cost so far: $2.459.
+<!-- /ai-test-run:2026-11-15T00-22-20-416Z-web-research-ab-d1e8f2 -->
+
+<!-- ai-test-run:2026-11-14-search-source-decision -->
+### 2026-11-14 · Built-in search vs Parallel vs both, every AI call that uses the web · finished
+
+- Status: **finished**. Question: per call, keep Claude's built-in web search, use Parallel Search, or run both and merge. Parallel ran with the Keychain API key on `mcp.parallel.ai/mcp`; no reply quoted a rate limit.
+- Out dirs under `~/Library/Application Support/infinite-canvas/ai-test-runs/`: `2026-11-14-preference-parallel`, `2026-11-14-role-family-parallel-seed2`, `2026-11-14-compensation-parallel-seed4`, `2026-11-14-location-parallel-seed2`, `2026-11-14-posting-parallel-seed3`, `2026-11-14-interview-research-parallel` (log `2026-11-14-parallel-round2.log`). The arm the files label `tavily` ran Parallel (`--second parallel`).
+- Commands: `scripts/web-research-ab.mjs --task <preference|role-family|compensation|location> --second parallel --seed <n> --count <n> --concurrency 3`; `scripts/official-research-search-ab.mjs --found 30 --missed 0 --seed 3 --arms native,parallel`; `scripts/interview-live-prepare-harness.mjs --research native|parallel|merged --merge-second parallel --stop-after brief` (new `parallel` arm), all on `canvas.json.before-content-pool-2026-11-04.bak` and the four Applied Jobs bundles used on 2026-11-09 (Appian, Intouch Insight, Reddit, Stripe).
+
+| Call | Measure | Built-in | Parallel | Both merged | Research cost built-in / Parallel |
+|---|---|---|---|---|---|
+| Official-posting research, seed 2 (earlier today) | exact posting of 30 | 18 | 28 | 28 | $5.10 / $3.99 |
+| Official-posting research, seed 3 | exact posting of 30 | 18 | 27 | 28 | $5.39 / $5.32 |
+| Experience bands, seed 1 (earlier today) | families of 12 with two verified hosts | 1 | 11 | 12 | $1.11 / $0.71 |
+| Experience bands, seed 2 | same | 4 | 10 | 12 | $0.84 / $0.74 |
+| Salary, seed 3 keyed (earlier today) | cohorts of 12 with a verified source | 4 | 12 | not recomputed | $0.96 / $1.19 |
+| Salary, seed 4 | same | 4 | 9 | 9 | $1.01 / $1.06 |
+| Job location, seed 1 (earlier today) | correct / wrong of 24 | 1 / 1 | 2 / 1 | 2 / 1 | $1.26 / $0.97 |
+| Job location, seed 2 | correct / wrong of 24 | 4 / 1 | 9 / 0 | 8 / 1 | $1.22 / $1.23 |
+| Interview research (qa-research, Opus high), 4 jobs | blind Opus judge of the brief, 1 to 5, two passes | 3.43 | 4.05 | 3.85 | $0.48 / $0.77 per job |
+| Preference (company) research, 40 companies, 180 checks | confirmed / conflicts / unverified | 38 / 0 / 142 | 37 / 1 / 142 | 174 / 2 / 4 | $10.71 / $14.81 |
+
+- Built-in replies failed the section format often on Sonnet medium (experience bands 3 of 6, salary 4 of 6); Parallel 0 of 6 and 1 of 6.
+- Interview research per job (mean of two judge passes; built-in / Parallel / merged): Appian 4.25 / 3.45 / 3.35, Intouch 2.8 / 4.3 / 3.85, Reddit 3.3 / 4.1 / 4.35, Stripe 3.35 / 4.35 / 3.85. Judge passes differed by at most 0.4. n=4, so this is a direction, not proof.
+- Preference research is **not a clean comparison**: the 121-section batch failed the reply format in 1 of 2 built-in calls and 2 of 2 Parallel calls, so each single arm left 142 checks unverified; the merged figure is mostly the one valid built-in reply. Parallel cost more and never produced a valid large batch.
+- Official-posting match was not run: it judges supplied page text and its web tools are almost never used (2026-11-08).
+
+**Decision (owner, 2026-11-14, applied):** every web-using call runs **Parallel Search only**, decided on result quality alone. Claude is never offered built-in WebSearch or WebFetch and there is no fallback; an exhausted Parallel pauses web research with queued work kept (`PARALLEL_SEARCH_EXHAUSTED`). Applies to official-posting research (plus plain Parallel leads), salary, experience bands, job location, preference research, official-posting match and interview research. Claude gets six Parallel tools (`web_search`, `web_fetch`, `web_decisions`, `find_verticals`, `search_vertical`, `image_search`; not `send_feedback`).
+
+- Preference rerun (same command; the failed large batches answered this time, stopped before the merged step): 172 checks answered by both arms, built-in 166 confirmed / 2 conflicts / 4 unverified, Parallel 158 / 2 / 12. Same two conflicts. First-pass copy: `2026-11-14-preference-parallel-first-pass`.
+
+Recorded cost so far: about $48 (preference $25.5 plus assessments $0.8, experience bands $1.6, salary $2.1, location $2.5, posting $10.7, interview research and briefs $6.4, judging not recorded).
+<!-- /ai-test-run:2026-11-14-search-source-decision -->
+
+<!-- ai-test-run:2026-11-15T00-51-35-864Z-web-research-ab-1ab55e -->
+### 2026-11-15 00:51 UTC · web-research-ab · preference · production profile
+
+- Status: **interrupted (SIGTERM) before finishing; rows above are complete up to that point** (updated 2026-11-15 01:13:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-preference-parallel`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-preference-parallel --second parallel --count 40 --seed 3 --concurrency 3`
+- Count: 40
+- Seed: 3
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research native | 2 | 2 | 0 | $6.377 | outcome per arm: summary.json |
+| research tavily | 2 | 2 | 0 | $9.076 | outcome per arm: summary.json |
+
+Recorded cost so far: $15.45.
+<!-- /ai-test-run:2026-11-15T00-51-35-864Z-web-research-ab-1ab55e -->
+
+<!-- ai-test-run:2026-11-15T01-43-10-506Z-web-research-ab-f5fd1b -->
+### 2026-11-15 01:43 UTC · web-research-ab · location · production profile
+
+- Status: **finished** (updated 2026-11-15 01:43:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-parallel-six-tools`
+- Command: `node scripts/web-research-ab.mjs --task location --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-parallel-six-tools --second parallel --count 8 --seed 2 --concurrency 2`
+- Count: 8
+- Seed: 2
+- summary eligibleRows: 106
+- summary skippedWithoutIdentity: 0
+- summary requests: 8
+- summary batches: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research native | 2 | 0 | 2 | $0.033 | outcome per arm: summary.json |
+| research tavily | 2 | 2 | 0 | $0.632 | outcome per arm: summary.json |
+
+Recorded cost so far: $0.666.
+<!-- /ai-test-run:2026-11-15T01-43-10-506Z-web-research-ab-f5fd1b -->
+
+<!-- ai-test-run:2026-11-15T02-29-59-116Z-ai-task-replay-757b9d -->
+### 2026-11-15 02:29 UTC · ai-task-replay · job-official-posting-match · claude, claude-native, claude-parallel
+
+- Status: **finished** (updated 2026-11-15 02:36:33 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-posting-match-search`
+- Command: `node scripts/ai-task-replay.mjs --task job-official-posting-match --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-posting-match-search --configs claude,claude-native,claude-parallel --batches 16 --claude-reps 1 --reps 2 --concurrency 4`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| claude | 16 | 16 | 0 | $2.973 | agreement: run ai-task-replay-score.mjs --out <dir> |
+| claude-native | 32 | 32 | 0 | $6.705 | agreement: run ai-task-replay-score.mjs --out <dir> |
+| claude-parallel | 32 | 30 | 0 | $5.934 | agreement: run ai-task-replay-score.mjs --out <dir> |
+
+Recorded cost so far: $15.61.
+<!-- /ai-test-run:2026-11-15T02-29-59-116Z-ai-task-replay-757b9d -->
+
+<!-- ai-test-run:2026-11-14-posting-match-search -->
+### 2026-11-14 · Built-in search vs Parallel · official-posting match (16 batches) · finished
+
+- Status: **finished**. Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-posting-match-search` (log beside it).
+- Command: `node --import ./scripts/test-stubs/register.mjs scripts/ai-task-replay.mjs --task job-official-posting-match --canvas "Job Search/canvas.json.before-content-pool-2026-11-04.bak" --configs claude,claude-native,claude-parallel --batches 16 --claude-reps 1 --reps 2 --concurrency 4` (new `claude-native` and `claude-parallel` configs; the `claude` baseline now runs Parallel like the app). Sonnet medium. Parallel ran with two tools in effect (`web_search`, `web_fetch` were the only ones called).
+
+| Search | Calls | Valid | Mean cost | Tool calls | Same posting chosen, pairs of runs of the same search |
+|---|---|---|---|---|---|
+| Parallel (baseline + 2 reps) | 48 | 46 (95.8%) | $0.186 | 51 search, 57 fetch | 37 of 44 (84%) |
+| Built-in (2 reps) | 32 | 32 (100%) | $0.210 | 48 search, 99 fetch | 15 of 16 (94%) |
+
+- Across searches the same posting was chosen in 71 of 92 pairs (77%). Against the majority answer of the five runs per batch: built-in 30 of 32, Parallel 36 of 46. Status "open" was reported in 18 of 46 Parallel answers and 9 of 32 built-in answers.
+- No ground truth was scored, so this measures consistency and validity, not correctness. Built-in was more consistent with itself. Every call used web tools in this replay (pages are downloaded without rendering here), unlike the 2026-11-08 finding that tools were rarely needed in production.
+- No merged arm: the call returns one judgment per lead.
+- Decision: Parallel only, by the owner rule (no built-in search anywhere). Flagged to the owner as the one call where the data leans to built-in.
+
+Recorded cost so far: about $15.6 (Parallel $8.9, built-in $6.7).
+<!-- /ai-test-run:2026-11-14-posting-match-search -->
+
+<!-- ai-test-run:2026-11-15T03-45-41-550Z-web-research-ab-f37a38 -->
+### 2026-11-15 03:45 UTC · web-research-ab · compensation · production profile
+
+- Status: **stopped (process exited with code 0) before finishing** (updated 2026-11-15 03:46:37 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-task-core`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-task-core --second task --task-processor core --count 12 --seed 4 --concurrency 3`
+- Count: 12
+- Seed: 4
+- Second: task
+- Task processor: core
+
+No results yet.
+<!-- /ai-test-run:2026-11-15T03-45-41-550Z-web-research-ab-f37a38 -->
+
+<!-- ai-test-run:2026-11-15T03-45-42-222Z-parallel-extract-ab-3a4d1e -->
+### 2026-11-15 03:45 UTC · parallel-extract-ab · official posting page reading · app,parallel-live,parallel-default
+
+- Status: **finished** (updated 2026-11-15 03:46:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-parallel-extract`
+- Command: `--canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-parallel-extract --count 40 --seed 1`
+- canvas: canvas.json.before-content-pool-2026-11-04.bak
+- count: 40
+- seed: 1
+- concurrency: 4
+- arms: app,parallel-live,parallel-default
+- selected: 40
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| app | 40 | 25 | 8 |  | titleHit 26; median 4164 chars / 259 ms; closedSignal 0 |
+| parallel-live | 40 | 35 | 0 |  | titleHit 35; median 6796 chars / 3032 ms; closedSignal 0 |
+| parallel-default | 40 | 35 | 0 |  | titleHit 35; median 7209 chars / 555 ms; closedSignal 0 |
+
+Recorded cost so far: $0.000.
+<!-- /ai-test-run:2026-11-15T03-45-42-222Z-parallel-extract-ab-3a4d1e -->
+
+<!-- ai-test-run:2026-11-15T03-46-24-721Z-parallel-decisions-ab-a19157 -->
+### 2026-11-15 03:46 UTC · parallel-decisions-ab · job-preference-checks · min-prob 0.6
+
+- Status: **finished** (updated 2026-11-15 03:46:43 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-parallel-decisions`
+- Command: `node scripts/parallel-decisions-ab.mjs --results ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-preference-parallel/results.jsonl --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-parallel-decisions`
+- Companies: 40
+- Checks: 172
+- Done: 40
+- Failed: 0
+- Requests: 40
+- Compared: 172
+
+No results yet.
+<!-- /ai-test-run:2026-11-15T03-46-24-721Z-parallel-decisions-ab-a19157 -->
+
+<!-- ai-test-run:2026-11-15T03-46-38-052Z-web-research-ab-4a79ae -->
+### 2026-11-15 03:46 UTC · web-research-ab · role-family · production profile
+
+- Status: **stopped (process exited with code 0) before finishing** (updated 2026-11-15 03:47:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-task-core`
+- Command: `node scripts/web-research-ab.mjs --task role-family --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-task-core --second task --task-processor core --count 12 --seed 2 --concurrency 3`
+- Count: 12
+- Seed: 2
+- Second: task
+- Task processor: core
+
+No results yet.
+<!-- /ai-test-run:2026-11-15T03-46-38-052Z-web-research-ab-4a79ae -->
+
+<!-- ai-test-run:2026-11-15T03-47-34-348Z-web-research-ab-0b3a05 -->
+### 2026-11-15 03:47 UTC · web-research-ab · location · production profile
+
+- Status: **stopped (process exited with code 0) before finishing** (updated 2026-11-15 03:48:30 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-task-core`
+- Command: `node scripts/web-research-ab.mjs --task location --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-task-core --second task --task-processor core --count 24 --seed 2 --concurrency 3`
+- Count: 24
+- Seed: 2
+- Second: task
+- Task processor: core
+
+No results yet.
+<!-- /ai-test-run:2026-11-15T03-47-34-348Z-web-research-ab-0b3a05 -->
+
+<!-- ai-test-run:2026-11-15T03-48-59-332Z-web-research-ab-d7a223 -->
+### 2026-11-15 03:48 UTC · web-research-ab · compensation · production profile
+
+- Status: **finished** (updated 2026-11-15 04:04:06 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-task-core`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-compensation-task-core --second task --task-processor core --count 12 --seed 4 --concurrency 3`
+- Count: 12
+- Seed: 4
+- Second: task
+- Task processor: core
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 42
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 2 | 4 | $1.080 | outcome per arm: summary.json |
+| research tavily (parallel-task core) | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.080.
+<!-- /ai-test-run:2026-11-15T03-48-59-332Z-web-research-ab-d7a223 -->
+
+<!-- ai-test-run:2026-11-15T04-04-06-710Z-web-research-ab-a51273 -->
+### 2026-11-15 04:04 UTC · web-research-ab · role-family · production profile
+
+- Status: **finished** (updated 2026-11-15 04:17:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-task-core`
+- Command: `node scripts/web-research-ab.mjs --task role-family --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-role-family-task-core --second task --task-processor core --count 12 --seed 2 --concurrency 3`
+- Count: 12
+- Seed: 2
+- Second: task
+- Task processor: core
+- summary roleFamilies: 54
+- summary sampledRoleFamilies: 12
+- summary batches: 6
+- summary distinctSourceUrls: 37
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 2 | 4 | $0.855 | outcome per arm: summary.json |
+| research tavily (parallel-task core) | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+
+Recorded cost so far: $0.855.
+<!-- /ai-test-run:2026-11-15T04-04-06-710Z-web-research-ab-a51273 -->
+
+<!-- ai-test-run:2026-11-15T04-17-23-390Z-web-research-ab-743be9 -->
+### 2026-11-15 04:17 UTC · web-research-ab · location · production profile
+
+- Status: **finished** (updated 2026-11-15 04:23:49 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-task-core`
+- Command: `node scripts/web-research-ab.mjs --task location --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-14-location-task-core --second task --task-processor core --count 24 --seed 2 --concurrency 3`
+- Count: 24
+- Seed: 2
+- Second: task
+- Task processor: core
+- summary eligibleRows: 106
+- summary skippedWithoutIdentity: 0
+- summary requests: 24
+- summary batches: 6
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research native | 6 | 6 | 0 | $1.084 | outcome per arm: summary.json |
+| research tavily (parallel-task core) | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.084.
+<!-- /ai-test-run:2026-11-15T04-17-23-390Z-web-research-ab-743be9 -->

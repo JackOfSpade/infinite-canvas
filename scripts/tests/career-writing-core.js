@@ -47,12 +47,12 @@ export default [
     assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 's1' }), ultracodeOff(golden.cliArgsOpus));
     assert.deepEqual(claudeCliArgs({ ultracode: true }), golden.cliArgs, 'an explicit opt-in restores the captured ultracode invocation');
     assert.deepEqual(claudeCliArgs({ model: 'opus', effort: 'xhigh', sessionId: 's1', ultracode: true }), golden.cliArgsOpus);
-    const research = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch' });
+    const research = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'Read,Grep' });
     assert.equal(research.includes('--settings'), false, 'no ultracode setting unless opted in');
-    assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch', '--allowedTools', 'WebSearch,WebFetch'], 'research tools are offered and allowed without Workflow by default');
-    const researchOn = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'WebSearch,WebFetch', ultracode: true });
+    assert.deepEqual(research.slice(research.indexOf('--tools'), research.indexOf('--tools') + 4), ['--tools', 'Read,Grep', '--allowedTools', 'Read,Grep'], 'stage tools are offered and allowed without Workflow by default');
+    const researchOn = claudeCliArgs({ model: 'opus', effort: 'high', tools: 'Read,Grep', ultracode: true });
     assert.deepEqual(researchOn.slice(researchOn.indexOf('--settings'), researchOn.indexOf('--settings') + 2), ['--settings', '{"ultracode":true}']);
-    assert.deepEqual(researchOn.slice(researchOn.indexOf('--tools'), researchOn.indexOf('--tools') + 4), ['--tools', 'WebSearch,WebFetch,Workflow', '--allowedTools', 'WebSearch,WebFetch,Workflow'], 'an explicit opt-in adds the setting and Workflow to the research tools');
+    assert.deepEqual(researchOn.slice(researchOn.indexOf('--tools'), researchOn.indexOf('--tools') + 4), ['--tools', 'Read,Grep,Workflow', '--allowedTools', 'Read,Grep,Workflow'], 'an explicit opt-in adds the setting and Workflow to the research tools');
     assert.equal(golden.cliArgs[golden.cliArgs.indexOf('--allowedTools') + 1], 'Workflow', 'application runs allow only the Workflow tool');
     assert.equal(CLAUDE_STAGE_PROFILES, APPLICATION_STAGE_PROFILES, 'the application runner reads the shared table');
     assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'medium' });

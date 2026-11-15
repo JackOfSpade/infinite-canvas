@@ -509,7 +509,9 @@ export default [
       assert.equal(entry.maxRejections, 3);
       assert.deepEqual(entry.webTools, { maxUsd: 0.2 });
       assert(Object.isFrozen(entry) && Object.isFrozen(entry.webTools));
-      assert.equal(entry.claude.tools, 'WebSearch,WebFetch');
+      // Web task profiles name the Parallel Search tools since 2026-11-14, never built-in web tools.
+      assert.equal(entry.claude.tools.split(',').every(tool => tool.startsWith('mcp__parallel__')), true);
+      assert.equal(entry.claude.tools.includes('WebSearch'), false);
       const bare = taskEntry('job-scoring');
       assert.equal(Object.hasOwn(bare, 'webTools'), false);
       assert.equal(Object.hasOwn(bare, 'maxRejections'), false);

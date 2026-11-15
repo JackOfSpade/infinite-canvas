@@ -1806,7 +1806,7 @@ export function materializeNonApiPrompt({
       'Return JSON only, with exactly the properties named in the schema and nothing else.',
     );
   }
-  if (grounding) rules.push(...(rules.length ? [''] : []), 'Use WebSearch and WebFetch to research this.');
+  if (grounding) rules.push(...(rules.length ? [''] : []), 'Use the web search tools you have been given to research this.');
   if (rules.length) sections.push(rules.join('\n'));
   if (typeof displayOnlyPromptSuffix === 'string' && displayOnlyPromptSuffix.trim()) {
     sections.push(displayOnlyPromptSuffix.slice(0, 40_000));

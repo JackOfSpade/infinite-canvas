@@ -259,3 +259,21 @@ test('--ultracode defaults to off for every task while the flag still works', ()
   assert.throws(() => cliOptions(['--task', 'compensation', ...base, '--ultracode', 'yes']), /--ultracode must be on or off/u);
   assert.throws(() => cliOptions(['--task', 'role-families', ...base]), /--task must be one of/u);
 });
+
+test('--second task accepts the Parallel Task API arm and validates --task-processor', () => {
+  const base = ['--task', 'compensation', '--canvas', 'canvas.json', '--out', 'out'];
+  assert.equal(cliOptions(base).second, 'tavily');
+  assert.equal(cliOptions(base).taskProcessor, 'core');
+  assert.equal(cliOptions([...base, '--second', 'parallel']).second, 'parallel');
+  const task = cliOptions([...base, '--second', 'task']);
+  assert.equal(task.second, 'task');
+  assert.equal(task.taskProcessor, 'core');
+  assert.equal(cliOptions([...base, '--second', 'task', '--task-processor', 'ultra']).taskProcessor, 'ultra');
+  assert.throws(() => cliOptions([...base, '--second', 'task', '--task-processor', 'turbo']),
+    /--task-processor must be one of lite, base, core, core2x, pro, ultra/u);
+  assert.throws(() => cliOptions([...base, '--second', 'tavily', '--task-processor', 'pro']),
+    /--task-processor is only allowed with --second task/u);
+  assert.throws(() => cliOptions([...base, '--second', 'parallel', '--task-processor', 'pro']),
+    /--task-processor is only allowed with --second task/u);
+  assert.throws(() => cliOptions([...base, '--second', 'claude']), /--second must be tavily, parallel or task/u);
+});

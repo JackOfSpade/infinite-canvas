@@ -94,8 +94,10 @@ const TASK_STEP_LIMIT = 8;
 const titleCase = value => value ? `${value[0].toUpperCase()}${value.slice(1)}` : '';
 
 function taskToolHeadline(task) {
-  if (task.tool === 'WebSearch') return 'Searching the web';
-  if (task.tool === 'WebFetch') return 'Reading a page';
+  if (task.tool === 'WebSearch' || task.tool === 'mcp__parallel__web_search') return 'Searching the web';
+  if (task.tool === 'WebFetch' || task.tool === 'mcp__parallel__web_fetch') return 'Reading a page';
+  // web_decisions, find_verticals, search_vertical and image_search all search.
+  if (typeof task.tool === 'string' && task.tool.startsWith('mcp__parallel__')) return 'Searching the web';
   return task.tool ? `Using ${task.tool}` : 'Using a tool';
 }
 

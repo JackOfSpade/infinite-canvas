@@ -160,8 +160,8 @@ const leadKey = url => {
  * candidates in the order given (earlier replies first), then plain extra leads per id,
  * deduplicated by posting/careers URL and capped at the 6 a section allows. A reply that
  * fails validation contributes nothing; null when no reply was valid and no lead exists.
- * Measured 2026-11-08: built-in search and Claude-driven Tavily find different postings
- * (17 and 21 of 30 alone, 25 together, 26 with plain Tavily leads added).
+ * Since 2026-11-14 the worker sends one Claude reply (Parallel Search, or built-in as its fallback) plus plain
+ * Parallel leads: 30 postings, two seeds, built-in 18 and 18, Parallel 28 and 27, both 28 and 28.
  */
 export function mergeOfficialPostingResearchReplies({ ids, replies = [], extraLeads = {} } = {}) {
   const ordered = (Array.isArray(ids) ? ids : []).map(String);

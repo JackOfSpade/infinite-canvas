@@ -629,7 +629,7 @@ export function parseJobLocationLookupBatch(raw, requests) {
 }
 
 // ---------------------------------------------------------------------------
-// Two-way merge — built-in web search first, Tavily second
+// Two-way merge — built-in web search first, Parallel second
 // ---------------------------------------------------------------------------
 
 /**
@@ -681,9 +681,9 @@ function replyRows(raw) {
 }
 
 /**
- * Choose one reply's section per posting when built-in web search and Tavily
+ * Choose one reply's section per posting when built-in web search and Parallel Search
  * answered the same location lookup. `replies` is ordered (built-in first,
- * Tavily second) and any entry may be null. Per posting:
+ * Parallel second) and any entry may be null. Per posting:
  *   1. the first reply whose FOUND row passes the host-side checks, unless two
  *      replies pass them with different locations: that usually means two
  *      different postings, and the lookup's own rule is "if you are not sure,

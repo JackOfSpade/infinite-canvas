@@ -13,11 +13,23 @@
  * Any OFFLOAD_* error, or a second rejected offload reply, moves the rest of
  * that call to a fresh Claude session. Research and fact-check stages never
  * route: tool use and truth checks stay on Claude.
+ *
+ * Research (qa-research) is Parallel Search only: the Parallel MCP server and
+ * its six tools, through the SDK stage. Measured 2026-11-14 on 4 briefs with a
+ * blind judge (out of 5): built-in 3.43, Parallel 4.05, both merged 3.85. There
+ * is no built-in fallback: no stage here is offered WebSearch or WebFetch, and
+ * when Parallel is exhausted (off, rate-limited, or a limit in a tool result)
+ * research fails loudly with code PARALLEL_SEARCH_EXHAUSTED so the work waits.
  */
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { claudeChildEnv, resolveClaudeBinary, runClaudeStage } from './claudeApplicationRunner.js';
+import { runClaudeSdkStage } from './claudeApplicationSdkStage.js';
+import {
+  PARALLEL_RESEARCH_TOOLS, isParallelLimitSignal, isParallelToolName, noteParallelLimit, parallelBlocked,
+  parallelExhaustedError, parallelMcpServers, readParallelKey,
+} from './parallelSearch.js';
 import { reportClaudeUsageLimit, trackClaudeCall, waitForClaudeRelease, waitForClaudeUsage } from './claudePause.js';
 import { standaloneClaudeActivity } from './claudeTaskActivity.js';
 import { careerWritingStageProfile } from './careerWritingCore.js';
@@ -26,8 +38,8 @@ import { recordAiReplaySample, recordAiUsage } from './aiReplaySamples.js';
 import { createShadowMeasure } from './aiShadowMeasure.js';
 import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 
-// Research is the only stage allowed tools, and only these read-only web tools.
-export const INTERVIEW_RESEARCH_TOOLS = 'WebSearch,WebFetch';
+// Parallel search/fetch turns: enough to read several briefs' worth of pages in one session.
+export const INTERVIEW_RESEARCH_MAX_TURNS = 24;
 export const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
 const MAX_REJECTION_CHARS = 6000;
 const OFFLOAD_BLOCK_MS = 30 * 60_000;
@@ -92,6 +104,9 @@ const isOffloadError = error => typeof error?.code === 'string' && error.code.st
 
 export function createInterviewClaudeTransport({
   runStage = runClaudeStage,
+  // Research runs through the SDK runner: the CLI runner has no MCP option.
+  runResearchStage = runClaudeSdkStage,
+  parallel = { enabled: async () => !parallelBlocked(), readKey: readParallelKey },
   resolveBinary = () => resolveClaudeBinary({ env: process.env, homedir: os.homedir() }),
   env = process.env,
   cwd = os.tmpdir(),
@@ -115,11 +130,27 @@ export function createInterviewClaudeTransport({
     return bound;
   };
 
+  /** False while Parallel is out of usage (or cannot be checked): research then fails loudly. */
+  async function parallelAvailable() {
+    try { return typeof parallel?.enabled === 'function' ? (await parallel.enabled()) !== false : true; } catch { return false; }
+  }
+
+  /**
+   * The research stage's tool-result callback. A Parallel tool reporting a limit means research
+   * cannot go on anywhere, so the limit is noted (the dock and the next call see it) and the
+   * exhaustion error ends the stage: this call fails with PARALLEL_SEARCH_EXHAUSTED, no fallback.
+   */
+  function parallelToolResult({ toolName, isError, text }) {
+    if (!isParallelToolName(toolName) || isError !== true || !isParallelLimitSignal({ text })) return;
+    noteParallelLimit({ text }, now());
+    throw parallelExhaustedError();
+  }
+
   async function call(prompt, opts = {}, { json, scope = null }) {
     const { signal, task, responseSchema, responseValidator, claudeStage } = opts;
     const stage = interviewClaudeStage(task, claudeStage);
+    const research = stage === 'qa-research';
     const profile = careerWritingStageProfile(stage);
-    const tools = stage === 'qa-research' ? INTERVIEW_RESEARCH_TOOLS : '';
     // Ultracode is off by default: only an explicit opt-in (call or stage profile) is forwarded.
     const ultracode = opts.ultracode === true || (opts.ultracode !== false && profile.ultracode === true);
     let sessionId = crypto.randomUUID();
@@ -129,8 +160,11 @@ export function createInterviewClaudeTransport({
     let lastError = null;
     let lastRejection = null;
     let claudeStarted = false;
-    const route = interviewStageMayOffload(stage) && !tools ? routeFor(stage) : null;
+    // Research never routes: interviewStageMayOffload excludes it, so it has no offload mode.
+    const route = interviewStageMayOffload(stage) ? routeFor(stage) : null;
     let mode = route && now() >= offloadBlockedUntil ? 'offload' : 'claude';
+    // Parallel only: with it exhausted before the first attempt, Claude is never called.
+    if (research && !(await parallelAvailable())) throw parallelExhaustedError();
     const messages = handoffMessages({ text: originalText });
     let offloadRejections = 0;
     const toFreshClaude = () => {
@@ -143,6 +177,8 @@ export function createInterviewClaudeTransport({
       const started = Date.now();
       let reply = null;
       let provider = 'claude';
+      // What this attempt actually offered, recorded on its sample.
+      let attemptTools = '';
       if (mode === 'offload') {
         if (scope) {
           standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: route.route, effort: route.reasoning, countRound: false });
@@ -165,10 +201,23 @@ export function createInterviewClaudeTransport({
           standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
         }
         const callEnded = scope ? trackClaudeCall(scope.key) : () => {};
+        let usedBuiltIn = false;
         try {
-          reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools,
-            ...(ultracode ? { ultracode: true } : {}),
-            ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
+          if (research) {
+            // Read the key per attempt: a rejected key is dropped without failing research.
+            let key = '';
+            try { key = (await parallel.readKey?.()) || ''; } catch { key = ''; }
+            attemptTools = PARALLEL_RESEARCH_TOOLS.join(',');
+            reply = await runResearchStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: false,
+              tools: [...PARALLEL_RESEARCH_TOOLS], mcpServers: parallelMcpServers(key), maxTurns: INTERVIEW_RESEARCH_MAX_TURNS,
+              persistSession: false, ultracode: false, onToolResult: parallelToolResult,
+              ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
+          } else {
+            usedBuiltIn = true;
+            reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools: '',
+              ...(ultracode ? { ultracode: true } : {}),
+              ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
+          }
         } catch (error) {
           if (!scope || error?.code !== 'CLAUDE_USAGE_LIMIT' || signal?.aborted) throw error;
           // Earlier stages are saved; this one waits for the reset and asks again.
@@ -183,7 +232,7 @@ export function createInterviewClaudeTransport({
           attempt -= 1;
           continue;
         } finally { callEnded(); }
-        claudeStarted = true;
+        if (usedBuiltIn) claudeStarted = true;
       }
       if (scope) standaloneClaudeActivity.checking(scope.key);
       onStage({ task, stage, attempt, model: reply?.model, durationMs: Date.now() - started, provider,
@@ -211,7 +260,7 @@ export function createInterviewClaudeTransport({
             model: reply?.model ?? null,
             requestedModel: profile.model ?? null,
             effort: profile.effort ?? null,
-            tools: tools || null,
+            tools: attemptTools || null,
             costUsd: reply?.costUsd ?? null,
             usage: reply?.usage ?? null,
             durationMs,
@@ -259,6 +308,10 @@ export function createInterviewClaudeTransport({
         messages.push({ role: 'assistant', content: String(reply.text ?? '') }, { role: 'user', content: lastRejection });
         offloadRejections += 1;
         if (offloadRejections >= OFFLOAD_REJECTION_LIMIT) toFreshClaude();
+      } else if (research) {
+        // A Parallel session is never persisted, so the next Parallel call cannot
+        // resume it: it carries the original prompt plus the rejection text.
+        text = `${originalText}\n\n${lastRejection}`;
       } else text = lastRejection;
     }
     // Every attempt was a reply rejection (unparseable or invalid), not a

@@ -3,6 +3,7 @@
 // that text; signatures, redacted blocks and raw SDK events never enter our log.
 import {
   answeringModel,
+  assertNoBuiltInWebTools,
   buildClaudeInputMessage,
   classifyClaudeFailure,
   CLAUDE_HANDOFF_SYSTEM_PROMPT,
@@ -54,12 +55,16 @@ export async function runClaudeSdkStage({
   sessionId,
   resume = false,
   tools = [],
+  // Only a measurement script's built-in comparison arm sets this; every app
+  // stage is refused WebSearch/WebFetch.
+  allowBuiltInWebTools = false,
   // Ultracode is a settings flag that only does anything through the Workflow
   // tool. Off unless a stage asks for it: measured 2026-11-09, it added no
   // quality to any app call and cost 3-5x on the research tasks where it acted.
   ultracode = false,
-  // Explicit MCP servers only (never the user's own connectors or settings). Empty for
-  // every app task today; a server's tools are named mcp__<server>__<tool> in `tools`.
+  // Explicit MCP servers only (never the user's own connectors or settings). The
+  // Parallel Search server is passed by every web research task; a server's tools
+  // are named mcp__<server>__<tool> in `tools`.
   mcpServers = {},
   // One turn suffices for a launched workflow (the CLI still runs the turn
   // after its task notification), but a failed Workflow call leaves no turn
@@ -74,9 +79,16 @@ export async function runClaudeSdkStage({
   timeoutMs = CLAUDE_STAGE_TIMEOUT_MS,
   onThinkingSummary = async () => {},
   onActivity = () => {},
+  // Optional: told about every tool result ({ toolName, isError, text }) the stage
+  // receives. A throwing callback interrupts the stage with that exact error,
+  // which is how a web research task stops when Parallel is out of usage. The
+  // result text is handed over for that decision only and is never logged here.
+  onToolResult = null,
   setTimeoutImpl = globalThis.setTimeout,
   clearTimeoutImpl = globalThis.clearTimeout,
 } = {}) {
+  // Refused before the query starts: no app stage may offer WebSearch or WebFetch.
+  assertNoBuiltInWebTools(tools, allowBuiltInWebTools);
   if (signal?.aborted) throw new ClaudeRunnerError('CLAUDE_CANCELLED', 'Claude run was cancelled.');
   const promptTokens = estimateClaudePromptTokens(systemAppend, text);
   if (promptTokens > CLAUDE_PROMPT_TOKEN_BUDGET) {
@@ -88,6 +100,8 @@ export async function runClaudeSdkStage({
   const answerModels = new Set();
   const assistantErrors = new Set();
   const stopReasons = new Set();
+  // tool_use id -> tool name, so a tool result can be attributed to its tool.
+  const toolUseNames = new Map();
   const started = Date.now();
   let queryHandle;
   let iterator;
@@ -229,6 +243,8 @@ export async function runClaudeSdkStage({
         if (message.aborted === true) assistantErrors.add('aborted');
         const content = Array.isArray(message.message?.content) ? message.message.content : [];
         for (const block of content) {
+          // Remember which tool a later tool_result belongs to.
+          if (block?.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string') toolUseNames.set(block.id, block.name);
           if (block?.type === 'text') {
             countText(block.text);
             if (typeof block.text === 'string' && block.text.trim() && !assistantError) answerModels.add(assistantModel);
@@ -247,6 +263,24 @@ export async function runClaudeSdkStage({
           checkInterrupted();
           summaryCount += 1;
           summaryChars += block.thinking.length;
+        }
+      } else if (message.type === 'user') {
+        // A tool result is where a tool reports its own failure (for example a
+        // Parallel limit). The callback alone decides what that means; a throw
+        // from it interrupts this stage with exactly that error, and its text is
+        // passed on for that decision only, never logged.
+        const content = Array.isArray(message.message?.content) ? message.message.content : [];
+        for (const block of content) {
+          if (block?.type !== 'tool_result' || typeof onToolResult !== 'function') continue;
+          const text = Array.isArray(block.content)
+            ? block.content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('')
+            : String(block.content ?? '');
+          try {
+            await onToolResult({ toolName: toolUseNames.get(block.tool_use_id) || '', isError: block.is_error === true, text: clipped(text, 2000) });
+          } catch (error) {
+            interrupt(error);
+            checkInterrupted();
+          }
         }
       } else if (message.type === 'result') {
         const result = typeof message.result === 'string' ? message.result : '';

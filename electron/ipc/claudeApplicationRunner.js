@@ -179,6 +179,27 @@ export function withWorkflowTool(tools) {
   return list.includes(CLAUDE_WORKFLOW_TOOL) ? list : [...list, CLAUDE_WORKFLOW_TOOL];
 }
 
+// Claude's own web search is never used by this app: every AI web search goes
+// through Parallel Search's MCP tools (mcp__parallel__*).
+export const BUILT_IN_WEB_TOOLS = Object.freeze(['WebSearch', 'WebFetch']);
+export const CLAUDE_BUILT_IN_WEB_TOOL_REFUSED = 'CLAUDE_BUILT_IN_WEB_TOOL_REFUSED';
+export const CLAUDE_BUILT_IN_WEB_TOOL_REFUSED_MESSAGE = 'Claude\'s built-in web search is disabled in this app; web research uses Parallel Search.';
+
+/**
+ * Throws unless every offered tool is something other than a built-in web tool.
+ * Only an explicit allowBuiltInWebTools (the measurement scripts' built-in arm)
+ * lets WebSearch/WebFetch through.
+ */
+export function assertNoBuiltInWebTools(tools, allowBuiltInWebTools = false) {
+  if (allowBuiltInWebTools === true) return;
+  const refused = splitToolList(tools).filter(name => BUILT_IN_WEB_TOOLS.some(tool => tool.toLowerCase() === name.toLowerCase()));
+  if (refused.length === 0) return;
+  throw new ClaudeRunnerError(CLAUDE_BUILT_IN_WEB_TOOL_REFUSED, CLAUDE_BUILT_IN_WEB_TOOL_REFUSED_MESSAGE, {
+    tools: refused,
+    allowed: [...BUILT_IN_WEB_TOOLS],
+  });
+}
+
 const TASK_END_STATUSES = new Set(['completed', 'failed', 'killed', 'stopped']);
 
 function mainThreadBlocks(event, type) {
@@ -255,11 +276,15 @@ export function claudeCliArgs({
   effort = CLAUDE_APPLICATION_EFFORT,
   sessionId,
   resume = false,
-  // A stage that opts into ultracode is offered Workflow; interview research also adds
-  // the read-only web tools (search/fetch). No file, shell or MCP tools.
+  // A stage that opts into ultracode is offered Workflow; research gets Parallel
+  // Search's MCP tools (mcp__parallel__*) instead, because Claude's built-in web
+  // tools (search/fetch) are refused here. No file or shell tools.
   tools = '', partialMessages = false,
+  // Only a measurement script's built-in comparison arm sets this.
+  allowBuiltInWebTools = false,
   // Ultracode is a setting that only acts through Workflow; off unless a stage opts in.
   ultracode = false } = {}) {
+  assertNoBuiltInWebTools(tools, allowBuiltInWebTools);
   let sessionArgs = [];
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     sessionArgs = resume === true ? ['--resume', sessionId] : ['--session-id', sessionId];
@@ -467,6 +492,8 @@ export function runClaudeStage({
   sessionId,
   resume = false,
   tools = '',
+  // Only a measurement script's built-in comparison arm sets this.
+  allowBuiltInWebTools = false,
   // Passed straight through: only true adds the ultracode setting and Workflow.
   ultracode = false,
   onActivity = null,
@@ -476,13 +503,20 @@ export function runClaudeStage({
   clearTimeoutImpl = globalThis.clearTimeout,
 } = {}) {
   return new Promise((resolve, reject) => {
+    // Refused before anything is spawned: no app stage may offer WebSearch or WebFetch.
+    try {
+      assertNoBuiltInWebTools(tools, allowBuiltInWebTools);
+    } catch (error) {
+      reject(error);
+      return;
+    }
     if (signal?.aborted) {
       reject(new ClaudeRunnerError('CLAUDE_CANCELLED', MESSAGES.cancelled));
       return;
     }
     let child;
     try {
-      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools, ultracode, partialMessages: typeof onActivity === 'function' }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+      child = spawnImpl(binary, claudeCliArgs({ model, effort, sessionId, resume, tools, ultracode, allowBuiltInWebTools, partialMessages: typeof onActivity === 'function' }), { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     } catch (error) {
       reject(error?.code === 'ENOENT'
         ? new ClaudeRunnerError('CLAUDE_CLI_MISSING', MESSAGES.missing)

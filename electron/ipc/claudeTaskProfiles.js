@@ -5,7 +5,10 @@
 // defects were still caught. Fable and max effort are excluded.
 // docs/ai-model-selection.md records the selection policy, every measured result
 // and the open gaps; read it before re-testing or changing a profile here.
-const WEB = 'WebSearch,WebFetch';
+// Web tasks run on Parallel Search only: this app never offers Claude's built-in
+// WebSearch or WebFetch, and a Parallel limit pauses the work instead of falling back.
+import { PARALLEL_RESEARCH_TOOLS } from './parallelSearch.js';
+const WEB = PARALLEL_RESEARCH_TOOLS.join(',');
 // Ultracode is off for every task (measured 2026-11-09: no quality gain, 3-5x cost
 // on the research tasks where it acted). A profile records only an explicit opt-in.
 export const profile = (model, effort, tools = '', options = {}) => Object.freeze({

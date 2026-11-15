@@ -1,5 +1,5 @@
 // What the dock says when Claude, which answers every AI task, cannot run.
-// Only the three stops the worker waits out are shown; any other failure is
+// Only the stops the worker waits out are shown; any other failure is
 // retried quietly and is not worth a notice.
 export const CLAUDE_PAUSE_COPY = Object.freeze({
   headline: 'AI work is paused and will resume',
@@ -7,6 +7,7 @@ export const CLAUDE_PAUSE_COPY = Object.freeze({
     CLAUDE_USAGE_LIMIT: 'Claude has reached its usage limit. Work continues when the limit resets.',
     CLAUDE_NOT_SIGNED_IN: 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription; work continues on its own.',
     CLAUDE_CLI_MISSING: 'Claude Code is not installed or not on PATH. Install it and sign in; work continues on its own.',
+    PARALLEL_SEARCH_EXHAUSTED: 'Parallel Search is out of usage, so web research is paused. Queued work is saved. Add credits or an API key at platform.parallel.ai, then press Resume.',
   }),
 });
 
@@ -15,6 +16,12 @@ export function claudePauseNotice(status) {
   if (!status || status.paused !== true) return null;
   const reason = Object.hasOwn(CLAUDE_PAUSE_COPY.reasons, status.pauseCode) ? CLAUDE_PAUSE_COPY.reasons[status.pauseCode] : null;
   return reason ? { headline: CLAUDE_PAUSE_COPY.headline, reason } : null;
+}
+
+/** The notice for a limited web-search service (Parallel Search), or null. Research waits for Parallel; it never uses built-in search. */
+export function searchLimitNotice(status) {
+  const reason = typeof status?.searchNotice === 'string' ? status.searchNotice.trim() : '';
+  return reason ? { headline: 'Web search is limited', reason } : null;
 }
 
 // The limit kinds Claude reports, as the one or two words the dock and the

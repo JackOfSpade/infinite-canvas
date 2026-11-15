@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Side-by-side test of the official-posting research step with Claude's built-in web
-// tools versus the Tavily MCP server. Both arms get the app's exact prompt, prompt
+// tools versus the Tavily MCP server and (arm `parallel`, added 2026-11-14) the free
+// Parallel Search MCP server the app now uses. Both arms get the app's exact prompt, prompt
 // preparation, model profile and validator; only the search/read tools differ.
 // Scored against official postings the app already confirmed (answer key) and on
 // jobs it found nothing for (leads to review by hand).
@@ -90,10 +91,10 @@ async function main(argv) {
   const opts = options(argv);
   const key = opts.dryRun ? 'dry-run-no-key' : readTavilyKey();
   const redact = redactWith(key);
-  const [{ parseWorkspaceText, restoreWorkspaceContent }, bridge, nonApi, worker, profiles, sdk, runner, offload, replay] = await Promise.all([
+  const [{ parseWorkspaceText, restoreWorkspaceContent }, bridge, nonApi, worker, profiles, sdk, runner, offload, replay, parallelSearch] = await Promise.all([
     ipc('workspaceContentPool.js'), ipc('officialPostingBridge.js'), ipc('nonApiAi.js'), ipc('claudeTaskWorker.js'),
     ipc('claudeTaskProfiles.js'), ipc('claudeApplicationSdkStage.js'), ipc('claudeApplicationRunner.js'), ipc('offloadTextCall.js'),
-    import(new URL('./ai-task-replay.mjs', import.meta.url).href),
+    import(new URL('./ai-task-replay.mjs', import.meta.url).href), ipc('parallelSearch.js'),
   ]);
   const parsed = parseWorkspaceText(fs.readFileSync(opts.canvas, 'utf8'));
   const canvas = restoreWorkspaceContent(parsed) ?? parsed;
@@ -116,21 +117,24 @@ async function main(argv) {
       const prompt = nonApi.materializeNonApiPrompt({ prompt: request.prompt, cachedPrefix: request.cachedPrefix, task: TASK, grounding: request.grounding });
       console.log(`${item.kind.padEnd(6)} prompt ${prompt.length} chars · description ${String(job.snippet || job.description || '').length} chars · known urls ${item.kind === 'found' ? knownUrls(item.row).length : 0}`);
     }
-    console.log(`dry run: profile ${profile.model}/${profile.effort}, native tools ${profile.tools}; no AI call made`);
+    console.log(`dry run: profile ${profile.model}/${profile.effort}, native tools WebSearch,WebFetch; no AI call made`);
     return 0;
   }
   const binary = runner.resolveClaudeBinary({ env: process.env, homedir: os.homedir() });
   const stage = { binary, env: runner.claudeChildEnv(process.env, path.dirname(binary)), cwd: os.tmpdir() };
   const arms = {
-    native: { tools: String(profile.tools).split(','), mcpServers: {} },
+    // Comparison arm only: the app itself never offers built-in web tools (2026-11-14).
+    native: { tools: ['WebSearch', 'WebFetch'], mcpServers: {}, allowBuiltInWebTools: true },
     tavily: { tools: TAVILY_TOOLS, mcpServers: { tavily: { type: 'http', url: `https://mcp.tavily.com/mcp/?tavilyApiKey=${encodeURIComponent(key)}` } } },
   };
+  // The free keyless Parallel Search MCP server, exactly as the app gives it to a research call.
+  arms.parallel = { tools: [...parallelSearch.PARALLEL_RESEARCH_TOOLS], mcpServers: parallelSearch.parallelMcpServers() };
   // Both toolsets in one call: Claude's own search and page reader plus Tavily's.
-  arms.both = { tools: [...arms.native.tools, ...TAVILY_TOOLS], mcpServers: arms.tavily.mcpServers };
+  arms.both = { tools: [...arms.native.tools, ...TAVILY_TOOLS], mcpServers: arms.tavily.mcpServers, allowBuiltInWebTools: true };
   // DeepSeek Flash through Offload with its own web_search/web_fetch, exactly as a routed task call.
   arms.deepseek = { offload: { route: 'deepseek-flash', reasoning: 'high' } };
   const armNames = opts.arms;
-  for (const arm of armNames) if (!arms[arm]) throw new Error(`Unknown arm ${arm}; use native, tavily, both or deepseek.`);
+  for (const arm of armNames) if (!arms[arm]) throw new Error(`Unknown arm ${arm}; use native, tavily, parallel, both or deepseek.`);
 
   fs.mkdirSync(opts.out, { recursive: true, mode: 0o700 });
   const resultsPath = path.join(opts.out, 'results.jsonl');
@@ -154,6 +158,8 @@ async function main(argv) {
         ...stage, ...cached, env: cached.systemAppend ? stage.env : { ...stage.env, DISABLE_PROMPT_CACHING: '1' },
         pageImages: [], model: profile.model, effort: profile.effort, persistSession: false, maxTurns: RESEARCH_MAX_TURNS,
         tools: arms[armName].tools, mcpServers: arms[armName].mcpServers,
+        // Only the arms that offer Claude's built-in web tools opt in.
+        allowBuiltInWebTools: arms[armName].allowBuiltInWebTools === true,
         onActivity: event => { if (event?.kind === 'tool') for (const call of event.calls) toolCalls[call.tool] = (toolCalls[call.tool] || 0) + 1; },
       });
       record.durationMs = Date.now() - started;

@@ -1,5 +1,5 @@
 // Combining two research answers for the same identities (Claude with its
-// built-in web search, and Claude with Tavily) into one answer the host parser
+// built-in web search, and Claude with Parallel Search) into one answer the host parser
 // already understands. Pure and dependency-free: the callers own cost, usage
 // and fallback.
 //
