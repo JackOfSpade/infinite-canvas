@@ -24,8 +24,22 @@ export function fallbackGlanceCue(value) {
   return cue.replace(/(^|\s)(?:a|an|the)\s+/giu, '$1').trim();
 }
 
+/**
+ * A reminder without its leading employer when that employer is the most
+ * recent one. Nearly every line comes from the most recent role, so naming it
+ * on each line is noise; a line that still names an employer is an earlier role.
+ */
+export function withoutRecentEmployer(cue, recentEmployer) {
+  const employer = typeof recentEmployer === 'string' ? recentEmployer.trim() : '';
+  const value = String(cue || '');
+  if (!employer || value.length <= employer.length || value.slice(0, employer.length).toLowerCase() !== employer.toLowerCase()) return value;
+  const rest = value.slice(employer.length);
+  const separator = /^\s*[:,·–—-]\s+/u.exec(rest);
+  return separator && rest.slice(separator[0].length).trim() ? rest.slice(separator[0].length).trim() : value;
+}
+
 /** The reminder to show for one prepared line. */
-export function glanceCueOf(text, cue) {
+export function glanceCueOf(text, cue, recentEmployer = '') {
   const saved = typeof cue === 'string' ? cue.trim() : '';
-  return saved || fallbackGlanceCue(text);
+  return withoutRecentEmployer(saved || fallbackGlanceCue(text), recentEmployer);
 }

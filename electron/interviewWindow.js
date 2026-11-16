@@ -321,7 +321,12 @@ export function attachInterviewLiveCards(bank, storeCards) {
     })();
     const answered = !!(statementOf(card.headline).trim() || (card.bullets || []).some(item => statementOf(item).trim()) || statementOf(card.example).trim());
     CARD_CUES.set(card, storedCues(stored));
-    CARD_META.set(card, Object.freeze({ ...meta, status: answered ? 'ready' : meta.origin === 'disclosed' ? 'needs-prep' : 'empty' }));
+    // Approach reminders and the most recent employer live only on the stored
+    // copy, like cues; the sealed card never carries them.
+    const approach = Object.freeze((Array.isArray(stored.approach) ? stored.approach : []).filter(item => typeof item?.text === 'string' && item.text.trim())
+      .slice(0, 6).map(item => Object.freeze({ text: item.text.trim().slice(0, 200), example: typeof item.example === 'string' ? item.example : '' })));
+    const recentEmployer = typeof stored.recentEmployer === 'string' ? stored.recentEmployer.slice(0, 200) : '';
+    CARD_META.set(card, Object.freeze({ ...meta, approach, recentEmployer, status: answered ? 'ready' : meta.origin === 'disclosed' ? 'needs-prep' : 'empty' }));
     return card;
   });
   LIVE_CARDS.set(bank, Object.freeze(live));
@@ -365,7 +370,8 @@ function projectLiveCard(card, bank) {
   if (!card) return null;
   const projected = withCues(OVERLAY_CARDS.has(card) ? projectOverlayCard(card, bank) : projectAnswerCard(card, bank), CARD_CUES.get(card));
   const meta = CARD_META.get(card);
-  return meta ? Object.freeze({ ...projected, scope: meta.scope, origin: meta.origin, source: meta.source, author: meta.author, status: meta.status }) : projected;
+  return meta ? Object.freeze({ ...projected, scope: meta.scope, origin: meta.origin, source: meta.source, author: meta.author, status: meta.status,
+    ...(meta.approach?.length ? { approach: meta.approach } : {}), ...(meta.recentEmployer ? { recentEmployer: meta.recentEmployer } : {}) }) : projected;
 }
 
 function cardSharesExactStory(plan, card, bank) {
@@ -476,6 +482,8 @@ export function createInterviewWindowController({
   buildPlan = buildInterviewPlan,
   createAudioService = createInterviewCallAudioService,
   createMatcher = createInterviewAiMatcher,
+  // Off unless the caller supplies it: the real one starts a Claude process.
+  createTalkingPoints = null,
   matcherConfig = interviewAiMatcherConfigFromEnv(process.env),
   matcherTransportFactory,
   preloadPath = path.join(process.cwd(), 'dist-electron', 'interviewWindowPreload.js'),
@@ -537,6 +545,36 @@ export function createInterviewWindowController({
       effectiveMode: session.latencyMode === 'auto' ? latency.latencyMode : session.latencyMode,
       p50Ms: latency.p50Ms };
   };
+  const talkingPointsFactory = typeof createTalkingPoints === 'function' ? createTalkingPoints : null;
+  const ensureTalkingPoints = session => {
+    if (!talkingPointsFactory || session.closing) return null;
+    if (!session.talkingPoints) {
+      session.talkingPoints = talkingPointsFactory({ config: matcherConfig, transportFactory: matcherTransportFactory });
+      session.talkingPoints.start?.().catch(() => {});
+    }
+    return session.talkingPoints;
+  };
+  /**
+   * A real question that no prepared card answers: ask for generic talking
+   * points and add them to the display that is on screen, if it still is when
+   * they arrive. Any newer display (next question, preview, relaunch) wins.
+   */
+  const requestTalkingPoints = (session, question, shown) => {
+    const generator = ensureTalkingPoints(session);
+    if (!generator) return;
+    const started = Date.now();
+    Promise.resolve().then(() => generator.generate(question)).then(points => {
+      const usable = (Array.isArray(points) ? points : []).map(item => (typeof item === 'string' ? { text: item, sub: [] } : item))
+        .filter(item => typeof item?.text === 'string' && item.text.trim()).slice(0, 3)
+        .map(item => Object.freeze({ text: displayString(item.text.trim(), 120), sub: Object.freeze((Array.isArray(item.sub) ? item.sub : []).filter(line => typeof line === 'string' && line.trim()).slice(0, 4).map(line => displayString(line.trim(), 120)).filter(Boolean)) }))
+        .filter(item => item.text);
+      const live = sessions.get(session.ownerId) === session && !session.closing && session.display === shown;
+      note(session, 'talking-points', { question, points: usable, ms: Date.now() - started, shown: live && usable.length >= 2 });
+      if (!live || usable.length < 2) return;
+      session.display = Object.freeze({ ...shown, talkingPoints: Object.freeze(usable) });
+      session.child.webContents.send?.('interview-window:brief-updated', session.display);
+    }).catch(() => {});
+  };
   const ensureMatcher = (session, sealedBank) => {
     // Match over the live (editable) cards; the sealed bank stays the binding.
     const bank = sealedBank && LIVE_CARDS.has(sealedBank) ? { ...sealedBank, cards: cardsOf(sealedBank) } : sealedBank;
@@ -572,6 +610,7 @@ export function createInterviewWindowController({
       },
     });
     session.matcher.start().catch(() => {});
+    ensureTalkingPoints(session);
     return session.matcher;
   };
 
@@ -589,6 +628,7 @@ export function createInterviewWindowController({
     session.audio?.stop();
     cancelQuestion(session);
     session.matcher?.close();
+    session.talkingPoints?.close?.();
     sessions.delete(ownerId);
     return true;
   };
@@ -790,7 +830,7 @@ export function createInterviewWindowController({
     protect(child);
     child.once?.('ready-to-show', () => child.show?.());
     const onOwnerClosed = () => { if (!child.isDestroyed?.()) child.close?.(); remove(ownerId, session); };
-    child.once?.('close', () => { note(session, 'close', {}); session.closing = true; session.audio?.stop(); cancelQuestion(session); session.matcher?.close(); });
+    child.once?.('close', () => { note(session, 'close', {}); session.closing = true; session.audio?.stop(); cancelQuestion(session); session.matcher?.close(); session.talkingPoints?.close?.(); });
     child.once?.('closed', () => { session.closing = true; owner.removeListener?.('closed', onOwnerClosed); remove(ownerId, session); });
     owner.once?.('closed', onOwnerClosed);
     // A crashed child renderer cannot recover its memory-only session. Retire
@@ -1022,6 +1062,10 @@ export function createInterviewWindowController({
       onSelection({ stage: 'display', question, cardId: answerCard?.id ?? null, supported, followUp });
       noteShown(session);
       session.child.webContents.send?.('interview-window:brief-updated', session.display);
+      // Nothing prepared answers this question: fill the blank card with
+      // generic talking points when they are ready. Never for a follow-up, or
+      // when the AI itself was unavailable for the match.
+      if (!answerCard && selection.kind === 'question' && !followUp && !selection.approximate) requestTalkingPoints(session, question, session.display);
       return session.display;
     } finally {
       if (session.questionAbort === abort) {

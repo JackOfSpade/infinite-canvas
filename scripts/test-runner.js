@@ -285,6 +285,8 @@ import interview_application_folders from './tests/interview-application-folders
 import career_writing_core from './tests/career-writing-core.js';
 import interview_cue_card_log from './tests/interview-cue-card-log.js';
 import interview_cue_card_render from './tests/interview-cue-card-render.js';
+import interview_approach_reminders from './tests/interview-approach-reminders.js';
+import interview_talking_points from './tests/interview-talking-points.js';
 import interview_glance_cues from './tests/interview-glance-cues.js';
 import interview_qa from './tests/interview-qa.js';
 import interview_practice from './tests/interview-practice.js';
@@ -620,6 +622,8 @@ const testGroups = [
   ['career-writing-core.js', career_writing_core],
   ['interview-cue-card-log.js', interview_cue_card_log],
   ['interview-cue-card-render.js', interview_cue_card_render],
+  ['interview-approach-reminders.js', interview_approach_reminders],
+  ['interview-talking-points.js', interview_talking_points],
   ['interview-glance-cues.js', interview_glance_cues],
   ['interview-qa.js', interview_qa],
   ['interview-practice.js', interview_practice],

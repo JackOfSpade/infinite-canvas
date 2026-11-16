@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import './interviewWindow.css';
 import './interviewWindowRoot.css';
-import { hasPreparedAnswer, PreparedAnswer } from './PreparedAnswer.jsx';
+import { CUE_CARD_MAX_LINES, hasPreparedAnswer, PreparedAnswer } from './PreparedAnswer.jsx';
 
 const RETRY_LISTEN_MS = 3000;
 const MAX_LISTEN_RETRIES = 20;
@@ -54,8 +54,16 @@ export function CueCardApp() {
   // A confident guess for the question now being asked replaces the previous
   // answer at once; otherwise the answer matched to the last question stays.
   const card = display?.preview?.card || display?.answerCard || null;
+  // A question no prepared card answers: generic talking points, written live
+  // with no career data, that the person illustrates with their own example.
+  const points = !card && !display?.preview && Array.isArray(display?.talkingPoints) ? display.talkingPoints.map(item => (typeof item === 'string' ? { text: item, sub: [] } : item)).filter(item => typeof item?.text === 'string' && item.text.trim()).slice(0, CUE_CARD_MAX_LINES) : [];
   return <main className="interview-window cue-card">
     {hasPreparedAnswer(card) && <PreparedAnswer key={card.id} card={card} />}
+    {points.length > 0 && <section className="spoken-answer" aria-label="Cues"><ul className="spoken-bullets">{points.map((point, index) => {
+      // Sub points explain the point above them; read only when there is time.
+      const sub = (Array.isArray(point.sub) ? point.sub : []).filter(line => typeof line === 'string' && line.trim());
+      return <li key={index} className="answer-approach"><span className="glance-cue">{point.text}</span>{sub.length > 0 && <ul>{sub.map((line, at) => <li key={at}><span className="glance-cue">{line}</span></li>)}</ul>}</li>;
+    })}</ul></section>}
   </main>;
 }
 

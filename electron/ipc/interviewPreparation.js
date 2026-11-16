@@ -41,7 +41,8 @@ import { factCheckInterviewCards } from './interviewQaFactCheck.js';
 import { planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
 import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCues.js';
-import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaCues, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { generateInterviewApproaches } from './interviewAnswerApproach.js';
+import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
 import { isRendererPrivateAppPath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 
@@ -1360,6 +1361,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
   fillCues = fillInterviewQaCues,
+  fillApproaches = fillInterviewQaApproaches,
   practiceRegistry = null,
   resolveAppliedJobsRoot = null,
   logWarning = message => console.warn(message) } = {}) {
@@ -1483,6 +1485,19 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
           if (signal?.aborted) throw error;
           qaWarning = qaWarning || 'Short reminders could not be written this time; the live card shows trimmed answer lines.';
           logWarning(`[Interview Q&A] glance cues skipped: ${String(error?.message || error).slice(0, 300)}`);
+        }
+      }
+      throwIfAborted(signal);
+      // Approach reminders: for "how do you work" questions the live card
+      // shows general good practice to illustrate, not a past-work claim.
+      if (qa) {
+        try {
+          await fillApproaches({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId,
+            generate: units => generateInterviewApproaches({ units, callText, signal, logWarning }) });
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          qaWarning = qaWarning || 'Approach reminders could not be written this time; those cards show their prepared lines.';
+          logWarning(`[Interview Q&A] approach reminders skipped: ${String(error?.message || error).slice(0, 300)}`);
         }
       }
       throwIfAborted(signal);

@@ -143,17 +143,17 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
             const renderMs = performance.now() - start;
             const card = document.querySelector('main.cue-card');
             const rect = element => { const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, height: box.height, visible: box.top >= 0 && box.bottom <= innerHeight }; };
-            const headline = card.querySelector('h2');
             const cues = [...card.querySelectorAll('li .glance-cue')];
             return { firstPaintMs: renderMs, fullRenderMs: renderMs, cardText: card.textContent,
-              titles: [...(headline ? [headline.title] : []), ...cues.map(item => item.title)],
+              titles: cues.map(item => item.title),
               words: card.textContent.trim().split(/\s+/u).filter(Boolean).length,
-              boxes: [...card.querySelectorAll('h2, li')].map(rect), controls: card.querySelectorAll('button, input, textarea, select, a, details, nav').length,
+              boxes: [...card.querySelectorAll('li')].map(rect), controls: card.querySelectorAll('button, input, textarea, select, a, details, nav').length,
               horizontalOverflow: document.documentElement.scrollWidth > innerWidth };
           }, result);
           const answer = result.answerCard && !['empty', 'needs-prep'].includes(result.answerCard.status) ? result.answerCard : null;
           const example = answer?.example?.text?.trim() && answer.example.text.trim() !== answer.headline.trim() ? [answer.example.text] : [];
-          const expectedTitles = answer ? [answer.headline, ...answer.bullets.map(item => item.text), ...example] : [];
+          // The card shows its first three prepared lines and no more.
+          const expectedTitles = answer ? [answer.headline, ...answer.bullets.map(item => item.text), ...example].slice(0, 3) : [];
           const actualKind = result.answerCard ? 'card' : result.plan?.status === 'supported' ? 'cue' : 'abstain';
           const rendered = answer ? JSON.stringify(measurement.titles) === JSON.stringify(expectedTitles) : measurement.cardText === '';
           const correct = rendered && measurement.controls === 0 && actualKind === scenario.expectedKind && (scenario.expectedKind !== 'card' || result.answerCard.id === (scenario.expectedCardId || null));

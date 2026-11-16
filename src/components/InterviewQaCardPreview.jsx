@@ -32,6 +32,8 @@ export function qaCardToDisplayCard(card, scope) {
     bullets,
     example,
     optionalExtension,
+    approach: (Array.isArray(source.approach) ? source.approach : []).map(item => (typeof item === 'string' ? { text: item, example: '' } : { text: String(item?.text || ''), example: String(item?.example || '') })).filter(item => item.text.trim()),
+    ...(typeof source.recentEmployer === 'string' && source.recentEmployer ? { recentEmployer: source.recentEmployer } : {}),
     consistency: { consistentWithResume: source.consistency?.consistentWithResume === true, resumeQuote: String(source.consistency?.resumeQuote || '') },
     evidence: [],
     scope: scope === 'foundation' ? 'foundation' : 'company',

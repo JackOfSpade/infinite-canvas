@@ -11,7 +11,7 @@ const emptyQa = () => ({ foundation: { status: 'missing', cards: [] }, company: 
 const sameQuestion = (left, right) => String(left || '').trim().toLocaleLowerCase() === String(right || '').trim().toLocaleLowerCase();
 
 function CardForm({ card, scope, onSave, onCancel, busy }) {
-  const [draft, setDraft] = useState(() => ({ ...card, variants: [...(card.variants || [])], bullets: (card.bullets || []).map(item => ({ ...item })), extensions: (card.extensions || []).map(item => ({ ...item })) }));
+  const [draft, setDraft] = useState(() => ({ ...card, variants: [...(card.variants || [])], bullets: (card.bullets || []).map(item => ({ ...item })), extensions: (card.extensions || []).map(item => ({ ...item })), approach: (card.approach || []).map(item => ({ ...item })) }));
   const [error, setError] = useState('');
   const nextExtension = useRef(0);
   const field = (key, value) => setDraft(previous => ({ ...previous, [key]: value }));
@@ -43,6 +43,7 @@ function CardForm({ card, scope, onSave, onCancel, busy }) {
         </div>)}
         <button type="button" className={buttonClass} onClick={() => field('extensions', [...draft.extensions, { id: `user-${Date.now()}-${++nextExtension.current}`, text: '' }])}>Add extension</button>
       </fieldset>
+      <label className="block text-xs">Approach reminders (one per line, optional)<textarea className={inputClass} rows={3} placeholder="For how-do-you-work questions, e.g. Split work into small tasks" value={draft.approach.map(item => item.text).join('\n')} onChange={event => field('approach', event.target.value.split('\n').map(line => ({ text: line, example: draft.approach.find(item => item.text === line)?.example || '' })))} /><span className="mt-1 block text-white/60">When a card has these, the cue card shows them instead of the lines above; you supply the real example as you speak.</span></label>
       {error && <p role="alert" className="text-xs text-amber-500">{error}</p>}
       <section aria-label="Interview card preview" className="space-y-2"><h4 className="text-xs font-medium">On the interview card</h4><InterviewCardPreview card={draft} scope={scope} /></section>
       <div className="flex gap-2"><button type="submit" className={buttonClass}>Save</button><button type="button" className={buttonClass} onClick={onCancel}>Cancel</button></div>
@@ -65,6 +66,7 @@ function QaCard({ card, scope, company, links, mutate, busy, readOnly }) {
       <InterviewQaBadges card={card} details />
       {card.variants?.length > 0 && <details className="text-xs text-white/60"><summary className="cursor-pointer">Question variants ({card.variants.length})</summary><ul className="list-disc pl-4">{card.variants.map((variant, index) => <li key={index}>{variant}</li>)}</ul></details>}
       {(card.status === 'needs-prep' || card.status === 'empty') && <p className="text-xs text-amber-500">No prepared answer yet. Write your own answer, or Prepare to fill empty answers.</p>}
+      {card.approach?.length > 0 && <div className="text-xs"><p className="font-medium">Approach reminders (shown on the cue card)</p><ul className="list-disc pl-4">{card.approach.map((item, index) => <li key={index}>{item.text}{item.example && <ul className="list-[circle] pl-4 text-white/60"><li>{item.example}</li></ul>}</li>)}</ul></div>}
       {card.headline && <p className="whitespace-pre-wrap text-sm font-medium">{card.headline}</p>}
       {card.bullets?.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs">{card.bullets.map((bullet, index) => <li key={index}>{bullet.stage && <span className="text-white/60">{bullet.stage}: </span>}{bullet.text}</li>)}</ul>}
       {card.example && <div className="text-xs"><p className="font-medium">Example</p><p className="whitespace-pre-wrap">{card.example}</p></div>}
@@ -89,7 +91,7 @@ function QaSection({ scope, section, company, foundationLinks, mutate, busy, rea
     {scope === 'foundation' && <p className="text-xs text-white/60">Editing this shared set applies to every interview.</p>}
     {!section.cards.length && <p className="text-xs text-white/60">No cards yet. Add your own question or Prepare to get started.</p>}
     {section.cards.map(card => <QaCard key={card.id} card={card} scope={scope} company={company} links={scope === 'foundation' ? foundationLinks.filter(link => sameQuestion(link.foundationQuestion, card.question)) : []} mutate={mutate} busy={busy} readOnly={readOnly} />)}
-    {adding && <CardForm scope={scope} card={{ scope, question: '', variants: [], headline: '', bullets: [], example: '', extensions: [], origin: 'user', source: null, author: 'user', status: 'empty', thinEvidence: false }} busy={busy || readOnly}
+    {adding && <CardForm scope={scope} card={{ scope, question: '', variants: [], headline: '', bullets: [], example: '', extensions: [], approach: [], origin: 'user', source: null, author: 'user', status: 'empty', thinEvidence: false }} busy={busy || readOnly}
       onCancel={() => setAdding(false)} onSave={async draft => { await mutate('add', scope, draft); setAdding(false); }} />}
   </section>;
 }

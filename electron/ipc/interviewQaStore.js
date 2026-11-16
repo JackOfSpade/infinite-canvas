@@ -18,6 +18,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
+import { interviewLastRole } from './interviewAnswerBank.js';
 
 export const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
 const STORE_VERSION = 1;
@@ -29,6 +30,8 @@ const MAX_EXAMPLE = 1200;
 const MAX_BULLETS = 6;
 const MAX_EXTENSIONS = 6;
 const MAX_VARIANTS = 8;
+const MAX_APPROACH = 6;
+const MAX_APPROACH_LINE = 200;
 const MAX_TOMBSTONES = 200;
 const MAX_LINKS = 40;
 const SCOPES = new Set(['foundation', 'company']);
@@ -42,6 +45,14 @@ export const isFoundationQuestion = question => FOUNDATION_KEYS.has(normalizeQue
 
 const text = (value, max) => typeof value === 'string' && value.length <= max && !hasControl(value);
 const statementText = statement => (typeof statement === 'string' ? statement : statement?.text || '').trim();
+
+/** Stored approach reminders as `[{ text, example }]`; malformed entries are dropped. */
+export function approachOf(card) {
+  return (Array.isArray(card?.approach) ? card.approach : [])
+    .map(item => ({ text: typeof item?.text === 'string' ? item.text.trim() : '', example: typeof item?.example === 'string' ? item.example.trim() : '' }))
+    .filter(item => item.text && text(item.text, MAX_APPROACH_LINE) && text(item.example, MAX_EXAMPLE)).slice(0, MAX_APPROACH);
+}
+const recentEmployerOf = store => (typeof store?.recentEmployer === 'string' && text(store.recentEmployer, 200) ? store.recentEmployer.trim() : '');
 
 /** A card is answered when its headline, any bullet or its example has text. */
 export function isAnsweredCard(card) {
@@ -129,6 +140,7 @@ export function toQaCard(card, scope) {
     bullets: (card.bullets || []).map(item => ({ ...(typeof item?.stage === 'string' ? { stage: item.stage } : {}), text: statementText(item) })).filter(item => item.text),
     example: statementText(card.example),
     extensions: (card.extensions || []).map((item, index) => ({ id: typeof item?.id === 'string' ? item.id : `ext-${index + 1}`, text: statementText(item) })).filter(item => item.text),
+    approach: approachOf(card),
     origin: ORIGINS.has(card.origin) ? card.origin : 'catalog',
     source: card.source && typeof card.source.url === 'string' ? { url: card.source.url, date: String(card.source.date || 'unknown'), quote: String(card.source.quote || '') } : null,
     author: card.author === 'user' ? 'user' : 'generated',
@@ -138,7 +150,8 @@ export function toQaCard(card, scope) {
 }
 
 function section(store, scope) {
-  const cards = store.cards.map(card => toQaCard(card, scope));
+  const recentEmployer = recentEmployerOf(store);
+  const cards = store.cards.map(card => ({ ...toQaCard(card, scope), ...(recentEmployer ? { recentEmployer } : {}) }));
   const status = !cards.length ? 'missing' : cards.every(card => card.status === 'ready') ? 'ready' : 'partial';
   return scope === 'company'
     ? { status, company: store.company || '', cards, foundationLinks: store.foundationLinks.map(link => ({ foundationQuestion: link.foundationQuestion, question: link.question, sourceUrl: link.sourceUrl })) }
@@ -169,12 +182,17 @@ export function userCardFromPayload(payload, { id }) {
   if (bullets.length > MAX_BULLETS) throw new Error('Keep at most 6 recall bullets.');
   const extensions = (Array.isArray(payload.extensions) ? payload.extensions : []).map(item => (typeof item === 'string' ? item : item?.text) || '').map(item => item.trim()).filter(Boolean);
   if (extensions.length > MAX_EXTENSIONS) throw new Error('Keep at most 6 extension points.');
+  const approach = (Array.isArray(payload.approach) ? payload.approach : [])
+    .map(item => ({ text: String((typeof item === 'string' ? item : item?.text) || '').trim(), example: String((typeof item === 'string' ? '' : item?.example) || '').trim() })).filter(item => item.text);
+  if (approach.length > MAX_APPROACH || approach.some(item => !text(item.text, MAX_APPROACH_LINE) || !text(item.example, MAX_EXAMPLE))) throw new Error('Keep at most 6 short approach reminders.');
   return {
     id, question, variants,
     headline: userStatement(payload.headline || '', MAX_LINE),
     bullets: bullets.map(item => ({ stage: 'point', ...userStatement(item, MAX_LINE) })),
     example: userStatement(payload.example || '', MAX_EXAMPLE),
     extensions: extensions.map((item, index) => ({ id: `user-ext-${index + 1}`, ...userStatement(item, MAX_LINE) })),
+    // Always present after an edit: an emptied list means "none", not "not yet written".
+    approach,
     consistency: { consistentWithResume: false, resumeQuote: '' },
     thinEvidence: false,
     author: 'user', updatedAt: new Date().toISOString(),
@@ -194,6 +212,9 @@ export async function saveInterviewQaCard({ userDataPath, nodeId, scope, card })
     if (store.cards.some(item => item.id !== previous.id && normalizeQuestion(item.question) === normalizeQuestion(edited.question))) {
       throw new Error('That question is already in this section.');
     }
+    // No reminders before and none now means "not written yet", so the next
+    // Prepare may still write them; an emptied list stays empty.
+    if (!edited.approach.length && !Array.isArray(previous.approach)) delete edited.approach;
     store.cards[index] = { ...edited, origin: previous.origin || 'catalog', source: previous.source || null };
     await writeStore(userDataPath, scope, nodeId, store);
     return section(store, scope);
@@ -207,6 +228,8 @@ export async function addInterviewQaCard({ userDataPath, nodeId, scope, card }) 
     if (store.cards.length >= MAX_CARDS) throw new Error('This Q&A section is full. Delete a card first.');
     const added = userCardFromPayload(card, { id: `user-${crypto.randomBytes(6).toString('hex')}` });
     if (store.cards.some(item => normalizeQuestion(item.question) === normalizeQuestion(added.question))) throw new Error('That question is already in this section.');
+    // A new question with no reminders is still open for the next Prepare to write them.
+    if (!added.approach.length) delete added.approach;
     store.cards.push({ ...added, origin: 'user', source: null });
     store.tombstones = store.tombstones.filter(item => item !== normalizeQuestion(added.question));
     await writeStore(userDataPath, scope, nodeId, store);
@@ -264,7 +287,7 @@ function fillCards(store, incoming) {
       if (card.variants?.length) existing.variants = [...new Set([...(existing.variants || []), ...card.variants])].slice(0, MAX_VARIANTS);
       continue;
     }
-    store.cards[index] = { ...card, id: existing.id, variants: [...new Set([...(existing.variants || []), ...(card.variants || [])])].slice(0, MAX_VARIANTS),
+    store.cards[index] = { ...card, ...(Array.isArray(existing.approach) ? { approach: existing.approach } : {}), id: existing.id, variants: [...new Set([...(existing.variants || []), ...(card.variants || [])])].slice(0, MAX_VARIANTS),
       origin: existing.origin || card.origin, source: existing.source || card.source };
   }
 }
@@ -278,6 +301,8 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   const generated = (bank?.cards || []).filter(isAnsweredCard);
   const foundationIncoming = generated.filter(card => isFoundationQuestion(card.question)).map(card => generatedCard(card));
   const companyIncoming = generated.filter(card => !isFoundationQuestion(card.question)).map(card => generatedCard(card));
+  // Remembered so the live card can leave the most recent employer unsaid.
+  const recentEmployer = (interviewLastRole(bank?.evidence)?.employer || '').trim().slice(0, 200);
   const links = [];
   for (const item of disclosureMapping) {
     const source = { url: item.sourceUrl, date: item.sourceDate || 'unknown', quote: item.evidenceQuote || '' };
@@ -301,6 +326,7 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   await serialized(queueKey(userDataPath, 'foundation', nodeId), async () => {
     const store = await readStore(userDataPath, 'foundation', nodeId);
     fillCards(store, foundationIncoming);
+    if (recentEmployer) store.recentEmployer = recentEmployer;
     await writeStore(userDataPath, 'foundation', nodeId, store);
   });
   await serialized(queueKey(userDataPath, 'company', nodeId), async () => {
@@ -317,6 +343,7 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
       store.tombstones = [];
     }
     fillCards(store, companyIncoming);
+    if (recentEmployer) store.recentEmployer = recentEmployer;
     if (incomingCompany && !(isCompanyPlaceholder(incomingCompany) && priorCompany)) store.company = incomingCompany;
     const seen = new Set(store.foundationLinks.map(link => `${normalizeQuestion(link.foundationQuestion)}|${normalizeQuestion(link.question)}`));
     for (const link of links) {
@@ -383,12 +410,55 @@ export async function fillInterviewQaCues({ userDataPath, nodeId, generate, want
   return { requested: units.length, saved };
 }
 
+// ------------------------------------------------------ approach reminders --
+
+/**
+ * Add approach reminders to stored cards that have never been considered for
+ * them (no `approach` field). `generate(units)` receives
+ * `[{ id, question, lines:[{ id, text }] }]` and resolves to a Map of id to
+ * `[{ text, example }]`; an empty list is saved too, so a question that is not
+ * a "how do you work" question is asked about only once. A card edited while
+ * the request ran is left for the next Prepare.
+ */
+export async function fillInterviewQaApproaches({ userDataPath, nodeId, generate }) {
+  const scopes = ['foundation', 'company'];
+  const linesOf = card => cardStatements(card).filter(line => line.field !== 'extensions').map(line => ({ id: `${line.field}[${line.index}]`, text: line.statement.text }));
+  const units = [];
+  for (const scope of scopes) {
+    const store = await readStore(userDataPath, scope, nodeId);
+    for (const card of store.cards) {
+      if (!Array.isArray(card.approach)) units.push({ id: `${scope}:${card.id}`, scope, cardId: card.id, question: card.question, lines: linesOf(card) });
+    }
+  }
+  if (!units.length) return { requested: 0, saved: 0 };
+  const approaches = await generate(units.map(({ id, question, lines }) => ({ id, question, lines })));
+  let saved = 0;
+  for (const scope of scopes) {
+    const mine = units.filter(unit => unit.scope === scope && Array.isArray(approaches?.get?.(unit.id)));
+    if (!mine.length) continue;
+    await serialized(queueKey(userDataPath, scope, nodeId), async () => {
+      const store = await readStore(userDataPath, scope, nodeId);
+      let changed = 0;
+      for (const unit of mine) {
+        const card = store.cards.find(item => item.id === unit.cardId);
+        if (!card || Array.isArray(card.approach) || card.question !== unit.question) continue;
+        const current = new Set(linesOf(card).map(line => line.text));
+        card.approach = approachOf({ approach: approaches.get(unit.id) }).map(item => ({ text: item.text, example: current.has(item.example) ? item.example : '' }));
+        changed += 1;
+      }
+      if (changed) await writeStore(userDataPath, scope, nodeId, store);
+      saved += changed;
+    });
+  }
+  return { requested: units.length, saved };
+}
+
 /** Live-window cards: Foundation then Company, each tagged with its scope. */
 export async function loadInterviewQaLiveCards({ userDataPath, nodeId }) {
   const [foundation, company] = await Promise.all([readStore(userDataPath, 'foundation', nodeId), readStore(userDataPath, 'company', nodeId)]);
   return [
-    ...foundation.cards.map(card => ({ ...card, scope: 'foundation' })),
-    ...company.cards.map(card => ({ ...card, scope: 'company' })),
+    ...foundation.cards.map(card => ({ ...card, scope: 'foundation', recentEmployer: recentEmployerOf(foundation) })),
+    ...company.cards.map(card => ({ ...card, scope: 'company', recentEmployer: recentEmployerOf(company) })),
   ];
 }
 

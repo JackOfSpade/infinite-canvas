@@ -28,7 +28,7 @@ class Window extends EventEmitter {
   isDestroyed() { return !!this.destroyed; }
   close() { if (this.destroyed) return; this.emit('close'); this.destroyed = true; this.emit('closed'); Window.all.delete(this.webContents); }
 }
-async function harness({ launchQuestion = null, initialResponses = [], poolSize = 1 } = {}) {
+async function harness({ launchQuestion = null, initialResponses = [], poolSize = 1, createTalkingPoints = null } = {}) {
   const fixture = createInterviewWindowE2EFixture();
   const owner = new Window(); const handlers = new Map(); const transports = []; const queue = [...initialResponses];
   let time = 0; let bank = fixture.bank; let failPlan = false; let audioInput; let active = false; let transcript = ''; let endpointId = 0;
@@ -41,6 +41,7 @@ async function harness({ launchQuestion = null, initialResponses = [], poolSize 
     buildPlan: options => { if (failPlan) throw new Error('Synthetic projection failure.'); return buildInterviewPlan(options); },
     createMatcher: options => createInterviewAiMatcher({ ...options, config: { ...options.config, poolSize }, now: () => time }),
     matcherConfig: { timeoutMs: 5000 },
+    createTalkingPoints,
     matcherTransportFactory: () => {
       const record = { starts: [], matches: [], closes: 0 };
       transports.push(record);
@@ -81,6 +82,52 @@ async function harness({ launchQuestion = null, initialResponses = [], poolSize 
 }
 
 export default [
+  {
+    name: 'interview AI window: an unmatched question gets live talking points; a matched, superseded or closed one never does',
+    async run() {
+      const asked = []; const replies = []; let closes = 0;
+      const createTalkingPoints = () => ({ start: async () => {}, close: () => { closes += 1; },
+        generate: question => { asked.push(question); const reply = deferred(); replies.push(reply); return reply.promise; } });
+      const h = await harness({ createTalkingPoints });
+      const settle = () => new Promise(resolve => setImmediate(resolve));
+      try {
+        h.controller.startListening(h.event);
+        h.queue.push({ result: { kind: 'question', cardId: 'none', confidence: 0.9 } });
+        await h.endpoint('Tell me about a time you handled conflict between coworkers.');
+        const blank = h.session.display;
+        assert.equal(blank.answerCard, null); assert.equal(blank.talkingPoints, undefined, 'the card is blank until the points arrive');
+        assert.deepEqual(asked, ['Tell me about a time you handled conflict between coworkers.']);
+        const before = h.updates().length;
+        replies[0].resolve([{ text: 'Listen actively', sub: ['Hear each person separately first', ' '] }, 'Focus on shared goal', '  ']); await settle();
+        assert.deepEqual(JSON.parse(JSON.stringify(h.session.display.talkingPoints)), [{ text: 'Listen actively', sub: ['Hear each person separately first'] }, { text: 'Focus on shared goal', sub: [] }]);
+        assert.equal(h.session.display.answerCard, null); assert.equal(h.updates().length, before + 1);
+        assert.equal(h.updates().at(-1).value, h.session.display);
+        // A question a prepared card answers asks for nothing and drops the old points.
+        h.queue.push({ result: pick('leadership') });
+        await h.endpoint('Tell me about leading teams.');
+        assert.equal(h.session.display.answerCard.id, 'leadership'); assert.equal(h.session.display.talkingPoints, undefined); assert.equal(asked.length, 1);
+        // Points that arrive after the next question is on screen are discarded.
+        h.queue.push({ result: { kind: 'question', cardId: 'none', confidence: 0.9 } });
+        await h.endpoint('What would you do with a vague requirement from a client?');
+        h.queue.push({ result: pick('priorities') });
+        await h.endpoint('How do you decide what to do first?');
+        const shown = h.session.display; const count = h.updates().length;
+        replies[1].resolve(['Ask clarifying questions', 'Confirm the goal']); await settle();
+        assert.equal(h.session.display, shown, 'late points cannot replace a newer answer'); assert.equal(h.updates().length, count);
+        // One point, or none, is not an outline: the card stays blank.
+        h.queue.push({ result: { kind: 'question', cardId: 'none', confidence: 0.9 } });
+        await h.endpoint('What is your favourite database and why is that so?');
+        const still = h.session.display;
+        replies[2].resolve(['Only one point']); await settle();
+        assert.equal(h.session.display, still);
+        // Not a question: nothing is requested.
+        h.queue.push({ result: { kind: 'not-question', cardId: 'none', confidence: 0.99 } });
+        await h.endpoint('Okay great, thanks for sharing that with me.');
+        assert.equal(asked.length, 3);
+      } finally { h.cleanup(); }
+      assert(closes >= 1, 'closing the window ends the talking-points session');
+    },
+  },
   {
     name: 'interview AI window: identical in-flight audio selection locks without another transport call and clears preview immediately',
     async run() {

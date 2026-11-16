@@ -80,7 +80,7 @@ function requireFlags(help, flags) {
 }
 function cliArguments(config, help) {
   requireFlags(help, ['--print', '--output-format', '--tools', '--system-prompt', '--no-session-persistence', '--strict-mcp-config', '--mcp-config']);
-  const args = ['-p', '--tools', '', '--system-prompt', SYSTEM, '--no-session-persistence',
+  const args = ['-p', '--tools', '', '--system-prompt', typeof config.systemPrompt === 'string' && config.systemPrompt.trim() ? config.systemPrompt : SYSTEM, '--no-session-persistence',
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}', '--output-format', 'stream-json'];
   if (config.model) { requireFlags(help, ['--model']); args.push('--model', config.model); }
   if (config.effort && config.effort !== 'default') { requireFlags(help, ['--effort']); args.push('--effort', config.effort); }

@@ -12,6 +12,7 @@ import { configureCareerSnapshotDataRoot, registerCareerDataHandlers } from '../
 import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from '../ipc/interviewHelper.js';
 import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from '../ipc/interviewPreparation.js';
 import { createInterviewWindowController } from '../interviewWindow.js';
+import { createInterviewTalkingPoints } from '../interviewTalkingPoints.js';
 import { createPracticeCallController, createReplayHandler } from '../practiceCall/callWindow.js';
 import { createPracticeAudioHelper, practiceAudioHelperPath } from '../interviewPracticeAudio.js';
 import { getInterviewPracticeRegistry } from '../ipc/interviewPracticeRegistry.js';
@@ -169,6 +170,8 @@ if (!app.requestSingleInstanceLock()) {
       loadSnapshot: ({ snapshotId, userDataPath }) => loadInterviewHelperCareerSnapshot({ snapshotId, userDataPath }),
       loadBundle: ({ artifactId, userDataPath }) => loadInterviewPreparationBundle({ artifactId, userDataPath }),
       preloadPath: path.join(__dirname, 'interviewWindowPreload.js'),
+      // Live talking points for questions no prepared card answers.
+      createTalkingPoints: createInterviewTalkingPoints,
       devServerUrl: DEV_SERVER_URL ? new URL('interview.html', DEV_SERVER_URL).toString() : null,
       distHtmlPath: RENDERER_HTML,
     });
