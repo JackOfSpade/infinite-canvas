@@ -48,7 +48,12 @@ const open = (html, beforeParse) => {
 };
 
 const panelFor = (document, kind) => document.querySelector(`[data-ic-document-panel="${kind}"] main`);
-const editToggle = document => document.getElementById('ic-edit-toggle');
+// Leaving the tab saves at once; tests use that instead of waiting out the
+// typing pause before an automatic save.
+const leaveTab = dom => {
+  Object.defineProperty(dom.window.document, 'visibilityState', { configurable: true, value: 'hidden' });
+  dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
+};
 const history = dom => dom.window.icEditHistory;
 const depthOf = (dom, kind) => {
   const depth = history(dom).depth(kind);
@@ -105,7 +110,6 @@ export default [
       const { dom, errors, document } = open(workspaceHtml('undo-depth-a'));
       try {
         noPageErrors(errors);
-        editToggle(document).click();
         const panel = panelFor(document, 'resume');
         const baselineHtml = panel.innerHTML;
         assert.equal(lineOf(panel), BASELINE_LINE);
@@ -140,7 +144,6 @@ export default [
       const { dom, errors, document } = open(workspaceHtml('undo-coalesce-b'));
       try {
         noPageErrors(errors);
-        editToggle(document).click();
         const panel = panelFor(document, 'resume');
         let clock = 1000;
         dom.window.Date.now = () => clock;
@@ -170,19 +173,30 @@ export default [
     },
   },
   {
-    name: 'Sync rewriting the panel keeps the edits made before it undoable',
+    name: 'an automatic save keeps the edits made before it undoable and leaves the panel editable',
     run: async () => {
       const { dom, errors, document } = open(syncedHtml('undo-sync-c'));
       try {
         noPageErrors(errors);
-        const syncButton = document.getElementById('ic-sync-btn');
-        assert.equal(syncButton.disabled, false, 'a fresh unsynced page offers Sync');
-        editToggle(document).click();
+        assert.equal(document.getElementById('ic-sync-btn'), null, 'there is no Sync button');
+        assert.equal(document.getElementById('ic-edit-toggle'), null, 'there is no Edit button');
+        const saves = [];
+        dom.window.fetch = async (_endpoint, options) => {
+          const payload = JSON.parse(options.body);
+          if (payload.html) saves.push(payload);
+          return { ok: true, json: async () => ({ success: true, htmlSha256: 'a'.repeat(64) }) };
+        };
         const panel = panelFor(document, 'resume');
         for (let index = 1; index <= 4; index += 1) mutateText(dom, panel, `Before sync ${index}`);
-        syncButton.click();
+        const liveNode = textNodeOf(panel);
+        leaveTab(dom);
         await new Promise(resolve => dom.window.setTimeout(resolve, 20));
-        assert.equal(panel.getAttribute('contenteditable'), null, 'Sync leaves edit mode');
+        assert.equal(saves.length, 1, 'the edits are saved without a click');
+        assert.equal(saves[0].document, 'resume');
+        assert.ok(saves[0].html.includes('Before sync 4'), 'the save carries the current text');
+        assert.equal(/<main[^>]*contenteditable/u.test(saves[0].html), false, 'the saved file does not carry the editing attribute');
+        assert.equal(panel.getAttribute('contenteditable'), 'true', 'the panel stays editable after a save');
+        assert.equal(textNodeOf(panel), liveNode, 'a save must not replace the nodes being typed into');
         assert.equal(lineOf(panel), 'Before sync 4', 'the synced rewrite preserves the text');
         assert.ok(history(dom).depth('resume').past >= 5, 'the pre-Sync edits are still in the stack');
         assert.equal(history(dom).undo('resume'), true, 'undo still works after Sync rewrote the panel');
@@ -201,7 +215,6 @@ export default [
       const { dom, errors, document } = open(workspaceHtml('undo-redo-d'));
       try {
         noPageErrors(errors);
-        editToggle(document).click();
         const panel = panelFor(document, 'resume');
         for (const text of ['First edit', 'Second edit', 'Third edit']) mutateText(dom, panel, text);
         assert.equal(history(dom).undo('resume'), true);
@@ -220,11 +233,9 @@ export default [
       const { dom, errors, document } = open(workspaceHtml('undo-panels-e'));
       try {
         noPageErrors(errors);
-        editToggle(document).click();
         const resumePanel = panelFor(document, 'resume');
         for (let index = 1; index <= 3; index += 1) mutateText(dom, resumePanel, `Resume ${index}`);
         document.querySelector('[data-ic-document-tab="cover"]').click();
-        editToggle(document).click();
         const coverPanel = panelFor(document, 'cover');
         for (let index = 1; index <= 3; index += 1) mutateText(dom, coverPanel, `Letter ${index}`);
         assert.deepEqual(depthOf(dom, 'resume'), { past: 4, future: 0 });
@@ -248,7 +259,6 @@ export default [
       const { dom, errors, document } = open(workspaceHtml('undo-targets-f'));
       try {
         noPageErrors(errors);
-        editToggle(document).click();
         const panel = panelFor(document, 'resume');
         mutateText(dom, panel, 'Panel edit');
         const panelMarkup = panel.innerHTML;
@@ -286,7 +296,6 @@ export default [
       const { dom, errors, document } = open(workspaceHtml('undo-cap-g'));
       try {
         noPageErrors(errors);
-        editToggle(document).click();
         const panel = panelFor(document, 'resume');
         for (let index = 1; index <= 600; index += 1) mutateText(dom, panel, `Line ${index}`);
         assert.deepEqual(depthOf(dom, 'resume'), { past: 500, future: 0 });
@@ -306,7 +315,6 @@ export default [
       try {
         noPageErrors(errors);
         const storageKey = `ic-edit:${docId}`;
-        editToggle(document).click();
         const panel = panelFor(document, 'resume');
         assert.equal(dom.window.localStorage.getItem(storageKey), null);
         mutateText(dom, panel, 'Autosaved edit');

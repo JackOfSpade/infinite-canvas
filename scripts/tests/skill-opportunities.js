@@ -299,14 +299,15 @@ export default [
       const dom = new JSDOM(html, { runScripts: 'dangerously', url: 'https://workspace.test/' });
       const { document } = dom.window;
       assert(!document.getElementById('ic-export-btn'), 'the removed print/export button must not be present in the rendered DOM');
-      const syncButton = document.getElementById('ic-sync-btn');
+      assert(!document.getElementById('ic-sync-btn') && !document.getElementById('ic-edit-toggle'), 'the Sync and Edit buttons must not be present');
+      const reviewStatus = document.getElementById('ic-review-status');
       const inferred = document.querySelector('[data-ic-inferred-skill="skill-1"]');
-      assert(syncButton.disabled, 'Sync should start gated while a verify item is unresolved');
+      assert(/Automatic saving starts after/.test(reviewStatus.textContent), 'automatic saving should start gated while a verify item is unresolved');
       assert(inferred?.hidden, 'unverified adjacent skill leaked into the résumé');
       assert(!document.querySelector('main.page')?.textContent.includes('Ruby <script>'), 'learn-first skill leaked into the résumé main');
 
       document.querySelector('[data-ic-skill-action="verified"][data-ic-skill-id="skill-1"]').click();
-      assert(!syncButton.disabled, 'resolving every review item should unlock Sync');
+      assert(!/Automatic saving starts after/.test(reviewStatus.textContent), 'resolving every review item should unlock automatic saving');
       assert(!inferred.hidden && document.querySelector('main.page')?.textContent.includes('Django ORM'), 'verified skill was not deterministically added to the résumé');
       document.querySelector('[data-ic-skill-action="not_mine"][data-ic-skill-id="skill-1"]').click();
       assert(inferred.hidden, 'Not mine must remove the inferred skill from the résumé');

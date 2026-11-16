@@ -951,18 +951,24 @@ export default [
           beforeParse(window) { window.fetch = fetchImpl; },
         });
       };
-      const staleDom = build(async () => ({
-        ok: true,
-        json: async () => ({ success: true, importedDocuments: [], staleDocuments: ['resume'], conflicts: [] }),
-      }), 'open-stale-visible');
+      const staleSaves = [];
+      const staleDom = build(async (_endpoint, options) => {
+        const payload = JSON.parse(options.body);
+        if (payload.html) {
+          staleSaves.push(payload.document);
+          return { ok: true, json: async () => ({ success: true, htmlSha256: 'f'.repeat(64) }) };
+        }
+        return { ok: true, json: async () => ({ success: true, importedDocuments: [], staleDocuments: ['resume'], conflicts: [] }) };
+      }, 'open-stale-visible');
       const failedDom = build(async () => { throw new TypeError('Failed to fetch'); }, 'open-bridge-visible');
       try {
         await new Promise(resolve => staleDom.window.setTimeout(resolve, 0));
         await new Promise(resolve => failedDom.window.setTimeout(resolve, 0));
+        await new Promise(resolve => staleDom.window.setTimeout(resolve, 20));
         const staleNote = staleDom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
         const failedNote = failedDom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
-        assert(/changed since its PDF was written/i.test(staleNote),
-          `a stale response must update the active document notice immediately, got ${JSON.stringify(staleNote)}`);
+        assert(staleSaves.join() === 'resume' && /résumé PDF in this folder is up to date/i.test(staleNote),
+          `a stale PDF must be re-rendered on open without a click, got ${JSON.stringify(staleSaves)} ${JSON.stringify(staleNote)}`);
         assert(/could not reach Infinite Canvas/i.test(failedNote),
           `a loopback bridge failure must be visible instead of swallowed, got ${JSON.stringify(failedNote)}`);
         return { staleVisible: true, bridgeFailureVisible: true };
@@ -1107,6 +1113,51 @@ export default [
     },
   },
   {
+    name: 'Application Sync: a revision-matched draft left by a closed tab is saved on the next open',
+    run: async () => {
+      const docId = 'closed-tab-draft-saved';
+      let source = buildResumeDocument({
+        docId,
+        resumeMainHtml: '<main class="page"><h1 class="name">Maya Chen</h1><p>Saved baseline.</p></main>',
+        coverLetter: { name: 'Maya Chen', paragraphs: ['Cover baseline.'] },
+        downloadBundle: { company: 'Acme', candidateName: 'Maya Chen' },
+      });
+      const config = applicationSyncConfig('9'.repeat(64), { html: source });
+      source = embedApplicationSyncConfig(source, config);
+      const fingerprint = /var RESUME_MARKUP_FINGERPRINT = "([^"]+)"/.exec(source)?.[1] || '';
+      const storageKey = `ic-edit:${docId}`;
+      const draftMarkup = '<h1 class="name">Maya Chen</h1><p>Typed just before the tab closed.</p>';
+      const saves = [];
+      const dom = new JSDOM(source, {
+        runScripts: 'dangerously', url: 'https://closed-tab-draft.local/',
+        beforeParse(window) {
+          window.localStorage.setItem(storageKey, draftMarkup);
+          window.localStorage.setItem(`${storageKey}:fingerprint`, fingerprint);
+          window.localStorage.setItem(`${storageKey}:base-html-sha256`, config.documents.resume.htmlSha256);
+          window.fetch = async (_endpoint, options) => {
+            const payload = JSON.parse(options.body);
+            if (payload.html) {
+              saves.push(payload);
+              return { ok: true, json: async () => ({ success: true, htmlSha256: 'e'.repeat(64) }) };
+            }
+            return { ok: true, json: async () => ({ success: true, importedDocuments: [], staleDocuments: [], conflicts: [], variantMismatches: [] }) };
+          };
+        },
+      });
+      try {
+        await new Promise(resolve => dom.window.setTimeout(resolve, 1600));
+        assert(saves.length === 1 && saves[0].document === 'resume' && saves[0].html.includes('Typed just before the tab closed.'),
+          `a draft proven to match the saved revision must be saved on open, got ${saves.length} save(s)`);
+        assert(dom.window.localStorage.getItem(`${storageKey}:superseded`) === null
+          && dom.window.localStorage.getItem(`${storageKey}:base-html-sha256`) === 'e'.repeat(64),
+        'the saved draft must stay active and be re-stamped against the returned revision');
+        return { closedTabDraftSaved: true };
+      } finally {
+        dom.window.close();
+      }
+    },
+  },
+  {
     name: 'Application Sync: an edit during Sync and later same-session autosaves retain the returned panel revision',
     run: async () => {
       const docId = 'sync-in-flight-autosave';
@@ -1138,27 +1189,32 @@ export default [
       try {
         await new Promise(resolve => dom.window.setTimeout(resolve, 0));
         const main = dom.window.document.querySelector('[data-ic-document-panel="resume"] main');
-        const syncButton = dom.window.document.getElementById('ic-sync-btn');
-        assert(main && syncButton, 'fixture requires the résumé editor and Sync control');
+        assert(main, 'fixture requires the résumé editor');
         main.innerHTML = '<h1 class="name">Maya Chen</h1><p>Snapshot submitted to Sync.</p>';
         main.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-        syncButton.click();
+        Object.defineProperty(dom.window.document, 'visibilityState', { configurable: true, value: 'hidden' });
+        dom.window.document.dispatchEvent(new dom.window.Event('visibilitychange'));
         await new Promise(resolve => dom.window.setTimeout(resolve, 0));
-        assert(typeof resolveSync === 'function', 'Sync click must issue a pending Sync request');
+        assert(typeof resolveSync === 'function', 'leaving the tab must issue a pending save request');
+        const firstResolve = resolveSync;
         main.innerHTML = '<h1 class="name">Maya Chen</h1><p>Edit made while Sync was rendering.</p>';
         main.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
         dom.window.document.getElementById('ic-cover-tab').click();
         await new Promise(resolve => dom.window.setTimeout(resolve, 550));
-        resolveSync();
+        firstResolve();
         await new Promise(resolve => dom.window.setTimeout(resolve, 0));
-        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+        await new Promise(resolve => dom.window.setTimeout(resolve, 20));
         const storageKey = `ic-edit:${docId}`;
         const inFlightSaved = dom.window.localStorage.getItem(storageKey) || '';
         const note = dom.window.document.getElementById('ic-pdf-bundle-note')?.textContent || '';
         assert(inFlightSaved.includes('Edit made while Sync was rendering.')
           && dom.window.localStorage.getItem(`${storageKey}:base-html-sha256`) === syncedRevision
-          && /Newer edits still need Sync/i.test(note),
+          && !/up to date/i.test(note),
         'a Sync response must not overwrite an edit made while it was rendering or after a tab switch, and must re-stamp that edit against the returned revision');
+        await new Promise(resolve => dom.window.setTimeout(resolve, 1100));
+        assert(resolveSync !== firstResolve, 'an edit made while a save was rendering must be saved by a following request');
+        resolveSync();
+        await new Promise(resolve => dom.window.setTimeout(resolve, 20));
         main.innerHTML = '<h1 class="name">Maya Chen</h1><p>Later same-session autosave.</p>';
         main.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
         await new Promise(resolve => dom.window.setTimeout(resolve, 550));

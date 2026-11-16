@@ -6788,8 +6788,8 @@ export default [
         && doc.includes('Memphis, TN') && doc.includes('Charlotte, NC, United States')
         && doc.includes('I can work there'),
       'a cross-city on-site application must show a concrete work-location confirmation card');
-      assert(doc.includes('var locationBlocked = !!locationCard && !locationConfirmed;')
-        && doc.includes('var blocked = locationBlocked || (activeDocument === \'resume\' && reviewBlocked);'),
+      assert(doc.includes('function syncLocationBlocked() { return !!locationCard && !locationConfirmed; }')
+        && doc.includes('function syncBlocked(kind) { return syncLocationBlocked() || syncReviewBlocked(kind); }'),
       'unresolved location confirmation must gate Sync for both résumé and cover-letter documents');
       const sameCity = buildResumeDocument({
         resumeMainHtml: '<main class="page">Same city</main>',

@@ -380,7 +380,7 @@ export default [
     },
   },
   {
-    name: 'application workspace: Sync replaces download and submits only the selected document to its saved bridge',
+    name: 'application workspace: an edit is saved automatically and submits only the edited document to its saved bridge',
     run: async () => {
       let doc = buildResumeDocument({
         docId: 'sync-interaction-test',
@@ -392,24 +392,33 @@ export default [
       assert(!doc.includes('Download application bundle') && !doc.includes('storedZip'), 'saved workspace must not ship a browser ZIP downloader');
       const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'file:///tmp/Acme/Application.html' });
       const { document } = dom.window;
-      const sync = document.getElementById('ic-sync-btn');
+      assert(!document.getElementById('ic-sync-btn') && !document.getElementById('ic-edit-toggle'), 'the Sync and Edit buttons must not be present');
       const calls = [];
       dom.window.fetch = async (endpoint, options) => {
         calls.push({ endpoint, payload: JSON.parse(options.body) });
         return { ok: true, json: async () => ({ success: true, htmlSha256: 'b'.repeat(64) }) };
       };
-      assert(!sync.disabled && sync.textContent.includes('résumé'), 'a configured saved HTML enables Sync without manually attaching a PDF');
-      document.getElementById('ic-cover-tab').click();
-      document.getElementById('ic-edit-toggle').click();
       const cover = document.getElementById('ic-cover-panel').querySelector('main');
+      const resume = document.querySelector('[data-ic-document-panel="resume"] main');
+      assert(cover.getAttribute('contenteditable') === 'true' && resume.getAttribute('contenteditable') === 'true', 'both documents are editable without entering an edit mode');
+      document.getElementById('ic-cover-tab').click();
       cover.querySelector('.letter-body p').textContent = 'Edited cover letter.';
+      const indicator = document.getElementById('ic-save-indicator');
+      assert(indicator.hidden, 'the save indicator stays out of the way until something changes');
       cover.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
-      sync.click();
-      await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+      await new Promise(resolve => dom.window.setTimeout(resolve, 200));
+      assert(calls.length === 0, 'a save waits for a pause in typing');
+      assert(!indicator.hidden && indicator.textContent === 'Saving…' && indicator.getAttribute('data-ic-save-state') === 'saving',
+        'the indicator says Saving from the first change, before the request goes out');
+      await new Promise(resolve => dom.window.setTimeout(resolve, 700));
+      assert(calls.length === 0, 'the pause is one second');
+      await new Promise(resolve => dom.window.setTimeout(resolve, 400));
+      assert(indicator.textContent === 'Saved' && indicator.getAttribute('data-ic-save-state') === 'saved', 'the indicator says Saved once the PDF is replaced');
       assert(calls.length === 1 && calls[0].endpoint === 'http://127.0.0.1:43192/application-sync', 'Sync must use the fixed local bridge endpoint');
       assert(calls[0].payload.token === 'a'.repeat(64) && calls[0].payload.document === 'cover', 'Sync must use its capability and selected document only');
       assert(calls[0].payload.html.includes('Edited cover letter.'), 'Sync must send the current editable HTML to Electron for rendering');
-      assert(document.getElementById('ic-pdf-bundle-note').textContent.includes('Synced cover letter'), 'success should confirm the replaced sibling document');
+      assert(!/<main[^>]*contenteditable/.test(calls[0].payload.html), 'the saved file must not carry the editing attribute');
+      assert(document.getElementById('ic-pdf-bundle-note').textContent.includes('The cover letter PDF in this folder is up to date'), 'success should confirm the replaced sibling document');
       dom.window.close();
       return { selectedDocument: 'cover', capabilityScoped: true };
     },
@@ -634,15 +643,16 @@ export default [
       const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application-review.local/' });
       const { document } = dom.window;
       assert(!document.getElementById('ic-export-btn'), 'the removed print/export button must not be present in the rendered DOM');
-      const sync = document.getElementById('ic-sync-btn');
-      assert(sync.disabled, 'unresolved résumé claim must gate résumé Sync');
+      const note = document.getElementById('ic-pdf-bundle-note');
+      const gated = () => /Resolve the skill checks/.test(note.textContent);
+      assert(gated(), 'unresolved résumé claim must gate résumé saving');
       document.getElementById('ic-cover-tab').click();
-      assert(!sync.disabled, 'cover-letter Sync stays available while résumé review is unresolved');
+      assert(!gated(), 'cover-letter saving stays available while résumé review is unresolved');
       document.querySelector('[data-ic-skill-action="not_mine"]').click();
       document.getElementById('ic-resume-tab').click();
-      assert(!sync.disabled, 'Not mine allows résumé Sync without a manually attached PDF');
+      assert(!gated(), 'Not mine allows résumé saving without a manually attached PDF');
       document.querySelector('[data-ic-skill-action="verified"]').click();
-      assert(!sync.disabled, 'adding a verified skill is rendered fresh by Electron during Sync');
+      assert(!gated(), 'adding a verified skill is rendered fresh by Electron during the save');
       dom.window.close();
       return { coverIndependent: true, renderOnSync: true };
     },
@@ -710,9 +720,7 @@ export default [
         downloadBundle: migrated,
       });
       const dom = new JSDOM(doc, { runScripts: 'dangerously', url: 'https://application-legacy.local/' });
-      const sync = dom.window.document.getElementById('ic-sync-btn');
       const note = dom.window.document.getElementById('ic-pdf-bundle-note');
-      assert(sync.disabled, 'legacy HTML without an Electron capability must not claim it can overwrite files');
       assert(note.textContent.includes('Save this application from Infinite Canvas'), 'legacy HTML must explain how to make Sync available');
       dom.window.close();
       return { legacyResumeRetained: true, syncRequiresSave: true };

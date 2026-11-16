@@ -876,6 +876,29 @@ const INJECTED_CHROME_CSS = `
 .ic-toolbar .ic-btn-primary:hover { background: #8F2534; }
 .ic-toolbar .ic-hint { margin-left: auto; opacity: 0.8; font-size: 12px; }
 .ic-toolbar .ic-restore-note { opacity: 0.8; font-size: 12px; }
+/* Save state, pinned to the corner so it stays in view while editing anywhere
+   on the page. The sentence beside the toolbar carries the detail. */
+.ic-save-indicator {
+  position: fixed; right: 16px; bottom: 16px; z-index: 50;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 12px 7px 10px; border-radius: 999px;
+  background: #2a2320; color: #f7f4ed; font: 500 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
+  transition: opacity 0.4s ease;
+}
+.ic-save-indicator[hidden] { display: none; }
+.ic-save-indicator::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #9a8f80; }
+.ic-save-indicator[data-ic-save-state="saving"]::before { background: #e0a43a; animation: ic-save-pulse 1s ease-in-out infinite; }
+.ic-save-indicator[data-ic-save-state="saved"]::before { background: #5fb878; }
+.ic-save-indicator[data-ic-save-state="saved"][data-ic-save-settled] { opacity: 0.6; }
+.ic-save-indicator[data-ic-save-state="waiting"]::before { background: #e0a43a; }
+.ic-save-indicator[data-ic-save-state="error"] { background: #7A1F2B; }
+.ic-save-indicator[data-ic-save-state="error"]::before { background: #f7f4ed; }
+@keyframes ic-save-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .ic-save-indicator { transition: none; }
+  .ic-save-indicator[data-ic-save-state="saving"]::before { animation: none; }
+}
 .ic-print-variant-note { max-width: 340px; font-size: 11px; line-height: 1.35; opacity: 0.85; }
 .ic-banner {
   padding: 8px 20px;
@@ -1067,12 +1090,12 @@ const INJECTED_CHROME_CSS = `
 }
 
 /* ---- edit mode (design doc §5.5) ---- */
-[contenteditable="true"] {
+[contenteditable="true"]:focus {
   outline: 1px dashed rgba(122, 31, 43, 0.5);
   outline-offset: 6px;
 }
 @media print {
-  [contenteditable="true"] { outline: none; }
+  [contenteditable="true"]:focus { outline: none; }
 }
 `;
 
@@ -1753,16 +1776,15 @@ function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl
   ${coverLetterCheckSummary ? `<p class="ic-panel-note" role="status">${escapeHtml(coverLetterCheckSummary)}</p>` : ''}
   <div id="ic-skill-workspace-data" data-ic-workspace="${escapeHtml(json)}" hidden></div>
   <div class="ic-toolbar" role="toolbar" aria-label="Document controls">
-    <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
-    <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary">Sync résumé</button>
     <button type="button" id="ic-remove-cover-btn" class="ic-btn">Remove cover letter</button>
     ${printVariantIndicator(jobContext)}
     <span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>
+    <span id="ic-save-indicator" class="ic-save-indicator" aria-hidden="true" hidden></span>
     <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
-    <span class="ic-hint">Sync re-renders the PDF with the same engine that produced the originals — use it instead of your browser’s print dialog.</span>
+    <span class="ic-hint">Click the résumé or cover letter to edit it. Every change is saved and its PDF is re-rendered automatically — use that PDF instead of your browser’s print dialog.</span>
   </div>
   ${APPLICATION_EDIT_NOTES_MARKUP}
-  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn’t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
+  <div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn’t load. Check your internet connection or content blocker, then reopen this application. A PDF is never replaced with fallback typography.</div>
   <section class="ic-panel" aria-labelledby="ic-check-title">
     <div class="ic-panel-head"><h2 class="ic-panel-title" id="ic-check-title">Needs your check</h2><span id="ic-review-progress" class="ic-panel-note"></span></div>
     <span id="ic-review-status" class="ic-review-status" role="status"></span>
@@ -1834,17 +1856,17 @@ function buildInjectedChrome({ docId, kind, workspace = false, downloadBundle, s
   // a restore, so the kind fed to the sanitizer must track what this
   // document actually is, not the résumé slot the storage key reuses.
   const standaloneSanitizeKind = kind === 'cover-letter' ? 'cover' : 'resume';
-  const syncHint = 'Sync re-renders the PDF with the same engine that produced the originals \u2014 use it instead of your browser\u2019s print dialog.';
+  const syncHint = isResumeBundle
+    ? 'Click the document to edit it. Every change is saved and its PDF is re-rendered automatically \u2014 use that PDF instead of your browser\u2019s print dialog.'
+    : 'Click the document to edit it. Changes are kept in this browser.';
 
   const chromeMarkup = workspace ? '' : `<div class="ic-toolbar" role="toolbar" aria-label="Document controls">
-  <button type="button" id="ic-edit-toggle" class="ic-btn">Edit</button>
-  <button type="button" id="ic-sync-btn" class="ic-btn ic-btn-primary"${isResumeBundle ? '' : ' hidden'}>${isResumeBundle ? 'Sync résumé' : 'Sync edited copy'}</button>
   ${PRINT_VARIANT_INDICATOR}
-  ${isResumeBundle ? '<span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span>' : ''}
+  ${isResumeBundle ? '<span id="ic-pdf-bundle-note" class="ic-restore-note" role="status"></span><span id="ic-save-indicator" class="ic-save-indicator" aria-hidden="true" hidden></span>' : ''}
   <span id="ic-restore-note" class="ic-restore-note" hidden>Restored your edits from this browser.</span>
   <span class="ic-hint">${escapeHtml(syncHint)}</span>
 </div>
-<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn\u2019t load. Check your internet connection or content blocker, then reopen this application before syncing. Sync refuses to replace a PDF with fallback typography.</div>
+<div class="ic-banner ic-font-warning" id="ic-font-warning" role="status" hidden>Web fonts didn\u2019t load. Check your internet connection or content blocker, then reopen this application. A PDF is never replaced with fallback typography.</div>
 `;
   const html = `${chromeMarkup}<script id="ic-application-bundle-data" type="application/json" nonce="${escapeHtml(scriptNonce)}">${bundleJson}</script><script nonce="${escapeHtml(scriptNonce)}">
 (function () {
@@ -1869,8 +1891,6 @@ ${editableRuntimeSanitizerSource()}
   var coverMain = document.querySelector('[data-ic-document-panel="cover"] main');
   var activeDocument = resumeMain ? 'resume' : 'cover';
   var documentTabs = Array.prototype.slice.call(document.querySelectorAll('[data-ic-document-tab]'));
-  var editBtn = document.getElementById('ic-edit-toggle');
-  var syncBtn = document.getElementById('ic-sync-btn');
   var removeCoverBtn = document.getElementById('ic-remove-cover-btn');
   var improvementDue = document.getElementById('ic-improvement-due');
   var improvementTitle = improvementDue ? improvementDue.querySelector('.ic-improvement-title') : null;
@@ -1911,10 +1931,29 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     sessionStorage.removeItem(reconcileNoticeKey);
   } catch (e) {}
   // Keystrokes, skill-decision clicks, and tab switches all funnel into
-  // updateSync(). Without this flag one of those firing mid-fetch re-enables
-  // the button and overwrites the 'Syncing…' state while the POST is still
-  // in flight, inviting a second concurrent sync request.
+  // updateSync(). Without this flag one of those firing mid-fetch overwrites
+  // the 'Saving…' state while the POST is still in flight and starts a second
+  // concurrent sync request.
   var syncInFlight = false;
+  // There is no Sync button: every change is saved and its PDF re-rendered
+  // automatically. syncDirty marks a document whose latest markup has not been
+  // sent yet. syncHold parks a document after a failure that retrying cannot
+  // fix (or an open-time PDF conflict) until the person edits it again.
+  var AUTO_SYNC_DELAY_MS = 1000;
+  var AUTO_SYNC_RETRY_MS = 10000;
+  var syncDirty = { resume: false, cover: false };
+  var syncHold = { resume: false, cover: false };
+  var syncTimer = null;
+  var saveIndicator = document.getElementById('ic-save-indicator');
+  // '' until something fails; 'offline' while the app cannot be reached,
+  // 'refused' when it answered no. Cleared by the next edit or a good save.
+  var syncFailure = '';
+  var savedOnce = false;
+  var saveSettleTimer = null;
+  // The open-time PDF comparison may import newer PDF text and reload. Hold
+  // automatic saves until it settles so a restored draft cannot race it.
+  var reconcilePending = false;
+  var coverSaveTimer = null;
   var initialResumeMarkup = resumeMain ? resumeMain.innerHTML : '';
   // The generated file is the source of truth. Browser-saved edits are only
   // meaningful against the revision they were typed over, so each autosave slot
@@ -2004,33 +2043,82 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
   }
   function markPdfStale(kind) {
     if (HAS_APPLICATION_BUNDLE) {
-      pdfStale[kind === 'cover' ? 'cover' : 'resume'] = true;
+      kind = kind === 'cover' ? 'cover' : 'resume';
+      pdfStale[kind] = true;
+      syncDirty[kind] = true;
+      syncHold[kind] = false;
+      syncFailure = '';
+      syncMessage = '';
+      if (syncTimer) clearTimeout(syncTimer);
+      syncTimer = setTimeout(runPendingSync, AUTO_SYNC_DELAY_MS);
       updateSync();
     }
   }
+  function syncConfigured() {
+    return !!(BUNDLE_DATA.sync && BUNDLE_DATA.sync.endpoint && BUNDLE_DATA.sync.token);
+  }
+  function syncLocationBlocked() { return !!locationCard && !locationConfirmed; }
+  function syncReviewBlocked(kind) {
+    return kind === 'resume' && skillCards.some(function (card) { return !skillDecisions[card.getAttribute('data-ic-insight')]; });
+  }
+  function syncBlocked(kind) { return syncLocationBlocked() || syncReviewBlocked(kind); }
+  // The document that should be saved next: the one on screen first.
+  function pendingSyncKind() {
+    if (!HAS_APPLICATION_BUNDLE || typeof fetch !== 'function' || !syncConfigured()) return '';
+    var order = activeDocument === 'cover' ? ['cover', 'resume'] : ['resume', 'cover'];
+    for (var i = 0; i < order.length; i += 1) {
+      var kind = order[i];
+      if (syncDirty[kind] && !syncHold[kind] && !syncBlocked(kind) && (kind === 'cover' ? coverMain : resumeMain)) return kind;
+    }
+    return '';
+  }
+  function runPendingSync() {
+    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+    if (syncInFlight || reconcilePending) return;
+    var kind = pendingSyncKind();
+    if (kind) syncDocument(kind, false);
+  }
+  // The corner pill: Saving… from the first keystroke until the PDF is
+  // replaced, then Saved. It never says Saved while anything is still unsent.
+  function updateSaveIndicator() {
+    if (!saveIndicator) return;
+    var dirtyKinds = ['resume', 'cover'].filter(function (kind) { return syncDirty[kind] && (kind === 'cover' ? coverMain : resumeMain); });
+    var state = ''; var label = ''; var detail = '';
+    if (syncInFlight) { state = 'saving'; label = 'Saving…'; }
+    else if (!dirtyKinds.length) { if (savedOnce) { state = 'saved'; label = 'Saved'; detail = 'Your changes are saved and the PDF in this folder is up to date.'; } }
+    else if (!syncConfigured() || typeof fetch !== 'function') { state = 'error'; label = 'Not saved'; detail = 'Save this application from Infinite Canvas to turn on automatic saving.'; }
+    else if (dirtyKinds.every(syncBlocked)) { state = 'waiting'; label = 'Not saved yet'; detail = 'Resolve the checks in the side panel. Your changes are saved after that.'; }
+    else if (syncFailure === 'offline') { state = 'error'; label = 'Not saved · retrying'; detail = syncMessage; }
+    else if (syncFailure || dirtyKinds.every(function (kind) { return syncHold[kind]; })) { state = 'error'; label = 'Not saved'; detail = syncMessage; }
+    else { state = 'saving'; label = 'Saving…'; }
+    if (saveSettleTimer) { clearTimeout(saveSettleTimer); saveSettleTimer = null; }
+    saveIndicator.removeAttribute('data-ic-save-settled');
+    saveIndicator.hidden = !state;
+    saveIndicator.setAttribute('data-ic-save-state', state);
+    saveIndicator.textContent = label;
+    saveIndicator.title = detail || '';
+    // A finished save stays on screen, dimmed after a moment so it does not
+    // compete with the page.
+    if (state === 'saved') saveSettleTimer = setTimeout(function () { saveIndicator.setAttribute('data-ic-save-settled', ''); }, 2500);
+  }
   function updateSync() {
-    if (!syncBtn || !HAS_APPLICATION_BUNDLE || syncInFlight) return;
-    var reviewBlocked = skillCards.some(function (card) { return !skillDecisions[card.getAttribute('data-ic-insight')]; });
-    var configured = !!(BUNDLE_DATA.sync && BUNDLE_DATA.sync.endpoint && BUNDLE_DATA.sync.token);
-    var locationBlocked = !!locationCard && !locationConfirmed;
-    var blocked = locationBlocked || (activeDocument === 'resume' && reviewBlocked);
-    syncBtn.disabled = blocked || !configured;
-    syncBtn.setAttribute('aria-disabled', String(blocked || !configured));
-    syncBtn.textContent = 'Sync ' + documentLabel(activeDocument);
-    syncBtn.title = locationBlocked ? 'Confirm that you can work in the on-site job location before syncing.'
-      : (blocked ? 'Resolve every high-impact skill check before syncing the résumé.'
-      : (!configured ? 'This copy has not been saved by Infinite Canvas yet.' : 'Render and replace the current ' + documentLabel(activeDocument) + ' PDF in this application folder.'));
-    if (pdfBundleNote) {
-      if (locationBlocked) { syncMessage = ''; pdfBundleNote.textContent = 'Confirm the on-site work location before syncing.'; }
-      else if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve skill checks before syncing the résumé.'; }
-      else if (!configured) { syncMessage = ''; pdfBundleNote.textContent = 'Save this application from Infinite Canvas before Sync is available.'; }
+    if (!HAS_APPLICATION_BUNDLE) return;
+    updateSaveIndicator();
+    if (!syncInFlight && pdfBundleNote) {
+      var blocked = syncBlocked(activeDocument);
+      if (syncLocationBlocked()) { syncMessage = ''; pdfBundleNote.textContent = 'Confirm the on-site work location. Changes are saved to the PDF after that.'; }
+      else if (blocked) { syncMessage = ''; pdfBundleNote.textContent = 'Resolve the skill checks. Résumé changes are saved to the PDF after that.'; }
+      else if (!syncConfigured()) { syncMessage = ''; pdfBundleNote.textContent = 'Save this application from Infinite Canvas to turn on automatic saving.'; }
       // pdfStale is per-document on purpose: a résumé edit must not imply the
       // still-current cover-letter PDF is out of date. Saying which one drifted
       // is the whole point of tracking it — a stale PDF beside a fresh HTML is
       // the one failure mode of this workspace a user cannot see for themselves.
-      else if (pdfStale[activeDocument]) pdfBundleNote.textContent = syncMessage || ('This ' + documentLabel(activeDocument) + ' has changed since its PDF was written — Sync to replace it.');
-      else pdfBundleNote.textContent = syncMessage || ('Sync renders a fresh ' + documentLabel(activeDocument) + ' PDF and replaces it in this folder.');
+      else if (pdfStale[activeDocument]) pdfBundleNote.textContent = syncMessage || ('Saving your ' + documentLabel(activeDocument) + ' changes…');
+      else pdfBundleNote.textContent = syncMessage || ('Changes to this ' + documentLabel(activeDocument) + ' are saved automatically and replace its PDF in this folder.');
     }
+    // A check that was just resolved, or a save that just finished, may have
+    // left a document waiting. Edits and failures set their own timer.
+    if (!syncTimer && !syncInFlight && !reconcilePending && pendingSyncKind()) syncTimer = setTimeout(runPendingSync, 0);
   }
 
   // This is deliberately an explanation, not an override. The model selected
@@ -2053,7 +2141,6 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
 
   function selectDocument(kind) {
     if (kind !== 'resume' && kind !== 'cover') return;
-    stopEditing();
     activeDocument = kind;
     showDocumentNotes(kind);
     main = kind === 'cover' ? coverMain : resumeMain;
@@ -2064,7 +2151,6 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
       tab.setAttribute('aria-selected', String(tab.getAttribute('data-ic-document-tab') === kind));
       tab.setAttribute('tabindex', tab.getAttribute('data-ic-document-tab') === kind ? '0' : '-1');
     });
-    if (editBtn) editBtn.textContent = 'Edit ' + (kind === 'cover' ? 'cover letter' : 'résumé');
     updateSync();
     updateSkillReviewStatus();
     if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
@@ -2185,7 +2271,7 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     var status = document.getElementById('ic-review-status');
     if (progress) progress.textContent = total ? resolved + ' / ' + total + ' resolved' : '';
     if (status) status.textContent = !total ? '' : (resolved < total
-      ? 'Sync unlocks after every required location and high-impact claim check is resolved.'
+      ? 'Automatic saving starts after every required location and high-impact claim check is resolved.'
       : (verified ? verified + ' verified skill' + (verified === 1 ? '' : 's') + ' included in this résumé.' : 'No inferred skills will be added to this résumé.'));
     updateSync();
   }
@@ -2226,6 +2312,7 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     if (typeof fetch !== 'function') return;
     var sync = BUNDLE_DATA.sync || {};
     if (!sync.endpoint || !sync.token) return;
+    reconcilePending = true;
     fetch(sync.endpoint, {
       method: 'POST', mode: 'cors', credentials: 'omit',
       headers: { 'Content-Type': 'application/json' },
@@ -2237,38 +2324,47 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
         var stale = Array.isArray(body.staleDocuments) ? body.staleDocuments : [];
         var conflicts = Array.isArray(body.conflicts) ? body.conflicts : [];
         var variantMismatches = Array.isArray(body.variantMismatches) ? body.variantMismatches : [];
-        stale.forEach(function (kind) { if (kind === 'resume' || kind === 'cover') pdfStale[kind] = true; });
+        // An out-of-date or wrong-paper PDF used to wait for a Sync click.
+        // It is repaired automatically now.
+        stale.forEach(function (kind) { if (kind === 'resume' || kind === 'cover') { pdfStale[kind] = true; syncDirty[kind] = true; } });
         if (variantMismatches.length) {
           syncMessage = variantMismatches.map(function (item) {
             var label = item.document === 'cover' ? 'Cover letter' : 'Résumé';
+            if (item.document === 'resume' || item.document === 'cover') { pdfStale[item.document] = true; syncDirty[item.document] = true; }
             return label + ' PDF uses ' + (item.actual === 'dual-pdf' ? 'a cream viewer background' : 'a flat white background')
-              + ', but this application selected ' + (item.expected === 'dual-pdf' ? 'dual-mode cream' : 'flat white') + '. Sync to repair it.';
+              + ', but this application selected ' + (item.expected === 'dual-pdf' ? 'dual-mode cream' : 'flat white') + '. Repairing it now.';
           }).join(' ');
         }
         if (conflicts.length) {
           var conflictMessage = conflicts.map(function (item) {
             var label = item.document === 'cover' ? 'Cover letter' : 'Résumé';
+            // Both sides may hold real work, so nothing is overwritten on open.
+            // The person's next edit here is the decision to keep this copy.
+            if (item.document === 'resume' || item.document === 'cover') syncHold[item.document] = true;
             // The server reports why each import was held (missing sibling PDF,
             // both sides edited, an extractor error, an ambiguous remap). Report
             // what it observed instead of asserting one cause for all of them.
             var reason = typeof item.reason === 'string' ? item.reason.trim() : '';
             if (reason) return label + ': ' + reason;
             return label + ' PDF and HTML both changed; automatic import was paused to protect both revisions.';
-          }).join(' ');
+          }).join(' ') + ' Your next edit here replaces that PDF.';
           syncMessage = [syncMessage, conflictMessage].filter(Boolean).join(' ');
         }
-        if (stale.length || variantMismatches.length || conflicts.length) updateSync();
         var blockedKinds = stale.concat(
           conflicts.map(function (item) { return item.document; }),
           variantMismatches.map(function (item) { return item.document; })
         );
-        // If disk HTML and its sibling PDF are still the verified shared
-        // revision, a restored localStorage draft is necessarily browser-only
-        // and must not mask what is actually in the PDF. Preserve it in the
-        // existing superseded recovery slot, clear the active slot, and reload
-        // the trusted file. A real disk conflict remains visible and untouched.
+        // A restored browser draft exists only because the tab closed before
+        // its save finished. When this file embeds the saved panel revision,
+        // icReadAutosave has already proven the draft was typed over exactly
+        // that revision, so it is saved now with everything else pending.
+        // A draft from a file with no embedded revision cannot be shown to be
+        // current: if disk HTML and its PDF are still the verified shared
+        // revision, it must not mask (or overwrite) them. Preserve it in the
+        // superseded recovery slot, clear the active slot, and reload the
+        // trusted file. A real disk conflict remains visible and untouched.
         var realigned = ['resume', 'cover'].filter(function (kind) {
-          return restoredAutosave[kind] && blockedKinds.indexOf(kind) < 0;
+          return restoredAutosave[kind] && !icPanelRevisionSha256(kind) && blockedKinds.indexOf(kind) < 0;
         });
         var reloaded = imported.concat(realigned.filter(function (kind) { return imported.indexOf(kind) < 0; }));
         if (!reloaded.length) return;
@@ -2278,13 +2374,19 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
           ? 'Imported the updated ' + labels + ' PDF contents into this HTML workspace.'
           : 'Restored the current ' + labels + ' from its verified PDF revision; the previous browser-only draft was preserved for recovery.';
         try { sessionStorage.setItem(reconcileNoticeKey, notice); } catch (e) {}
+        syncDirty.resume = false;
+        syncDirty.cover = false;
         window.location.reload();
+        return true;
       });
     }).catch(function (error) {
       var message = error && error.message ? error.message : '';
       syncMessage = !message || /fetch|network|load failed/i.test(message)
         ? 'Automatic PDF comparison could not reach Infinite Canvas. Keep the app running, then reopen this file.'
         : message;
+    }).then(function (reloading) {
+      if (reloading === true) return;
+      reconcilePending = false;
       updateSync();
     });
   }
@@ -2379,7 +2481,6 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     deleteContentForward: true
   };
   var editHistories = { resume: null, cover: null };
-  var coverSaveTimer = null;
 
   function historyKindForRequest(kind) {
     // A standalone letter reuses the resume slot: one panel, one history.
@@ -2605,27 +2706,23 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     redo: function (kind) { return redoPanelEdit(kind); }
   };
 
-  function stopEditing() {
-    if (!main) return;
-    main.removeAttribute('contenteditable');
-    if (editBtn) editBtn.textContent = 'Edit';
-  }
-
-  if (editBtn && main) {
-    editBtn.addEventListener('click', function () {
-      var editing = main.getAttribute('contenteditable') === 'true';
-      if (editing) {
-        stopEditing();
-      } else {
-        // Capture the baseline from the restored, reconciled markup the user
-        // is about to start editing; re-entering edit mode keeps the stack.
-        ensureEditHistory(historyKindForRequest(activeDocument));
-        main.setAttribute('contenteditable', 'true');
-        main.focus();
-        editBtn.textContent = 'Done editing';
-      }
+  // Both documents are always editable: there is no edit mode to enter or
+  // leave. The history baseline is captured here, after the autosave restore
+  // and the skill-decision reconcile, so the first edit can be undone.
+  [resumeMain, coverMain].forEach(function (panel) {
+    if (!panel) return;
+    ensureEditHistory(historyKindForPanel(panel));
+    panel.setAttribute('contenteditable', 'true');
+    // A plain click inside an editable region places the caret, so links
+    // open with Cmd/Ctrl+click instead.
+    panel.addEventListener('click', function (event) {
+      if (!event.metaKey && !event.ctrlKey) return;
+      var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+      if (!link || !panel.contains(link)) return;
+      event.preventDefault();
+      window.open(link.href, '_blank', 'noopener');
     });
-  }
+  });
 
   if (HAS_APPLICATION_BUNDLE && typeof fetch === 'function' && BUNDLE_DATA.sync?.endpoint && BUNDLE_DATA.sync?.token) {
     fetch(BUNDLE_DATA.sync.endpoint, {
@@ -2676,69 +2773,123 @@ ${APPLICATION_EDIT_NOTES_RESTORE}
     });
   }
 
-  if (syncBtn) {
-    syncBtn.addEventListener('click', function () {
-      if (syncBtn.disabled || !HAS_APPLICATION_BUNDLE) return;
-      var sync = BUNDLE_DATA.sync || {};
-      if (!sync.endpoint || !sync.token) { updateSync(); return; }
-      stopEditing();
-      persistBundleData();
-      var documentToSync = activeDocument === 'cover' ? 'cover' : 'resume';
-      // The main variable follows the selected tab. Keep the selected panel node stable
-      // through the async request so switching tabs cannot stamp the other
-      // document into this document's autosave slot on success.
-      var syncPanel = main;
-      if (syncPanel) {
-        syncPanel.innerHTML = icSanitizeEditableMarkup(syncPanel.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
-        // Sync rewrites the panel with fresh nodes. Adopt that markup as the
-        // current history state so undo still walks back through the edits
-        // made before this sync instead of stopping at a detached tree.
-        adoptPanelMarkup(documentToSync);
-      }
-      var syncedPanelMarkup = syncPanel ? syncPanel.innerHTML : '';
-      syncMessage = '';
-      var currentHtml = '<!doctype html>\\n' + document.documentElement.outerHTML;
-      syncInFlight = true;
-      syncBtn.disabled = true;
-      syncBtn.textContent = 'Syncing…';
-      if (pdfBundleNote) pdfBundleNote.textContent = 'Rendering a fresh ' + documentLabel(documentToSync) + ' PDF…';
-      fetch(sync.endpoint, {
-        method: 'POST', mode: 'cors', credentials: 'omit',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: sync.token, document: documentToSync, html: currentHtml, editNotes: undefined })
-      }).then(function (response) {
-        return response.json().catch(function () { return {}; }).then(function (body) {
-          if (!response.ok || !body.success) throw new Error(body.error || 'Infinite Canvas could not sync this application.');
-          var syncedHtmlSha256 = String(body.htmlSha256 || '').toLowerCase();
-          if (!/^[a-f0-9]{64}$/.test(syncedHtmlSha256)) throw new Error('Infinite Canvas did not confirm the saved document revision.');
-          if (!BUNDLE_DATA.sync) BUNDLE_DATA.sync = {};
-          if (!BUNDLE_DATA.sync.documents) BUNDLE_DATA.sync.documents = {};
-          if (!BUNDLE_DATA.sync.documents[documentToSync]) BUNDLE_DATA.sync.documents[documentToSync] = {};
-          BUNDLE_DATA.sync.documents[documentToSync].htmlSha256 = syncedHtmlSha256;
-          var livePanelMarkup = syncPanel
-            ? icSanitizeEditableMarkup(syncPanel.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null)
-            : syncedPanelMarkup;
-          var changedDuringSync = livePanelMarkup !== syncedPanelMarkup;
-          icWriteAutosave(
-            documentToSync === 'cover' ? STORAGE_KEY + ':cover' : STORAGE_KEY,
-            livePanelMarkup,
-            documentToSync === 'cover' ? COVER_MARKUP_FINGERPRINT : RESUME_MARKUP_FINGERPRINT,
-            syncedHtmlSha256,
-          );
-          pdfStale[documentToSync] = changedDuringSync;
-          syncMessage = changedDuringSync
-            ? 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder. Newer edits still need Sync.'
-            : 'Synced ' + documentLabel(documentToSync) + ' and replaced its PDF in this folder.';
-          if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
-        });
-      }).catch(function (error) {
-        var message = error && error.message ? error.message : '';
-        if (!message || /fetch|network|load failed/i.test(message)) message = 'Infinite Canvas is not running or its Sync service is unavailable. Launch it, then try Sync again.';
-        syncMessage = message;
-        if (pdfBundleNote) pdfBundleNote.textContent = syncMessage;
-      }).finally(function () { syncInFlight = false; updateSync(); });
-    });
+  function sanitizedPanelMarkup(kind) {
+    var panel = kind === 'cover' ? coverMain : resumeMain;
+    if (!panel) return '';
+    return kind === 'cover' && panel === coverMain
+      ? icSanitizeEditableMarkup(panel.innerHTML, 'cover')
+      : icSanitizeEditableMarkup(panel.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations);
   }
+  // Saves one document: posts the page to Infinite Canvas, which merges the
+  // edited panel into Application.html and re-renders that document's PDF.
+  // The page is serialized from a detached copy so the caret and the live
+  // nodes the person is typing into are never touched.
+  function syncDocument(documentToSync, leaving) {
+    var sync = BUNDLE_DATA.sync || {};
+    if (!HAS_APPLICATION_BUNDLE || typeof fetch !== 'function' || !sync.endpoint || !sync.token) return;
+    persistBundleData();
+    var syncedPanelMarkup = sanitizedPanelMarkup(documentToSync);
+    var snapshot = document.documentElement.cloneNode(true);
+    Array.prototype.slice.call(snapshot.querySelectorAll('[contenteditable]')).forEach(function (node) { node.removeAttribute('contenteditable'); });
+    var snapshotPanel = documentToSync === 'cover'
+      ? snapshot.querySelector('[data-ic-document-panel="cover"] main')
+      : (snapshot.querySelector('main.page') || snapshot.querySelector('main'));
+    if (snapshotPanel) snapshotPanel.innerHTML = syncedPanelMarkup;
+    var currentHtml = '<!doctype html>\\n' + snapshot.outerHTML;
+    var request = {
+      method: 'POST', mode: 'cors', credentials: 'omit',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: sync.token, document: documentToSync, html: currentHtml, editNotes: undefined })
+    };
+    syncDirty[documentToSync] = false;
+    if (leaving) {
+      // The tab is going away. A keepalive request outlives the page but
+      // browsers cap its body near 64 KB; a larger page is sent as an ordinary
+      // request. If neither lands, the browser draft written just before this
+      // is saved the next time the file is opened.
+      if (request.body.length < 60000) request.keepalive = true;
+      try { fetch(sync.endpoint, request).catch(function () {}); } catch (e) {}
+      return;
+    }
+    syncMessage = '';
+    syncInFlight = true;
+    updateSaveIndicator();
+    if (pdfBundleNote) pdfBundleNote.textContent = 'Saving the ' + documentLabel(documentToSync) + ' and rendering a fresh PDF…';
+    fetch(sync.endpoint, request).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (body) {
+        if (!response.ok || !body.success) {
+          var failure = new Error(body.error || 'Infinite Canvas could not save this application.');
+          failure.icServerRefused = true;
+          throw failure;
+        }
+        var syncedHtmlSha256 = String(body.htmlSha256 || '').toLowerCase();
+        if (!/^[a-f0-9]{64}$/.test(syncedHtmlSha256)) {
+          var unconfirmed = new Error('Infinite Canvas did not confirm the saved document revision.');
+          unconfirmed.icServerRefused = true;
+          throw unconfirmed;
+        }
+        if (!BUNDLE_DATA.sync) BUNDLE_DATA.sync = {};
+        if (!BUNDLE_DATA.sync.documents) BUNDLE_DATA.sync.documents = {};
+        if (!BUNDLE_DATA.sync.documents[documentToSync]) BUNDLE_DATA.sync.documents[documentToSync] = {};
+        BUNDLE_DATA.sync.documents[documentToSync].htmlSha256 = syncedHtmlSha256;
+        var livePanelMarkup = sanitizedPanelMarkup(documentToSync);
+        // Typing that landed while the PDF rendered is not in it yet. Keep the
+        // document marked so the save that follows picks it up.
+        if (livePanelMarkup !== syncedPanelMarkup) syncDirty[documentToSync] = true;
+        icWriteAutosave(
+          documentToSync === 'cover' ? STORAGE_KEY + ':cover' : STORAGE_KEY,
+          livePanelMarkup,
+          documentToSync === 'cover' ? COVER_MARKUP_FINGERPRINT : RESUME_MARKUP_FINGERPRINT,
+          syncedHtmlSha256,
+        );
+        pdfStale[documentToSync] = syncDirty[documentToSync];
+        syncFailure = '';
+        savedOnce = true;
+        syncMessage = syncDirty[documentToSync] ? ''
+          : 'Saved. The ' + documentLabel(documentToSync) + ' PDF in this folder is up to date.';
+      });
+    }).catch(function (error) {
+      var message = error && error.message ? error.message : '';
+      syncDirty[documentToSync] = true;
+      if (error && error.icServerRefused) {
+        // Infinite Canvas answered and said no. Sending the same page again
+        // cannot change that, so wait for the next edit.
+        syncHold[documentToSync] = true;
+        syncFailure = 'refused';
+        syncMessage = message + ' Your changes are kept in this browser; the next edit tries again.';
+      } else {
+        syncFailure = 'offline';
+        syncMessage = 'Infinite Canvas is not running, so the PDF was not updated. Your changes are kept in this browser and are saved as soon as it is running.';
+        if (syncTimer) clearTimeout(syncTimer);
+        syncTimer = setTimeout(runPendingSync, AUTO_SYNC_RETRY_MS);
+      }
+    }).finally(function () { syncInFlight = false; updateSync(); });
+  }
+  function flushBrowserDrafts() {
+    if (saveTimer && resumeMain) {
+      clearTimeout(saveTimer); saveTimer = null;
+      icWriteAutosave(STORAGE_KEY, sanitizedPanelMarkup('resume'), RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
+    }
+    if (coverSaveTimer && coverMain) {
+      clearTimeout(coverSaveTimer); coverSaveTimer = null;
+      icWriteAutosave(STORAGE_KEY + ':cover', sanitizedPanelMarkup('cover'), COVER_MARKUP_FINGERPRINT, icPanelRevisionSha256('cover'));
+    }
+  }
+  // Switching away from the tab saves at once instead of waiting out the
+  // typing pause. The page is still alive, so this is an ordinary save.
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'hidden') return;
+    flushBrowserDrafts();
+    if (pendingSyncKind()) runPendingSync();
+  });
+  // Closing the tab: write the browser drafts first (that part is synchronous
+  // and always lands), then send whatever is still unsaved.
+  window.addEventListener('pagehide', function () {
+    flushBrowserDrafts();
+    if (reconcilePending) return;
+    var kind = pendingSyncKind();
+    while (kind) { syncDocument(kind, true); kind = pendingSyncKind(); }
+  });
 
   // ---- Web-font availability detection (§5.3) ----
   try {
