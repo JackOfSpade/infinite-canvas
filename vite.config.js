@@ -5,6 +5,11 @@ import tailwindcss from '@tailwindcss/vite'
 import { execFileSync } from 'node:child_process'
 import { applicationRendererSourceDigest } from './electron/ipc/applicationV2RendererVersion.js'
 import { MAIN_PROCESS_EXTERNALS } from './vite.main-externals.js'
+import { buildInputsManifest } from './vite.build-inputs.js'
+
+// Records which project files this build actually read. The launcher rebuilds
+// Infinite Canvas only when one of them changes, not on every edit in the repo.
+const inputs = buildInputsManifest('dist-electron/build-inputs.json')
 
 // package.json stays at 0.0.0, so stamp the main bundle with the commit it was
 // built from; generation logs use it to tell builds apart.
@@ -37,10 +42,12 @@ export default defineConfig({
   plugins: [
     tailwindcss(),
     react(),
+    inputs,
     electron([
       {
         entry: 'electron/main.js',
         vite: {
+          plugins: [inputs],
           // The CommonJS main bundle does not have a native import.meta. Vite's
           // dynamic-import preload helper contains an optional import.meta
           // branch even though that branch is disabled for CJS output; define
@@ -100,6 +107,7 @@ export default defineConfig({
           options.reload()
         },
         vite: {
+          plugins: [inputs],
           build: {
             rollupOptions: {
               output: {
@@ -113,6 +121,7 @@ export default defineConfig({
       {
         entry: 'electron/ipc/workspaceSaveWorkerThread.js',
         vite: {
+          plugins: [inputs],
           build: {
             rollupOptions: {
               output: {

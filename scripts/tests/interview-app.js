@@ -269,6 +269,12 @@ const tests = [
       // Staleness follows the files the build read, so a canvas-only edit does not rebuild this app.
       assert.match(launcher, /BUILD_INPUTS="\$PROJECT_DIR\/dist-electron-interview\/build-inputs\.json"/u);
       assert.match(read('vite.interview.config.js'), /build-inputs\.json/u);
+      // And the reverse: the canvas launcher follows its own build's list, so an edit only this app is built from does not rebuild Infinite Canvas.
+      assert.match(canvasLauncher, /BUILD_INPUTS="\$PROJECT_DIR\/dist-electron\/build-inputs\.json"/u);
+      assert.match(canvasLauncher, /manifest="\$\(source_manifest "\$BUILD_INPUTS"\)"/u);
+      assert.match(read('vite.config.js'), /buildInputsManifest\('dist-electron\/build-inputs\.json'\)/u);
+      const canvasInputs = canvasLauncher.slice(canvasLauncher.indexOf('if [[ -n "$inputs"'), canvasLauncher.indexOf('elif git -C'));
+      assert.doesNotMatch(canvasInputs, /native|ls-files[^\n]*--exclude-standard \|\|/u, 'with a list, the canvas launcher must not hash the whole repo or the native helpers only the other app ships');
     },
   },
 ];

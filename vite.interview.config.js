@@ -7,10 +7,8 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import tailwindcss from '@tailwindcss/vite'
-import fs from 'node:fs'
-import path from 'node:path'
-import process from 'node:process'
 import { MAIN_PROCESS_EXTERNALS } from './vite.main-externals.js'
+import { buildInputsManifest } from './vite.build-inputs.js'
 
 const ELECTRON_OUT_DIR = 'dist-electron-interview'
 const cjsEntry = (entry, extra = {}) => ({
@@ -25,23 +23,7 @@ const cjsEntry = (entry, extra = {}) => ({
 
 // Records which project files this build actually read. The launcher rebuilds
 // Interview Helper only when one of them changes, not on every canvas edit.
-function buildInputsManifest() {
-  const root = process.cwd()
-  const seen = new Set()
-  const manifestPath = path.join(root, ELECTRON_OUT_DIR, 'build-inputs.json')
-  const collect = function () {
-    for (const id of this.getModuleIds()) {
-      const file = id.split('?')[0]
-      if (!path.isAbsolute(file) || file.includes(`${path.sep}node_modules${path.sep}`)) continue
-      const relative = path.relative(root, file)
-      if (!relative.startsWith('..') && fs.existsSync(file)) seen.add(relative.split(path.sep).join('/'))
-    }
-    fs.mkdirSync(path.dirname(manifestPath), { recursive: true })
-    fs.writeFileSync(manifestPath, `${JSON.stringify([...seen].sort(), null, 1)}\n`)
-  }
-  return { name: 'interview-build-inputs', buildEnd: collect }
-}
-const inputs = buildInputsManifest()
+const inputs = buildInputsManifest(`${ELECTRON_OUT_DIR}/build-inputs.json`, 'interview-build-inputs')
 const withInputs = entry => ({ ...entry, vite: { ...entry.vite, plugins: [inputs] } })
 
 export default defineConfig({

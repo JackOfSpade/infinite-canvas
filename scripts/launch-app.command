@@ -1,9 +1,13 @@
 #!/bin/zsh
 # Infinite Canvas — ONE icon: rebuild only if the source changed, then launch the
 # app straight from the project's build output (no separate .app on the Desktop).
-# Loads nvm so npm is on PATH; electron-builder runs only when the source tree's
-# content hash differs from the hash recorded after the last SUCCESSFUL build.
+# Loads nvm so npm is on PATH; electron-builder runs only when the files this app
+# is built from differ from the hash recorded after the last SUCCESSFUL build.
 # Unchanged launches are instant; a real rebuild can take a few minutes.
+#
+# The other app in this repo has its own launcher, build command, release
+# folder, build stamp and lock. An edit to a file only that app is built from
+# does not rebuild this one. A file both apps bundle rebuilds both.
 #
 # This is the canonical, version-controlled launcher. "~/Desktop/Infinite
 # Canvas.command" is a thin wrapper that exec's this file — edit THIS one.
@@ -17,6 +21,8 @@ PROJECT_DIR="${0:A:h:h}"
 RELEASE_APP="$PROJECT_DIR/release/mac-arm64/infinite-canvas.app"
 # release/ is gitignored, so keeping launcher state under it is safe.
 STATE_DIR="$PROJECT_DIR/release/.launcher"
+# Written by the build: the project files it actually read (vite.config.js).
+BUILD_INPUTS="$PROJECT_DIR/dist-electron/build-inputs.json"
 STAMP="$STATE_DIR/last-build-ok"
 LOCK="$STATE_DIR/build.lock"
 LOG="$STATE_DIR/last-build.log"
@@ -47,13 +53,25 @@ notify() {
   osascript -e "display notification \"$msg\" with title \"Infinite Canvas\" sound name \"$2\"" >/dev/null 2>&1
 }
 
-# Prints a sha256 over the project's tracked/untracked-but-not-ignored source
-# paths and bytes. A same-size edit with a restored mtime still requires a
+# Prints a sha256 over the files Infinite Canvas is built from, paths and bytes.
+# With an inputs list ($1, written by the last build) that is the modules the
+# build read plus the build configuration and the folders packaged beside the
+# bundle, so an edit that only concerns the other app does not rebuild this
+# one. Without a list (first build) it is the whole tracked/untracked-but-not-
+# ignored source tree. A same-size edit with a restored mtime still requires a
 # rebuild; Info.plist's mtime can also survive an interrupted codesign pass.
 source_manifest() {
   setopt local_options pipe_fail
+  local inputs="$1"
   {
-    if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if [[ -n "$inputs" && -f "$inputs" ]]; then
+      node -e 'for (const file of JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))) process.stdout.write(file + "\0")' "$inputs" || return 1
+      printf '%s\0' package.json package-lock.json index.html vite.config.js vite.main-externals.js \
+        vite.build-inputs.js config/application-model.json scripts/build-macos.mjs \
+        scripts/launch-app.command scripts/source-manifest.mjs || return 1
+      # Packaged beside the bundle or read by electron-builder, not by Vite.
+      git -C "$PROJECT_DIR" ls-files -z --cached --others --exclude-standard -- public build local_ai 'Job Application Design System' || return 1
+    elif git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       # -z + --cached --others --exclude-standard: honours .gitignore exactly
       # (node_modules/dist/dist-electron/release/.env/.claude/.DS_Store all
       # excluded automatically) and catches added AND deleted files, which a
@@ -240,7 +258,7 @@ unset ELECTRON_RUN_AS_NODE          # electron-builder must NOT run under ELECTR
 
 mkdir -p "$STATE_DIR"
 
-manifest="$(source_manifest)" || fail "Source inventory failed."
+manifest="$(source_manifest "$BUILD_INPUTS")" || fail "Source inventory failed."
 
 need_build=0
 if [[ ! -d "$RELEASE_APP" ]]; then
@@ -268,7 +286,15 @@ if [[ "$need_build" -eq 1 ]]; then
   # is part of the manifest. Recompute after the install, otherwise we'd record
   # the pre-install hash and every subsequent launch would see a mismatch and
   # rebuild forever.
-  manifest="$(source_manifest)" || fail "Source inventory failed."
+  # The inputs list is rewritten by the build, so keep the copy this build
+  # started from: the "changed during the build" check must hash the same list
+  # before and after.
+  inputs_before=""
+  if [[ -f "$BUILD_INPUTS" ]]; then
+    inputs_before="$STATE_DIR/build-inputs.before.json"
+    cp "$BUILD_INPUTS" "$inputs_before" || fail "Could not snapshot the build inputs list."
+  fi
+  manifest="$(source_manifest "$inputs_before")" || fail "Source inventory failed."
 
   # Delete the success sentinel before the build itself touches the app
   # bundle. If this build is interrupted or killed, no stale sentinel
@@ -288,14 +314,17 @@ if [[ "$need_build" -eq 1 ]]; then
 
   # A source edit made while packaging was running may not be in the bundle.
   # Leave the success sentinel absent so the next launch must rebuild it.
-  postbuild_manifest="$(source_manifest)" || fail "Source inventory failed after build."
+  # The stamp is the hash over the list this build just wrote; take it first so
+  # an edit landing after it is still caught by the same-list check below.
+  built_manifest="$(source_manifest "$BUILD_INPUTS")" || fail "Source inventory failed after build."
+  postbuild_manifest="$(source_manifest "$inputs_before")" || fail "Source inventory failed after build."
   if [[ "$postbuild_manifest" != "$manifest" ]]; then
     fail "Source changed during the build. Launch again to build the latest files."
   fi
 
   # Only record success after a clean build exit - this is what makes the
   # sentinel trustworthy for the staleness check above.
-  print -r -- "$manifest" > "$STAMP"
+  print -r -- "$built_manifest" > "$STAMP"
   notify "Infinite Canvas rebuilt." "Glass"
 else
   echo "> Up to date - launching."

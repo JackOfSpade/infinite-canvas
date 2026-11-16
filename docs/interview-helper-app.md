@@ -30,7 +30,11 @@ worker, and the `src/components/Interview*` / `src/interview-window/` /
 
 The Interview Helper launcher rebuilds only when a file its build read has
 changed (`dist-electron-interview/build-inputs.json`), so a Job Search-only
-edit does not rebuild it.
+edit does not rebuild it. The Infinite Canvas launcher does the same with
+`dist-electron/build-inputs.json`, so an edit to a file only Interview Helper
+is built from does not rebuild Infinite Canvas. A file both apps bundle
+rebuilds both. Each launcher falls back to hashing the whole repo until its
+first build has written that list.
 
 ## Data
 

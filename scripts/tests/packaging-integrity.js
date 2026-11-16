@@ -421,9 +421,9 @@ export default [
         && !launcher.includes("stat -f '%N|%m|%z'"),
       'the launcher must use the content digest instead of a filename/mtime/size stamp');
       const buildStart = launcher.indexOf('npm run build 2>&1 | tee "$LOG"');
-      const postBuild = launcher.indexOf('postbuild_manifest="$(source_manifest)"', buildStart);
+      const postBuild = launcher.indexOf('postbuild_manifest="$(source_manifest "$inputs_before")"', buildStart);
       const changedDuringBuild = launcher.indexOf('[[ "$postbuild_manifest" != "$manifest" ]]', postBuild);
-      const stampWrite = launcher.indexOf('print -r -- "$manifest" > "$STAMP"', changedDuringBuild);
+      const stampWrite = launcher.indexOf('print -r -- "$built_manifest" > "$STAMP"', changedDuringBuild);
       assert(buildStart >= 0 && postBuild > buildStart && changedDuringBuild > postBuild && stampWrite > changedDuringBuild
         && launcher.includes('setopt local_options pipe_fail')
         && launcher.includes('ls-files -z --cached --others --exclude-standard || return 1'),
