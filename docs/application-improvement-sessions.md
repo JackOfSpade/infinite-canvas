@@ -81,6 +81,20 @@ Shadow measurement: launch the app with `INFINITE_CANVAS_SHADOW_OFFLOAD` (comma 
 
 ## Session log
 
+### 2026-11-16 — improvement session; no generator change; career source reworded; counter reset
+
+Run with the counter at 3. Coverage: all 3 pairs since the 2026-11-15 session, one model label, none superseded, all on one career snapshot. All three were résumé-only. Two résumés were saved unedited; one carried two bullet edits, both with notes. No truth errors, and no edit was source-resolved.
+
+Findings, notes first:
+- **A trailing collaborator clause on a résumé bullet**, cut with the note that solo versus shared work can wait for the interview. The other two résumés led the same bullet with the collaborator and were kept. The clause comes from a collaboration sentence in the career source.
+- **A generic source label for an employer system**, replaced by the user with a plain word, with the note that it may be a career data fix. The same label was in the other two résumés and kept. The résumés repeat the source's own wording.
+
+Neither pattern recurs across bundles and both trace to source wording, so no guidance, rubric or code changed. With the user's approval the career source was edited (private backup kept): the collaboration sentence was removed from that one item, and the label was replaced with the system's type and product name. Both are new career-data watch items, `acting` until a bundle on the re-imported source confirms them. A personal project entry was also added to the source at the user's request.
+
+Watch list: reviewed for all 3 pairs. The operating-system item is resolved (the one bundle listing the project omits it on the reworded source). Kept-unedited evidence was recorded for the narrow Skills subset, the from-scratch lead, the weak verb and the follow-on bullet.
+
+Test: none; nothing changed in the generator, so no replay, panel, truth recall or frozen-set replay was run. Frozen regression set: the oldest pair dropped, the edited pair added (20). Counter reset after this entry.
+
 ### 2026-11-15 — improvement session; three-point cap, closing applied to the job, past-employer naming; editor undo history; counter reset
 
 Run at the user's request with the counter at 5. Coverage: nine pairs since the 2026-11-07 session, under one model label, none superseded: the five in the store and four that an 11-08 archive had set aside unreviewed. All nine résumés were kept as generated (two bundles were résumé-only). Five letters were edited, all with notes; two letters were saved untouched. No truth errors, and no edit was source-resolved.
