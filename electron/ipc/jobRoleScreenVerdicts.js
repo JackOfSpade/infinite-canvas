@@ -26,7 +26,9 @@ import electronPkg from 'electron';
 import { createFifoLock } from './asyncMutex.js';
 
 const FILE_NAME = 'job-role-screen-verdicts.json';
-const VERSION = 2;
+// 3: the screen also removes test/placeholder postings, so a 'match' saved
+// under the older rules for such a title must not be replayed.
+const VERSION = 3;
 // Least recently used entries go first past this count, across all lists.
 export const ROLE_SCREEN_VERDICT_MAX_ENTRIES = 20_000;
 // A replayed mismatch needs this many DISTINCT employers behind it.

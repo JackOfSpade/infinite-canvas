@@ -1151,4 +1151,32 @@ export default [
       return { realRejectedLengthAccepted: accepted.rationale.length, overBoundRejected: true, promptStatesWordLimit: true };
     },
   },
+  {
+    // A test/placeholder posting ("[TEST JOB] ... DO NOT APPLY") has a real
+    // description and a target-like title, so nothing else removes it. The AI
+    // judges it (no title regex); the screen must tell the AI to, on both
+    // passes, and must honour the removal.
+    name: 'Role screen asks the AI to remove test/placeholder postings and drops the one it names',
+    run: async () => {
+      const prompts = [];
+      const result = await screenJobRolesByTitle({
+        jobs: [
+          { title: '[TEST JOB] Software Developer - DO NOT APPLY', company: 'My Test Org' },
+          { title: 'Software Engineer in Test', company: 'Acme' },
+        ],
+        titles: ['Software Developer'],
+        callText: async (prompt) => {
+          prompts.push(prompt);
+          return { remove: [{ reason: 'test posting', indexes: [0] }], unsure: [] };
+        },
+      });
+      assert(prompts.length === 1 && /not a real vacancy/u.test(prompts[0]) && /test, placeholder or dummy posting/u.test(prompts[0]), 'title prompt carries the test-posting rule');
+      assert(/quality assurance is a real vacancy/u.test(prompts[0]), 'prompt protects real testing roles');
+      assert(result.droppedJobs.length === 1 && result.droppedJobs[0].roleScreen.reason === 'test posting', 'the named test posting is removed with its reason');
+      assert(result.acceptedJobs.length === 1 && result.acceptedJobs[0].title === 'Software Engineer in Test', 'the real testing role is kept');
+      const source = fs.readFileSync(new URL('../../electron/ipc/jobPreferences.js', import.meta.url), 'utf8');
+      assert(/descriptionOpening[\s\S]{0,400}/u.test(source) && (source.match(/\+ ROLE_SCREEN_PROMPT_RULES \+/gu) || []).length === 2, 'both screen passes share the rule text');
+      return { prompts: prompts.length };
+    },
+  },
 ];
