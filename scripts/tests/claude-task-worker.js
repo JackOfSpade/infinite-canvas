@@ -8,7 +8,7 @@ import {
   CLAUDE_TASK_PROFILES,
   profile,
 } from '../../electron/ipc/claudeTaskProfiles.js';
-import { cachedPromptParts, claudeTaskStatusView, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
+import { cachedPromptParts, claudeTaskStatusView, CLAUDE_TASK_PAUSE_CODES, createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';
 import { noteParallelLimit, PARALLEL_LIMIT_NOTICE, parallelBlocked, parallelExhaustedError, parallelPlainLeads, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { createShadowMeasure } from '../../electron/ipc/aiShadowMeasure.js';
 import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
@@ -651,7 +651,7 @@ export default [
     },
   },
   {
-    name: 'claude task worker offload: an OFFLOAD_ error is answered on Claude in the same serve, with no backoff',
+    name: 'claude task worker offload: an OFFLOAD_ error is a failed attempt retried on DeepSeek with backoff; Claude never answers a routed task',
     async run() {
       const rows = []; let calls = 0;
       const { worker, state } = harness({
@@ -662,47 +662,49 @@ export default [
       worker.start();
       await settle();
       assert.equal(calls, 1);
-      assert.equal(state.stages.length, 1);
-      assert.equal(state.submits.length, 1);
-      assert.equal(state.submits[0].response, 'answer');
-      assert.equal(state.timers.length, 0, 'no retry timer was armed');
-      assert.equal(rows[0].provider, 'claude');
-      assert.equal(worker.status().providerNotice, null, 'an ordinary offload error shows no notice');
+      assert.equal(state.stages.length, 0, 'Claude was not called');
+      assert.equal(state.submits.length, 0);
+      assert.equal(state.pending.size, 1, 'the request stays queued');
+      assert.equal(worker.status().retrying, 1, 'the failure is counted and shown');
+      assert.equal(worker.status().paused, false, 'an ordinary offload error does not pause the worker');
+      assert.equal(worker.activity().tasks.a.state, 'retrying');
+      assert.equal(worker.activity().tasks.a.failure.code, 'OFFLOAD_PROVIDER_ERROR');
+      assert.equal(state.timers.length > 0, true, 'a retry is scheduled');
     },
   },
   {
-    name: 'claude task worker offload: credit exhaustion falls back, blocks offload for 30 minutes and exposes providerNotice',
+    name: 'claude task worker offload: credit exhaustion pauses the worker with queued work kept, and Resume retries DeepSeek',
     async run() {
-      let calls = 0;
+      let calls = 0; let credit = false;
       const { worker, state } = harness({
         entries: [entry('a')], runStage: () => answer,
         routeFor: () => OFFLOAD_ROUTE,
-        offloadCall: async () => { calls += 1; throw Object.assign(new Error('credit'), { code: 'OFFLOAD_CREDIT_EXHAUSTED' }); },
+        offloadCall: async () => {
+          calls += 1;
+          if (!credit) throw Object.assign(new Error('credit'), { code: 'OFFLOAD_CREDIT_EXHAUSTED' });
+          return { text: 'ds answer', model: 'deepseek-v4-flash', usage: {} };
+        },
       });
       worker.start();
       await settle();
       assert.equal(calls, 1);
-      assert.equal(state.stages.length, 1);
-      const notice = 'DeepSeek credit is exhausted; AI tasks continue on Claude. Top up DeepSeek to resume savings.';
-      assert.equal(worker.status().providerNotice, notice);
+      assert.equal(state.stages.length, 0, 'Claude does not step in');
+      assert.equal(state.pending.size, 1, 'the request stays queued');
+      assert.equal(worker.status().retrying, 0, 'waiting for credit is not a failed attempt');
       const view = claudeTaskStatusView(worker.status());
-      assert.equal(view.providerNotice, notice);
-      assert.equal(view.paused, false);
-      assert.equal(view.pauseCode, null);
-      assert.equal(Object.hasOwn(claudeTaskStatusView({ paused: false }), 'providerNotice'), false, 'no notice field without a notice');
-      state.pending.set('b', entry('b', { task: 'job-scoring' }));
+      assert.equal(view.paused, true);
+      assert.equal(view.pauseCode, 'OFFLOAD_CREDIT_EXHAUSTED');
+      assert.equal(CLAUDE_TASK_PAUSE_CODES.includes('OFFLOAD_CREDIT_EXHAUSTED'), true);
       worker.pump();
       await settle();
-      assert.equal(calls, 1, 'a later task does not try offload while blocked');
-      assert.equal(state.stages.length, 2);
-      state.clock += 29 * 60_000;
-      assert.equal(worker.status().providerNotice, notice);
-      state.clock += 2 * 60_000;
-      assert.equal(worker.status().providerNotice, null, 'the block ends after 30 minutes');
-      state.pending.set('c', entry('c'));
-      worker.pump();
+      assert.equal(calls, 1, 'nothing is tried while paused');
+      credit = true;
+      worker.resumeNow();
       await settle();
-      assert.equal(calls, 2, 'offload is tried again once the block has ended');
+      assert.equal(calls, 2, 'Resume retries DeepSeek at once');
+      assert.deepEqual(state.submits.map(item => item.response), ['ds answer']);
+      assert.equal(state.stages.length, 0);
+      assert.equal(worker.status().paused, false);
     },
   },
   {
@@ -722,20 +724,19 @@ export default [
     },
   },
   {
-    name: 'claude task worker offload: two rejected offload answers escalate the request to Claude',
+    name: 'claude task worker offload: rejected offload answers are corrected by DeepSeek again and never escalate to Claude',
     async run() {
       let calls = 0;
       const { worker, state } = harness({
         entries: [entry('a')], runStage: () => answer,
         routeFor: () => OFFLOAD_ROUTE,
         offloadCall: async () => { calls += 1; return { text: `ds ${calls}`, model: 'deepseek-v4-flash', usage: {} }; },
-        submit: args => (args.response.startsWith('ds') ? { outcome: 'rejected' } : { outcome: 'accepted' }),
+        submit: args => (args.response === 'ds 4' ? { outcome: 'accepted' } : { outcome: 'rejected' }),
       });
       worker.start();
       await settle();
-      assert.equal(calls, 2);
-      assert.deepEqual(state.submits.map(item => item.response), ['ds 1', 'ds 2', 'answer']);
-      assert.equal(state.stages.length, 1);
+      assert.deepEqual(state.submits.map(item => item.response), ['ds 1', 'ds 2', 'ds 3', 'ds 4']);
+      assert.equal(state.stages.length, 0, 'Claude was never called');
       assert.equal(state.pending.size, 0);
     },
   },
@@ -923,7 +924,7 @@ export default [
     },
   },
   {
-    name: 'claude task worker web offload: a web task with photos never routes, and an entry maxRejections sets the escalation limit',
+    name: 'claude task worker web offload: a web task with photos never routes',
     async run() {
       const photo = harness({
         entries: [entry('a', { task: 'job-compensation-research-batch', hasAttachments: true })],
@@ -934,17 +935,6 @@ export default [
       photo.worker.start();
       await settle();
       assert.equal(photo.state.stages.length, 1);
-      let calls = 0;
-      const { worker, state } = harness({
-        entries: [entry('b')], runStage: () => answer,
-        routeFor: () => ({ ...OFFLOAD_ROUTE, maxRejections: 3 }),
-        offloadCall: async () => { calls += 1; return { text: `ds ${calls}`, model: 'deepseek-v4-flash', usage: {} }; },
-        submit: args => (args.response.startsWith('ds') ? { outcome: 'rejected' } : { outcome: 'accepted' }),
-      });
-      worker.start();
-      await settle();
-      assert.equal(calls, 3);
-      assert.deepEqual(state.submits.map(item => item.response), ['ds 1', 'ds 2', 'ds 3', 'answer']);
     },
   },
   {

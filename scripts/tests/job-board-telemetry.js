@@ -1,4 +1,8 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { buildJobCompletionAssessment, writeLastRunReceipt } from '../test-dependencies.js';
 import electronPkg from 'electron';
 import { __runWithIpcRequestContextForTests as withRequest } from '../../electron/ipc/ipcUtils.js';
 import {
@@ -251,6 +255,61 @@ export default [
       record.history.boardDisplay.skips.url = 99;
       assert.equal(report(owner, ['board-a'])[0].bucketing.input, 3);
       assert.equal(report(owner, ['board-a'])[0].history.boardDisplay.skips.url, 1);
+    },
+  },
+  {
+    // A Board-run scan records taxonomy and the displayed seen-history write
+    // under the Board. The completion assessment read only the source hub's
+    // record, so every such run reported both as "not retained" and could
+    // never leave INDETERMINATE.
+    name: 'Completion assessment reads taxonomy and seen-history from the one Board that consumed the run',
+    async run() {
+      __resetJobsTelemetryForTests();
+      const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'ic-board-stage-assessment-'));
+      const canvas = path.join(dir, 'workspace.json');
+      const owner = sender(8110);
+      owner.__canvasPath = canvas;
+      try {
+        await fs.promises.writeFile(canvas, JSON.stringify({ nodes: [] }), 'utf8');
+        const startedAt = Date.now() - 60_000;
+        const receipt = (started) => writeLastRunReceipt(canvas, {
+          runId: 'run-board-stage', nodeId: 'source-a', startedAt: started, completedAt: started + 30_000,
+          terminal: { status: 'completed', outcome: 'populated', scoreReadyCount: 3 },
+          cleanup: { attempted: true, cleared: true },
+        });
+        await receipt(startedAt);
+        const stamp = (ts) => inRequest(owner, 'board-a', 'bucket-jobs', () => {
+          const telemetry = getJobsTelemetry();
+          telemetry.bucketing = { ts, input: 3, placed: 3, missing: 0, duplicated: 0, taxonomyStage: 'complete' };
+          telemetry.history = { boardDisplay: { ts, input: 3, staged: 3, eligible: 3, written: 0 } };
+        });
+        const board = { id: 'board-a', hubState: 'done', stale: false, resultCount: 3, renderedCardCount: 3,
+          mergeUnique: 3, locationPostingsCollapsed: 0, connectedSourceHubIds: ['source-a'],
+          combineSourceRuns: [{ sourceHubId: 'source-a', runId: 'run-board-stage' }],
+          combineSignature: `8:${JSON.stringify([['source-a', 'fingerprint']])}` };
+        const assess = (states = [board]) => inRequest(owner, null, 'bug-report',
+          () => buildJobCompletionAssessment(canvas, new Set(['source-a', 'board-a']), states, states.length, new Set(['source-a']), owner.id));
+
+        stamp(startedAt + 45_000);
+        const current = assess();
+        assert.match(current, /- Taxonomy: input 3 · missing 0 · duplicated 0.* Recorded by Job Board `[^`]+`, which ran this stage\./);
+        assert.match(current, /- Seen-history write: ✅ 3 job\(s\).* Recorded by Job Board/);
+        assert.equal(/- (Taxonomy|Seen-history write): not retained/.test(current), false, current);
+        assert.equal(current.includes('board-a'), false, 'the Board id stays redacted');
+
+        // An older combine of the same Board says nothing about this run.
+        stamp(startedAt - 5_000);
+        const older = assess();
+        assert.ok(older.includes('- Taxonomy: not retained in this process.')
+          && older.includes('- Seen-history write: not retained in this process.'), older);
+
+        // Two Boards that both consumed the run: no single record is chosen.
+        stamp(startedAt + 45_000);
+        const twoBoards = assess([board, { ...board, id: 'board-b' }]);
+        assert.ok(twoBoards.includes('- Taxonomy: not retained in this process.'), twoBoards);
+      } finally {
+        await fs.promises.rm(dir, { recursive: true, force: true });
+      }
     },
   },
   {

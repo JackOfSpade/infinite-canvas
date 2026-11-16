@@ -8,6 +8,10 @@
 // When a Parallel web task's search is out of usage the worker pauses with
 // PARALLEL_SEARCH_EXHAUSTED and keeps the queued work, so the owner can add
 // credits and press Resume. A built-in-web task never pauses for Parallel.
+// A task routed to DeepSeek (aiCallProviders.js `task:<id>`) is answered by DeepSeek only (the
+// owner's rule, 2026-11-15): Claude never steps in. When DeepSeek credit is exhausted the worker
+// pauses with OFFLOAD_CREDIT_EXHAUSTED and keeps the queued work; any other DeepSeek failure is a
+// failed attempt that the dock shows and the worker retries with backoff.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -53,8 +57,8 @@ const USAGE_LIMIT_WAIT_MS = 10 * 60_000;
 const RESEARCH_MAX_TURNS = 16;
 const IMAGE_MAX_EDGE = 1568;
 const ACTIVITY_NOTIFY_MS = 500;
-const OFFLOAD_BLOCK_MS = 30 * 60_000;
-const OFFLOAD_REJECTION_LIMIT = 2;
+const OFFLOAD_PAUSE_MS = 10 * 60_000;
+export const OFFLOAD_CREDIT_CODE = 'OFFLOAD_CREDIT_EXHAUSTED';
 // A Parallel web task waits for a limit to pass: its search has no fallback.
 const PARALLEL_PAUSE_MS = 10 * 60_000;
 const PARALLEL_TOOL_PREFIX = 'mcp__parallel__';
@@ -78,7 +82,6 @@ export function toolSearchKind(tools) {
 // together 9 on the second seed; location cards correct 2 and 9 of 24 against 1 and 4, together 2 and
 // 8; preference research over 172 checks answered by both decided 166 confirmed / 2 conflicts / 4
 // unverified with built-in against 158 / 2 / 12 with Parallel, the same two conflicts decided.
-export const OFFLOAD_CREDIT_NOTICE = 'DeepSeek credit is exhausted; AI tasks continue on Claude. Top up DeepSeek to resume savings.';
 
 const SEAM = Object.freeze({
   list: listWorkerHandoffs,
@@ -93,7 +96,7 @@ const SEAM = Object.freeze({
 
 export const CLAUDE_TASK_STATUS_CHANNEL = 'get-claude-task-status';
 // Only these stops are shown to the person; anything else just retries quietly.
-export const CLAUDE_TASK_PAUSE_CODES = Object.freeze(['CLAUDE_USAGE_LIMIT', 'CLAUDE_NOT_SIGNED_IN', 'CLAUDE_CLI_MISSING', PARALLEL_EXHAUSTED_CODE]);
+export const CLAUDE_TASK_PAUSE_CODES = Object.freeze(['CLAUDE_USAGE_LIMIT', 'CLAUDE_NOT_SIGNED_IN', 'CLAUDE_CLI_MISSING', PARALLEL_EXHAUSTED_CODE, OFFLOAD_CREDIT_CODE]);
 export const CLAUDE_TASK_ACTIVITY_CHANNEL = 'get-claude-task-activity';
 export const CLAUDE_TASK_ACTIVITY_EVENT = 'claude-task:activity';
 
@@ -230,9 +233,6 @@ export function createClaudeTaskWorker({
   parallel = { enabled: async () => !parallelBlocked(), readKey: readParallelKey, plainLeads: parallelPlainLeads },
 } = {}) {
   const allowTasks = new Set(taskIds);
-  let offloadBlockedUntil = 0;
-  const offloadRejections = new Map();
-  const escalated = new Set();
   // Requests whose attempt actually ran on Claude (not a routed provider), so a
   // failure knows whether the spend it reports is Claude's.
   const claudeAttempts = new Set();
@@ -320,6 +320,13 @@ export function createClaudeTaskWorker({
       failures.delete(entry.requestId);
       activity.released(entry.requestId);
       return pause(error.code, PARALLEL_PAUSE_MS);
+    }
+    if (error?.code === OFFLOAD_CREDIT_CODE) {
+      // DeepSeek is out of credit and Claude may not answer a routed task, so this
+      // request waits in the queue for a top-up: no failed attempt, nothing given up.
+      failures.delete(entry.requestId);
+      activity.released(entry.requestId);
+      return pause(error.code, OFFLOAD_PAUSE_MS);
     }
     if (error?.code === CLAUDE_PROMPT_TOO_LONG) {
       // No retry or manual paste can make this prompt fit, so its caller is told.
@@ -428,25 +435,18 @@ export function createClaudeTaskWorker({
     const handoff = seam.read({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks, ...(comparisonProvenance ? { comparisonProvenance } : {}) });
     if (!handoff?.ok) return;
     seam.assigned({ requestId: entry.requestId, handoffCode: entry.handoffCode, allowTasks });
-    activity.begin(entry.requestId, { task: entry.task, model: profile.model, effort: profile.effort, maxTurns: profile.tools ? RESEARCH_MAX_TURNS : null, rejections: entry.rejections, nodeId: entry.nodeId });
+    // A routed task is DeepSeek's alone: its failure is thrown to handleFailure (a credit pause, or a
+    // failed attempt with backoff) and a rejected answer is corrected by DeepSeek again. Claude never answers it.
+    const route = !profile.tools && !entry.hasAttachments ? routeFor(entry.task) : null;
+    activity.begin(entry.requestId, { task: entry.task, model: route ? route.route : profile.model, effort: route ? route.reasoning : profile.effort, maxTurns: profile.tools ? RESEARCH_MAX_TURNS : null, rejections: entry.rejections, nodeId: entry.nodeId });
     const cached = cachedPromptParts(handoff.prompt, handoff.cachedPrefix);
-    // A task with a table entry and no photos may be answered off Claude when it has no tools. A web
-    // task never is: only its own search may answer it, so a cheaper model cannot step in either.
-    let route = !profile.tools && !entry.hasAttachments && !escalated.has(entry.requestId) && now() >= offloadBlockedUntil
-      ? routeFor(entry.task) : null;
     let reply = null;
     let provider = 'claude';
     if (route) {
-      try {
-        reply = await offloadCall({
-          messages: handoffMessages(cached), route: route.route, reasoning: route.reasoning, tag: entry.task, signal: controller.signal,
-        });
-        provider = 'offload';
-      } catch (error) {
-        if (typeof error?.code !== 'string' || !error.code.startsWith('OFFLOAD_')) throw error;
-        logger.warn(`[Claude tasks] '${entry.task}' offload failed (${error.code}); answering on Claude.`);
-        if (error.code === 'OFFLOAD_CREDIT_EXHAUSTED') offloadBlockedUntil = now() + OFFLOAD_BLOCK_MS;
-      }
+      reply = await offloadCall({
+        messages: handoffMessages(cached), route: route.route, reasoning: route.reasoning, tag: entry.task, signal: controller.signal,
+      });
+      provider = 'offload';
     }
     if (!reply) {
       const pageImages = await imagesFor(entry);
@@ -482,8 +482,8 @@ export function createClaudeTaskWorker({
       : { at: new Date(now()).toISOString(), task: entry.task, model: reply.model, effort: profile.effort, usage: reply.usage, costUsd: reply.costUsd, provider });
     claudeAttempts.delete(entry.requestId);
     failures.delete(entry.requestId);
-    if (provider === 'claude') {
-      // An answer proves Claude is usable again, which is what ends a pause notice.
+    if (provider === 'claude' || pauseCode === OFFLOAD_CREDIT_CODE) {
+      // An answer proves its provider is usable again, which is what ends a pause notice.
       pauseCode = null;
       pausedAt = null;
       activity.setPause(false, null);
@@ -519,14 +519,6 @@ export function createClaudeTaskWorker({
         });
       } catch { /* recording cannot change or fail the task */ }
     }
-    if (provider === 'offload') {
-      if (outcome?.outcome === 'rejected') {
-        const count = (offloadRejections.get(entry.requestId) || 0) + 1;
-        offloadRejections.set(entry.requestId, count);
-        const limit = Number.isInteger(route.maxRejections) && route.maxRejections >= 1 && route.maxRejections <= 5 ? route.maxRejections : OFFLOAD_REJECTION_LIMIT;
-        if (count >= limit) escalated.add(entry.requestId);
-      } else offloadRejections.delete(entry.requestId);
-    }
     if (shadowValidate) {
       try {
         shadow.measure({
@@ -557,8 +549,6 @@ export function createClaudeTaskWorker({
     for (const [requestId, run] of running) if (!live.has(requestId)) run.controller.abort();
     for (const requestId of failures.keys()) if (!live.has(requestId)) failures.delete(requestId);
     for (const requestId of [...claudeAttempts]) if (!live.has(requestId)) claudeAttempts.delete(requestId);
-    for (const requestId of [...offloadRejections.keys()]) if (!live.has(requestId)) offloadRejections.delete(requestId);
-    for (const requestId of [...escalated]) if (!live.has(requestId)) escalated.delete(requestId);
     activity.prune(live);
     if (snapshot.retryAfterMs > 0) wakeIn(snapshot.retryAfterMs);
     // A handoff past its backoff, or past a slot limit, is waiting for a turn.
@@ -609,7 +599,6 @@ export function createClaudeTaskWorker({
       for (const run of running.values()) run.controller.abort();
     },
     status: () => Object.freeze({ running: running.size, retrying: failures.size, paused: now() < pausedUntil, pauseCode,
-      providerNotice: now() < offloadBlockedUntil ? OFFLOAD_CREDIT_NOTICE : null,
       searchNotice: parallelSearchNotice() }),
     activity: () => activity.snapshot(),
     // Resolves when this node's running calls have ended and their answers are in.

@@ -2616,3 +2616,898 @@ Reading: the render must stay first. Parallel's reader can present a removed pos
 
 Recorded cost so far: Parallel usage only (40 page reads).
 <!-- /ai-test-run:2026-11-15-render-vs-parallel -->
+
+<!-- ai-test-run:2026-11-15T15-07-26-934Z-claude-effort-ladderrun-213cce -->
+### 2026-11-15 15:07 UTC · claude-effort-ladder run · editorial-plan · opus:xhigh
+
+- Status: **finished** (updated 2026-11-15 15:12:54 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/planner-new`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/planner-new-records.jsonl --configs opus:xhigh --reps 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/planner-new --concurrency 4`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/planner-new-records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| editorial-plan opus:xhigh | 14 | 14 | 0 | $6.450 |  |
+
+Recorded cost so far: $6.450.
+<!-- /ai-test-run:2026-11-15T15-07-26-934Z-claude-effort-ladderrun-213cce -->
+
+<!-- ai-test-run:2026-11-15T15-13-10-976Z-claude-effort-ladderrun-200b63 -->
+### 2026-11-15 15:13 UTC · claude-effort-ladder run · write · opus:low
+
+- Status: **finished** (updated 2026-11-15 15:18:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/writer-new`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/writer-new-records.jsonl --configs opus:low --reps 1 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/writer-new --concurrency 4`
+- Records: 28 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/writer-new-records.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 28 | 28 | 0 | $11.29 |  |
+
+Recorded cost so far: $11.29.
+<!-- /ai-test-run:2026-11-15T15-13-10-976Z-claude-effort-ladderrun-200b63 -->
+
+<!-- ai-test-run:2026-11-15T15-19-23-471Z-claude-effort-ladderrun-9619fb -->
+### 2026-11-15 15:19 UTC · claude-effort-ladder run · improvement-panel · sonnet:high
+
+- Status: **finished** (updated 2026-11-15 15:20:35 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/panel`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/panel-records.jsonl --configs sonnet:high --reps 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/panel --concurrency 6`
+- Records: 14 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-improvement-session/panel-records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| improvement-panel sonnet:high | 28 | 28 | 0 | $0.800 |  |
+
+Recorded cost so far: $0.800.
+<!-- /ai-test-run:2026-11-15T15-19-23-471Z-claude-effort-ladderrun-9619fb -->
+
+<!-- ai-test-run:2026-11-15T15-31-39-394Z-claude-effort-ladderrun-31a181 -->
+### 2026-11-15 15:31 UTC · claude-effort-ladder run · job-taxonomy-plan · haiku:low, haiku:medium, sonnet:low
+
+- Status: **finished** (updated 2026-11-15 15:32:45 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/taxonomy-plan`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/taxonomy-plan.jsonl --configs haiku:low,haiku:medium,sonnet:low --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/taxonomy-plan`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/taxonomy-plan.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-taxonomy-plan haiku:low | 8 | 8 | 0 | $0.017 |  |
+| job-taxonomy-plan haiku:medium | 8 | 8 | 0 | $0.017 |  |
+| job-taxonomy-plan sonnet:low | 8 | 8 | 0 | $0.163 |  |
+
+Recorded cost so far: $0.197.
+<!-- /ai-test-run:2026-11-15T15-31-39-394Z-claude-effort-ladderrun-31a181 -->
+
+<!-- ai-test-run:2026-11-15T15-32-45-721Z-claude-effort-ladderrun-e0ef41 -->
+### 2026-11-15 15:32 UTC · claude-effort-ladder run · job-compensation-assessment-batch · sonnet:low, opus:low, sonnet:medium, haiku:medium
+
+- Status: **finished** (updated 2026-11-15 15:55:31 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/comp-assessment`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/comp-assessment.jsonl --configs sonnet:low,opus:low,sonnet:medium,haiku:medium --reps 2 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/comp-assessment`
+- Records: 5 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/comp-assessment.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-compensation-assessment-batch haiku:medium | 10 | 10 | 0 | $0.252 |  |
+| job-compensation-assessment-batch opus:low | 10 | 10 | 0 | $2.692 |  |
+| job-compensation-assessment-batch sonnet:low | 10 | 10 | 0 | $1.588 |  |
+| job-compensation-assessment-batch sonnet:medium | 10 | 10 | 0 | $1.920 |  |
+
+Recorded cost so far: $6.453.
+<!-- /ai-test-run:2026-11-15T15-32-45-721Z-claude-effort-ladderrun-e0ef41 -->
+
+<!-- ai-test-run:2026-11-15T15-33-56-587Z-claude-effort-ladderrun-594b45 -->
+### 2026-11-15 15:33 UTC · claude-effort-ladder run · write · opus:low, opus:medium, sonnet:high
+
+- Status: **finished** (updated 2026-11-15 15:36:27 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/write-cover-only`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/write-cover-only.jsonl --configs opus:low,opus:medium,sonnet:high --reps 3 --concurrency 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/write-cover-only`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/write-cover-only.jsonl
+- Reps: 3
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:low | 3 | 3 | 0 | $1.143 |  |
+| write opus:medium | 3 | 3 | 0 | $1.323 |  |
+| write sonnet:high | 3 | 3 | 0 | $0.660 |  |
+
+Recorded cost so far: $3.125.
+<!-- /ai-test-run:2026-11-15T15-33-56-587Z-claude-effort-ladderrun-594b45 -->
+
+<!-- ai-test-run:2026-11-15T15-35-20-680Z-claude-effort-ladderrun-536db5 -->
+### 2026-11-15 15:35 UTC · claude-effort-ladder run · job-taxonomy-plan · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 15:42:56 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/taxonomy-plan`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/taxonomy-plan.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/taxonomy-plan`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/taxonomy-plan.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-taxonomy-plan flash:high | 8 | 8 | 0 | $0.017 |  |
+| job-taxonomy-plan flash:low | 8 | 8 | 0 | $0.010 |  |
+| job-taxonomy-plan flash:medium | 8 | 8 | 0 | $0.015 |  |
+| job-taxonomy-plan flash:off | 8 | 8 | 0 | $0.005 |  |
+| job-taxonomy-plan haiku:low | 8 | 8 | 0 | $0.017 |  |
+| job-taxonomy-plan haiku:medium | 8 | 8 | 0 | $0.017 |  |
+| job-taxonomy-plan pro:high | 8 | 8 | 0 | $0.095 |  |
+| job-taxonomy-plan pro:low | 8 | 8 | 0 | $0.072 |  |
+| job-taxonomy-plan pro:medium | 8 | 8 | 0 | $0.115 |  |
+| job-taxonomy-plan pro:off | 8 | 8 | 0 | $0.017 |  |
+| job-taxonomy-plan sonnet:low | 8 | 8 | 0 | $0.163 |  |
+
+Recorded cost so far: $0.542.
+<!-- /ai-test-run:2026-11-15T15-35-20-680Z-claude-effort-ladderrun-536db5 -->
+
+<!-- ai-test-run:2026-11-15T15-37-45-699Z-web-research-ab-9398f4 -->
+### 2026-11-15 15:37 UTC · web-research-ab · compensation · sonnet:low
+
+- Status: **finished** (updated 2026-11-15 15:41:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-sonnet-low`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-sonnet-low --second parallel --seed 4 --count 12 --concurrency 3 --profile sonnet:low`
+- Count: 12
+- Seed: 4
+- Second: parallel
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 66
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 1 | 5 | $0.629 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.865 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.494.
+<!-- /ai-test-run:2026-11-15T15-37-45-699Z-web-research-ab-9398f4 -->
+
+<!-- ai-test-run:2026-11-15T15-41-39-325Z-web-research-ab-218bb4 -->
+### 2026-11-15 15:41 UTC · web-research-ab · compensation · haiku:medium
+
+- Status: **finished** (updated 2026-11-15 15:56:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-haiku-medium`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-haiku-medium --second parallel --seed 4 --count 12 --concurrency 3 --profile haiku:medium`
+- Count: 12
+- Seed: 4
+- Second: parallel
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 115
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 6 | 0 | $0.681 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.132 | outcome per arm: summary.json |
+
+Recorded cost so far: $0.813.
+<!-- /ai-test-run:2026-11-15T15-41-39-325Z-web-research-ab-218bb4 -->
+
+<!-- ai-test-run:2026-11-15T15-44-33-417Z-claude-effort-ladderrun-71a576 -->
+### 2026-11-15 15:44 UTC · claude-effort-ladder run · job-listing-liveness · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 15:48:22 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/liveness`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/liveness.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/liveness`
+- Records: 13 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/liveness.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-listing-liveness flash:high | 26 | 26 | 0 | $0.011 |  |
+| job-listing-liveness flash:low | 26 | 26 | 0 | $0.018 |  |
+| job-listing-liveness flash:medium | 26 | 26 | 0 | $0.019 |  |
+| job-listing-liveness flash:off | 26 | 26 | 0 | $0.012 |  |
+| job-listing-liveness pro:high | 26 | 26 | 0 | $0.043 |  |
+| job-listing-liveness pro:low | 26 | 26 | 0 | $0.050 |  |
+| job-listing-liveness pro:medium | 26 | 26 | 0 | $0.088 |  |
+| job-listing-liveness pro:off | 26 | 26 | 0 | $0.066 |  |
+
+Recorded cost so far: $0.308.
+<!-- /ai-test-run:2026-11-15T15-44-33-417Z-claude-effort-ladderrun-71a576 -->
+
+<!-- ai-test-run:2026-11-15T15-46-12-984Z-blindjudge2Opussubagentsshuffledpackets-e670c1 -->
+### 2026-11-15 15:46 UTC · blind judge (2 Opus subagents, shuffled packets) · write, cover-letter-only prompt
+
+- Status: **finished** (updated 2026-11-15 15:46:12 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+- Records: 1 real cover-only writer prompt (one job, 2026-11-13), 3 runs per setting
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:low | 3 | 3 | 0 | $1.140 | judge overall mean 6.50 (6 scores), mean rank 6.0 of 9, unsupported claims 1.67 |
+| opus:medium | 3 | 3 | 0 | $1.320 | judge overall mean 7.67, mean rank 2.3, unsupported claims 1.67 |
+| sonnet:high | 3 | 3 | 0 | $0.660 | judge overall mean 6.17, mean rank 6.7, unsupported claims 2.17 |
+
+Recorded cost so far: $3.120.
+- Note: One job only: a direction, not proof. Both judge passes ranked Opus medium above Opus low. Setting not changed.
+<!-- /ai-test-run:2026-11-15T15-46-12-984Z-blindjudge2Opussubagentsshuffledpackets-e670c1 -->
+
+<!-- ai-test-run:2026-11-15T15-46-13-106Z-shapeandvalidityscorescore-taxonomymjs-fe1466 -->
+### 2026-11-15 15:46 UTC · shape and validity score (score-taxonomy.mjs) · job-taxonomy-plan after the 2026-11-15 salary-range sentence
+
+- Status: **finished** (updated 2026-11-15 15:46:13 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+- Records: 4 real prompts of 2026-11-14/15 with the new sentence put in, 2 runs per setting
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| haiku:low | 8 | 8 | 0 | $0.017 | 0 answers over 5 salary ranges (old prompt: production rejected 2 of 4 for 6 ranges) |
+| haiku:medium | 8 | 8 | 0 | $0.017 | same validity and shape, same cost |
+| sonnet:low | 8 | 8 | 0 | $0.163 | 10x cost, fewer role families (8-10 vs 11-12) |
+| flash:off | 8 | 8 | 0 | $0.005 | valid; one answer without exactly one Unspecified range |
+| flash:low..high, pro:off..high | 48 | 48 | 0 | $0.340 | all valid; Pro costs as much as Haiku or more |
+
+Recorded cost so far: $0.542.
+<!-- /ai-test-run:2026-11-15T15-46-13-106Z-shapeandvalidityscorescore-taxonomymjs-fe1466 -->
+
+<!-- ai-test-run:2026-11-15T15-48-22-360Z-claude-effort-ladderrun-707de7 -->
+### 2026-11-15 15:48 UTC · claude-effort-ladder run · job-gap-review · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 15:51:59 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/gap-plants`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/gap-plants.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/gap-plants`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/gap-plants.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-gap-review flash:high | 8 | 7 | 0 | $0.004 |  |
+| job-gap-review flash:low | 8 | 8 | 0 | $0.020 |  |
+| job-gap-review flash:medium | 8 | 8 | 0 | $0.021 |  |
+| job-gap-review flash:off | 8 | 8 | 0 | $0.019 |  |
+| job-gap-review pro:high | 8 | 8 | 0 | $0.045 |  |
+| job-gap-review pro:low | 8 | 8 | 0 | $0.058 |  |
+| job-gap-review pro:medium | 8 | 8 | 0 | $0.141 |  |
+| job-gap-review pro:off | 8 | 7 | 0 | $0.112 |  |
+
+Recorded cost so far: $0.420.
+<!-- /ai-test-run:2026-11-15T15-48-22-360Z-claude-effort-ladderrun-707de7 -->
+
+<!-- ai-test-run:2026-11-15T15-51-59-516Z-claude-effort-ladderrun-db61a9 -->
+### 2026-11-15 15:51 UTC · claude-effort-ladder run · job-gap-review · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 15:53:48 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/gap-review`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/gap-review.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/gap-review`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/gap-review.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-gap-review flash:high | 4 | 4 | 0 | $0.002 |  |
+| job-gap-review flash:low | 4 | 4 | 0 | $0.003 |  |
+| job-gap-review flash:medium | 4 | 4 | 0 | $0.004 |  |
+| job-gap-review flash:off | 4 | 4 | 0 | $0.002 |  |
+| job-gap-review pro:high | 4 | 4 | 0 | $0.022 |  |
+| job-gap-review pro:low | 4 | 4 | 0 | $0.022 |  |
+| job-gap-review pro:medium | 4 | 3 | 0 | $0.029 |  |
+| job-gap-review pro:off | 4 | 4 | 0 | $0.017 |  |
+
+Recorded cost so far: $0.101.
+<!-- /ai-test-run:2026-11-15T15-51-59-516Z-claude-effort-ladderrun-db61a9 -->
+
+<!-- ai-test-run:2026-11-15T15-53-09-234Z-interview-live-prepare-harnessblindOpusjudge2passes-d422ad -->
+### 2026-11-15 15:53 UTC · interview-live-prepare-harness + blind Opus judge (2 passes) · qa-research under Parallel Search
+
+- Status: **finished** (updated 2026-11-15 15:53:09 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+- Jobs: Appian, Intouch Insight, Reddit, Stripe (the 2026-11-09 and 11-14 bundles)
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:high (2026-11-14 Parallel briefs) | 4 | 4 | 0 | $3.090 | judge mean 4.13 of 5; best on 6 of 8 judgments (3 of 4 jobs) |
+| opus:medium | 4 | 4 | 0 | $1.720 | judge mean 3.86; best on Appian only; fewer sources (26 vs 40 in total) |
+| sonnet:high | 4 | 4 | 0 | $1.020 | judge mean 3.71; best on 1 of 8 judgments |
+
+Recorded cost so far: $5.830.
+- Note: Cost column is the research call only. Outputs: tmp/claude-e2e/runs/2026-11-15-qa-research; judge results in the out dir under judge/qa-research. Opus high was not rerun, so its own run-to-run gap under Parallel is not measured (judge passes differed by up to 0.8 on one brief). Opus high kept.
+<!-- /ai-test-run:2026-11-15T15-53-09-234Z-interview-live-prepare-harnessblindOpusjudge2passes-d422ad -->
+
+<!-- ai-test-run:2026-11-15T15-53-48-340Z-claude-effort-ladderrun-083656 -->
+### 2026-11-15 15:53 UTC · claude-effort-ladder run · job-role-snippet-screen-batch · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:05:56 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/snippet-screen`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/snippet-screen.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/snippet-screen`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/snippet-screen.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-snippet-screen-batch flash:high | 8 | 8 | 0 | $0.023 |  |
+| job-role-snippet-screen-batch flash:low | 8 | 8 | 0 | $0.020 |  |
+| job-role-snippet-screen-batch flash:medium | 8 | 8 | 0 | $0.027 |  |
+| job-role-snippet-screen-batch flash:off | 8 | 8 | 0 | $0.009 |  |
+| job-role-snippet-screen-batch pro:high | 8 | 8 | 0 | $0.136 |  |
+| job-role-snippet-screen-batch pro:low | 8 | 8 | 0 | $0.090 |  |
+| job-role-snippet-screen-batch pro:medium | 8 | 8 | 0 | $0.179 |  |
+| job-role-snippet-screen-batch pro:off | 8 | 8 | 0 | $0.051 |  |
+
+Recorded cost so far: $0.536.
+<!-- /ai-test-run:2026-11-15T15-53-48-340Z-claude-effort-ladderrun-083656 -->
+
+<!-- ai-test-run:2026-11-15T15-55-47-911Z-agreementscorescore-agreementmjs-4993c7 -->
+### 2026-11-15 15:55 UTC · agreement score (score-agreement.mjs) · job-compensation-assessment-batch, 5 new real prompts of 2026-11-14/15
+
+- Status: **finished** (updated 2026-11-15 15:55:47 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| sonnet:low rerun | 10 | 10 | 0 | $1.590 | range agreement with production's Sonnet low answers 62.9% (the noise floor) |
+| opus:low | 10 | 10 | 0 | $2.690 | 60.3% |
+| sonnet:medium | 10 | 10 | 0 | $1.920 | 61.6% |
+| haiku:medium | 10 | 10 | 0 | $0.250 | 56.1% |
+
+Recorded cost so far: $6.450.
+- Note: Valid = the response schema; the 11-12 validator rebuild script does not parse the newer prompt layout, so the app's range validator was not rerun. One small record matched 0% in every arm, reruns included. Confirms Sonnet low: no dearer setting agrees more than its own rerun.
+<!-- /ai-test-run:2026-11-15T15-55-47-911Z-agreementscorescore-agreementmjs-4993c7 -->
+
+<!-- ai-test-run:2026-11-15T15-56-24-711Z-web-research-ab-4ad443 -->
+### 2026-11-15 15:56 UTC · web-research-ab · compensation · production profile
+
+- Status: **finished** (updated 2026-11-15 16:01:56 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-production-rerun`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-production-rerun --second parallel --seed 4 --count 12 --concurrency 3`
+- Count: 12
+- Seed: 4
+- Second: parallel
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 55
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 0 | 6 | $0.923 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.994 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.917.
+<!-- /ai-test-run:2026-11-15T15-56-24-711Z-web-research-ab-4ad443 -->
+
+<!-- ai-test-run:2026-11-15T16-01-57-046Z-web-research-ab-444d88 -->
+### 2026-11-15 16:01 UTC · web-research-ab · preference · sonnet:medium
+
+- Status: **finished** (updated 2026-11-15 16:23:20 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-medium`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-medium --second parallel --seed 3 --count 40 --concurrency 3 --profile sonnet:medium`
+- Count: 40
+- Seed: 3
+- Second: parallel
+- summary disagreements: 94
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 2 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 4 | 4 | 0 | $2.754 | outcome per arm: summary.json |
+| research tavily | 4 | 3 | 1 | $6.538 | outcome per arm: summary.json |
+
+Recorded cost so far: $9.291.
+<!-- /ai-test-run:2026-11-15T16-01-57-046Z-web-research-ab-444d88 -->
+
+<!-- ai-test-run:2026-11-15T16-05-56-632Z-claude-effort-ladderrun-1c22c4 -->
+### 2026-11-15 16:05 UTC · claude-effort-ladder run · interview-qa-disclosures · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:08:35 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/qa-disclosures`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/qa-disclosures.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/qa-disclosures`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/qa-disclosures.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-qa-disclosures flash:high | 4 | 4 | 0 | $0.006 |  |
+| interview-qa-disclosures flash:low | 4 | 4 | 0 | $0.005 |  |
+| interview-qa-disclosures flash:medium | 4 | 4 | 0 | $0.004 |  |
+| interview-qa-disclosures flash:off | 4 | 4 | 0 | $0.001 |  |
+| interview-qa-disclosures pro:high | 4 | 4 | 0 | $0.041 |  |
+| interview-qa-disclosures pro:low | 4 | 4 | 0 | $0.016 |  |
+| interview-qa-disclosures pro:medium | 4 | 4 | 0 | $0.036 |  |
+| interview-qa-disclosures pro:off | 4 | 4 | 0 | $0.004 |  |
+
+Recorded cost so far: $0.113.
+<!-- /ai-test-run:2026-11-15T16-05-56-632Z-claude-effort-ladderrun-1c22c4 -->
+
+<!-- ai-test-run:2026-11-15T16-08-35-478Z-claude-effort-ladderrun-4b58bc -->
+### 2026-11-15 16:08 UTC · claude-effort-ladder run · interview-qa-practice · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:09:43 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/qa-practice-order`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/qa-practice-order.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/qa-practice-order`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/qa-practice-order.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| interview-qa-practice flash:high | 2 | 2 | 0 | $0.002 |  |
+| interview-qa-practice flash:low | 2 | 2 | 0 | $0.002 |  |
+| interview-qa-practice flash:medium | 2 | 2 | 0 | $0.003 |  |
+| interview-qa-practice flash:off | 2 | 2 | 0 | $0.000 |  |
+| interview-qa-practice pro:high | 2 | 2 | 0 | $0.011 |  |
+| interview-qa-practice pro:low | 2 | 2 | 0 | $0.005 |  |
+| interview-qa-practice pro:medium | 2 | 2 | 0 | $0.010 |  |
+| interview-qa-practice pro:off | 2 | 2 | 0 | $0.001 |  |
+
+Recorded cost so far: $0.034.
+<!-- /ai-test-run:2026-11-15T16-08-35-478Z-claude-effort-ladderrun-4b58bc -->
+
+<!-- ai-test-run:2026-11-15T16-09-43-325Z-claude-effort-ladderrun-613940 -->
+### 2026-11-15 16:09 UTC · claude-effort-ladder run · job-role-screen-batch · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:33:48 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/role-screen`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/role-screen.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/role-screen`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/role-screen.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-screen-batch flash:high | 4 | 1 | 3 | $0.018 |  |
+| job-role-screen-batch flash:low | 4 | 2 | 2 | $0.033 |  |
+| job-role-screen-batch flash:medium | 4 | 1 | 3 | $0.018 |  |
+| job-role-screen-batch flash:off | 4 | 4 | 0 | $0.028 |  |
+| job-role-screen-batch pro:high | 4 | 0 | 4 | $0.000 |  |
+| job-role-screen-batch pro:low | 4 | 1 | 3 | $0.057 |  |
+| job-role-screen-batch pro:medium | 4 | 0 | 4 | $0.000 |  |
+| job-role-screen-batch pro:off | 4 | 3 | 0 | $0.089 |  |
+
+Recorded cost so far: $0.243.
+<!-- /ai-test-run:2026-11-15T16-09-43-325Z-claude-effort-ladderrun-613940 -->
+
+<!-- ai-test-run:2026-11-15T16-10-25-558Z-ai-task-replay-116b1e -->
+### 2026-11-15 16:10 UTC · ai-task-replay · job-official-posting-research · claude, claude:haiku:high, claude:sonnet:medium
+
+- Status: **finished** (updated 2026-11-15 16:22:45 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/posting-batch`
+- Command: `node scripts/ai-task-replay.mjs --task job-official-posting-research --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --user-data ~/Library/Application Support/infinite-canvas --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/posting-batch --configs claude,claude:haiku:high,claude:sonnet:medium --batches 6 --claude-reps 2 --reps 2 --concurrency 4`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| claude | 12 | 12 | 0 | $11.33 | agreement: run ai-task-replay-score.mjs --out <dir> |
+| claude:haiku:high | 12 | 12 | 0 | $3.875 | agreement: run ai-task-replay-score.mjs --out <dir> |
+| claude:sonnet:medium | 12 | 12 | 0 | $10.28 | agreement: run ai-task-replay-score.mjs --out <dir> |
+
+Recorded cost so far: $25.49.
+<!-- /ai-test-run:2026-11-15T16-10-25-558Z-ai-task-replay-116b1e -->
+
+<!-- ai-test-run:2026-11-15T16-10-40-887Z-web-research-ab-863e5c -->
+### 2026-11-15 16:10 UTC · web-research-ab · compensation · sonnet:low
+
+- Status: **finished** (updated 2026-11-15 16:14:50 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-sonnet-low-seed3`
+- Command: `node scripts/web-research-ab.mjs --task compensation --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/compensation-sonnet-low-seed3 --second parallel --seed 3 --count 12 --concurrency 3 --profile sonnet:low`
+- Count: 12
+- Seed: 3
+- Second: parallel
+- summary cohorts: 452
+- summary sampledCohorts: 12
+- summary batches: 6
+- summary distinctSourceUrls: 77
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 2 | 4 | $0.771 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.993 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.764.
+<!-- /ai-test-run:2026-11-15T16-10-40-887Z-web-research-ab-863e5c -->
+
+<!-- ai-test-run:2026-11-15T16-14-50-984Z-web-research-ab-986eb5 -->
+### 2026-11-15 16:14 UTC · web-research-ab · role-family · sonnet:low
+
+- Status: **finished** (updated 2026-11-15 16:18:24 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/role-family-sonnet-low-seed2`
+- Command: `node scripts/web-research-ab.mjs --task role-family --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/role-family-sonnet-low-seed2 --second parallel --seed 2 --count 12 --concurrency 3 --profile sonnet:low`
+- Count: 12
+- Seed: 2
+- Second: parallel
+- summary roleFamilies: 54
+- summary sampledRoleFamilies: 12
+- summary batches: 6
+- summary distinctSourceUrls: 62
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 6 | 6 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 6 | 4 | 2 | $0.612 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $0.597 | outcome per arm: summary.json |
+
+Recorded cost so far: $1.208.
+<!-- /ai-test-run:2026-11-15T16-14-50-984Z-web-research-ab-986eb5 -->
+
+<!-- ai-test-run:2026-11-15T16-18-24-988Z-web-research-ab-835f44 -->
+### 2026-11-15 16:18 UTC · web-research-ab · location · sonnet:low
+
+- Status: **finished** (updated 2026-11-15 16:21:40 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/location-sonnet-low-seed2`
+- Command: `node scripts/web-research-ab.mjs --task location --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/location-sonnet-low-seed2 --second parallel --seed 2 --count 24 --concurrency 3 --profile sonnet:low`
+- Count: 24
+- Seed: 2
+- Second: parallel
+- summary eligibleRows: 106
+- summary skippedWithoutIdentity: 0
+- summary requests: 24
+- summary batches: 6
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research native | 6 | 6 | 0 | $0.953 | outcome per arm: summary.json |
+| research tavily | 6 | 6 | 0 | $1.058 | outcome per arm: summary.json |
+
+Recorded cost so far: $2.011.
+<!-- /ai-test-run:2026-11-15T16-18-24-988Z-web-research-ab-835f44 -->
+
+<!-- ai-test-run:2026-11-15T16-24-00-097Z-web-research-ab-e6ef73 -->
+### 2026-11-15 16:24 UTC · web-research-ab · preference · sonnet:medium
+
+- Status: **finished** (updated 2026-11-15 16:54:14 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-medium-run2`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-medium-run2 --second parallel --seed 3 --count 40 --concurrency 3 --profile sonnet:medium`
+- Count: 40
+- Seed: 3
+- Second: parallel
+- summary disagreements: 32
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 2 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 4 | 4 | 0 | $3.027 | outcome per arm: summary.json |
+| research tavily | 4 | 4 | 0 | $6.397 | outcome per arm: summary.json |
+
+Recorded cost so far: $9.423.
+<!-- /ai-test-run:2026-11-15T16-24-00-097Z-web-research-ab-e6ef73 -->
+
+<!-- ai-test-run:2026-11-15T16-24-00-105Z-official-research-search-abParallelarmkeyedai-task-replaybatches-135e02 -->
+### 2026-11-15 16:24 UTC · official-research-search-ab (Parallel arm, keyed) + ai-task-replay batches · job-official-posting-research under Parallel Search
+
+- Status: **finished** (updated 2026-11-15 16:24:00 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+- Canvas: canvas.json.before-content-pool-2026-11-04.bak
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:low (production) | 90 | 90 | 0 | $13.70 | exact posting of 30: 28 (seed 2, 11-14), 27 and 27 (seed 3) |
+| sonnet:medium | 60 | 60 | 0 | $5.110 | 27 (seed 2), 28 (seed 3) |
+| sonnet:low | 30 | 30 | 0 | $2.200 | 27 (seed 2) |
+| haiku:high | 60 | 60 | 0 | $0.500 | 27 (seed 2), 28 (seed 3); about twice the searches per job |
+| haiku:medium | 60 | 60 | 0 | $0.360 | 26 (seed 2), 28 (seed 3) |
+| haiku:low | 30 | 30 | 0 | $0.160 | 26 (seed 2) |
+| batched replay, opus:low | 12 | 12 | 0 | $11.33 | 6 real 12-job batches x 2 runs: 48 confirmed postings named, own-run agreement 68.1% |
+| batched replay, haiku:high | 12 | 12 | 0 | $3.870 | 59 confirmed postings named; 100% valid |
+| batched replay, sonnet:medium | 12 | 12 | 0 | $10.28 | 55 confirmed postings named |
+| 11 jobs with no confirmed posting, haiku:high | 11 | 11 | 0 | $0.330 | offered leads for 9 |
+| 11 jobs with no confirmed posting, opus:low | 11 | 11 | 0 | $2.290 | offered leads for 11 |
+
+Recorded cost so far: $50.13.
+- Note: An unkeyed first attempt (Sonnet low seed 2, Sonnet medium seed 3) hit the anonymous Parallel server's throttle and found nothing; discarded (folders named THROTTLED-discard), and the tool now uses the Keychain key. Batched score: score-posting-batch.mjs counts confirmed board postings named in each reply.
+<!-- /ai-test-run:2026-11-15T16-24-00-105Z-official-research-search-abParallelarmkeyedai-task-replaybatches-135e02 -->
+
+<!-- ai-test-run:2026-11-15T16-24-00-147Z-web-research-ab--secondparallelParallelarm-51b8c9 -->
+### 2026-11-15 16:24 UTC · web-research-ab --second parallel (Parallel arm) · job-compensation-research-batch under Parallel Search
+
+- Status: **finished** (updated 2026-11-15 16:24:00 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| salary seed 4, sonnet:medium (production; 11-14 and rerun) | 12 | 11 | 1 | $2.050 | cohorts with a verified source 9 and 10 of 12; verified sources 20 and 19 |
+| salary seed 4, sonnet:low | 6 | 6 | 0 | $0.870 | 12 of 12; 24 sources |
+| salary seed 4, haiku:medium | 6 | 6 | 0 | $0.130 | 5 of 12; 11 sources |
+| salary seed 3, sonnet:medium (11-14) | 6 | 6 | 0 | $1.190 | 12 of 12; 26 sources |
+| salary seed 3, sonnet:low | 6 | 6 | 0 | $0.990 | 12 of 12; 27 sources |
+| experience bands seed 2, sonnet:medium (11-14) | 6 | 6 | 0 | $0.740 | two verified hosts 10 of 12; year bands 12; 45 sources |
+| experience bands seed 2, sonnet:low | 6 | 6 | 0 | $0.600 | two verified hosts 10 of 12; year bands 11; 36 sources |
+| job location seed 2, sonnet:medium (11-14) | 6 | 6 | 0 | $1.230 | correct 9, wrong 0 of 24 |
+| job location seed 2, sonnet:low | 6 | 6 | 0 | $1.060 | correct 9, wrong 1 of 24 |
+
+Recorded cost so far: $8.860.
+- Note: n is research replies. Costs are the Parallel arm only; each run also ran the built-in comparison arm.
+<!-- /ai-test-run:2026-11-15T16-24-00-147Z-web-research-ab--secondparallelParallelarm-51b8c9 -->
+
+<!-- ai-test-run:2026-11-15T16-33-48-715Z-claude-effort-ladderrun-dd6f7a -->
+### 2026-11-15 16:33 UTC · claude-effort-ladder run · job-preference-interpretation · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:48:09 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-interpretation`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-interpretation.records.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-interpretation`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-interpretation.records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-preference-interpretation flash:high | 8 | 6 | 0 | $0.027 |  |
+| job-preference-interpretation flash:low | 8 | 2 | 0 | $0.030 |  |
+| job-preference-interpretation flash:medium | 8 | 6 | 0 | $0.036 |  |
+| job-preference-interpretation flash:off | 8 | 7 | 0 | $0.016 |  |
+| job-preference-interpretation pro:high | 8 | 7 | 0 | $0.211 |  |
+| job-preference-interpretation pro:low | 8 | 6 | 0 | $0.160 |  |
+| job-preference-interpretation pro:medium | 8 | 6 | 0 | $0.230 |  |
+| job-preference-interpretation pro:off | 8 | 4 | 0 | $0.053 |  |
+
+Recorded cost so far: $0.762.
+<!-- /ai-test-run:2026-11-15T16-33-48-715Z-claude-effort-ladderrun-dd6f7a -->
+
+<!-- ai-test-run:2026-11-15T16-48-09-500Z-claude-effort-ladderrun-b91167 -->
+### 2026-11-15 16:48 UTC · claude-effort-ladder run · job-role-audit · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:52:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-role-audit`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-role-audit.records.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-role-audit`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-role-audit.records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-audit flash:high | 8 | 2 | 0 | $0.007 |  |
+| job-role-audit flash:low | 8 | 0 | 0 | $0.012 |  |
+| job-role-audit flash:medium | 8 | 1 | 0 | $0.013 |  |
+| job-role-audit flash:off | 8 | 2 | 0 | $0.009 |  |
+| job-role-audit pro:high | 8 | 8 | 0 | $0.053 |  |
+| job-role-audit pro:low | 8 | 8 | 0 | $0.040 |  |
+| job-role-audit pro:medium | 8 | 8 | 0 | $0.090 |  |
+| job-role-audit pro:off | 8 | 6 | 0 | $0.037 |  |
+
+Recorded cost so far: $0.261.
+<!-- /ai-test-run:2026-11-15T16-48-09-500Z-claude-effort-ladderrun-b91167 -->
+
+<!-- ai-test-run:2026-11-15T16-52-23-609Z-claude-effort-ladderrun-c536a9 -->
+### 2026-11-15 16:52 UTC · claude-effort-ladder run · job-preference-research-batch-assessment · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:55:31 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-research-batch-assessment`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-research-batch-assessment.records.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-research-batch-assessment`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-preference-research-batch-assessment.records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-preference-research-batch-assessment flash:high | 2 | 2 | 0 | $0.009 |  |
+| job-preference-research-batch-assessment flash:low | 2 | 2 | 0 | $0.009 |  |
+| job-preference-research-batch-assessment flash:medium | 2 | 2 | 0 | $0.009 |  |
+| job-preference-research-batch-assessment flash:off | 2 | 2 | 0 | $0.006 |  |
+| job-preference-research-batch-assessment pro:high | 2 | 2 | 0 | $0.040 |  |
+| job-preference-research-batch-assessment pro:low | 2 | 2 | 0 | $0.037 |  |
+| job-preference-research-batch-assessment pro:medium | 2 | 2 | 0 | $0.044 |  |
+| job-preference-research-batch-assessment pro:off | 2 | 2 | 0 | $0.018 |  |
+
+Recorded cost so far: $0.173.
+<!-- /ai-test-run:2026-11-15T16-52-23-609Z-claude-effort-ladderrun-c536a9 -->
+
+<!-- ai-test-run:2026-11-15T16-54-14-221Z-web-research-ab-0d7607 -->
+### 2026-11-15 16:54 UTC · web-research-ab · preference · sonnet:low
+
+- Status: **finished** (updated 2026-11-15 17:19:53 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-low`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-low --second parallel --seed 3 --count 40 --concurrency 3 --profile sonnet:low`
+- Count: 40
+- Seed: 3
+- Second: parallel
+- summary disagreements: 100
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 2 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 4 | 4 | 0 | $2.562 | outcome per arm: summary.json |
+| research tavily | 4 | 3 | 1 | $5.530 | outcome per arm: summary.json |
+
+Recorded cost so far: $8.092.
+<!-- /ai-test-run:2026-11-15T16-54-14-221Z-web-research-ab-0d7607 -->
+
+<!-- ai-test-run:2026-11-15T16-55-31-215Z-claude-effort-ladderrun-ad7b93 -->
+### 2026-11-15 16:55 UTC · claude-effort-ladder run · job-location-consolidation-confirmation · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:56:34 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-planted`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-planted.records.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-planted`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-planted.records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-location-consolidation-confirmation flash:high | 4 | 0 | 0 | $0.004 |  |
+| job-location-consolidation-confirmation flash:low | 4 | 0 | 0 | $0.007 |  |
+| job-location-consolidation-confirmation flash:medium | 4 | 0 | 0 | $0.008 |  |
+| job-location-consolidation-confirmation flash:off | 4 | 0 | 0 | $0.004 |  |
+| job-location-consolidation-confirmation pro:high | 4 | 0 | 0 | $0.010 |  |
+| job-location-consolidation-confirmation pro:low | 4 | 0 | 0 | $0.020 |  |
+| job-location-consolidation-confirmation pro:medium | 4 | 0 | 0 | $0.031 |  |
+| job-location-consolidation-confirmation pro:off | 4 | 0 | 0 | $0.028 |  |
+
+Recorded cost so far: $0.114.
+<!-- /ai-test-run:2026-11-15T16-55-31-215Z-claude-effort-ladderrun-ad7b93 -->
+
+<!-- ai-test-run:2026-11-15T16-56-34-751Z-claude-effort-ladderrun-c48d39 -->
+### 2026-11-15 16:56 UTC · claude-effort-ladder run · job-location-consolidation-confirmation · flash:off, flash:low, flash:medium, flash:high, pro:off, pro:low, pro:medium, pro:high
+
+- Status: **finished** (updated 2026-11-15 16:57:23 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-subtle`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-subtle.records.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:off,pro:low,pro:medium,pro:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-subtle`
+- Records: 2 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/b10/job-location-consolidation-subtle.records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-location-consolidation-confirmation flash:high | 4 | 4 | 0 | $0.002 |  |
+| job-location-consolidation-confirmation flash:low | 4 | 4 | 0 | $0.005 |  |
+| job-location-consolidation-confirmation flash:medium | 4 | 4 | 0 | $0.004 |  |
+| job-location-consolidation-confirmation flash:off | 4 | 4 | 0 | $0.003 |  |
+| job-location-consolidation-confirmation pro:high | 4 | 4 | 0 | $0.009 |  |
+| job-location-consolidation-confirmation pro:low | 4 | 4 | 0 | $0.010 |  |
+| job-location-consolidation-confirmation pro:medium | 4 | 4 | 0 | $0.019 |  |
+| job-location-consolidation-confirmation pro:off | 4 | 4 | 0 | $0.021 |  |
+
+Recorded cost so far: $0.072.
+<!-- /ai-test-run:2026-11-15T16-56-34-751Z-claude-effort-ladderrun-c48d39 -->
+
+<!-- ai-test-run:2026-11-15T16-57-56-438Z-claude-effort-ladderrun-88293f -->
+### 2026-11-15 16:57 UTC · claude-effort-ladder run · job-preference-research-batch-assessment · flash:off, flash:low, flash:medium, flash:high, sonnet:low
+
+- Status: **finished** (updated 2026-11-15 17:11:40 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/pref-assessment-new`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/pref-assessment-new.jsonl --configs flash:off,flash:low,flash:medium,flash:high,sonnet:low --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/pref-assessment-new`
+- Records: 7 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/pref-assessment-new.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-preference-research-batch-assessment flash:high | 14 | 14 | 0 | $0.137 |  |
+| job-preference-research-batch-assessment flash:low | 14 | 14 | 0 | $0.117 |  |
+| job-preference-research-batch-assessment flash:medium | 14 | 13 | 1 | $0.140 |  |
+| job-preference-research-batch-assessment flash:off | 14 | 14 | 0 | $0.063 |  |
+| job-preference-research-batch-assessment sonnet:low | 14 | 14 | 0 | $2.328 |  |
+
+Recorded cost so far: $2.785.
+<!-- /ai-test-run:2026-11-15T16-57-56-438Z-claude-effort-ladderrun-88293f -->
+
+<!-- ai-test-run:2026-11-15T17-11-40-352Z-claude-effort-ladderrun-a52f8d -->
+### 2026-11-15 17:11 UTC · claude-effort-ladder run · job-role-audit · flash:off, flash:low, flash:medium, flash:high, pro:low, haiku:high
+
+- Status: **finished** (updated 2026-11-15 17:13:39 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/role-audit-new`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/role-audit-new.jsonl --configs flash:off,flash:low,flash:medium,flash:high,pro:low,haiku:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/role-audit-new`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/role-audit-new.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-audit flash:high | 8 | 8 | 0 | $0.007 |  |
+| job-role-audit flash:low | 8 | 8 | 0 | $0.012 |  |
+| job-role-audit flash:medium | 8 | 8 | 0 | $0.011 |  |
+| job-role-audit flash:off | 8 | 8 | 0 | $0.009 |  |
+| job-role-audit haiku:high | 8 | 8 | 0 | $0.035 |  |
+| job-role-audit pro:low | 8 | 8 | 0 | $0.069 |  |
+
+Recorded cost so far: $0.142.
+<!-- /ai-test-run:2026-11-15T17-11-40-352Z-claude-effort-ladderrun-a52f8d -->
+
+<!-- ai-test-run:2026-11-15T17-13-39-920Z-claude-effort-ladderrun-e4ac99 -->
+### 2026-11-15 17:13 UTC · claude-effort-ladder run · job-gap-review · flash:off, flash:low, flash:medium, haiku:high
+
+- Status: **finished** (updated 2026-11-15 17:14:42 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/gap-review-new`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/gap-review-new.jsonl --configs flash:off,flash:low,flash:medium,haiku:high --reps 2 --concurrency 4 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/runs/gap-review-new`
+- Records: 4 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/records/gap-review-new.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-gap-review flash:low | 8 | 8 | 0 | $0.006 |  |
+| job-gap-review flash:medium | 8 | 8 | 0 | $0.009 |  |
+| job-gap-review flash:off | 8 | 8 | 0 | $0.004 |  |
+| job-gap-review haiku:high | 8 | 7 | 0 | $0.088 |  |
+
+Recorded cost so far: $0.106.
+<!-- /ai-test-run:2026-11-15T17-13-39-920Z-claude-effort-ladderrun-e4ac99 -->
+
+<!-- ai-test-run:2026-11-15T17-15-58-645Z-claude-effort-ladderrunwithDeepSeekarmsthe11-10and11-12scorers-54effc -->
+### 2026-11-15 17:15 UTC · claude-effort-ladder run with DeepSeek arms + the 11-10 and 11-12 scorers · DeepSeek Flash and Pro (reasoning off, low, medium, high) on worker and interview calls never measured with DeepSeek
+
+- Status: **finished** (updated 2026-11-15 17:15:58 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-gap-review, flash:low | 20 | 20 | 0 | $0.030 | 11-12 real 18/18 rows; planted 8/8 caught, 0 false alarms; 4 new real prompts 97.4% (Haiku high rerun 97.4%, 7 of 8 valid). ROUTED |
+| job-gap-review, other arms | 76 | 73 | 0 | $0.400 | flash:off missed 1 planted row and fell to 89.5% on new prompts; flash:medium 89.5%; flash:high and pro:off each had an invalid answer |
+| job-role-audit, flash:low | 16 | 8 | 0 | $0.020 | new real audits 97.8% (Haiku high rerun 95.6%), 8/8 valid; 11-10 audits title/removed/added overlap 0.986/0.875/1.0 = Haiku high (those 8 fail only the old 800-character cap stored in the records). ROUTED |
+| job-location-consolidation-confirmation, flash:low | 8 | 4 | 0 | $0.010 | planted pairs 40/40 right (Haiku low 40/40); flash:off 39/40, pro:off 38/40; the 4 invalid are the planted prompts exceeding the 4-pair schema, as for every arm. ROUTED |
+| job-preference-research-batch-assessment, flash:low | 16 | 16 | 0 | $0.130 | 11-10 batch 40/40, but 7 newer real prompts 95.1% vs a Sonnet low rerun 98.8%. Stays Sonnet low |
+| job-listing-liveness, all arms | 208 | 208 | 0 | $0.300 | planted 17-20 of 20 (flash:off 20/20) but real pages 6/8 (flash:high 7/8) vs Haiku medium 8/8. Stays Haiku medium |
+| job-role-snippet-screen-batch, all arms | 64 | 64 | 0 | $0.500 | Flash 59-65% agreement with 102-123 extra removals; Pro 72% at 2-4x Haiku's cost. Stays Haiku medium |
+| job-role-screen-batch, all arms | 32 | 14 | 18 | $0.300 | flash:off 49% agreement, 1,008 extra removals; reasoning arms hit the 32k output cap on the 1,975-title prompt. Stays Haiku low |
+| job-preference-interpretation, all arms | 64 | 44 | 0 | $0.760 | 2-7 of 8 valid; strict-requirement overlap 0.01-0.18 (Haiku 0.18-0.27). Stays Haiku medium |
+| qa-disclosures, all arms | 32 | 32 | 0 | $0.110 | only pro:medium matched (100%); its neighbours pro:low 71% and pro:high 81%, Flash 42-81%. Stays Sonnet low |
+| job-taxonomy-plan, all arms | 64 | 64 | 0 | $0.350 | valid, but Flash with reasoning and Pro cost as much as Haiku low or more; flash:off had one answer without exactly one Unspecified range. Stays Haiku low |
+
+Recorded cost so far: $2.910.
+- Note: Agreement is against production's stored answers, with a rerun of the current Claude setting as the noise floor where shown. Records are the 2026-11-10 and 11-12 sets plus accepted samples through 2026-11-15.
+<!-- /ai-test-run:2026-11-15T17-15-58-645Z-claude-effort-ladderrunwithDeepSeekarmsthe11-10and11-12scorers-54effc -->
+
+<!-- ai-test-run:2026-11-15T17-20-11-157Z-web-research-ab-efe17e -->
+### 2026-11-15 17:20 UTC · web-research-ab · preference · haiku:high
+
+- Status: **finished** (updated 2026-11-15 17:42:40 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-haiku-high`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-haiku-high --second parallel --seed 3 --count 40 --concurrency 3 --profile haiku:high`
+- Count: 40
+- Seed: 3
+- Second: parallel
+- summary disagreements: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 1 | 1 | $0.000 | outcome per arm: summary.json |
+| research native | 4 | 2 | 2 | $2.182 | outcome per arm: summary.json |
+| research tavily | 4 | 2 | 2 | $1.942 | outcome per arm: summary.json |
+
+Recorded cost so far: $4.123.
+<!-- /ai-test-run:2026-11-15T17-20-11-157Z-web-research-ab-efe17e -->
+
+<!-- ai-test-run:2026-11-15T17-42-40-442Z-web-research-ab-a72d21 -->
+### 2026-11-15 17:42 UTC · web-research-ab · preference · sonnet:low
+
+- Status: **finished** (updated 2026-11-15 18:15:33 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-low-run2`
+- Command: `node scripts/web-research-ab.mjs --task preference --canvas ~/Desktop/Job Search/canvas.json.before-content-pool-2026-11-04.bak --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit/preference-sonnet-low-run2 --second parallel --seed 3 --count 40 --concurrency 3 --profile sonnet:low`
+- Count: 40
+- Seed: 3
+- Second: parallel
+- summary disagreements: 0
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| research merged | 2 | 2 | 0 | $0.000 | outcome per arm: summary.json |
+| research native | 4 | 4 | 0 | $2.433 | outcome per arm: summary.json |
+| research tavily | 4 | 3 | 1 | $4.473 | outcome per arm: summary.json |
+
+Recorded cost so far: $6.905.
+<!-- /ai-test-run:2026-11-15T17-42-40-442Z-web-research-ab-a72d21 -->
+
+<!-- ai-test-run:2026-11-15T18-16-04-008Z-web-research-ab--taskpreference--secondparallel--seed3--count40Parallelarm-ff9ed2 -->
+### 2026-11-15 18:16 UTC · web-research-ab --task preference --second parallel --seed 3 --count 40 (Parallel arm) · job-preference-research-batch under Parallel Search
+
+- Status: **finished** (updated 2026-11-15 18:16:04 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| opus:medium (production, 11-14) | 6 | 4 | 2 | $23.90 | rerun: 158 confirmed / 2 conflicts / 12 unverified of 172; first pass lost the 121-section batch twice |
+| sonnet:medium run 1 | 4 | 3 | 1 | $6.540 | 171 / 2 / 7 of 180; 43 jobs accepted, 2 filtered |
+| sonnet:medium run 2 | 4 | 4 | 0 | $6.400 | 175 / 2 / 3; 43 accepted, 2 filtered |
+| sonnet:low run 1 | 4 | 3 | 1 | $5.530 | 173 / 2 / 5; 43 accepted, 2 filtered |
+| sonnet:low run 2 | 4 | 3 | 1 | $4.470 | no outcomes: the assessment was rejected 3 times (no direct URL from the research section) |
+| haiku:high | 4 | 2 | 2 | $1.940 | 36 / 0 / 144; both conflicts missed |
+
+Recorded cost so far: $48.78.
+- Note: n is research replies; cost is the research step of the Parallel arm. Sonnet medium applied.
+<!-- /ai-test-run:2026-11-15T18-16-04-008Z-web-research-ab--taskpreference--secondparallel--seed3--count40Parallelarm-ff9ed2 -->
+
+<!-- ai-test-run:2026-11-15T18-16-04-048Z-blindjudge1Opussubagent-15a8cd -->
+### 2026-11-15 18:16 UTC · blind judge (1 Opus subagent) · qa-practice-order with DeepSeek arms
+
+- Status: **finished** (updated 2026-11-15 18:16:04 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-15-policy-audit`
+- Records: the one real 26-question prompt of 2026-11-12
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| production opus:low | 1 | 1 | 0 | $0.014 | judge 8 of 10 |
+| flash:low | 2 | 2 | 0 | $0.002 | 9 and 9. ROUTED |
+| flash:high | 2 | 2 | 0 | $0.002 | 9 and 8 |
+| pro:low, pro:high | 4 | 4 | 0 | $0.016 | 8 and 9 each |
+| flash:off | 2 | 1 | 1 | $0.000 | 6, and 3 for a repeated question |
+
+Recorded cost so far: $0.034.
+<!-- /ai-test-run:2026-11-15T18-16-04-048Z-blindjudge1Opussubagent-15a8cd -->

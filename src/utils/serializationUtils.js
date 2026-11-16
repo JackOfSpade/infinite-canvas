@@ -12,6 +12,53 @@ import { consolidateBoardCascadeNodes } from './jobLocationConsolidation.js';
 import { isLegacyUnscoredPlaceholder, UNSCORED_SCORE_STATUS } from './jobCardFilters.js';
 import { OFFICIAL_POSTING_ROW_FIELDS } from '../../electron/ipc/officialPostingFields.js';
 
+// 53-bit string hash (cyrb53). A node's undo signature can run to tens of
+// kilobytes; the fingerprint keeps this digest plus the length instead.
+function hashText(text) {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ code, 2654435761);
+    h2 = Math.imul(h2 ^ code, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+}
+
+// A canvas node is never changed in place, so its signature is worked out once
+// per node object. Re-serializing every node on every edit cost tens of
+// milliseconds per click on a canvas with a large Job Board.
+const nodeFingerprintCache = new WeakMap();
+
+function nodeFingerprint(x) {
+  const cacheable = !!x && typeof x === 'object';
+  if (cacheable) {
+    const cached = nodeFingerprintCache.get(x);
+    if (cached !== undefined) return cached;
+  }
+  // Optimization: avoid heavy recursive serialization for the fingerprint.
+  // Instead, include a "deep summary" of nested canvas data (counts/lengths)
+  // so changes inside groups trigger a state change detection, enabling undo/redo.
+  let data = x.data;
+  let summary = null;
+  if (x.type === 'group' && data?.canvasData) {
+    const { canvasData, ...rest } = data;
+    data = rest;
+    summary = {
+      nc: canvasData.nodes?.length || 0,
+      ec: canvasData.edges?.length || 0,
+      dc: canvasData.drawings?.length || 0
+    };
+  }
+  const undoData = stripNonRestorableNodeDataForUndo({ ...x, data });
+  const text = JSON.stringify({ id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: undoData, s: x.style, sm: summary });
+  const signature = `${text.length}:${hashText(text)}`;
+  if (cacheable) nodeFingerprintCache.set(x, signature);
+  return signature;
+}
+
 /** Stable, pure snapshot fingerprint — no hook needed. */
 export function fingerprint(snap) {
   if (!snap || !snap.nodes) return '';
@@ -19,24 +66,7 @@ export function fingerprint(snap) {
   const e = snap.edges || [];
   const d = snap.drawings || [];
   return JSON.stringify({
-    n: n.map(x => {
-      // Optimization: avoid heavy recursive serialization for the fingerprint.
-      // Instead, include a "deep summary" of nested canvas data (counts/lengths)
-      // so changes inside groups trigger a state change detection, enabling undo/redo.
-      let data = x.data;
-      let summary = null;
-      if (x.type === 'group' && data?.canvasData) {
-        const { canvasData, ...rest } = data;
-        data = rest;
-        summary = {
-          nc: canvasData.nodes?.length || 0,
-          ec: canvasData.edges?.length || 0,
-          dc: canvasData.drawings?.length || 0
-        };
-      }
-      const undoData = stripNonRestorableNodeDataForUndo({ ...x, data });
-      return { id: x.id, x: x.position?.x, y: x.position?.y, t: x.type, d: undoData, s: x.style, sm: summary };
-    }),
+    n: n.map(nodeFingerprint),
     e: e.map(x => ({ id: x.id, s: x.source, t: x.target })),
     dl: d.map(x => {
       if (!x) return null;
@@ -577,6 +607,20 @@ export function migrateUnscoredPlaceholderStatus(nodes) {
   return changed ? out : nodes;
 }
 
+/**
+ * Drop Interview Helper nodes (v12).
+ *
+ * Interview Helper moved into its own app (see electron/interviewApp). Its
+ * prepared briefs, answer banks and Q&A live in the app data folder, not in the
+ * canvas, and the standalone app imports a node's settings from the canvas file
+ * before this runs on a saved canvas. A canvas has no component for the node
+ * any more, so it is removed on load and the next save persists that.
+ */
+export function migrateRemoveInterviewHelperNodes(nodes) {
+  if (!Array.isArray(nodes) || !nodes.some(node => node?.type === 'interviewhelper')) return nodes;
+  return nodes.filter(node => node?.type !== 'interviewhelper');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Versioned node-migration framework
 //
@@ -611,6 +655,7 @@ const MIGRATIONS = [
   { version: 9, name: 'jobhub-titlesource→single-mode',  migrate: migrateJobHubTitleSourceSingleMode, selfRecursive: false },
   { version: 10, name: 'jobboard-location-consolidation', migrate: migrateConsolidateBoardLocations, selfRecursive: false },
   { version: 11, name: 'jobcard-unscored-placeholder-status', migrate: migrateUnscoredPlaceholderStatus, selfRecursive: false },
+  { version: 12, name: 'interviewhelper-moved-to-own-app', migrate: migrateRemoveInterviewHelperNodes, selfRecursive: false },
 ];
 
 export const CURRENT_SCHEMA_VERSION = MIGRATIONS.length ? MIGRATIONS[MIGRATIONS.length - 1].version : 0;

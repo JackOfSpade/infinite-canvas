@@ -5,6 +5,8 @@
 // defects were still caught. Fable and max effort are excluded.
 // docs/ai-model-selection.md records the selection policy, every measured result
 // and the open gaps; read it before re-testing or changing a profile here.
+// A task with no tools that aiCallProviders.js routes (`task:<id>`) is answered by DeepSeek only: there is no Claude
+// fallback (the owner's rule, 2026-11-15). Its profile here is what it ran on before and what a re-test compares with.
 // Web tasks run on Parallel Search only, except the tasks named in BUILT_IN_WEB_TASKS: those
 // offer Claude's built-in WebSearch/WebFetch instead. A Parallel limit pauses the work instead of
 // falling back.
@@ -33,7 +35,10 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   'marketplace-hub-scan-batch': profile('haiku', 'low'),
   'career-profile-clean': profile('haiku', 'low'),
   'job-preference-interpretation': profile('haiku', 'medium'),
-  'application-edit-recurrence': profile('haiku', 'medium'),
+  // Chosen by analogy 2026-11-15, not yet tested on a real prompt (none is stored): it judges whether the same kind of
+  // edit recurs across bundles and can stop generation, like the gap review and role audit, where Haiku high matched
+  // the stronger settings at the same price and Haiku medium was less reliable (docs/ai-model-selection.md).
+  'application-edit-recurrence': profile('haiku', 'high'),
   'career-profile-audit-completeness': profile('haiku', 'medium'),
   'career-profile-audit-grounding': profile('haiku', 'medium'),
   'career-profile-audit-attribution': profile('haiku', 'medium'),
@@ -45,7 +50,10 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // and additions at about 1/10 the cost; Haiku low and Sonnet low removed brief-allowed Senior titles, which a
   // blind judge ruled a clear rule violation (docs/ai-model-selection.md).
   'job-role-audit': profile('haiku', 'high'),
-  'job-taxonomy-classify-batch': profile('sonnet', 'medium'),
+  // Chosen by analogy 2026-11-15, not yet tested on a real prompt (none is stored): on every measured sibling that
+  // sorts jobs (taxonomy plan, both role screens) Haiku beat Sonnet medium at about a tenth of the cost, and Haiku
+  // medium was the pick where descriptions are read (docs/ai-model-selection.md).
+  'job-taxonomy-classify-batch': profile('haiku', 'medium'),
   // 2026-11-09: Sonnet low agreed with Sonnet high within run-to-run noise (decision 98.0% vs 96.8%,
   // 6 batches x 2 runs) at about 15% less cost; Haiku fell 12-14 points short (docs/ai-model-selection.md).
   'job-preference-evaluation': profile('sonnet', 'low'),
@@ -62,20 +70,33 @@ export const CLAUDE_TASK_PROFILES = Object.freeze({
   // copy must merge), Haiku low decided 40 of 40 correctly across 2 runs, the same as Opus low or better (Opus
   // low split one boilerplate-only copy), at about 1/20 the cost (docs/ai-model-selection.md).
   'job-location-consolidation-confirmation': profile('haiku', 'low'),
-  'job-official-posting-research': profile('opus', 'low', WEB),
+  // 2026-11-15: With Parallel Search, Haiku high found the confirmed posting as often as Opus low (27 and 28 of 30 on
+  // two seeds vs 28 and 27) and named more confirmed postings in real 12-job batches (59 vs 48 over 12 replies), at about
+  // a third of the batch cost; Haiku medium and low found 26 on the first seed (docs/ai-model-selection.md).
+  'job-official-posting-research': profile('haiku', 'high', WEB),
   'bundle-price-synthesis': profile('opus', 'medium'),
   // 2026-11-09: Sonnet medium kept two-source salary coverage (10-11 of 12 cohorts vs 9-10 on Opus medium)
   // with about 20% fewer verified sources, at about 75% less cost; Sonnet high and Opus medium buy a few
   // sources at 3-4x the price (docs/ai-model-selection.md).
-  'job-compensation-research-batch': profile('sonnet', 'medium', WEB),
-  'job-preference-research-batch': profile('opus', 'medium', WEB),
+  // 2026-11-15: With Parallel Search, Sonnet low verified a source for 12 of 12 salary cohorts on two seeds (Sonnet
+  // medium 9-10 and 12), matched it on experience bands (two verified hosts 10 of 12) and job location (9 of 24 correct),
+  // at 15-20% less; Haiku medium verified 5 of 12 (docs/ai-model-selection.md).
+  'job-compensation-research-batch': profile('sonnet', 'low', WEB),
+  // 2026-11-15: With Parallel Search, Sonnet medium confirmed 171 and 175 of 180 preference checks in two runs and found
+  // the same 2 conflicts as Opus medium (158 of 172 confirmed), so the same jobs are filtered, at under half the cost.
+  // Sonnet low matched once and returned no usable assessment once; Haiku high confirmed 36 and found no conflict
+  // (docs/ai-model-selection.md).
+  'job-preference-research-batch': profile('sonnet', 'medium', WEB),
   // 2026-11-09: Haiku medium caught the same planted skill defects as Opus xhigh (16/18), was valid on
   // every real prompt, and a full compile with it converged in 2 rounds; Haiku low stalled the compile
   // with unactionable findings (docs/ai-model-selection.md).
   'career-profile-audit-skills': profile('haiku', 'medium'),
   'career-profile-compile': profile('opus', 'xhigh'),
-  // Not tested: a blank-brief search is rare, and no product photos were available.
-  'job-query-generation': profile('sonnet', 'medium'),
+  // Chosen by analogy 2026-11-15, not yet tested (a blank-brief search is rare): it turns the profile into search
+  // titles, like preference interpretation, where Haiku medium was judged best and Sonnet medium worst at 7x the cost
+  // (docs/ai-model-selection.md).
+  'job-query-generation': profile('haiku', 'medium'),
+  // Not tested: no product photos were available; marketplace calls are skipped by the owner's decision.
   'vision-product-analysis': profile('sonnet', 'medium'),
   // Judges the page text the app downloads for each lead; tools only for a lead with no usable page. Tested
   // 2026-11-02 on 8 real postings, A and B per setting: every setting chose the right lead and none a wrong one, so

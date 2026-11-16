@@ -531,7 +531,25 @@ export function sanitizeJobRunCollectionDiagnostics(value) {
     unfinishedSourceCount: typeof count === 'number'
       && Number.isSafeInteger(count) && count >= 0 && count <= MAX_COLLECTION_DIAGNOSTIC_SOURCES
       ? count : null,
+    // Which platforms finished their walk in this run. Present only when the
+    // host's settled search boundary supplied the list: an absent list means
+    // "not recorded", never "none finished", so older manifests and an
+    // explicit partial finish keep their exact earlier shape.
+    ...(Array.isArray(data.completedSourceIds)
+      ? { completedSourceIds: sanitizeCompletedSourceIds(data.completedSourceIds) }
+      : {}),
   };
+}
+
+function sanitizeCompletedSourceIds(value) {
+  const ids = [];
+  for (const entry of Array.isArray(value) ? value : []) {
+    const text = typeof entry === 'string' ? entry.trim() : '';
+    if (!/^[a-z0-9_-]{1,40}$/.test(text) || ids.includes(text)) continue;
+    ids.push(text);
+    if (ids.length >= MAX_COLLECTION_DIAGNOSTIC_SOURCES) break;
+  }
+  return ids;
 }
 
 function receiptToken(value, max = 80) {

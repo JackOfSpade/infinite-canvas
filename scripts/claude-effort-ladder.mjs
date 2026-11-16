@@ -16,6 +16,7 @@
 //     capture-archive --archive-dir <dir> --stage <name> --out <records.jsonl> [--limit N]
 //   node --import ./scripts/test-stubs/register.mjs scripts/claude-effort-ladder.mjs \
 //     run --records <records.jsonl> --configs opus:xhigh,opus:high --reps 1 --out <dir> [--concurrency 4]
+//   (run also takes DeepSeek arms: flash:<off|low|medium|high> and pro:<off|low|medium|high>, through Offload)
 //   node --import ./scripts/test-stubs/register.mjs scripts/claude-effort-ladder.mjs \
 //     capture-career --source <file.md> --out <dir> --ladder-tasks career-profile-compile,career-profile-audit-skills \
 //     --configs <list> --reps 1 [--concurrency 4] [--max-calls N] \
@@ -40,13 +41,17 @@ import { assertDurableOutDir, createRunJournal, takeEphemeralFlag } from './ai-t
 
 export const LADDER_MODELS = Object.freeze(['haiku', 'sonnet', 'opus']);
 export const LADDER_EFFORTS = Object.freeze(['low', 'medium', 'high', 'xhigh']);
+// DeepSeek arms for `run` (docs/ai-model-selection.md, Candidate models): `flash:<reasoning>` and
+// `pro:<reasoning>` go through offloadTextCall, as a routed call does. Max reasoning is excluded.
+export const LADDER_DEEPSEEK_ROUTES = Object.freeze({ flash: 'deepseek-flash', pro: 'deepseek-pro' });
+export const LADDER_DEEPSEEK_REASONING = Object.freeze(['off', 'low', 'medium', 'high']);
 export const DEFAULT_EDITORIAL_LIMIT = 6;
 export const DEFAULT_LADDER_TASKS = Object.freeze(['career-profile-compile', 'career-profile-audit-skills']);
 // One first answer plus at most two corrections, as the durable worker does.
 export const MAX_REPAIR_ATTEMPTS = 2;
 export const DEFAULT_MAX_CALLS = 40;
 
-/** `opus:xhigh,sonnet:medium` -> [{id, model, effort}]. Anything else is refused. */
+/** `opus:xhigh,sonnet:medium,flash:off` -> [{id, model, effort}], with `route` on a DeepSeek arm. Anything else is refused. */
 export function parseConfigs(list) {
   const configs = [];
   const seen = new Set();
@@ -54,6 +59,13 @@ export function parseConfigs(list) {
     const parts = raw.split(':');
     if (parts.length !== 2) throw new Error(`Unknown ladder config ${raw}; expected <model>:<effort>.`);
     const [model, effort] = parts;
+    if (Object.hasOwn(LADDER_DEEPSEEK_ROUTES, model)) {
+      if (!LADDER_DEEPSEEK_REASONING.includes(effort)) throw new Error(`Unknown DeepSeek reasoning ${effort} in ${raw}; allowed: ${LADDER_DEEPSEEK_REASONING.join(', ')}.`);
+      if (seen.has(raw)) throw new Error(`Ladder config ${raw} is listed twice.`);
+      seen.add(raw);
+      configs.push({ id: raw, model, effort, route: LADDER_DEEPSEEK_ROUTES[model] });
+      continue;
+    }
     if (!LADDER_MODELS.includes(model)) throw new Error(`Unknown ladder model ${model} in ${raw}; allowed: ${LADDER_MODELS.join(', ')}.`);
     if (!LADDER_EFFORTS.includes(effort)) throw new Error(`Unknown ladder effort ${effort} in ${raw}; allowed: ${LADDER_EFFORTS.join(', ')}.`);
     if (seen.has(raw)) throw new Error(`Ladder config ${raw} is listed twice.`);
@@ -396,7 +408,13 @@ function envForCall(baseEnv, systemAppend) {
 }
 
 /** The production Claude stage, exactly as the application runner drives it. */
-export async function defaultRunStage({ binary, env, cwd, text, systemAppend, model, effort, tools = [], pageImages }) {
+export async function defaultRunStage({ binary, env, cwd, text, systemAppend, model, effort, tools = [], pageImages, route = null }) {
+  if (route) {
+    // A DeepSeek arm: the same stateless text call a routed task makes. It cannot read page images.
+    if (Array.isArray(pageImages) && pageImages.length) throw new Error('A DeepSeek arm cannot replay a record with page images.');
+    const offload = await import(new URL('../electron/ipc/offloadTextCall.js', import.meta.url).href);
+    return offload.offloadTextCall({ messages: offload.handoffMessages({ text, systemAppend }), route, reasoning: effort, tag: 'ladder' });
+  }
   const modules = await loadApp();
   return modules.runClaudeSdkStage({
     binary, env, cwd, text, systemAppend, model, effort, tools, pageImages, persistSession: false,
@@ -565,6 +583,7 @@ export async function runLadder({
       const reply = await runStage({
         binary: stage.binary, env: envForCall(stage.env, systemAppend), cwd: stage.cwd,
         text: record.text, systemAppend, model: config.model, effort: config.effort, persistSession: false,
+        ...(config.route ? { route: config.route } : {}),
         // Only the call carries the images; the row below never stores them.
         pageImages: Array.isArray(record.pageImages) ? record.pageImages : undefined,
       });
@@ -813,6 +832,8 @@ export function createCaptureCallText({
   const repairBudget = maxRepairs === null || typeof maxRepairs === 'undefined' ? MAX_REPAIR_ATTEMPTS : Number(maxRepairs);
   if (!Number.isSafeInteger(repairBudget) || repairBudget < 0) throw new Error('--max-repairs must be a non-negative integer.');
   const ladder = Array.isArray(configs) ? configs : parseConfigs(configs);
+  // capture-career drives Claude stages only; DeepSeek arms exist for `run`.
+  if (ladder.some(config => config.route)) throw new Error('capture-career takes Claude configs only; DeepSeek arms (flash:, pro:) work with run.');
   const overrideProfiles = parseProfileOverrides(overrides);
   const ladderTasksSet = new Set(ladderTasks);
   const baselineIndex = baselineFrom ? loadBaselineIndex(baselineFrom) : null;
@@ -1082,6 +1103,7 @@ function addOverrideText(overrides, raw) {
   } catch (error) {
     throw new Error(`Unknown profile override ${text}; ${errorMessage(error)}`);
   }
+  if (parsed.some(entry => entry.route)) throw new Error(`Unknown profile override ${text}; a profile override takes a Claude <model>:<effort>.`);
   if (parsed.length !== 1) throw new Error(`Unknown profile override ${text}; expected exactly one <model>:<effort>.`);
   overrides.set(task, { model: parsed[0].model, effort: parsed[0].effort });
 }

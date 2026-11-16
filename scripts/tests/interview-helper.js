@@ -25,6 +25,7 @@ import {
   registerInterviewHelperHandlers,
 } from '../../electron/ipc/interviewHelper.js';
 import { cloneNode, NODE_FACTORIES } from '../../src/utils/nodeFactory.js';
+import { emptyInterviewData } from '../../src/interview-app/sessions.js';
 import { getNodeDims } from '../../src/utils/constants.js';
 import { interviewHelperCardWidth, interviewHelperColumns } from '../../src/utils/interviewHelperLayout.js';
 
@@ -896,14 +897,16 @@ export default [
   {
     name: 'interview helper: factory and clone never retain a source-bound saved rail',
     run: () => {
-      const fresh = NODE_FACTORIES.interviewhelper({ x: 24, y: 48 });
-      assert(fresh.type === 'interviewhelper', 'factory must register the Interview Helper node type');
+      // Interview Helper is its own app: a canvas can no longer create the node,
+      // and a fresh interview there starts without a source pin, plan or cursor.
+      assert(NODE_FACTORIES.interviewhelper === undefined, 'the canvas must not offer an Interview Helper node');
+      const fresh = { id: 'fresh', type: 'interviewhelper', position: { x: 24, y: 48 }, data: emptyInterviewData() };
       assert(fresh.data.interviewHelperSourceNodeId === null
         && fresh.data.interviewHelperSourceSnapshotId === null
         && fresh.data.interviewHelperManualAiCleanup === null
         && fresh.data.interviewHelperLockedPlan === null
         && fresh.data.interviewHelperCurrentStep === 0,
-      'fresh helper must start without a source pin, saved plan, or rail cursor');
+      'a fresh interview must start without a source pin, saved plan, or rail cursor');
 
       const populated = {
         ...fresh,

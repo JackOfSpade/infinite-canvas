@@ -147,27 +147,40 @@ export function JobRunStatusSection({ pauseOwnedBy = null, only = null }) {
 let minimized = false;
 
 // The panel while modules run with no handoff pending, such as during a scrape.
-export function JobRunStatusDock({ yieldsToModal = false }) {
+// `continuesHandoffs` is the gap inside one workflow: a prompt was just answered
+// and the next is not issued yet. The handoff panel passes its own expanded
+// state and this one keeps the same title and height, so the side panel reads
+// as one panel working through steps instead of closing and reopening.
+export function JobRunStatusDock({ yieldsToModal = false, continuesHandoffs = false, expanded = null, onExpandedChange = null }) {
   const statuses = useSyncExternalStore(subscribeJobRunStatuses, getJobRunStatuses, getJobRunStatuses);
-  const [isExpanded, setIsExpanded] = useState(!minimized);
+  const [ownExpanded, setOwnExpanded] = useState(!minimized);
   if (!statuses.length) return null;
-  const setExpanded = (value) => { minimized = !value; setIsExpanded(value); };
+  const controlled = continuesHandoffs && typeof expanded === 'boolean' && typeof onExpandedChange === 'function';
+  const isExpanded = controlled ? expanded : ownExpanded;
+  const setExpanded = (value) => {
+    if (controlled) { onExpandedChange(value); return; }
+    minimized = !value; setOwnExpanded(value);
+  };
+  const title = continuesHandoffs ? 'AI handoffs' : 'Modules running';
   return createPortal(
     <div className={`pointer-events-none fixed inset-0 ${yieldsToModal ? 'z-[9998]' : 'z-[11000]'}`} role="presentation">
       <div data-run-status-dock={isExpanded ? 'expanded' : 'collapsed'} className={`pointer-events-auto fixed bottom-[5.5rem] right-4 ${yieldsToModal ? 'z-[9999]' : 'z-[11001]'} w-[min(32rem,calc(100vw-2rem))]`}>
         {!isExpanded ? (
           <button type="button" onClick={() => setExpanded(true)} aria-expanded="false" className="ml-auto flex max-w-full items-center gap-2 rounded-xl border border-violet-400/35 bg-neutral-900/95 px-3.5 py-2.5 text-left text-sm text-white shadow-2xl">
             <span className="min-w-0">
-              <span className="block font-medium">Modules running</span>
-              <span className="block text-xs text-white/55">{statuses.map(entry => entry.label).join(', ')}</span>
+              <span className="block font-medium">{continuesHandoffs ? 'Pending AI handoffs' : title}</span>
+              <span className="block text-xs text-white/55">{continuesHandoffs ? 'Working on the next step' : statuses.map(entry => entry.label).join(', ')}</span>
             </span>
             <span className="ml-1 inline-flex items-center gap-1 text-xs font-medium text-violet-200">Expand <ChevronUp size={15} aria-hidden="true" /></span>
           </button>
         ) : (
-          <section role="region" aria-label="Module status" className="max-h-[calc(100vh-6.5rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col">
+          <section role="region" aria-label="Module status" className={`${continuesHandoffs ? 'min-h-[min(47rem,calc(100vh-6.5rem))] ' : ''}max-h-[calc(100vh-6.5rem)] overflow-hidden rounded-2xl border border-violet-400/25 bg-neutral-900 shadow-2xl flex flex-col`}>
             <header className="flex shrink-0 items-center gap-3 border-b border-white/10 px-5 py-4">
               <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-violet-400/25 bg-violet-500/15"><ClipboardCopy size={16} className="text-violet-300" aria-hidden="true" /></div>
-              <h2 className="min-w-0 flex-1 text-sm font-semibold text-white">Modules running</h2>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-sm font-semibold text-white">{title}</h2>
+                {continuesHandoffs && <p role="status" className="mt-0.5 text-xs text-white/50">Working between steps. The next prompt opens here.</p>}
+              </div>
               <button type="button" onClick={() => setExpanded(false)} className={NEUTRAL}><ChevronDown size={13} aria-hidden="true" />Minimize</button>
             </header>
             <div className="custom-scrollbar flex min-h-0 flex-col gap-3 overflow-y-auto p-5"><JobRunStatusSection /></div>

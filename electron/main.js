@@ -29,12 +29,6 @@ import { isTrustedCanvasNavigation } from './canvasNavigation.js';
 import { logger } from './logger.js';
 import { attachRendererRecovery, hasStoppedRenderer, recordRendererCrash } from './rendererRecovery.js';
 import { registerJobsHandlers } from './ipc/jobs.js';
-import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from './ipc/interviewHelper.js';
-import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from './ipc/interviewPreparation.js';
-import { createInterviewWindowController, isTrustedInterviewNavigation } from './interviewWindow.js';
-import { createPracticeCallController, createReplayHandler } from './practiceCall/callWindow.js';
-import { getInterviewPracticeRegistry } from './ipc/interviewPracticeRegistry.js';
-import { createInterviewClaudeTransport } from './ipc/interviewClaudeTransport.js';
 import { configureAiRecording } from './ipc/aiReplaySamples.js';
 import { configureModelCalibration, registerModelCalibrationHandler } from './ipc/aiModelCalibration.js';
 import { registerJobApplicationHandlers } from './ipc/jobApplication.js';
@@ -359,8 +353,6 @@ process.on('unhandledRejection', (reason, promise) => {
 // localStorage) live once in this single main process and are deliberately
 // shared — running multiple OS processes would fight over those.
 const canvasWindows = new Set();
-let interviewWindowController = null;
-let practiceCallController = null;
 // Most-recently focused canvas window — menu actions target this so File ▸ Save
 // etc. act on the window the user is actually looking at.
 let lastFocusedCanvasWindow = null;
@@ -918,7 +910,6 @@ function createWindow(initSpec = { mode: 'auto' }) {
   });
 
   win.on('closed', () => {
-    interviewWindowController?.cleanupOwner(win);
     canvasWindows.delete(win);
     if (lastFocusedCanvasWindow === win) lastFocusedCanvasWindow = null;
   });
@@ -1055,20 +1046,15 @@ app.on('web-contents-created', (_, contents) => {
 
   contents.on('will-navigate', (event, navigationUrl) => {
     // Auth/monitor BrowserWindows need to follow their remote flows. Only the
-    // canvas and the narrow Interview Helper child have application preload
-    // bridges, so both get a strict, surface-specific top-level allowlist.
-    if (!contents.__isCanvasRenderer && !contents.__isInterviewHelperRenderer) return;
+    // canvas has an application preload bridge, so it gets a strict top-level
+    // allowlist.
+    if (!contents.__isCanvasRenderer) return;
     try {
       const parsedUrl = new URL(navigationUrl);
-      const trusted = contents.__isInterviewHelperRenderer
-        ? isTrustedInterviewNavigation(navigationUrl, {
-            devServerUrl: process.env.VITE_DEV_SERVER_URL,
-            distHtmlPath: path.join(__dirname, '../dist/index.html'),
-          })
-        : isTrustedCanvasNavigation(navigationUrl, {
-            devServerUrl: process.env.VITE_DEV_SERVER_URL,
-            distDir: path.join(__dirname, '../dist'),
-          });
+      const trusted = isTrustedCanvasNavigation(navigationUrl, {
+        devServerUrl: process.env.VITE_DEV_SERVER_URL,
+        distDir: path.join(__dirname, '../dist'),
+      });
       if (trusted) return;
 
       event.preventDefault();
@@ -1086,11 +1072,6 @@ if (!gotTheLock) {
   app.quit();
 } else {
   protocol.registerSchemesAsPrivileged([
-    // Replay audio of in-app practice calls; only known call ids are served (electron/practiceCall/replayProtocol.js).
-    {
-      scheme: 'practice-call',
-      privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
-    },
     {
       scheme: 'local-file',
       privileges: {
@@ -1404,49 +1385,7 @@ if (!gotTheLock) {
 
     registerFilesystemHandlers();
     registerJobsHandlers();
-    registerInterviewHelperHandlers();
-    registerInterviewPreparationHandlers();
-    interviewWindowController = createInterviewWindowController({
-      BrowserWindow,
-      ipcMain: electronPkg.ipcMain,
-      appInstance: app,
-      isAuthorizedOwner: owner => canvasWindows.has(owner) && !owner.isDestroyed(),
-      loadSnapshot: ({ snapshotId, userDataPath }) => loadInterviewHelperCareerSnapshot({ snapshotId, userDataPath }),
-      loadBundle: ({ artifactId, userDataPath }) => loadInterviewPreparationBundle({ artifactId, userDataPath }),
-      preloadPath: path.join(__dirname, 'interviewWindowPreload.js'),
-      devServerUrl: process.env.VITE_DEV_SERVER_URL || null,
-      distHtmlPath: path.join(__dirname, '../dist/index.html'),
-    });
-    try {
-      // In-app practice call (docs/interview-practice-call.md). The review runs on the
-      // same Claude CLI transport as interview preparation, stage qa-practice-review.
-      const practiceReviewTransport = createInterviewClaudeTransport();
-      const practiceCallText = ({ prompt, schema, signal } = {}) => practiceReviewTransport.callText(prompt, {
-        signal, task: 'practice-review', claudeStage: 'qa-practice-review', responseSchema: schema,
-      });
-      const ownerFromFrame = sender => {
-        try {
-          const contents = sender?.webContents ?? electronPkg.webContents?.fromFrame?.(sender) ?? sender;
-          return BrowserWindow.fromWebContents(contents) || null;
-        } catch { return null; }
-      };
-      practiceCallController = createPracticeCallController({
-        BrowserWindow,
-        ipcMain: electronPkg.ipcMain,
-        appInstance: app,
-        isAuthorizedOwner: sender => { const owner = ownerFromFrame(sender); return !!owner && canvasWindows.has(owner) && !owner.isDestroyed(); },
-        preloadPath: path.join(__dirname, 'practiceCallPreload.js'),
-        devServerUrl: process.env.VITE_DEV_SERVER_URL || null,
-        distHtmlPath: path.join(__dirname, '../dist/index.html'),
-        callText: practiceCallText,
-        registry: getInterviewPracticeRegistry(),
-        // The model worker runs from its own bundle entry (vite: electron/practiceCall/models/inferenceWorkerThread.js).
-        serviceOptions: { callText: practiceCallText, registry: getInterviewPracticeRegistry(), inferenceWorkerPath: path.join(__dirname, 'inferenceWorkerThread.js').replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`) },
-      });
-      protocol.handle('practice-call', createReplayHandler({ store: practiceCallController.store }));
-    } catch (error) {
-      logger.warn(`[PracticeCall] unavailable: ${error?.message || error}`);
-    }
+    // Interview Helper is its own app now (electron/interviewApp/main.js).
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
     try {
@@ -1480,11 +1419,7 @@ if (!gotTheLock) {
     registerMarketplaceHandlers();
     registerAccountsHandlers();
     registerBugReportHandlers();
-    registerNetworkHandlers({
-      onNodeDeleted: (sender, nodeId) => (
-        interviewWindowController?.cleanupBySenderAndNode(sender, nodeId)
-      ),
-    });
+    registerNetworkHandlers();
     registerSettingsHandlers();
     registerNonApiAiHandlers();
     // Every Claude call is recorded for offline re-measurement on a future model.

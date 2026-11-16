@@ -922,7 +922,7 @@ export default [
       assert(dialogSource.includes('const [isExpanded, setIsExpanded] = useState(true)')
         && dialogSource.includes('const hadPendingRequestsRef = useRef(false);')
         && dialogSource.includes('useLayoutEffect(() => {')
-        && dialogSource.includes('if (hasPendingRequests && !hadPendingRequestsRef.current) setIsExpanded(true);')
+        && dialogSource.includes('if (hasPendingRequests && !hadPendingRequestsRef.current && !continuesHandoffs) setIsExpanded(true);')
         && dialogSource.includes('Pending AI handoffs')
         && dialogSource.includes('Expand')
         && dialogSource.includes('Minimize')

@@ -1,0 +1,53 @@
+{
+  "appId": "com.antigravity.interviewhelper",
+  "productName": "Interview Helper",
+  "extraMetadata": {
+    "name": "interview-helper",
+    "productName": "Interview Helper",
+    "main": "dist-electron-interview/main.cjs"
+  },
+  "npmRebuild": false,
+  "mac": {
+    "target": "dir",
+    "identity": "AI Chalkboard Local Code Signing",
+    "forceCodeSigning": true,
+    "hardenedRuntime": true,
+    "extraResources": [
+      {
+        "from": "native/interview-audio/build/Interview Audio Helper.app",
+        "to": "interview-audio/Interview Audio Helper.app"
+      },
+      {
+        "from": "native/practice-audio/build/Practice Audio Helper.app",
+        "to": "practice-audio/Practice Audio Helper.app"
+      }
+    ],
+    "timestamp": "none",
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "Hear your answers during interview practice calls. Audio is transcribed on this Mac and recorded locally for your feedback.",
+      "NSAudioCaptureUsageDescription": "Transcribe interview call output on this Mac without capturing your microphone or changing playback.",
+      "NSScreenCaptureUsageDescription": "Read interview call system audio locally. No screen frames or microphone audio are captured by Interview Helper."
+    }
+  },
+  "directories": {
+    "buildResources": "build",
+    "output": "release-interview"
+  },
+  "files": [
+    "dist-interview",
+    "dist-electron-interview",
+    "!node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
+    "!node_modules/onnxruntime-node/bin/napi-v*/linux/**/*",
+    "!node_modules/onnxruntime-node/bin/napi-v*/win32/**/*"
+  ],
+  "asarUnpack": [
+    "node_modules/onnxruntime-node/**/*",
+    "dist-electron-interview/inferenceWorkerThread.js"
+  ],
+  "extraResources": [
+    {
+      "from": "config/application-model.json",
+      "to": "config/application-model.json"
+    }
+  ]
+}

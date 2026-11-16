@@ -181,7 +181,7 @@ export default [
       await settle();
       const snapshot = worker.activity();
       assert.equal(snapshot.tasks.a.state, 'running');
-      assert.equal(snapshot.tasks.a.model, 'opus');
+      assert.equal(snapshot.tasks.a.model, 'haiku', 'posting research runs on Haiku high since 2026-11-15');
       assert.equal(snapshot.tasks.a.maxTurns, 16, 'a research task reports its turn limit');
       assert.equal(snapshot.tasks.b.state, 'queued');
       assert.equal(snapshot.running, 1);

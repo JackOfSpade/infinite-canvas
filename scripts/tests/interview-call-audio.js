@@ -249,9 +249,18 @@ export default [
     assert.doesNotMatch(swift, /addStreamOutput\([^\n]+type:\s*\.(?:microphone|screen)/u);
     assert.doesNotMatch(swift, /(?:AVAudioFile|Data\([^)]*\)\.write|write\(to:|FileManager.*createFile)/u);
     assert.match(swift, /downloadAndInstall/u); assert.doesNotMatch(swift, /requiresOnDeviceRecognition\s*=\s*false/u);
-    const config = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
-    assert.equal(config.build.mac.identity, 'AI Chalkboard Local Code Signing'); assert.equal(config.build.mac.hardenedRuntime, true);
-    assert(config.build.mac.extraResources.some(item => item.to === 'interview-audio/Interview Audio Helper.app'));
+    // The helper ships with the standalone Interview Helper app, under the same signing identity as Infinite Canvas.
+    const canvasConfig = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).build;
+    const config = JSON.parse(fs.readFileSync(new URL('../../electron-builder.interview.json', import.meta.url), 'utf8'));
+    assert.equal(config.mac.identity, 'AI Chalkboard Local Code Signing'); assert.equal(config.mac.hardenedRuntime, true);
+    assert.equal(config.mac.identity, canvasConfig.mac.identity); assert.equal(config.mac.forceCodeSigning, true);
+    assert(config.mac.extraResources.some(item => item.to === 'interview-audio/Interview Audio Helper.app'));
+    assert(config.mac.extraResources.some(item => item.to === 'practice-audio/Practice Audio Helper.app'));
+    for (const key of ['NSMicrophoneUsageDescription', 'NSAudioCaptureUsageDescription', 'NSScreenCaptureUsageDescription']) {
+      assert(typeof config.mac.extendInfo[key] === 'string' && config.mac.extendInfo[key], `${key} must be declared by the app that asks for it`);
+      assert.equal(canvasConfig.mac.extendInfo[key], undefined, `Infinite Canvas no longer asks for ${key}`);
+    }
+    assert.equal(canvasConfig.mac.extraResources, undefined, 'Infinite Canvas no longer ships the audio helpers');
     assert.equal(interviewAudioHelperPath({ packaged: true, resourcesPath: '/tmp/resources' }), '/tmp/resources/interview-audio/Interview Audio Helper.app/Contents/MacOS/interview-audio-helper');
     const pipeline = fs.readFileSync(new URL('../build-macos.mjs', import.meta.url), 'utf8');
     assert.match(pipeline, /buildInterviewAudioHelper\(\{ projectDir, identity \}\)/u);

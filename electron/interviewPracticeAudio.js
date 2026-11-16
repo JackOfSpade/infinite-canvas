@@ -2,7 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process';
 import path from 'node:path';
 
 export const PRACTICE_AUDIO_MESSAGES = Object.freeze({
-  'permission-denied': 'Allow Infinite Canvas or Practice Audio Helper in System Settings → Privacy & Security → Microphone, then retry. The call can’t continue without microphone access.',
+  'permission-denied': 'Allow Interview Helper or Practice Audio Helper in System Settings → Privacy & Security → Microphone, then retry. The call can’t continue without microphone access.',
   'unsupported-locale': 'English on-device speech recognition is unavailable on this Mac, so the call can’t continue.',
   'speech-assets': 'English on-device speech assets could not be prepared. Check your connection, then retry the call.',
   'unsupported-platform': 'Practice calls require Apple Silicon and macOS 26 or later.',

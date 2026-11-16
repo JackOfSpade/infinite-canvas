@@ -485,9 +485,28 @@ export default [
     },
   },
   {
+    name: 'Run status: a job card generation stays in the side panel between its prompts',
+    run() {
+      __resetJobRunStatusForTests();
+      publishJobRunStatus('card', { label: 'Application', headline: 'Finding the official posting', relatedNodeIds: ['board', '', null] });
+      const entry = getJobRunStatus('card');
+      assert.deepEqual(entry.relatedNodeIds, ['board']);
+      assert.equal(runStatusBelongsToHandoff(entry, 'board'), true, "the Board's lookup prompt tab shows the card's generation");
+      assert.equal(runStatusBelongsToHandoff(entry, 'card'), true, "the bundle's own prompt tab shows it too");
+      assert.equal(runStatusBelongsToHandoff(entry, 'otherBoard'), false);
+      assert.deepEqual(partitionRunStatusesForHandoffs([entry], ['board']).unrelated, [], 'it opens no separate Modules tab');
+      assert.equal(pauseOwnerStatus('board', [entry]), null, 'a related run offers no Pause for the Board');
+      const card = fs.readFileSync(new URL('../../src/nodes/JobCardNode.jsx', import.meta.url), 'utf8');
+      assert.match(card, /usePublishJobRunStatus\(id, hasApplicationRun \|\| dockArrivalJobId \? \{/);
+      const dock = fs.readFileSync(new URL('../../src/components/NonApiAiDialog.jsx', import.meta.url), 'utf8');
+      assert.match(dock, /<JobRunStatusDock[\s\S]{0,120}continuesHandoffs=\{continuesHandoffs\}/, 'the panel between prompts continues the handoff panel');
+      __resetJobRunStatusForTests();
+    },
+  },
+  {
     name: 'Interview Helper: the live Claude status lives in the Modules running panel, not the node',
     run: () => {
-      const node = fs.readFileSync(new URL('../../src/nodes/InterviewHelperNode.jsx', import.meta.url), 'utf8');
+      const node = fs.readFileSync(new URL('../../src/interview-app/InterviewHelperPanel.jsx', import.meta.url), 'utf8');
       assert.doesNotMatch(node, /ClaudeTaskProgress/);
       assert.doesNotMatch(node, /ClaudePauseControl/);
       assert.match(node, /usePublishJobRunStatus\(id, locallyPreparing \? \{ label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: claudeInterviewPauseKey\(data\.interviewHelperPreparationRunId\), pauseKeys: \[claudeInterviewPauseKey\(data\.interviewHelperPreparationRunId\)\], pauseWithoutSave: true \} : null\);/);

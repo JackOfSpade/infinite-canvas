@@ -12,6 +12,9 @@ export const REDUNDANCY_SHINGLE_WORDS = 8;
 const MAX_REDUNDANCY_PHRASE_WORDS = 24;
 const MAX_CHECK_DETAIL_VALUE_CHARS = 160;
 export const MAX_LETTER_FIGURES = 3;
+// The brief's own cap: at least one and at most three body points. It lives
+// here as one number so the advisory check and its callers cannot drift apart.
+export const MAX_LETTER_BODY_POINTS = 3;
 const MAX_FIGURE_DETAIL_ITEMS = 12;
 const MAX_GENERIC_OBSERVATIONS = 12;
 export const MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS = 8;
@@ -26,6 +29,9 @@ const MAX_PUNCTUATION_OBSERVATIONS = 8;
 const MAX_PLAIN_REGISTER_OBSERVATIONS = 4;
 const MAX_OPENING_DEMONSTRATIVE_OBSERVATIONS = 4;
 const MAX_PARAGRAPH_OPENER_OBSERVATIONS = 4;
+// The body-point cap states its count once, so it needs at most one
+// observation; the constant keeps the shared observationResult tail in use.
+const MAX_BODY_POINT_COUNT_OBSERVATIONS = 1;
 const MAX_PARALLEL_STRUCTURE_OBSERVATIONS = 8;
 const MAX_EXPERIENCE_FRAMING_OBSERVATIONS = 4;
 const MAX_REFERENCE_CLARITY_OBSERVATIONS = 8;
@@ -3299,6 +3305,113 @@ export function checkPriorEmployerOpening(paragraphs = [], employerNames = []) {
     'each prior employer is introduced with the candidate\'s role or relationship before its evidence');
 }
 
+// Trailing corporate-suffix words name a legal form, not the organization, so a
+// name is its remaining words: "Maple Ridge School District, Inc." is named by
+// "Maple Ridge School District", and a remainder of one word ("Acme, Inc.") has
+// no shorter form to flag.
+const EMPLOYER_SUFFIX_WORDS = new Set([
+  'inc', 'llc', 'ltd', 'corp', 'corporation', 'co', 'company', 'plc', 'gmbh', 'ag', 'sa', 'lp', 'llp',
+]);
+
+/** A name's words, with its trailing corporate-suffix words and punctuation removed. */
+function employerNameParts(value) {
+  const parts = text(value).split(/\s+/).filter(Boolean)
+    .map(part => part.replace(/^[^\p{L}\p{N}]+/gu, '').replace(/[^\p{L}\p{N}.']+$/gu, ''));
+  let end = parts.length;
+  while (end > 0 && EMPLOYER_SUFFIX_WORDS.has(parts[end - 1].replace(/\.+$/u, '').toLowerCase())) end--;
+  return parts.slice(0, end).filter(Boolean);
+}
+
+/** Comparison key for a word sequence: lowercased, trailing punctuation dropped. */
+function namePartsKey(parts) {
+  return parts.map(part => part.replace(/[.,;:]+$/u, '').toLowerCase()).filter(Boolean).join(' ');
+}
+
+/** The words written at a position in a paragraph, possessives and punctuation dropped. */
+function writtenWordKeysAt(paragraph, start) {
+  return (paragraph.slice(start).match(/[\p{L}\p{N}][\p{L}\p{N}'’.-]*/gu) || [])
+    .map(word => word.replace(/['’]s$/u, '').replace(/[.,;:!?]+$/u, '').toLowerCase())
+    .filter(Boolean);
+}
+
+/** True when the words written from a position open with a whole known name. */
+function startsWithWordKeys(keys, nameKeys) {
+  return nameKeys.length > 0 && nameKeys.length <= keys.length
+    && nameKeys.every((key, index) => key === keys[index]);
+}
+
+/**
+ * A past employer is written by its full name or not named at all. A leading
+ * part of the name used alone ("at Maple Ridge I built", "my Maple Ridge work",
+ * "Maple Ridge's staff", "the Maple project") reads as an adjective: the reader
+ * is told about a place, not about a named employer.
+ *
+ * Flagged: a proper leading-word prefix of the name, one to n-1 words, whole
+ * words, case-sensitive, optionally possessive, that the name's next word does
+ * not continue. Not flagged: the full name, a plain reference to the job that
+ * uses no part of the name, a one-word name, and a prefix that is itself the
+ * whole name of another prior employer, the target company, or a project the
+ * letter names — that is that name, not a truncation of this one.
+ *
+ * The observation states the rule and quotes only the words the letter wrote;
+ * it never assembles a replacement from source data. The written prefix is
+ * curly-quoted for the reason given on checkPriorEmployerOpening above: this
+ * check is fingerprinted, and only curly-quoted spans are stripped before
+ * hashing.
+ */
+export function checkPriorEmployerShortForm(paragraphs = [], employerNames = [], { otherNames = [] } = {}) {
+  const list = Array.isArray(paragraphs) ? paragraphs : [];
+  const employers = (Array.isArray(employerNames) ? employerNames : []).map(text).filter(Boolean);
+  // Every name the letter may legally write whole, as word keys, in both its
+  // full and its suffix-stripped form: "Acme, Inc." written as "Acme" is that
+  // company's own name, not a truncation of it.
+  const wholeNameKeys = [...employers, ...(Array.isArray(otherNames) ? otherNames : [])]
+    .map(text).filter(Boolean)
+    .flatMap(name => [text(name).split(/\s+/).filter(Boolean), employerNameParts(name)])
+    .map(nameParts => namePartsKey(nameParts).split(' ').filter(Boolean))
+    .filter(nameKeys => nameKeys.length > 0);
+  const hits = [];
+  for (const employer of employers) {
+    const nameParts = employerNameParts(employer);
+    if (nameParts.length < 2) continue;
+    for (let length = 1; length < nameParts.length; length++) {
+      const prefixParts = nameParts.slice(0, length);
+      const nextPart = nameParts[length].replace(/[.,;:]+$/u, '').toLowerCase();
+      const pattern = new RegExp(
+        `(?<![\\p{L}\\p{N}])(${prefixParts.map(escapeRegExp).join('\\s+')})(?:['’]s)?(?![\\p{L}\\p{N}])`,
+        'gu',
+      );
+      for (let index = 0; index < list.length; index++) {
+        const paragraph = text(list[index]);
+        for (const match of paragraph.matchAll(pattern)) {
+          const end = match.index + match[0].length;
+          // The name's next word — possessive or not — continues the prefix:
+          // what was written is part of the whole name, and a longer prefix
+          // reports it where the name actually stops.
+          if (writtenWordKeysAt(paragraph, end)[0] === nextPart) continue;
+          // The words written from here are the whole name of something else
+          // the letter may name: another prior employer, the target company, a
+          // project of the candidate's. That is that name, not a truncation.
+          const writtenKeys = writtenWordKeysAt(paragraph, match.index);
+          if (wholeNameKeys.some(nameKeys => startsWithWordKeys(writtenKeys, nameKeys))) continue;
+          hits.push({ index, start: match.index, end, written: match[1] });
+        }
+      }
+    }
+  }
+  // One observation per written span, longest prefix first: what the letter
+  // wrote is "Maple Ridge", even where the shorter "Maple" matched first.
+  hits.sort((left, right) => left.index - right.index || left.start - right.start || right.end - left.end);
+  const accepted = [];
+  for (const hit of hits) {
+    if (accepted.some(other => other.index === hit.index && hit.start < other.end && other.start < hit.end)) continue;
+    accepted.push(hit);
+  }
+  const observations = accepted.map(hit => `paragraph ${hit.index + 1} writes “${boundedDetailValue(hit.written)}” for a past employer; write the employer's full name, or refer to that job without the name`);
+  return observationResult('prior-employer-short-form', observations, MAX_EXPERIENCE_FRAMING_OBSERVATIONS,
+    'each past employer is written by its full name or not named');
+}
+
 // These checks receive project names from the structured résumé markup, never
 // arbitrary capitalization in prose. That makes the check strict for a known
 // artifact such as a named personal project without mistaking a target company, city, or
@@ -6028,6 +6141,28 @@ export function checkParagraphOpeners(paragraphs = []) {
     `${list.length} paragraph(s) open on different words`);
 }
 
+/**
+ * The brief caps the letter at three body points ("at least one and at most
+ * three"). The letter's prose paragraphs read as thesis, body points, closing,
+ * which is how checkShape and checkParagraphOpeners already receive them: the
+ * array holds no salutation or sign-off in any caller. So the body points are
+ * everything between the first paragraph and the last.
+ *
+ * Advisory only, and the cap is the whole rule: the floor is not enforced
+ * here. A letter with no middle paragraph is thin, not false, and the brief
+ * already asks for one; a check that rejected on it would invent a paragraph
+ * quota this file has spent several revisions removing.
+ */
+export function checkBodyPointCount(paragraphs = []) {
+  const list = Array.isArray(paragraphs) ? paragraphs.filter(paragraph => text(paragraph)) : [];
+  const bodyPoints = Math.max(0, list.length - 2);
+  const observations = bodyPoints > MAX_LETTER_BODY_POINTS
+    ? [`the letter makes ${bodyPoints} body points; keep the three strongest and fold or drop the rest`]
+    : [];
+  return observationResult('body-point-count', observations, MAX_BODY_POINT_COUNT_OBSERVATIONS,
+    `${bodyPoints} body point(s) between the thesis and the closing`);
+}
+
 // At a paragraph boundary, “The department” after a named employer
 // makes the prior employer sound like generic context rather than the named
 // source of the next evidence. This is intentionally narrower than a ban on
@@ -7484,6 +7619,7 @@ const CHECK_DISPOSITION_ROWS = Object.freeze([
   ['compound-hyphenation', 'off', 'TASTE', 'orthography; the message already prints the corrected spelling.'],
   ['parallel-structure', 'off', 'TASTE', 'grammar heuristics.'],
   ['prior-employer-opening', 'advisory', 'TASTE', 'where a sentence states the candidate’s relationship to an employer is a wording preference; the closed frames rejected complete relationship statements and taught one template.'],
+  ['prior-employer-short-form', 'gate', 'MIXED', 'the user’s stated rule: a past employer is written by its full name or not named; a first-word short form reads as an adjective. Held as MIXED rather than TASTE because the letter table keeps TASTE rules advisory, and the half that gates here is a claim about which organization the work was for.'],
   ['named-artifact-introduction', 'advisory', 'TASTE', 'introduction style, not fact.'],
   ['opening-artifact-context', 'advisory', 'TASTE', 'opening form; with the other opening checks it steered writers toward an abstract opener about the employer’s domain, which is the unsupported claim a gate should be catching.'],
   ['vague-domain-work-label', 'off', 'TASTE', 'a one-pattern wording fixer.'],
@@ -7508,6 +7644,7 @@ const CHECK_DISPOSITION_ROWS = Object.freeze([
   ['sentence-length', 'advisory', 'TASTE', 'a readability preference.'],
   ['punctuation-style', 'advisory', 'TASTE', 'house style the host can normalise mechanically instead of rejecting.'],
   ['paragraph-openers', 'advisory', 'TASTE', 'opening-word variety that the brief asks for; the host records it and never rejects on it.'],
+  ['body-point-count', 'advisory', 'TASTE', 'the brief caps the letter at three body points; the host records it and never rejects on it.'],
   ['plain-register', 'off', 'TASTE', 'a few fixed phrases from past letters.'],
   ['introductory-workplace-comma', 'off', 'TASTE', 'comma placement.'],
   ['visual-reference-precision', 'off', 'TASTE', 'fitted to one project description.'],
@@ -7671,6 +7808,9 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     ['compound-hyphenation', () => checkCompoundHyphenation(paragraphs)],
     ['parallel-structure', () => checkParallelStructure(paragraphs)],
     ['prior-employer-opening', () => checkPriorEmployerOpening(paragraphs, priorEmployers)],
+    ['prior-employer-short-form', () => checkPriorEmployerShortForm(paragraphs, priorEmployers, {
+      otherNames: [companyName, ...(Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name)],
+    })],
     ['named-artifact-introduction', () => checkNamedArtifactIntroduction(paragraphs, (Array.isArray(evidence?.projects) ? evidence.projects : []).map(project => project?.name))],
     ['opening-artifact-context', () => checkOpeningArtifactContext(
       paragraphs,
@@ -7699,6 +7839,7 @@ export function evaluateCoverLetterChecks({ plan = {}, paragraphs = [], evidence
     ['sentence-length', () => checkSentenceLength(paragraphs)],
     ['punctuation-style', () => checkPunctuationStyle(paragraphs)],
     ['paragraph-openers', () => checkParagraphOpeners(paragraphs)],
+    ['body-point-count', () => checkBodyPointCount(paragraphs)],
     ['plain-register', () => checkPlainRegister(paragraphs)],
     ['introductory-workplace-comma', () => checkIntroductoryWorkplaceComma(paragraphs, priorEmployers)],
     ['visual-reference-precision', () => checkVisualReferencePrecision(paragraphs)],

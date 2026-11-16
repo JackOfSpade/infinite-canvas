@@ -94,6 +94,16 @@ export async function appliedJobsRootForCanvas(canvasFilePath, { assertCanvasPat
   return { root };
 }
 
+/** A folder the user chose in the standalone app; it must be a real directory. */
+export async function chosenAppliedJobsRoot(folder) {
+  if (typeof folder !== 'string' || !path.isAbsolute(folder) || folder.length > 4096) return { root: null, reason: 'folder-unset' };
+  try {
+    const stat = await fs.promises.lstat(folder);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return { root: null, reason: 'missing-root' };
+  } catch { return { root: null, reason: 'missing-root' }; }
+  return { root: folder };
+}
+
 /** Per-helper token registry: a token resolves only to a folder this process listed recently. */
 export function createApplicationFolderRegistry({ now = Date.now } = {}) {
   const byNode = new Map();
@@ -121,8 +131,11 @@ export function createApplicationFolderRegistry({ now = Date.now } = {}) {
 }
 
 /** IPC-facing listing: labels and tokens only, never filesystem paths. */
-export async function listApplicationFolders({ nodeId, canvasFilePath, registry, assertCanvasPathAllowed }) {
-  const { root, reason } = await appliedJobsRootForCanvas(canvasFilePath, { assertCanvasPathAllowed });
+export async function listApplicationFolders({ nodeId, canvasFilePath, registry, assertCanvasPathAllowed, appliedJobsFolder }) {
+  // The standalone Interview Helper app has no canvas: it names the folder itself.
+  const { root, reason } = appliedJobsFolder !== undefined
+    ? await chosenAppliedJobsRoot(appliedJobsFolder)
+    : await appliedJobsRootForCanvas(canvasFilePath, { assertCanvasPathAllowed });
   if (!root) return { root: null, folders: [], reason };
   const folders = await enumerateApplicationFolders(root);
   return {

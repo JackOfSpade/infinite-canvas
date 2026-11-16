@@ -92,7 +92,9 @@ export const CLAUDE_TASK_FAILURE_LABELS = Object.freeze({
   CLAUDE_TASK_IMAGE: 'A photo could not be read',
   CLAUDE_ERROR: 'Claude returned an error',
 });
-export const claudeTaskFailureLabel = code => CLAUDE_TASK_FAILURE_LABELS[code] || 'The attempt failed';
+// A task routed to DeepSeek has no Claude fallback, so its provider failures are named as such.
+export const claudeTaskFailureLabel = code => CLAUDE_TASK_FAILURE_LABELS[code]
+  || (typeof code === 'string' && code.startsWith('OFFLOAD_') ? 'DeepSeek could not answer' : 'The attempt failed');
 
 function toolLabel({ tool, target }) {
   if (tool === 'WebSearch' || tool === 'mcp__parallel__web_search') return target ? `Searching the web: ${target}` : 'Searching the web';

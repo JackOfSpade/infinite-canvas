@@ -82,14 +82,13 @@ async function flush() {
   await Promise.resolve();
 }
 
-const PROBE_SOURCE = (nodePath, contextPath) => `
+// The panel is the standalone app's view of one interview: `data` in, patches out.
+const PROBE_SOURCE = panelPath => `
   import React, { useCallback, useState } from 'react';
-  import { ReactFlowProvider } from '@xyflow/react';
-  import { InterviewHelperNode } from ${JSON.stringify(nodePath)};
-  import { CanvasNavigationContext } from ${JSON.stringify(contextPath)};
-  export function InterviewHelperProbe({ initialData, nodes, onPersist, nodeId = 'interview-helper' }) {
+  import { InterviewHelperPanel } from ${JSON.stringify(panelPath)};
+  export function InterviewHelperProbe({ initialData, onPersist, nodeId = 'interview-helper' }) {
     const [data, setData] = useState(initialData);
-    const update = useCallback((id, patch) => {
+    const update = useCallback((patch) => {
       setData(previous => {
         const next = { ...previous, ...patch };
         onPersist?.(patch, next);
@@ -97,11 +96,7 @@ const PROBE_SOURCE = (nodePath, contextPath) => `
       });
       return true;
     }, [onPersist]);
-    return <ReactFlowProvider initialNodes={nodes} initialWidth={1000} initialHeight={700}>
-      <CanvasNavigationContext.Provider value={{ updateNodeDataGlobally: update }}>
-        <InterviewHelperNode id={nodeId} data={data} />
-      </CanvasNavigationContext.Provider>
-    </ReactFlowProvider>;
+    return <InterviewHelperPanel id={nodeId} data={data} onPatch={update} appliedJobsFolder="/Applied Jobs" />;
   }
 `;
 
@@ -190,7 +185,7 @@ async function withDomBundledProbe(fn) {
     const controller = new AbortController();
     let bundle;
     try {
-      await fsPromises.writeFile(entry, PROBE_SOURCE(path.resolve('src/nodes/InterviewHelperNode.jsx'), path.resolve('src/contexts/CanvasNavigationContext.jsx')));
+      await fsPromises.writeFile(entry, PROBE_SOURCE(path.resolve('src/interview-app/InterviewHelperPanel.jsx')));
       bundle = await withTimeout(bundleComponent(entry, { signal: controller.signal }), 10_000);
       return await fn(bundle, window);
     } finally {
@@ -1084,7 +1079,7 @@ export default [
           await bundle.module.act(async () => { await flush(); });
           assert(text(window).includes('A restored deletion cleanup is still pending')
             && button(window, 'Resume preparation').disabled
-            && button(window, 'choose canvas files').disabled,
+            && button(window, 'Choose files…').disabled,
           'only strictly valid restored deletion receipts must block new career and preparation work with an explicit recovery alert');
 
           await bundle.module.act(async () => { button(window, 'Retry restored cleanup').click(); await flush(); });
@@ -1873,24 +1868,26 @@ export default [
     },
   },
   {
-    name: 'interview helper render: canvas career-drop events compile only this helper and ignore foreign or empty drops',
+    name: 'interview helper render: the file chooser compiles the chosen career files and ignores a cancelled or blank choice',
     async run() {
       await withDomBundledProbe(async (bundle, window) => {
         const parsePaths = [];
+        let chosen = [];
         window.electronAPI = { parseCareerData: async args => { parsePaths.push(args.filePaths); return { success: false, error: 'retryable' }; } };
-        const root = await mount(bundle, window, { nodes: [] });
+        window.interviewAppAPI = { chooseCareerFiles: async () => chosen };
+        const root = await mount(bundle, window);
         try {
           await bundle.module.act(async () => { await flush(); });
-          const fire = async detail => bundle.module.act(async () => {
-            window.document.dispatchEvent(new window.CustomEvent('canvas-file-nodes-dropped-on-hub', { detail }));
-            await flush(); await flush();
-          });
-          await fire({ hubId: 'other-helper', hubType: 'interviewhelper', files: [{ nodeId: 'n1', filePath: '/private/candidate/other.md', filename: 'other.md' }], mode: 'career-files' });
-          await fire({ hubId: 'interview-helper', hubType: 'jobboard', files: [{ nodeId: 'n2', filePath: '/private/candidate/wrong-hub.md', filename: 'wrong-hub.md' }], mode: 'career-files' });
-          await fire({ hubId: 'interview-helper', hubType: 'interviewhelper', files: [{ nodeId: 'n3', filePath: '   ', filename: 'blank.md' }], mode: 'career-files' });
-          assert(parsePaths.length === 0, `foreign hub ids, foreign hub types and blank paths must be ignored, got ${JSON.stringify(parsePaths)}`);
-          await fire({ hubId: 'interview-helper', hubType: 'interviewhelper', files: [{ nodeId: 'n4', filePath: '/private/candidate/canvas-career.md', filename: 'canvas-career.md' }], mode: 'career-files' });
-          assert(parsePaths.length === 1 && parsePaths[0][0] === '/private/candidate/canvas-career.md', `the drop must compile exactly the dropped career file, got ${JSON.stringify(parsePaths)}`);
+          const choose = async paths => {
+            chosen = paths;
+            await bundle.module.act(async () => { button(window, 'Choose files…').click(); await flush(); await flush(); });
+            await settle(bundle);
+          };
+          await choose([]);
+          await choose(['   ']);
+          assert(parsePaths.length === 0, `a cancelled chooser and a blank path must start nothing, got ${JSON.stringify(parsePaths)}`);
+          await choose(['/private/candidate/career.md']);
+          assert(parsePaths.length === 1 && parsePaths[0][0] === '/private/candidate/career.md', `the chooser must compile exactly the chosen career file, got ${JSON.stringify(parsePaths)}`);
         } finally { await bundle.module.act(async () => root.unmount()); }
       });
     },

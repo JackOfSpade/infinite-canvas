@@ -140,6 +140,32 @@ export default [
     },
   })),
   {
+    name: 'performance diagnostics: timings reach FULL and PERF, and only numbers are read from the window',
+    run: async () => {
+      const { recordMainPerf } = await import('../../electron/ipc/perfDiagnostics.js');
+      const { recordPerf, perfDiagnosticsSnapshot } = await import('../../src/utils/perfDiagnostics.js');
+      recordMainPerf('save-serialize', 571.4, 219.5);
+      recordMainPerf('not-a-kind', 99999);
+      recordPerf('undo-snapshot', 1040, 1625);
+      recordPerf('undo-snapshot', 4, 1625);
+      recordPerf('save-handoff', 790, 1625);
+      const perf = perfDiagnosticsSnapshot();
+      assert(perf.kinds['undo-snapshot'].count === 1 && perf.kinds['undo-snapshot'].worstMs === 1040, 'a fast undo step is not recorded');
+      perf.kinds.stall = { count: 1, worstMs: 900, recent: [{ at: Date.now(), ms: 900, nodes: 'perf-private-sentinel' }, { at: 'x', ms: 'perf-private-sentinel' }] };
+      const payload = { nodes: [], edges: [], drawings: [], eventLog: [], description: 'Synthetic lag', perf };
+      for (const filterCode of ['FULL', 'PERF']) {
+        const report = generateMarkdown({ ...payload, filterCode }).markdown;
+        assert(report.includes('## Performance (PERF)') && report.includes('1040 ms · 1625 nodes') && report.includes('790 ms')
+          && report.includes('571 ms · 219.5 MB') && report.includes('900 ms'), `${filterCode} carries the timings`);
+        assert(!report.includes('perf-private-sentinel') && !report.includes('99999'), 'text from the window and unknown kinds never reach the report');
+      }
+      assert(generateMarkdown({ nodes: [], edges: [], drawings: [], eventLog: [], description: 'x', filterCode: 'PERF' }).markdown.includes('none recorded'),
+        'a report without window timings still renders');
+      assert(!generateMarkdown({ ...payload, filterCode: 'APPOUTPUT' }).markdown.includes('## Performance (PERF)'), 'unrelated narrow reports omit timings');
+      assert(applyBugReportCode([], {}, 'PERF').matchedCodes.includes('PERF'), 'PERF is a recognized filter');
+    },
+  },
+  {
     name: 'workspace save diagnostics: exact refusal reasons reach FULL and WSIO without private path data',
     run: async () => {
       const root = await fs.promises.realpath(await fs.promises.mkdtemp(path.join(process.cwd(), '.workspace-check-')));

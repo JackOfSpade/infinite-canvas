@@ -107,38 +107,6 @@ function createJobBoardNode(position, extra = {}) {
   };
 }
 
-// Interview Helper can pin an approved Job Search snapshot or compile its own
-// independent approved snapshot. It persists only opaque references and a
-// compact, privacy-safe preparation brief; unfinished question typing remains
-// renderer-local.
-function createInterviewHelperNode(position, extra = {}) {
-  return {
-    id: generateId(), type: 'interviewhelper', position,
-    data: {
-      interviewHelperSourceNodeId: null,
-      interviewHelperSourceSnapshotId: null,
-      interviewHelperCareerMode: null,
-      interviewHelperCareerGeneration: null,
-      interviewHelperCareerCompilation: null,
-      interviewHelperCareerSnapshotId: null,
-      interviewHelperCareerFingerprint: null,
-      interviewHelperCareerFilenames: [],
-      interviewHelperJobUrl: null,
-      interviewHelperApplicationBundle: null,
-      interviewHelperPreparation: null,
-      interviewHelperPreparationRecordId: null,
-      interviewHelperPreparationInputBinding: null,
-      interviewHelperPreparationInputDigest: null,
-      interviewHelperPreparationRunId: null,
-      interviewHelperManualAiCleanup: null,
-      interviewHelperManualAiRetirementReceipts: null,
-      interviewHelperLockedPlan: null,
-      interviewHelperCurrentStep: 0,
-      ...extra,
-    },
-  };
-}
-
 /** Centralized factory lookup — avoids duplicated maps across hooks. */
 export const NODE_FACTORIES = {
   text: createTextNode,
@@ -146,7 +114,6 @@ export const NODE_FACTORIES = {
   group: createGroupNode,
   jobhub: createJobSearchNode,
   jobboard: createJobBoardNode,
-  interviewhelper: createInterviewHelperNode,
   sellhub: createSellHubNode,
   marketplacestatus: createMarketplaceStatusNode,
 };

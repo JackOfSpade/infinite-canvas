@@ -866,6 +866,10 @@ export default [
       // A stage the table does not name runs on the Sonnet high default.
       assert.deepEqual(claudeStageProfile('requirements-audit'), { model: 'sonnet', effort: 'high' });
       assert.deepEqual(claudeCliArgs(claudeStageProfile('write')).slice(0, 5), ['-p', '--model', 'opus', '--effort', 'low']);
+      // A cover-letter-only writer runs on Opus medium; a résumé-only or two-document writer and every other stage do not change.
+      assert.deepEqual(claudeStageProfile('write', { documentScope: 'cover' }), { model: 'opus', effort: 'medium' });
+      assert.deepEqual(claudeStageProfile('write', { documentScope: 'resume' }), { model: 'opus', effort: 'low' });
+      assert.deepEqual(claudeStageProfile('pick', { documentScope: 'cover' }), { model: 'opus', effort: 'high' });
     },
   },
   {
@@ -1936,6 +1940,27 @@ export default [
     },
   },
   {
+    name: 'claude runner: a cover-letter-only writer runs on Opus medium and its retry names that setting',
+    async run() {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cover-only-'));
+      const logFile = path.join(dir, 'runs.jsonl');
+      const api = { getHandoff: async () => ({ handoff: { handoffCode: 'c', stage: 'write', prompt: 'p', documentScope: 'cover' } }), submitHandoff: async () => ({ accepted: true, completed: true }) };
+      const calls = [];
+      const runner = createClaudeApplicationRunner({
+        api, stateFile: path.join(dir, 'state.json'), logger: quietLogger(), homedir: dir, runLogPath: () => logFile,
+        runStage: async options => { calls.push([options.model, options.effort]); throw new ClaudeRunnerError('CLAUDE_USAGE_LIMIT', 'Claude usage limit reached.'); },
+      });
+      runner.ensure({ jobId: 'job-cover-only', canvasFilePath: '/c.canvas' });
+      await waitFor(() => runner.status(['job-cover-only'])['job-cover-only']?.status === 'failed', 'failed');
+      const state = runner.status(['job-cover-only'])['job-cover-only'];
+      await runner.shutdown();
+      const rows = readRunLog(logFile);
+      assert.deepEqual(calls, [['opus', 'medium']]);
+      assert.deepEqual([rows[0].stage, rows[0].requestedModel, rows[0].requestedEffort], ['write', 'opus', 'medium']);
+      if ('retryEffort' in state) assert.equal(state.retryEffort, 'medium');
+    },
+  },
+  {
     name: 'claude runner run log: a failed Claude run is recorded with its error code',
     async run() {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-runlog-'));
@@ -2351,59 +2376,51 @@ export default [
     },
   },
   {
-    name: 'offload routing: credit exhaustion re-runs the handoff on Claude in a fresh session, sets the notice and routes later stages to Claude',
+    name: 'offload routing: credit exhaustion fails the routed stage loudly; Claude never answers it and Retry asks DeepSeek again',
     async run() {
       const script = scriptedApi([
         { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'FULL convert prompt.' },
         { revision: 2, handoffCode: 'f1', stage: 'fit-correction', prompt: 'Fit prompt.' },
       ]);
+      let credit = false;
       const h = offloadHarness({
         api: script.api,
-        offload: async () => { throw new ClaudeRunnerError('OFFLOAD_CREDIT_EXHAUSTED', 'credit gone', { retryable: false }); },
-      });
-      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
-      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
-      await h.runner.shutdown();
-      assert.equal(h.calls.offload.length, 1, 'offload is not tried again after credit exhaustion');
-      assert.deepEqual(h.calls.claude.map(call => [call.stage, call.text, call.resume]), [
-        ['convert', 'FULL convert prompt.', false],
-        // Same lane and provider now, so the Claude session started by the fallback is resumed.
-        ['fit-correction', 'Fit prompt.', true],
-      ]);
-      assert.equal(h.calls.claude[1].sessionId, h.calls.claude[0].sessionId);
-      assert.notEqual(h.calls.claude[0].sessionId, h.calls.offload[0].sessionId, 'Claude gets a fresh session');
-      const notice = 'DeepSeek credit is exhausted; this bundle continues on Claude. Top up DeepSeek to resume savings.';
-      assert.equal(h.runner.status([h.jobId])[h.jobId].providerNotice, notice);
-      assert.equal(h.notes.some(state => state.providerNotice === notice && state.status === 'running'), true, 'the notice reaches the running state');
-      const fallback = h.log().filter(event => event.event === 'offload-fallback');
-      assert.equal(fallback.length, 1);
-      assert.equal(fallback[0].stage, 'convert');
-      assert.equal(fallback[0].code, 'OFFLOAD_CREDIT_EXHAUSTED');
-      assert.equal(fallback[0].retryable, false);
-      const failedEvents = h.log().filter(event => event.event === 'failed');
-      assert.deepEqual(failedEvents.map(event => [event.provider, event.error.code]), [['offload', 'OFFLOAD_CREDIT_EXHAUSTED']]);
-    },
-  },
-  {
-    name: 'offload routing: a non-credit offload failure falls back for that stage only',
-    async run() {
-      const script = scriptedApi([
-        { revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' },
-        { revision: 2, handoffCode: 'f1', stage: 'fit-correction', prompt: 'Fit prompt.' },
-      ]);
-      const h = offloadHarness({
-        api: script.api,
-        offload: async ({ stage, route }) => {
-          if (stage === 'convert') throw new ClaudeRunnerError('OFFLOAD_UNAVAILABLE', 'no cli');
+        offload: async ({ route }) => {
+          if (!credit) throw new ClaudeRunnerError('OFFLOAD_CREDIT_EXHAUSTED', 'credit gone', { retryable: false });
           return { text: '{}', model: 'deepseek-test', provider: 'offload', route };
         },
       });
       h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'failed', 'failed');
+      const failed = h.runner.status([h.jobId])[h.jobId];
+      assert.equal(failed.code, 'OFFLOAD_CREDIT_EXHAUSTED');
+      assert.equal(failed.providerNotice, undefined);
+      assert.equal(h.calls.claude.length, 0, 'Claude does not step in');
+      assert.equal(h.calls.offload.length, 1);
+      assert.equal(h.log().some(event => event.event === 'offload-fallback'), false);
+      const failedEvents = h.log().filter(event => event.event === 'failed');
+      assert.deepEqual(failedEvents.map(event => [event.provider, event.error.code]), [['offload', 'OFFLOAD_CREDIT_EXHAUSTED']]);
+      credit = true;
+      await h.runner.retry({ jobId: h.jobId, canvasFilePath: h.canvas });
       await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
       await h.runner.shutdown();
-      assert.deepEqual(h.calls.claude.map(call => call.stage), ['convert']);
-      assert.deepEqual(h.calls.offload.map(call => call.stage), ['convert', 'fit-correction']);
-      assert.equal(h.runner.status([h.jobId])[h.jobId].providerNotice, undefined);
+      assert.deepEqual(h.calls.offload.map(call => call.stage), ['convert', 'convert', 'fit-correction']);
+      assert.equal(h.calls.claude.length, 0);
+    },
+  },
+  {
+    name: 'offload routing: a non-credit offload failure also fails the stage with its own code and no Claude call',
+    async run() {
+      const script = scriptedApi([{ revision: 1, handoffCode: 'c1', stage: 'convert', prompt: 'Convert prompt.' }]);
+      const h = offloadHarness({
+        api: script.api,
+        offload: async () => { throw new ClaudeRunnerError('OFFLOAD_UNAVAILABLE', 'no cli'); },
+      });
+      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
+      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'failed', 'failed');
+      await h.runner.shutdown();
+      assert.equal(h.runner.status([h.jobId])[h.jobId].code, 'OFFLOAD_UNAVAILABLE');
+      assert.equal(h.calls.claude.length, 0);
     },
   },
   {
@@ -2422,53 +2439,22 @@ export default [
     },
   },
   {
-    name: 'offload routing: two consecutive rejected submissions move the lane to Claude in a fresh self-contained session',
-    async run() {
-      const api = rejectingApi([false, false, true]);
-      const h = offloadHarness({ api: api.api });
-      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
-      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
-      await h.runner.shutdown();
-      assert.deepEqual(h.calls.offload.map(call => call.resume), [false, true]);
-      assert.equal(h.calls.offload[0].sessionId, h.calls.offload[1].sessionId);
-      assert.equal(h.calls.offload[1].text, `fix it${REJECTED_INTRO(1)}1. bad`);
-      assert.equal(h.calls.claude.length, 1);
-      assert.equal(h.calls.claude[0].resume, false);
-      assert.notEqual(h.calls.claude[0].sessionId, h.calls.offload[0].sessionId);
-      assert.equal(h.calls.claude[0].text, `Convert prompt.${REJECTED_INTRO(1)}1. bad`, 'self-contained: the full prompt plus the corrections, not the bare correction prompt');
-      const fallback = h.log().filter(event => event.event === 'offload-fallback');
-      assert.deepEqual(fallback.map(event => [event.stage, event.code]), [['convert', 'validation-streak']]);
-      assert.equal(h.runner.status([h.jobId])[h.jobId].providerNotice, undefined);
-    },
-  },
-  {
-    name: 'offload routing: a stage maxRejections of 3 keeps the lane on offload for two rejections and escalates on the third',
+    name: 'offload routing: rejected submissions are corrected on DeepSeek in the same session and never move the lane to Claude',
     async run() {
       const api = rejectingApi([false, false, false, true]);
-      const h = offloadHarness({ api: api.api, providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'off', maxRejections: 3 } } });
+      const h = offloadHarness({ api: api.api, providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'off', maxRejections: 2 } } });
       h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
       await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
       await h.runner.shutdown();
-      assert.equal(h.calls.offload.length, 3, 'three offload turns run before the lane escalates');
-      assert.equal(h.calls.claude.length, 1, 'only the turn after the third rejection runs on Claude');
-      const fallback = h.log().filter(event => event.event === 'offload-fallback');
-      assert.deepEqual(fallback.map(event => [event.stage, event.code]), [['convert', 'validation-streak']]);
+      assert.deepEqual(h.calls.offload.map(call => call.resume), [false, true, true, true]);
+      assert.equal(new Set(h.calls.offload.map(call => call.sessionId)).size, 1);
+      assert.equal(h.calls.offload[1].text, `fix it${REJECTED_INTRO(1)}1. bad`);
+      assert.equal(h.calls.claude.length, 0);
+      assert.equal(h.log().some(event => event.event === 'offload-fallback'), false);
     },
   },
   {
-    name: 'offload routing: an invalid maxRejections falls back to the default of two',
-    async run() {
-      const api = rejectingApi([false, false, true]);
-      const h = offloadHarness({ api: api.api, providers: { convert: { provider: 'offload', route: 'deepseek-flash', reasoning: 'off', maxRejections: 9 } } });
-      h.runner.ensure({ jobId: h.jobId, canvasFilePath: h.canvas });
-      await waitFor(() => h.runner.status([h.jobId])[h.jobId]?.status === 'done', 'done');
-      await h.runner.shutdown();
-      assert.equal(h.calls.offload.length, 2);
-      assert.equal(h.calls.claude.length, 1);
-    },
-  },
-  {
-    name: 'offload routing: an accepted submission resets the rejection streak',
+    name: 'offload routing: accepted and rejected submissions alternate on DeepSeek without a Claude call',
     async run() {
       const api = rejectingApi([false, true, false, true], { completeAt: 4 });
       const h = offloadHarness({ api: api.api });

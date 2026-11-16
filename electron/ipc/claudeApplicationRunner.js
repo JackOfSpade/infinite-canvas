@@ -20,7 +20,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CLAUDE_OUTPUT_TOKENS, CLAUDE_PROMPT_TOO_LONG } from './claudePromptLimit.js';
-import { APPLICATION_STAGE_PROFILES, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL } from './careerWritingCore.js';
+import { APPLICATION_STAGE_PROFILES, CLAUDE_OPUS_MODEL, CLAUDE_SONNET_MODEL, COVER_ONLY_WRITE_PROFILE } from './careerWritingCore.js';
 import { OFFLOAD_REASONING_LEVELS, applicationStageProviders, offloadStagesDisabled } from './aiCallProviders.js';
 import { createOffloadCompleteStage, removeOffloadSessions } from './offloadCompleteStage.js';
 import { buildEditorialPlanPrompt, editorialPlanAllowedIds, editorialPlanBinding, parseEditorialPlanResponse, writerPromptWithEditorialPlan } from './applicationEditorialPlan.js';
@@ -36,7 +36,6 @@ export const CLAUDE_APPLICATION_MODEL = CLAUDE_SONNET_MODEL;
 export const CLAUDE_APPLICATION_EFFORT = 'high';
 export const CLAUDE_STAGE_PROFILES = APPLICATION_STAGE_PROFILES;
 // Shown on a job once DeepSeek credit runs out; the job continues on Claude.
-export const OFFLOAD_CREDIT_NOTICE = 'DeepSeek credit is exhausted; this bundle continues on Claude. Top up DeepSeek to resume savings.';
 const OFFLOAD_ROUTES = new Set(['deepseek-flash', 'deepseek-pro']);
 const MODEL_FAMILIES = Object.freeze({
   [CLAUDE_SONNET_MODEL]: Object.freeze({ label: 'Sonnet', id: /^claude-sonnet-/ }),
@@ -96,9 +95,11 @@ export function stageProfileOverridesFromEnv(env = process.env) {
 // starts instead of quietly running a stage on the production profile.
 const STAGE_PROFILE_OVERRIDES = stageProfileOverridesFromEnv();
 
-export function claudeStageProfile(stage) {
+/** The stage's model and effort. `documentScope: 'cover'` picks the letter-only writer profile. */
+export function claudeStageProfile(stage, { documentScope = null } = {}) {
   const override = typeof stage === 'string' && Object.hasOwn(STAGE_PROFILE_OVERRIDES, stage) ? STAGE_PROFILE_OVERRIDES[stage] : null;
   if (override) return { model: override.model, effort: override.effort };
+  if (stage === 'write' && documentScope === 'cover') return COVER_ONLY_WRITE_PROFILE;
   return CLAUDE_STAGE_PROFILES[stage] || { model: CLAUDE_APPLICATION_MODEL, effort: CLAUDE_APPLICATION_EFFORT };
 }
 // Normal Opus write stages take 5-7 minutes; the cap leaves room for Claude
@@ -910,15 +911,13 @@ export function createClaudeApplicationRunner({
         ...(reasoningOverride ? { reasoning: reasoningOverride } : {}),
       }]))
       : applicationStageProviders());
-  // jobId -> Map(stage -> reason) for stages that left offload for Claude, until
-  // the job ends. Persisted like modelUpgrades so a restart does not re-route.
-  const offloadFallbacks = new Map();
-  // `${jobId}\0${laneKey}` -> consecutive rejected submissions of a lane on offload.
-  const rejectionStreaks = new Map();
-
+  // A routed stage is DeepSeek's alone (the owner's rule, 2026-11-15): Claude never answers it. A DeepSeek
+  // failure, credit exhaustion included, fails the stage like any other stage failure, so the bundle stops
+  // loudly with its saved progress and Retry runs the stage on DeepSeek again. A rejected answer is corrected
+  // by DeepSeek. State files written before this rule may carry `offloadFallbacks`; they are ignored.
   function offloadRoute(jobId, stage) {
     const entry = providers[stage];
-    if (!offloadStage || entry?.provider !== 'offload' || offloadFallbacks.get(jobId)?.has(stage)) return null;
+    if (!offloadStage || entry?.provider !== 'offload') return null;
     return typeof entry.route === 'string' && entry.route ? entry.route : 'deepseek-flash';
   }
 
@@ -927,18 +926,6 @@ export function createClaudeApplicationRunner({
     return typeof level === 'string' && level ? level : 'high';
   };
 
-  function recordOffloadFallback(jobId, stage, reason) {
-    if (!offloadFallbacks.has(jobId)) offloadFallbacks.set(jobId, new Map());
-    const map = offloadFallbacks.get(jobId);
-    if (!map.has(stage)) map.set(stage, reason);
-    // Without credit no routed stage can succeed, so none is tried again.
-    if (reason === 'OFFLOAD_CREDIT_EXHAUSTED') {
-      for (const routed of Object.keys(providers)) if (!map.has(routed)) map.set(routed, reason);
-    }
-  }
-
-  const providerNoticeOf = jobId => ([...(offloadFallbacks.get(jobId)?.values() || [])].includes('OFFLOAD_CREDIT_EXHAUSTED')
-    ? OFFLOAD_CREDIT_NOTICE : null);
 
   // Deletes the stored turns of offload sessions that will never be resumed.
   function removeOffloadFiles(ids) {
@@ -959,8 +946,11 @@ export function createClaudeApplicationRunner({
   // such a stage in this job uses Opus, until the job finishes or is discarded.
   const modelUpgrades = new Map();
 
+  // jobId -> the document scope of the job's writer handoff ('cover' runs the letter-only writer profile).
+  const writeScopes = new Map();
+
   function jobStageProfile(jobId, stage) {
-    const profile = claudeStageProfile(stage);
+    const profile = claudeStageProfile(stage, { documentScope: writeScopes.get(jobId) ?? null });
     return modelUpgrades.get(jobId)?.has(stage) ? { ...profile, model: CLAUDE_OPUS_MODEL } : profile;
   }
 
@@ -1073,9 +1063,8 @@ export function createClaudeApplicationRunner({
     const lanes = sessions.get(jobId);
     const hadRuns = runCounts.delete(jobId);
     const hadUpgrades = modelUpgrades.delete(jobId);
-    const hadFallbacks = offloadFallbacks.delete(jobId);
-    for (const streakKey of [...rejectionStreaks.keys()]) if (streakKey.startsWith(`${jobId}\0`)) rejectionStreaks.delete(streakKey);
-    if (!lanes && !hadRuns && !hadUpgrades && !hadFallbacks) return;
+    writeScopes.delete(jobId);
+    if (!lanes && !hadRuns && !hadUpgrades) return;
     sessions.delete(jobId);
     const ids = [...(lanes?.values() || [])].map(lane => lane.sessionId).filter(Boolean);
     persist();
@@ -1105,7 +1094,6 @@ export function createClaudeApplicationRunner({
       ...(patch.code ? { code: patch.code } : {}),
       ...(patch.message ? { message: patch.message } : {}),
       ...(patch.upgradeModel ? { upgradeModel: patch.upgradeModel } : {}),
-      ...(providerNoticeOf(jobId) ? { providerNotice: providerNoticeOf(jobId) } : {}),
       ...(patch.status === 'failed' ? retryProfile(jobId, patch.retryStage || patch.stage) : {}),
       ...(patch.status === 'failed' ? failedCallProfile(jobId, patch.failedCallStage || patch.retryStage || patch.stage) : {}),
       updatedAt: Number.isFinite(patch.updatedAt) ? patch.updatedAt : now(),
@@ -1177,9 +1165,7 @@ export function createClaudeApplicationRunner({
     }
     const runs = Object.fromEntries([...runCounts].filter(([, n]) => n > 0));
     const upgrades = Object.fromEntries([...modelUpgrades].map(([jobId, stages]) => [jobId, [...stages]]));
-    const fallbacks = Object.fromEntries([...offloadFallbacks].filter(([, stages]) => stages.size > 0)
-      .map(([jobId, stages]) => [jobId, Object.fromEntries(stages)]));
-    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot, ...(Object.keys(runs).length ? { runs } : {}), ...(Object.keys(upgrades).length ? { upgrades } : {}), ...(Object.keys(fallbacks).length ? { offloadFallbacks: fallbacks } : {}) }, null, 2)}\n`;
+    const body = `${JSON.stringify({ failed, sessions: sessionSnapshot, ...(Object.keys(runs).length ? { runs } : {}), ...(Object.keys(upgrades).length ? { upgrades } : {}) }, null, 2)}\n`;
     const write = async () => {
       if (!stateFile) return;
       await fsImpl.mkdir(path.dirname(stateFile), { recursive: true });
@@ -1231,11 +1217,6 @@ export function createClaudeApplicationRunner({
         const restored = stages.filter(stage => nonEmptyString(stage) && claudeStageProfile(stage).model === CLAUDE_SONNET_MODEL);
         if (restored.length) modelUpgrades.set(jobId, new Set(restored));
       }
-      if (isPlainObject(data.offloadFallbacks)) for (const [jobId, stages] of Object.entries(data.offloadFallbacks)) {
-        if (!nonEmptyString(jobId) || !isPlainObject(stages) || drivers.has(jobId)) continue;
-        const restored = Object.entries(stages).filter(([stage, reason]) => nonEmptyString(stage) && nonEmptyString(reason));
-        if (restored.length) offloadFallbacks.set(jobId, new Map(restored));
-      }
       for (const [jobId, lanes] of Object.entries(data.sessions || {})) {
         if (!nonEmptyString(jobId) || !isPlainObject(lanes) || drivers.has(jobId)) continue;
         const restored = new Map();
@@ -1257,8 +1238,7 @@ export function createClaudeApplicationRunner({
         ...(entry.code ? { code: String(entry.code) } : {}),
         ...(entry.message ? { message: String(entry.message) } : {}),
         ...(upgradeModel ? { upgradeModel } : {}),
-        ...(providerNoticeOf(jobId) ? { providerNotice: providerNoticeOf(jobId) } : {}),
-        ...(typeof entry.retryModel === 'string' && typeof entry.retryEffort === 'string'
+          ...(typeof entry.retryModel === 'string' && typeof entry.retryEffort === 'string'
           ? { retryModel: entry.retryModel, retryEffort: entry.retryEffort } : retryProfile(jobId, entry.stage)),
         ...(typeof entry.failedModel === 'string' && typeof entry.failedEffort === 'string'
           ? { failedModel: entry.failedModel, failedEffort: entry.failedEffort } : {}),
@@ -1305,6 +1285,7 @@ export function createClaudeApplicationRunner({
       }
       const acquiredAt = now();
       entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: acquiredAt });
+      if (stage === 'write') writeScopes.set(jobId, handoff?.documentScope ?? null);
       const profile = jobStageProfile(jobId, stage);
       const actionShown = () => [...entry.actions.entries()].find(([, row]) => row.activity === 'running')?.[0] === actionId;
       if (actionShown()) {
@@ -1491,24 +1472,8 @@ export function createClaudeApplicationRunner({
       let record;
       let usedProvider = provider;
       try {
-        try {
-          ({ result, record } = await invokeLoggedStage({ stage, text, handoff, matchTaskId, pageImages,
-            sessionId: lane.sessionId, resume: lane.started, editorialPlan: planReference, provider }));
-        } catch (error) {
-          // Any offload failure re-runs the same handoff on Claude in a fresh
-          // session. A cancellation is not a provider failure and never falls back.
-          if (provider !== 'offload' || typeof error?.code !== 'string' || !error.code.startsWith('OFFLOAD_')) throw error;
-          recordOffloadFallback(jobId, stage, error.code);
-          rejectionStreaks.delete(`${jobId}\0${laneKey}`);
-          persist();
-          await logRun(jobId, canvasFilePath, { version: 2, jobId, stage, ...(matchTaskId ? { matchTaskId } : {}),
-            event: 'offload-fallback', code: error.code, retryable: error.detail?.retryable === true });
-          publishActiveAction(entry);
-          startFreshSession();
-          usedProvider = 'claude';
-          ({ result, record } = await invokeLoggedStage({ stage, text: chooseText(handoff, true), handoff, matchTaskId, pageImages,
-            sessionId: lane.sessionId, resume: false, editorialPlan: planReference, provider: 'claude' }));
-        }
+        ({ result, record } = await invokeLoggedStage({ stage, text, handoff, matchTaskId, pageImages,
+          sessionId: lane.sessionId, resume: lane.started, editorialPlan: planReference, provider }));
         lane.started = true;
         lane.provider = usedProvider;
       } finally {
@@ -1547,23 +1512,6 @@ export function createClaudeApplicationRunner({
         ...(submitted?.gone === true ? { gone: true } : {}),
         ...(submitted?.rejection ? { rejection: submitted.rejection } : {}),
       } });
-      // Two rejections in a row on an offload lane mean the cheaper model is not
-      // converging; the lane's next turn runs on Claude in a fresh session.
-      if (usedProvider === 'offload' && submitted?.gone !== true) {
-        const streakKey = `${jobId}\0${laneKey}`;
-        if (submitted?.accepted === true) rejectionStreaks.delete(streakKey);
-        else {
-          const streak = (rejectionStreaks.get(streakKey) || 0) + 1;
-          const limit = providers[stage]?.maxRejections;
-          if (streak >= (Number.isInteger(limit) && limit >= 1 && limit <= 5 ? limit : 2)) {
-            rejectionStreaks.delete(streakKey);
-            recordOffloadFallback(jobId, stage, 'validation-streak');
-            persist();
-            await logRun(jobId, canvasFilePath, { version: 2, jobId, stage, ...(matchTaskId ? { matchTaskId } : {}),
-              event: 'offload-fallback', code: 'validation-streak', retryable: false });
-          } else rejectionStreaks.set(streakKey, streak);
-        }
-      }
       return submitted;
     };
 
@@ -1760,7 +1708,7 @@ export function createClaudeApplicationRunner({
       removeState(jobId, event?.canvasFilePath);
       persist();
     }
-    if (sessions.has(jobId) || runCounts.has(jobId) || modelUpgrades.has(jobId) || offloadFallbacks.has(jobId)) {
+    if (sessions.has(jobId) || runCounts.has(jobId) || modelUpgrades.has(jobId)) {
       dropSessions(jobId).catch(() => { /* logged inside; never fails a job */ });
     }
   }

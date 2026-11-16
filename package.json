@@ -13,6 +13,9 @@
     "dev": "vite",
     "build:compile": "vite build",
     "build": "node scripts/build-macos.mjs",
+    "dev:interview": "vite --config vite.interview.config.js",
+    "build:interview:compile": "vite build --config vite.interview.config.js",
+    "build:interview": "node scripts/build-macos.mjs --app interview",
     "lint": "eslint .",
     "test:unit": "node --import ./scripts/test-stubs/register.mjs scripts/test-runner.js",
     "test:resume-pdf": "npm --prefix 'Job Application Design System/build' test",
@@ -33,22 +36,9 @@
       "identity": "AI Chalkboard Local Code Signing",
       "forceCodeSigning": true,
       "hardenedRuntime": true,
-      "extraResources": [
-        {
-          "from": "native/interview-audio/build/Interview Audio Helper.app",
-          "to": "interview-audio/Interview Audio Helper.app"
-        },
-        {
-          "from": "native/practice-audio/build/Practice Audio Helper.app",
-          "to": "practice-audio/Practice Audio Helper.app"
-        }
-      ],
       "timestamp": "none",
       "extendInfo": {
-        "NSAppleEventsUsageDescription": "Read the marketplace pages you are signed in to in Google Chrome.",
-        "NSMicrophoneUsageDescription": "Hear your answers during interview practice calls. Audio is transcribed on this Mac and recorded locally for your feedback.",
-        "NSAudioCaptureUsageDescription": "Transcribe interview call output on this Mac without capturing your microphone or changing playback.",
-        "NSScreenCaptureUsageDescription": "Read interview call system audio locally. No screen frames or microphone audio are captured by Interview Helper."
+        "NSAppleEventsUsageDescription": "Read the marketplace pages you are signed in to in Google Chrome."
       }
     },
     "directories": {
@@ -63,8 +53,7 @@
       "!node_modules/onnxruntime-node/bin/napi-v*/win32/**/*"
     ],
     "asarUnpack": [
-      "node_modules/onnxruntime-node/**/*",
-      "dist-electron/inferenceWorkerThread.js"
+      "dist-electron/workspaceSaveWorkerThread.js"
     ],
     "extraResources": [
       {

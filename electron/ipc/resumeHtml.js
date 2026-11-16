@@ -1808,8 +1808,14 @@ function documentMarkupFingerprint(markup) {
  * on `<main>` is a REAL browser tab, not a React-reconciled node, so there is
  * no virtual-DOM-vs-native-undo fight to manage the way src/nodes/TextNode.jsx
  * (~:151) and src/utils/nativeTextUndo.js (~:28) have to for in-canvas text —
- * the browser's own Ctrl+Z "just works" here. A future instance should NOT
- * "fix" this editor away to match the design doc's stated intent; it is a
+ * but the browser's own undo is not enough here: Sync, the autosave restore
+ * and skill-decision toggles rewrite a panel's nodes, and native undo entries
+ * still point at the detached old ones, so Ctrl+Z runs out or does nothing.
+ * The editor therefore keeps its own snapshot history per panel (500-entry and
+ * total-size caps, coalesced typing, Cmd/Ctrl+Z, Cmd/Ctrl+Shift+Z, Ctrl+Y and
+ * beforeinput historyUndo/historyRedo). Edit-notes fields are plain textareas
+ * outside the panels and keep native undo. A future instance should NOT "fix"
+ * this editor away to match the design doc's stated intent; it is a
  * deliberate, discussed divergence (design doc §5.5).
  *
  * Fonts (§5.3): uses the same DOM-side face matrix as the hidden PDF renderer
@@ -2161,7 +2167,13 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     if (fallback) fallback.hidden = !Array.prototype.slice.call(fallback.querySelectorAll('[data-ic-inferred-skill]')).some(function (node) { return !node.hidden; });
     if (persist) {
       try { localStorage.setItem(skillStorageKey, JSON.stringify(skillDecisions)); } catch (e) {}
-      if (resumeMain && resumeMain.innerHTML !== resumeBefore) markPdfStale('resume');
+      if (resumeMain && resumeMain.innerHTML !== resumeBefore) {
+        markPdfStale('resume');
+        // The toggle rewrote hidden attributes inside the panel. Adopt that
+        // markup as the current history state so undo steps over it rather
+        // than restoring a copy that contradicts the visible decision.
+        adoptPanelMarkup(historyKindForPanel(resumeMain));
+      }
     }
     updateSkillReviewStatus();
   }
@@ -2302,19 +2314,9 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
       }
     } catch (e) { /* localStorage unavailable (e.g. file:// under strict privacy settings) — degrade to no-autosave */ }
 
-    function scheduleSave() {
-      if (saveTimer) clearTimeout(saveTimer);
-      saveTimer = setTimeout(function () {
-        // The main variable follows the selected tab. Capture the stable résumé node so
-        // switching to the cover tab during the debounce cannot save cover
-        // markup into the résumé's storage slot.
-        icWriteAutosave(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations), RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
-      }, 500);
-    }
-    resumeMain.addEventListener('input', function () {
-      scheduleSave();
-      markPdfStale('resume');
-      if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
+    resumeMain.addEventListener('input', function (event) {
+      recordPanelEdit('resume', event);
+      runPanelEditSideEffects('resume');
     });
   }
   if (coverMain) {
@@ -2330,14 +2332,9 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
         markPdfStale('cover');
       }
     } catch (e) {}
-    var coverSaveTimer = null;
-    coverMain.addEventListener('input', function () {
-      if (coverSaveTimer) clearTimeout(coverSaveTimer);
-      coverSaveTimer = setTimeout(function () {
-        icWriteAutosave(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover'), COVER_MARKUP_FINGERPRINT, icPanelRevisionSha256('cover'));
-      }, 500);
-      markPdfStale('cover');
-      if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
+    coverMain.addEventListener('input', function (event) {
+      recordPanelEdit('cover', event);
+      runPanelEditSideEffects('cover');
     });
   }
 
@@ -2364,6 +2361,250 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
     applySkillDecision(id, skillDecisions[id], false);
   });
 
+  // ---- Deep undo/redo history (§5.5) ------------------------------------
+  // Script rewrites of a panel (Sync, the autosave restore, skill-decision
+  // toggles) hand the connected main fresh nodes. Native contenteditable undo
+  // entries still point at the detached old ones, so the browser's Ctrl+Z runs
+  // out after a few edits or does nothing at all. The editor keeps a snapshot
+  // stack per panel: past[0] is the baseline captured when editing starts,
+  // past[past.length - 1] is what is on screen now, undo moves the top state
+  // onto future and restores the one below. In memory only.
+  var HISTORY_LIMIT = 500;
+  var HISTORY_CHAR_BUDGET = 20000000;
+  var HISTORY_COALESCE_MS = 1000;
+  var HISTORY_COALESCING_INPUTS = {
+    insertText: true,
+    insertCompositionText: true,
+    deleteContentBackward: true,
+    deleteContentForward: true
+  };
+  var editHistories = { resume: null, cover: null };
+  var coverSaveTimer = null;
+
+  function historyKindForRequest(kind) {
+    // A standalone letter reuses the resume slot: one panel, one history.
+    if (kind === 'cover' && !coverMain) return 'resume';
+    if (kind === 'resume' && !resumeMain) return 'cover';
+    return kind;
+  }
+  function historyKindForPanel(panel) {
+    return panel && coverMain && panel === coverMain ? 'cover' : 'resume';
+  }
+  function panelForHistoryKind(kind) {
+    if (kind === 'resume') return resumeMain;
+    if (kind === 'cover') return coverMain;
+    return null;
+  }
+  function historySanitizeKind(kind) {
+    return kind === 'cover' ? 'cover' : MAIN_SANITIZE_KIND;
+  }
+  function historyTrustedDerivations(kind) {
+    return kind === 'resume' ? trustedResumeDerivations : null;
+  }
+  function captureCaretPoint(panel, node, offset) {
+    if (!node || !panel.contains(node)) return null;
+    var path = [];
+    var current = node;
+    while (current && current !== panel) {
+      var parent = current.parentNode;
+      if (!parent) return null;
+      path.unshift(Array.prototype.indexOf.call(parent.childNodes, current));
+      current = parent;
+    }
+    return { path: path, offset: typeof offset === 'number' ? offset : 0 };
+  }
+  function capturePanelCaret(panel) {
+    var selection = null;
+    try { selection = window.getSelection ? window.getSelection() : null; } catch (e) {}
+    if (!selection || !selection.rangeCount) return null;
+    var anchor = captureCaretPoint(panel, selection.anchorNode, selection.anchorOffset);
+    if (!anchor) return null;
+    return { anchor: anchor, focus: captureCaretPoint(panel, selection.focusNode, selection.focusOffset) || anchor };
+  }
+  function resolveCaretPoint(panel, point) {
+    if (!point || !point.path) return null;
+    var node = panel;
+    for (var i = 0; i < point.path.length; i += 1) {
+      var index = point.path[i];
+      if (!node.childNodes || index < 0 || index >= node.childNodes.length) return null;
+      node = node.childNodes[index];
+    }
+    if (!node) return null;
+    var max = node.nodeType === 3 ? (node.nodeValue || '').length : (node.childNodes ? node.childNodes.length : 0);
+    var offset = typeof point.offset === 'number' ? point.offset : 0;
+    return { node: node, offset: Math.max(0, Math.min(offset, max)) };
+  }
+  function restorePanelCaret(panel, caret) {
+    if (!window.getSelection || !document.createRange) return;
+    var anchor = caret ? resolveCaretPoint(panel, caret.anchor) : null;
+    var focus = caret ? (resolveCaretPoint(panel, caret.focus) || anchor) : null;
+    try {
+      var range = document.createRange();
+      if (anchor) {
+        range.setStart(anchor.node, anchor.offset);
+        range.setEnd(focus.node, focus.offset);
+      } else {
+        // Defensive fallback: the path no longer resolves (or the baseline had
+        // no selection), so put the caret at the end of the restored panel.
+        range.selectNodeContents(panel);
+        range.collapse(false);
+      }
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } catch (e) {}
+  }
+  function snapshotPanelState(panel) {
+    return { html: panel.innerHTML, caret: capturePanelCaret(panel) };
+  }
+  function trimEditHistory(history) {
+    if (history.past.length > HISTORY_LIMIT) history.past.splice(0, history.past.length - HISTORY_LIMIT);
+    var total = 0;
+    var i;
+    for (i = 0; i < history.past.length; i += 1) total += history.past[i].html.length;
+    for (i = 0; i < history.future.length; i += 1) total += history.future[i].html.length;
+    while (history.past.length > 1 && total > HISTORY_CHAR_BUDGET) {
+      total -= history.past[0].html.length;
+      history.past.shift();
+    }
+  }
+  function ensureEditHistory(kind) {
+    var resolved = historyKindForRequest(kind);
+    if (resolved !== 'resume' && resolved !== 'cover') return null;
+    var existing = editHistories[resolved];
+    if (existing) return existing;
+    var panel = panelForHistoryKind(resolved);
+    if (!panel) return null;
+    var history = { kind: resolved, panel: panel, past: [snapshotPanelState(panel)], future: [], lastInputType: '', lastRecordedAt: 0 };
+    editHistories[resolved] = history;
+    return history;
+  }
+
+  function recordPanelEdit(kind, event) {
+    var history = ensureEditHistory(kind);
+    if (!history) return;
+    var panel = history.panel;
+    var html = panel.innerHTML;
+    var top = history.past[history.past.length - 1];
+    if (html === top.html) return;
+    var inputType = event && typeof event.inputType === 'string' ? event.inputType : '';
+    var typing = !!HISTORY_COALESCING_INPUTS[inputType];
+    var now = Date.now();
+    // Continuous typing becomes one step: same input kind, under a second
+    // since the previous recorded keystroke, and something to coalesce into.
+    var coalesce = typing && history.past.length > 1
+      && history.lastInputType === inputType
+      && (now - history.lastRecordedAt) < HISTORY_COALESCE_MS;
+    var caret = capturePanelCaret(panel);
+    if (history.future.length) history.future.length = 0;
+    if (coalesce) {
+      top.html = html;
+      top.caret = caret;
+    } else {
+      history.past.push({ html: html, caret: caret });
+      trimEditHistory(history);
+    }
+    history.lastInputType = typing ? inputType : '';
+    history.lastRecordedAt = now;
+  }
+  function runPanelEditSideEffects(kind) {
+    if (kind === 'cover' && coverMain) {
+      if (coverSaveTimer) clearTimeout(coverSaveTimer);
+      coverSaveTimer = setTimeout(function () {
+        icWriteAutosave(STORAGE_KEY + ':cover', icSanitizeEditableMarkup(coverMain.innerHTML, 'cover'), COVER_MARKUP_FINGERPRINT, icPanelRevisionSha256('cover'));
+      }, 500);
+      markPdfStale('cover');
+    } else {
+      if (saveTimer) clearTimeout(saveTimer);
+      saveTimer = setTimeout(function () {
+        icWriteAutosave(STORAGE_KEY, icSanitizeEditableMarkup(resumeMain.innerHTML, MAIN_SANITIZE_KIND, trustedResumeDerivations), RESUME_MARKUP_FINGERPRINT, icPanelRevisionSha256('resume'));
+      }, 500);
+      markPdfStale('resume');
+    }
+    if (window.icPageGuidesRecompute) window.icPageGuidesRecompute();
+  }
+  function applyEditHistoryState(history, state) {
+    history.panel.innerHTML = icSanitizeEditableMarkup(state.html, historySanitizeKind(history.kind), historyTrustedDerivations(history.kind));
+    state.html = history.panel.innerHTML;
+    restorePanelCaret(history.panel, state.caret);
+    runPanelEditSideEffects(history.kind);
+  }
+  function undoPanelEdit(kind) {
+    var history = ensureEditHistory(kind);
+    if (!history || history.past.length < 2) return false;
+    history.future.push(history.past.pop());
+    history.lastInputType = '';
+    history.lastRecordedAt = 0;
+    applyEditHistoryState(history, history.past[history.past.length - 1]);
+    return true;
+  }
+  function redoPanelEdit(kind) {
+    var history = ensureEditHistory(kind);
+    if (!history || !history.future.length) return false;
+    var state = history.future.pop();
+    history.past.push(state);
+    history.lastInputType = '';
+    history.lastRecordedAt = 0;
+    applyEditHistoryState(history, state);
+    return true;
+  }
+  function adoptPanelMarkup(kind) {
+    var history = editHistories[historyKindForRequest(kind)];
+    if (!history) return;
+    var html = history.panel.innerHTML;
+    if (html === history.past[history.past.length - 1].html) return;
+    history.past.push({ html: html, caret: capturePanelCaret(history.panel) });
+    history.future.length = 0;
+    history.lastInputType = '';
+    history.lastRecordedAt = 0;
+    trimEditHistory(history);
+  }
+
+  function historyKindForEvent(event) {
+    var target = event && event.target;
+    if (!target || target.nodeType !== 1 || !target.closest) return '';
+    if (target.closest('input, textarea, select')) return '';
+    var panel = target.closest('main[contenteditable="true"]');
+    if (!panel || (panel !== resumeMain && panel !== coverMain)) return '';
+    return historyKindForPanel(panel);
+  }
+  document.addEventListener('keydown', function (event) {
+    var kind = historyKindForEvent(event);
+    if (!kind || event.altKey) return;
+    if (!event.metaKey && !event.ctrlKey) return;
+    var key = String(event.key || '').toLowerCase();
+    if (key === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      undoPanelEdit(kind);
+      return;
+    }
+    if (key === 'z' && event.shiftKey) {
+      event.preventDefault();
+      redoPanelEdit(kind);
+      return;
+    }
+    if (key === 'y' && event.ctrlKey && !event.metaKey) {
+      event.preventDefault();
+      redoPanelEdit(kind);
+    }
+  });
+  document.addEventListener('beforeinput', function (event) {
+    if (event.inputType !== 'historyUndo' && event.inputType !== 'historyRedo') return;
+    var kind = historyKindForEvent(event);
+    if (!kind) return;
+    event.preventDefault();
+    if (event.inputType === 'historyUndo') undoPanelEdit(kind);
+    else redoPanelEdit(kind);
+  });
+  window.icEditHistory = {
+    depth: function (kind) {
+      var history = editHistories[historyKindForRequest(kind)];
+      return { past: history ? history.past.length : 0, future: history ? history.future.length : 0 };
+    },
+    undo: function (kind) { return undoPanelEdit(kind); },
+    redo: function (kind) { return redoPanelEdit(kind); }
+  };
+
   function stopEditing() {
     if (!main) return;
     main.removeAttribute('contenteditable');
@@ -2376,6 +2617,9 @@ ${APPLICATION_EDIT_NOTES_RUNTIME}
       if (editing) {
         stopEditing();
       } else {
+        // Capture the baseline from the restored, reconciled markup the user
+        // is about to start editing; re-entering edit mode keeps the stack.
+        ensureEditHistory(historyKindForRequest(activeDocument));
         main.setAttribute('contenteditable', 'true');
         main.focus();
         editBtn.textContent = 'Done editing';
@@ -2444,7 +2688,13 @@ ${APPLICATION_EDIT_NOTES_RESTORE}
       // through the async request so switching tabs cannot stamp the other
       // document into this document's autosave slot on success.
       var syncPanel = main;
-      if (syncPanel) syncPanel.innerHTML = icSanitizeEditableMarkup(syncPanel.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
+      if (syncPanel) {
+        syncPanel.innerHTML = icSanitizeEditableMarkup(syncPanel.innerHTML, documentToSync, documentToSync === 'resume' ? trustedResumeDerivations : null);
+        // Sync rewrites the panel with fresh nodes. Adopt that markup as the
+        // current history state so undo still walks back through the edits
+        // made before this sync instead of stopping at a detached tree.
+        adoptPanelMarkup(documentToSync);
+      }
       var syncedPanelMarkup = syncPanel ? syncPanel.innerHTML : '';
       syncMessage = '';
       var currentHtml = '<!doctype html>\\n' + document.documentElement.outerHTML;

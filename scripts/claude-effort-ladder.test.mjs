@@ -44,6 +44,17 @@ test('parseConfigs builds model:effort pairs for every allowed model and effort'
   ]);
 });
 
+test('parseConfigs takes DeepSeek arms with a route and refuses max reasoning', () => {
+  assert.deepEqual(parseConfigs('flash:off,pro:high,haiku:low'), [
+    { id: 'flash:off', model: 'flash', effort: 'off', route: 'deepseek-flash' },
+    { id: 'pro:high', model: 'pro', effort: 'high', route: 'deepseek-pro' },
+    { id: 'haiku:low', model: 'haiku', effort: 'low' },
+  ]);
+  assert.throws(() => parseConfigs('flash:max'), /Unknown DeepSeek reasoning max/u);
+  assert.throws(() => parseConfigs('pro:xhigh'), /Unknown DeepSeek reasoning xhigh/u);
+  assert.throws(() => parseConfigs('flash:off,flash:off'), /listed twice/u);
+});
+
 test('parseConfigs rejects max, fable, unknown values and an empty list', () => {
   assert.throws(() => parseConfigs('opus:max'), /Unknown ladder effort max/u);
   assert.throws(() => parseConfigs('fable:high'), /Unknown ladder model fable/u);

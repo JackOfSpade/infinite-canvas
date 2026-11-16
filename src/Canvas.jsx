@@ -25,7 +25,6 @@ import { MarketplaceStatusNode } from './nodes/MarketplaceStatusNode';
 import { CompSourceCardNode } from './nodes/CompSourceCardNode';
 import { JobSourceCardNode } from './nodes/JobSourceCardNode';
 import { JobGroupNode } from './nodes/JobGroupNode';
-import { InterviewHelperNode } from './nodes/InterviewHelperNode';
 import { sanitizeEdgesForSave } from './utils/serializationUtils';
 import {CustomizeDialog} from './components/CustomizeDialog';
 
@@ -75,6 +74,7 @@ import { useCanvasOSDeletion } from './hooks/useCanvasOSDeletion';
 import { useWorkspaceStartupRecovery } from './hooks/useWorkspaceStartupRecovery';
 import { useQuitWorkflowPause } from './hooks/useQuitWorkflowPause';
 import { useConfirmDialog } from './hooks/useConfirmDialog';
+import { BlockingNoticeHost } from './components/BlockingNoticeHost';
 import { ArrowUpLeft } from 'lucide-react';
 import { viewportForZoomAtScreenPoint } from './utils/layoutGeometry';
 import { buildCustomizationDialogData, filterNodeCustomizationUpdates } from './utils/nodeCustomization';
@@ -100,7 +100,6 @@ const nodeTypes = {
   compsourcecard: CompSourceCardNode,
   jobsourcecard: JobSourceCardNode,
   jobgroup: JobGroupNode,
-  interviewhelper: InterviewHelperNode,
 };
 
 // ── Canvas ───────────────────────────────────────────────────────────────────
@@ -1079,6 +1078,8 @@ export function Canvas() {
           onClose={handleCloseIssueReporter}
           onSubmit={handleIssueSubmit}
         />
+
+        <BlockingNoticeHost />
 
         {confirmDialogData && (
           <ConfirmDialog

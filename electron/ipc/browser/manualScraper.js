@@ -722,6 +722,23 @@ function clearManualScraperTelemetry(status = 'idle') {
     : null;
 }
 
+/**
+ * Warning for a source whose own Chrome disconnected before its walk ended.
+ * States the observation only: the cause (crash, sleep, a closed window) is
+ * not known here.
+ */
+export function browserClosedWarning({ srcName, unreadQueries = 0, queryTotal = 0 } = {}) {
+  const unread = unreadQueries > 0
+    ? ` ${unreadQueries} of ${queryTotal} search${queryTotal === 1 ? '' : 'es'} had not started.`
+    : '';
+  return {
+    code: 'browser-closed',
+    severity: 'block',
+    evidence: `The ${srcName} browser window closed before the search finished, so its results are incomplete.${unread}`,
+    suggestion: `Run ${srcName} again to read the rest. The jobs found before the window closed are kept.`,
+  };
+}
+
 // Keep terminal causes separate from the generic "completed" outcome.  In
 // particular, FAST mode can intentionally stop a source after its aggregate
 // result cap; reporting that as a normal completion makes a breadth-limited
@@ -729,6 +746,7 @@ function clearManualScraperTelemetry(status = 'idle') {
 export function resolveManualSourceStopReason({
   earlyExit = false,
   aborted = false,
+  browserClosed = false,
   sourceSkipped = false,
   detailEnrichmentFailed = false,
   hitPerSourceCap = false,
@@ -748,6 +766,10 @@ export function resolveManualSourceStopReason({
   // this one as `user-done` hid the actual cause in both the source trail and
   // the bug report.
   if (detailEnrichmentFailed) return 'detail-enrichment-failed';
+  // The source's own Chrome went away mid-walk (a crash, a sleep/wake that
+  // killed it, or the window being closed). Nothing here ran out of results,
+  // so it must never share a reason with a finished walk.
+  if (browserClosed) return 'browser-closed';
   // `earlyExit` has historically meant a user-done / source-local stop, not
   // necessarily an AbortSignal. Keep that public result enum stable; callers
   // pass `aborted` only for an actual cancelled signal.
@@ -7588,6 +7610,8 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // backstop, a trickle pager, a stalled reveal, an exhausted retry budget.
       // Fixed shape, counts only — jobs.js turns these into a visible warning.
       const walkGuards             = [];
+      // Set when THIS source's Chrome disconnects without our own teardown.
+      let browserClosedUnexpectedly = false;
 
       const displayIndex = sourceIndexBase + si + 1;
       const displayTotal = sourceTotal || sourceList.length;
@@ -7598,7 +7622,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       try {
         platform = await launchScrapePlatformBrowser({
           userDataDir, executablePath, sandboxArgs,
-          onCrash: () => { earlyExit = true; },
+          onCrash: () => { earlyExit = true; browserClosedUnexpectedly = true; },
         });
       } catch (error) {
         const evidence = String(error?.message || error);
@@ -9136,9 +9160,22 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
         logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
       }
 
+      // The browser going away used to end the source with no warning and the
+      // generic early-exit reason, so a walk that lost most of its queries was
+      // recorded as a clean finish and its date bookmark advanced. Make it a
+      // blocking warning: the rows gathered so far are kept, and the source
+      // stays unfinished until it is run again or skipped.
+      const browserClosed = browserClosedUnexpectedly && !signal?.aborted;
+      if (browserClosed && !sourceSiteChangedWarning) {
+        const unreadQueries = Math.max(0, sourceTasks.length - executedQueries.length);
+        sourceSiteChangedWarning = browserClosedWarning({ srcName, unreadQueries, queryTotal: sourceTasks.length });
+        logger.warn(`[BrowserScraper] ${sourceSiteChangedWarning.evidence}`);
+      }
+
       const stopReason = resolveManualSourceStopReason({
         earlyExit,
         aborted: !!signal?.aborted,
+        browserClosed,
         sourceSkipped,
         detailEnrichmentFailed,
         hitPerSourceCap,
@@ -9310,6 +9347,9 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
       // Close this platform's browser completely before the next launches, so each
       // platform starts from a fresh process with no carried-over session signal.
       await teardownCurrent();
+      // Each source runs in its own Chrome, so one that died says nothing
+      // about the next. Clear the stop it raised; a cancel still ends the run.
+      if (browserClosed) earlyExit = false;
     }
   } finally {
     await teardownCurrent();

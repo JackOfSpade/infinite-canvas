@@ -22,6 +22,32 @@ export const PACKAGING_RECLAIM_GUARD_DIRECTORY = '.packaging-build.reclaim-guard
 export const PACKAGING_RECLAIM_CLAIMS_DIRECTORY = '.packaging-build.reclaim-claims';
 const UNKNOWN_LOCK_STALE_MS = 5 * 60_000;
 
+// This repository packages two independent apps. Each has its own compile
+// script, electron-builder configuration and release directory, so building or
+// relaunching one never writes into the other's output.
+export const BUILD_TARGETS = Object.freeze({
+  canvas: Object.freeze({ name: 'canvas', releaseDirectory: 'release', compileScript: 'build:compile', builderConfig: null, helpers: Object.freeze([]) }),
+  interview: Object.freeze({
+    name: 'interview', releaseDirectory: 'release-interview', compileScript: 'build:interview:compile',
+    builderConfig: 'electron-builder.interview.json',
+    // Native helpers shipped in Resources, with the entitlements each must keep.
+    helpers: Object.freeze([
+      Object.freeze({ resource: 'interview-audio/Interview Audio Helper.app', entitlements: 'native/interview-audio/entitlements.plist' }),
+      Object.freeze({ resource: 'practice-audio/Practice Audio Helper.app', entitlements: 'native/practice-audio/entitlements.plist' }),
+    ]),
+  }),
+});
+let activeTarget = BUILD_TARGETS.canvas;
+export function selectBuildTarget(name = 'canvas') {
+  if (!Object.hasOwn(BUILD_TARGETS, name)) throw new Error(`Unknown build target "${name}". Use one of: ${Object.keys(BUILD_TARGETS).join(', ')}.`);
+  activeTarget = BUILD_TARGETS[name];
+  return activeTarget;
+}
+export function buildTargetFromArgv(argv = process.argv.slice(2)) {
+  const index = argv.indexOf('--app');
+  return index === -1 ? 'canvas' : String(argv[index + 1] || '');
+}
+
 function commandFailure(label, result) {
   const detail = [result?.stdout, result?.stderr]
     .filter(Boolean)
@@ -36,15 +62,15 @@ export function packagingLockPath(projectDir = process.cwd()) {
   // release/.launcher/build.lock: direct npm builds and Finder launches need
   // distinct ownership protocols, but concurrent direct package builds must
   // serialize writes to the same electron-builder output directory.
-  return path.join(projectDir, 'release', PACKAGING_LOCK_DIRECTORY);
+  return path.join(projectDir, activeTarget.releaseDirectory, PACKAGING_LOCK_DIRECTORY);
 }
 
 export function packagingReclaimGuardPath(projectDir = process.cwd()) {
-  return path.join(projectDir, 'release', PACKAGING_RECLAIM_GUARD_DIRECTORY);
+  return path.join(projectDir, activeTarget.releaseDirectory, PACKAGING_RECLAIM_GUARD_DIRECTORY);
 }
 
 function reclaimClaimPath(projectDir, guardToken) {
-  return path.join(projectDir, 'release', PACKAGING_RECLAIM_CLAIMS_DIRECTORY, `${guardToken}.lock`);
+  return path.join(projectDir, activeTarget.releaseDirectory, PACKAGING_RECLAIM_CLAIMS_DIRECTORY, `${guardToken}.lock`);
 }
 
 function isPidAlive(pid) {
@@ -453,8 +479,8 @@ function runOrThrow(command, args, { cwd }) {
 
 function compileApplication(projectDir) {
   const npmCli = process.env.npm_execpath;
-  if (npmCli) runOrThrow(process.execPath, [npmCli, 'run', 'build:compile'], { cwd: projectDir });
-  else runOrThrow('npm', ['run', 'build:compile'], { cwd: projectDir });
+  if (npmCli) runOrThrow(process.execPath, [npmCli, 'run', activeTarget.compileScript], { cwd: projectDir });
+  else runOrThrow('npm', ['run', activeTarget.compileScript], { cwd: projectDir });
 }
 
 export function electronBuilderInvocation(projectDir, {
@@ -470,7 +496,30 @@ export function electronBuilderInvocation(projectDir, {
 
 function packageApplication(projectDir) {
   const { command, args } = electronBuilderInvocation(projectDir);
-  runOrThrow(command, args, { cwd: projectDir });
+  const configArgs = activeTarget.builderConfig ? ['--config', activeTarget.builderConfig] : [];
+  runOrThrow(command, [...args, ...configArgs], { cwd: projectDir });
+}
+
+// electron-builder re-signs every nested bundle with the main app's default
+// entitlements, which strips a helper's own (the practice helper then cannot
+// open the microphone under the hardened runtime). Sign each helper again with
+// its own entitlements; the later deep pass preserves what it finds.
+export function signBundledHelpers({
+  apps, identity, helpers, projectDir = process.cwd(),
+  runCommand = spawnSync, exists = fs.existsSync,
+} = {}) {
+  for (const appPath of apps || []) {
+    for (const helper of helpers || []) {
+      const helperPath = path.join(appPath, 'Contents', 'Resources', helper.resource);
+      if (!exists(helperPath)) throw new Error(`The packaged app is missing its helper: ${helperPath}`);
+      const result = runCommand('/usr/bin/codesign', [
+        '--force', '--sign', identity, '--options', 'runtime', '--timestamp=none',
+        '--entitlements', path.join(projectDir, helper.entitlements), helperPath,
+      ], { encoding: 'utf8', stdio: 'inherit' });
+      if (result?.error || result?.status !== 0) throw commandFailure(`Signing the bundled helper failed for ${helperPath}.`, result);
+    }
+  }
+  return apps;
 }
 
 export function usesMacIntegrityGate(platform = process.platform) {
@@ -481,14 +530,18 @@ export function buildMacApplication(projectDir = process.cwd()) {
   const { identity } = readConfiguredMacSigningConfig(projectDir);
   assertMacSigningPrerequisites({ identity });
 
-  buildInterviewAudioHelper({ projectDir, identity });
-  buildPracticeAudioHelper({ projectDir, identity });
+  // Only Interview Helper ships the native audio helpers.
+  if (activeTarget.helpers.length) {
+    buildInterviewAudioHelper({ projectDir, identity });
+    buildPracticeAudioHelper({ projectDir, identity });
+  }
   compileApplication(projectDir);
-  const releaseDir = path.join(projectDir, 'release');
+  const releaseDir = path.join(projectDir, activeTarget.releaseDirectory);
   const before = snapshotMacApplications(releaseDir);
   packageApplication(projectDir);
 
   const apps = findCurrentMacApplications(releaseDir, before);
+  signBundledHelpers({ apps, identity, helpers: activeTarget.helpers, projectDir });
   signMacApplications({ apps, identity });
   return verifyMacApplications({ apps, identity });
 }
@@ -509,6 +562,7 @@ export function buildApplication(projectDir = process.cwd(), platform = process.
 
 if (process.argv[1] && path.resolve(process.argv[1]) === SCRIPT_PATH) {
   try {
+    selectBuildTarget(buildTargetFromArgv());
     const apps = buildApplication();
     if (usesMacIntegrityGate()) process.stdout.write(`Verified macOS package integrity: ${apps.join(', ')}\n`);
   } catch (error) {

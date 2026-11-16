@@ -9,6 +9,9 @@ const REASONS = new Set([
   'completion-committed', 'terminal-not-completed', 'partial-collection',
   'missing-pending-completion', 'pending-run-mismatch', 'pending-career-mismatch',
   'invalid-pending-completion', 'finalization-failed',
+  // The card never recorded this run's completion; its dates moved from the
+  // collection record kept with the saved scrape once those rows were shown.
+  'saved-scrape-evidence',
   'clear-scrape', 'clear-career', 'clear-all',
 ]);
 const DISPOSITIONS = new Set(['full', 'user-finished-partial', 'unfinished-sources', 'unknown']);

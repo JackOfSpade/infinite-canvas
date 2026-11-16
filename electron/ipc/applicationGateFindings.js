@@ -84,6 +84,7 @@ export const GATE_FINDING_SCOPES = Object.freeze({
   shape: row('structure', 'structure'),
   'figure-discipline': row('unit-context', 'paragraph'),
   'target-company-binding': row('unit-context', 'paragraph'),
+  'prior-employer-short-form': row('unit-context', 'paragraph'),
   'target-claim-scope': row('unit-context', 'paragraph-thesis'),
   'transfer-benefit-support': row('unit', 'paragraph'),
   'logistics-exclusion': row('unit', 'paragraph'),

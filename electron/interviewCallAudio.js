@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { createInterviewCallQuestionDetector } from './interviewCallQuestionDetector.js';
 
 export const INTERVIEW_AUDIO_MESSAGES = Object.freeze({
-  'permission-denied': 'Allow Infinite Canvas or Interview Audio Helper in System Settings → Privacy & Security → Screen & System Audio Recording, then retry Listen. Only system output is captured. You can still type.',
+  'permission-denied': 'Allow Interview Helper or Interview Audio Helper in System Settings → Privacy & Security → Screen & System Audio Recording, then retry Listen. Only system output is captured. You can still type.',
   'speech-assets': 'English on-device speech assets could not be prepared. Check your connection before retrying; you can still type.',
   'unsupported-locale': 'English on-device speech recognition is unavailable on this Mac. You can still type.',
   'unsupported-platform': 'Listening requires Apple Silicon and macOS 26 or later. You can still type.',

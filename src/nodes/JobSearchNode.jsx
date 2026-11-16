@@ -104,6 +104,7 @@ import {
   resolveJobSearchDateWindow,
 } from '../utils/jobSearchDateWindow';
 import {
+  buildCollectionEvidenceCommitPatch,
   buildSourceCoverageCommitPatch,
   latestSourceCompletedAt,
   partitionSourcesByRescrapeAge,
@@ -1756,7 +1757,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       });
     // A delayed collection response with no exact run/career owner is not
     // allowed to stage coverage for whichever hub happens to be mounted.
-    if (!runId || !admittedCareerSnapshotId || !canPublish(getNode(id))) return;
+    if (!runId || !admittedCareerSnapshotId || !canPublish(getNode(id))) {
+      // This used to return silently, and a card whose dates never moved gave
+      // no trace of why. Fixed codes only.
+      const declined = !runId ? 'no-run-id'
+        : !admittedCareerSnapshotId ? 'no-career-snapshot'
+          : isCancelled?.() ? 'cancelled'
+            : getNode(id)?.data?.hubState !== admittedHubState || admittedHubState !== 'searching' ? 'hub-not-searching'
+              : 'owner-mismatch';
+      EventLogger.log(`[JobSearch][${id}] Collection completion not recorded on the card: ${declined}`);
+      return;
+    }
     // "Finish with saved listings" is intentionally a partial collection:
     // it must not advance the next full scan's coverage watermark and hide
     // the interval left un-scraped. The normal terminal/scoring path still
@@ -13624,7 +13635,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             ? searchRunOutcome('recovery-finalization-failed', { runId: snapshot.runId || null, resultDisposition, error: completionError })
             : searchRunOutcome('completed', { runId: snapshot.runId || recoveryBaseData.jobRunId || null, resultDisposition });
         }
-        return await runScoringAndSpawn({
+        const savedScrapeOutcome = await runScoringAndSpawn({
           profile,
           careerData,
           careerSnapshotId: admittedSavedCareerSnapshotId,
@@ -13658,6 +13669,32 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           analysisOperation: savedScrapeOperation,
           canCommit: () => !cancelled() && canCommitAnalysisOperation(savedScrapeOperation),
         });
+        // The saved rows are now on the card. If this run's completion was
+        // never recorded here, move each finished platform's date from the
+        // collection record the main process kept with the saved scrape.
+        if (savedScrapeOutcome?.status === 'completed' && resultMode !== 'append' && !cancelled()) {
+          const evidence = snapshot.collectionEvidence;
+          updateGlobal(currentId, (node) => {
+            if (!careerSnapshotBindingMatches({ careerSnapshotId: node?.data?.careerSnapshotId }, admittedSavedCareerSnapshotId)) return null;
+            const patch = buildCollectionEvidenceCommitPatch(node?.data, evidence, id, ALL_JOB_SOURCE_IDS);
+            if (!patch) return null;
+            EventLogger.log(`[JobSearch][${id}] Scrape dates moved from the saved scrape's collection record (${evidence.disposition}; ${Array.isArray(evidence.completedSourceIds) ? evidence.completedSourceIds.length : 0} platform(s) finished)`);
+            return {
+              ...patch,
+              ...jobSearchDateDiagnosticPatch(node?.data, {
+                event: 'finalization', reason: 'saved-scrape-evidence', runId: evidence.runId,
+                nextData: { ...node?.data, ...patch },
+                searchResult: {
+                  collectionDisposition: evidence.disposition,
+                  hasUnfinishedSources: evidence.disposition === 'unfinished-sources',
+                  collectionStartedAt: evidence.startedAt,
+                  collectionCompletedAt: evidence.completedAt,
+                },
+              }),
+            };
+          });
+        }
+        return savedScrapeOutcome;
       } catch (error) {
         if (error?.code === 'APP_QUIT_PAUSED' || error?.message === 'App paused for quit') {
           return searchRunOutcome('paused', { runId: snapshot.runId || null, reason: 'awaiting-explicit-ai-continue' });

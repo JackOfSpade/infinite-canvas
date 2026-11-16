@@ -54,7 +54,7 @@ import { JOB_SCORING_SCHEMA, JOB_COMPENSATION_EVIDENCE_BATCH_SCHEMA, ROLE_FAMILY
 import { runBoundedJobTaxonomy } from './jobTaxonomy.js';
 import { confirmSimilarJobLocationPairs } from './jobLocationConsolidation.js';
 import electronPkg from 'electron';
-import { abortNodeTasksAndWait, drainNodeTasksForQuit, getCurrentIpcRequestContext, handleSafe, isAppQuitPauseReason, nodeCancellationError } from './ipcUtils.js';
+import { abortNodeTasksAndWait, drainNodeTasksForQuit, getCurrentIpcRequestContext, handleSafe as registerIpcHandler, isAppQuitPauseReason, nodeCancellationError } from './ipcUtils.js';
 import { clearBrowserSession, getBrowserSessionResetBlocker, resetPlatformSession } from './stealthBrowser.js';
 import { buildPhysicalCardWalkPlan, scrapeManualSources, resetManualScraperDiagnostics, resetManualScraperTelemetry, enrichResolvedJobDescriptions, preloadResolvedJobList, followGoogleApplyRedirects, normalizeGoogleApplyOptions, selectGoogleApplyUrl, googleApplyLinksRateLimitedWarning, GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE } from './browser/manualScraper.js';
 import { orderBrowserSources, resetManualSolveTracking, markManualSolveRequired, recordVerificationOutcome, wasManualSolveRequired, getVerificationSnapshot } from './scrapeVerification.js';
@@ -136,7 +136,7 @@ export function walkGuardWarning(sourceId, guards) {
 }
 import { fetchIndeedListingsBrowser, resolveIndeedPageBudgets, retryIndeedJobDescriptions } from '../extractors/indeedBrowser.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
-import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, sanitizeJobSearchSourceWindows, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority } from './jobRunStaging.js';
+import { startRun as startJobRun, recordSourcePage, markSourceStatus, markProviderGathered, setStage as setJobRunStage, readRunState, readLastRunReceipt, clearRunWithResult, completeRunWithReceipt, computeResumeStartPagesByQuery, normalizeJobRunProfileFingerprint, sanitizeJobSearchWindow, sanitizeJobSearchSourceWindows, collectionCompletedAtForManifest, providerGatheredAtForManifest, finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings, isJobRunAutomaticRecoveryEligible, pauseRunForManualResume, activateRunForResume, rebindRunOperationAuthority, sanitizeJobRunCollectionDiagnostics } from './jobRunStaging.js';
 import { beginJobContinuation, checkpointJobContinuationResult, claimJobContinuation, clearJobContinuations, completeJobContinuation, listJobContinuations, pauseJobContinuations, publishJobContinuationParentUpdate, readJobContinuationResult, releaseJobContinuationExecution, retireTerminalJobContinuations, validateJobContinuationAuthority } from './jobContinuation.js';
 import { claimJobBoardRunExecution, releaseJobBoardRunExecution, validateJobBoardRunExecution } from './jobBoardRunLease.js';
 import { loadJobsHistory, stageDisplayedJobsHistory, finalizeDisplayedJobsHistory, dedupAgainstHistory, historyPathForCanvas } from './jobsHistory.js';
@@ -206,7 +206,7 @@ import { getJobRoleScreenVerdictStore } from './jobRoleScreenVerdicts.js';
 import { acquireCanvasRecoveryRead, resolveCanvasRecoveryPath, withCanvasRecoveryOwner } from './canvasRecoveryPaths.js';
 import { createDependencyReadyQueue, HANDOFF_CONCURRENCY, mapAutomaticHandoffs, runAutomaticHandoffWorkers } from '../../src/utils/handoffScheduler.js';
 
-const { ipcMain, app, shell } = electronPkg;
+const { ipcMain: electronIpcMain, app, shell } = electronPkg;
 const DEFAULT_MAX_AGE_DAYS = 21;
 const REANALYZE_SAVED_JOBS_RECOVERY_MODE = 'reanalyze-saved-jobs';
 const HISTORY_TOKEN_TTL_MS = 5 * 60 * 1000;
@@ -942,8 +942,15 @@ const compensationResearchCache = new Map();
 // avoids both model calls while an offer change naturally misses the key.
 const compensationAssessmentCache = new Map();
 const PDFJS_LEGACY_MODULE = 'pdfjs-dist/legacy/build/pdf.mjs';
+// The standalone Interview Helper app keeps its own Electron profile but reads
+// and writes the same content-addressed career snapshots as Infinite Canvas, so
+// a career file compiled in either app is reused by the other.
+let careerSnapshotDataRoot = null;
+export function configureCareerSnapshotDataRoot(root) {
+  careerSnapshotDataRoot = typeof root === 'string' && path.isAbsolute(root) ? root : null;
+}
 function careerSnapshotRoot() {
-  return careerSnapshotStorageRoot(app.getPath('userData'));
+  return careerSnapshotStorageRoot(careerSnapshotDataRoot || app.getPath('userData'));
 }
 
 async function ensureCareerCleanLayer(snapshot, signal, previousSnapshot = null) {
@@ -2431,6 +2438,57 @@ function withJobAnalysisSnapshotLock(filePath, fn) {
   return result;
 }
 
+/**
+ * The collection facts that travel with a saved scrape: when the run's walk
+ * began and ended, whether it was a full collection, and which platforms
+ * finished. They live and die with the saved rows on purpose. A card whose
+ * completion was never recorded can then still move each finished platform's
+ * date when those rows are shown, and Clear Scrape drops the proof together
+ * with the rows it described.
+ *
+ * Sources, in order: this run's live manifest (the host's own settled search
+ * boundary), evidence already on the snapshot, then the copy in the file being
+ * replaced (a re-analysis rewrites the same run). Null when none names this
+ * exact run.
+ */
+export function collectionEvidenceForSnapshot(snapshot, manifest = null, priorSnapshot = null) {
+  const runId = typeof snapshot?.runId === 'string' && snapshot.runId ? snapshot.runId : null;
+  if (!runId) return null;
+  const candidates = [
+    manifest?.runId === runId ? manifest.collectionDiagnostics : null,
+    snapshot?.collectionEvidence?.runId === runId ? snapshot.collectionEvidence : null,
+    priorSnapshot?.runId === runId && priorSnapshot?.collectionEvidence?.runId === runId
+      ? priorSnapshot.collectionEvidence : null,
+  ];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const evidence = sanitizeJobRunCollectionDiagnostics(candidate);
+    if (evidence.disposition === 'unknown' || evidence.startedAt == null || evidence.completedAt == null) continue;
+    return { runId, ...evidence };
+  }
+  return null;
+}
+
+async function attachCollectionEvidence(snapshot, jsonPath) {
+  if (!snapshot?.runId || !snapshot.canvasFilePath) return snapshot;
+  let manifest = null;
+  try {
+    manifest = (await readRunState(snapshot.canvasFilePath, Date.now(), { nodeId: jobAnalysisSnapshotOwner(snapshot) }))?.manifest || null;
+  } catch { /* a missing or foreign manifest supplies nothing */ }
+  let evidence = collectionEvidenceForSnapshot(snapshot, manifest);
+  if (!evidence) {
+    // Only now pay for parsing the file being replaced.
+    try {
+      evidence = collectionEvidenceForSnapshot(snapshot, null, JSON.parse(await fs.promises.readFile(jsonPath, 'utf8')));
+    } catch { /* first save, or an unreadable predecessor */ }
+  }
+  if (!evidence) {
+    const { collectionEvidence: _stale, ...rest } = snapshot;
+    return rest;
+  }
+  return { ...snapshot, collectionEvidence: evidence };
+}
+
 async function saveJobAnalysisSnapshot(snapshot) {
   const paths = analysisPathsForCanvas(
     snapshot.canvasFilePath,
@@ -2451,6 +2509,7 @@ async function saveJobAnalysisSnapshot(snapshot) {
       return { retired: true, jsonPath, lastSuccessJsonPath, promptPath };
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
+    snapshot = await attachCollectionEvidence(snapshot, jsonPath);
     const { snapshot: persisted, serialized } = prepareJobAnalysisSnapshotForWrite(snapshot);
     const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
@@ -3872,6 +3931,9 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
       return { saved: true, globalSaved: false, checkpointPath: checkpoint.checkpointPath, reason: 'superseded' };
     }
     if (!snapshot.canvasFilePath) await fs.promises.mkdir(dir, { recursive: true });
+    // A Solve rewrites the same run's saved scrape: keep its collection record.
+    const carriedEvidence = collectionEvidenceForSnapshot(snapshot, null, current);
+    if (carriedEvidence) snapshot = { ...snapshot, collectionEvidence: carriedEvidence };
     const { snapshot: persisted, serialized } = prepareJobAnalysisSnapshotForWrite(snapshot);
     const rotationPlan = await planSuccessfulJobAnalysisGenerations(paths, snapshot, serialized, authorityRecord);
     await stagePublication({
@@ -11199,6 +11261,13 @@ export function registerJobsHandlers() {
   return registerJobsHandlersWithDependencies();
 }
 
+// The career compile handlers alone, for the standalone Interview Helper app.
+// They stay defined in the shared registration below so both apps run one copy.
+const CAREER_DATA_CHANNELS = new Set(['parse-career-data', 'inspect-career-compile-resume']);
+export function registerCareerDataHandlers() {
+  return registerJobsHandlersWithDependencies({ onlyChannels: CAREER_DATA_CHANNELS });
+}
+
 // Registration is the only test seam. Nothing supplied here is reachable from
 // preload IPC, and production always receives the native implementations.
 // Keeping the pause points at operation boundaries lets race regressions avoid
@@ -11253,6 +11322,12 @@ export function applyGoogleApplyLinkRetryResults(rows, { resolvedHrefByHref, att
 }
 
 function registerJobsHandlersWithDependencies(dependencies = {}) {
+  const onlyChannels = dependencies.onlyChannels instanceof Set ? dependencies.onlyChannels : null;
+  // Shadows the shared registrar so a caller can register a named subset.
+  const handleSafe = onlyChannels
+    ? (channel, ...rest) => (onlyChannels.has(channel) ? registerIpcHandler(channel, ...rest) : undefined)
+    : registerIpcHandler;
+  const ipcMain = onlyChannels ? { handle() {} } : electronIpcMain;
   const compileCareerSnapshot = dependencies.compileCareerSnapshot || compileAuditedCareerSnapshot;
   const resolvePinnedScoringInputForHandler = dependencies.resolvePinnedScoringInput || resolvePinnedScoringInput;
   const resolveRequiredPinnedCareerInputForHandler = dependencies.resolveRequiredPinnedCareerInput || resolveRequiredPinnedCareerInput;
@@ -11366,7 +11441,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       boardClosedDrops: [...officialClosedDrops, ...settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
         reason: entry.disposition, stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' }))] };
   };
-  void pruneStaleUnsavedAnalysisArtifacts();
+  if (!onlyChannels) void pruneStaleUnsavedAnalysisArtifacts();
   void pruneStaleCareerInputStages();
   // This acknowledgement is the durable admission boundary for analysis
   // writes.  Do not let a renderer-local generation receipt stand in for it:
@@ -15064,43 +15139,6 @@ Return a JSON object with four arrays of search query strings:
       && persistedRunStartedAt > 0
       ? persistedRunStartedAt
       : (resumeScope ? activeSearchWindow.startTimestamp : runStartedAt);
-    // `setJobRunStage` owns the exact authority→manifest transaction.
-    await beforeSearchStageWrite({ phase: 'before-gathered-stage', nodeId, runId: activeRunId });
-    await assertSearchCurrent();
-    const gatheredStageAdvanced = await setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt, {
-      expectedRunId: activeRunId,
-      nodeId,
-      expectedOperationAuthority: authorityReceipt,
-      collectionCompletedAt,
-      collectionDiagnostics: {
-        disposition: collectionDisposition === 'user-finished-partial'
-          ? 'user-finished-partial'
-          : finalGatingSourceIds.size > 0 ? 'unfinished-sources' : 'full',
-        startedAt: collectionStartedAt,
-        completedAt: collectionCompletedAt,
-        unfinishedSourceCount: finalGatingSourceIds.size,
-      },
-    });
-    await assertSearchCurrent();
-    if (gatheredStageAdvanced !== true) return searchSupersededResult();
-    if (hasExactResumeToken && gatheredStageAdvanced !== true) {
-      const failure = await exactResumeStageFailure();
-      retirePipeline('recovery-superseded', failure.error);
-      return { success: false, ...failure };
-    }
-    // The user may have started a fresh run while this recovered result was
-    // being finalized. Re-check the manifest token immediately before returning
-    // so old staged jobs can never be painted onto its successor.
-    if (hasExactResumeToken) {
-      const failure = await inspectExactResumeOwnership();
-      if (failure) {
-        retirePipeline('recovery-superseded', failure.error);
-        return { success: false, ...failure };
-      }
-    }
-    await assertSearchCurrent();
-    const completedAt = Date.now();
-    const pausedSourceIds = [...finalGatingSourceIds];
     // Platforms whose collection genuinely finished, read from THIS run's
     // manifest so a "done" that only ever reached disk still counts. A missing or
     // mismatched manifest yields no completions — the next run then keeps the run
@@ -15127,6 +15165,47 @@ Return a JSON object with four arrays of search query strings:
         completedSourceIds = [];
       }
     }
+    // `setJobRunStage` owns the exact authority→manifest transaction.
+    await beforeSearchStageWrite({ phase: 'before-gathered-stage', nodeId, runId: activeRunId });
+    await assertSearchCurrent();
+    const gatheredStageAdvanced = await setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt, {
+      expectedRunId: activeRunId,
+      nodeId,
+      expectedOperationAuthority: authorityReceipt,
+      collectionCompletedAt,
+      collectionDiagnostics: {
+        disposition: collectionDisposition === 'user-finished-partial'
+          ? 'user-finished-partial'
+          : finalGatingSourceIds.size > 0 ? 'unfinished-sources' : 'full',
+        startedAt: collectionStartedAt,
+        completedAt: collectionCompletedAt,
+        unfinishedSourceCount: finalGatingSourceIds.size,
+        // Durable per-platform completion: the saved scrape copies this, so a
+        // run whose card never recorded its completion can still move each
+        // finished platform's date when its rows are shown.
+        completedSourceIds,
+      },
+    });
+    await assertSearchCurrent();
+    if (gatheredStageAdvanced !== true) return searchSupersededResult();
+    if (hasExactResumeToken && gatheredStageAdvanced !== true) {
+      const failure = await exactResumeStageFailure();
+      retirePipeline('recovery-superseded', failure.error);
+      return { success: false, ...failure };
+    }
+    // The user may have started a fresh run while this recovered result was
+    // being finalized. Re-check the manifest token immediately before returning
+    // so old staged jobs can never be painted onto its successor.
+    if (hasExactResumeToken) {
+      const failure = await inspectExactResumeOwnership();
+      if (failure) {
+        retirePipeline('recovery-superseded', failure.error);
+        return { success: false, ...failure };
+      }
+    }
+    await assertSearchCurrent();
+    const completedAt = Date.now();
+    const pausedSourceIds = [...finalGatingSourceIds];
     jobsTelemetry.pipeline = {
       ...(jobsTelemetry.pipeline || {}),
       // A source-level gate is a settled partial gather, not a completed

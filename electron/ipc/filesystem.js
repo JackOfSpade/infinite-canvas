@@ -6,9 +6,12 @@ const { shell, dialog, app } = electronPkg;
 import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { recordWorkspaceWriteOutcome } from './workspaceIoDiagnostics.js';
+import { recordMainPerf } from './perfDiagnostics.js';
 import { formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
 import path from 'path';
 import fs from 'fs';
+import { Worker } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
 import { constants as bufferConstants } from 'buffer';
 import { createHash, randomUUID } from 'crypto';
 import {
@@ -1926,7 +1929,7 @@ function pooledFormOf(data, plain) {
   return null;
 }
 
-export function serializeWorkspaceForSave(data) {
+function plainWorkspaceText(data) {
   let plain;
   try {
     plain = JSON.stringify(data);
@@ -1936,7 +1939,71 @@ export function serializeWorkspaceForSave(data) {
   }
   const byteLength = Buffer.byteLength(plain, 'utf8');
   if (byteLength > WORKSPACE_MAX_BYTES) throw workspaceSaveTooLargeError(byteLength);
+  return plain;
+}
+
+export function serializeWorkspaceForSave(data) {
+  const plain = plainWorkspaceText(data);
   return pooledFormOf(data, plain) ?? plain;
+}
+
+// A bundle such as dist-electron/main.cjs keeps the worker entry beside it
+// (unpacked from the asar); the unbundled source finds its sibling module.
+function workspaceSaveWorkerPath() {
+  if (typeof __dirname === 'string') {
+    return path.join(__dirname, 'workspaceSaveWorkerThread.js')
+      .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+  }
+  return fileURLToPath(new URL('./workspaceSaveWorkerThread.js', import.meta.url));
+}
+
+function pooledFormOffThread(plain) {
+  return new Promise((resolve, reject) => {
+    // One short-lived thread per save: it holds several copies of the canvas
+    // while it works, and ending it returns all of that memory at once.
+    const worker = new Worker(workspaceSaveWorkerPath(), {
+      resourceLimits: { maxOldGenerationSizeMb: 8192 },
+    });
+    let settled = false;
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      worker.terminate().catch(() => {});
+      fn(value);
+    };
+    worker.once('message', (reply) => {
+      if (!reply?.ok) return settle(reject, new Error(reply?.message || 'Canvas save worker failed.'));
+      if (reply.mismatch) logger.warn('[FileSystem] Canvas content pool did not restore identically; saving without it.');
+      settle(resolve, typeof reply.serialized === 'string' ? reply.serialized : null);
+    });
+    worker.once('error', error => settle(reject, error));
+    worker.once('exit', code => settle(reject, new Error(`Canvas save worker stopped early (code ${code}).`)));
+    worker.postMessage(plain);
+  });
+}
+
+/**
+ * Same result as serializeWorkspaceForSave, with the slow part (removing
+ * repeated content and proving it restores) on a worker thread. Any worker
+ * failure falls back to doing that work here, so a save never depends on it.
+ */
+export async function serializeWorkspaceForSaveOffThread(data) {
+  const megabytes = text => text.length / 1024 / 1024;
+  let started = performance.now();
+  const plain = plainWorkspaceText(data);
+  recordMainPerf('save-serialize', performance.now() - started, megabytes(plain));
+  let pooled;
+  started = performance.now();
+  try {
+    pooled = await pooledFormOffThread(plain);
+    recordMainPerf('save-compress', performance.now() - started, megabytes(pooled ?? plain));
+  } catch (error) {
+    logger.warn(`[FileSystem] Canvas save worker unavailable; serializing on the main thread: ${error?.message || error}`);
+    started = performance.now();
+    pooled = pooledFormOf(data, plain);
+    recordMainPerf('save-compress-fallback', performance.now() - started, megabytes(pooled ?? plain));
+  }
+  return pooled ?? plain;
 }
 
 export async function readRendererWorkspaceFile(filePath, {
@@ -3463,9 +3530,12 @@ export function registerFilesystemHandlers() {
 
   // Every hard-link refusal on this route (the rename/Save As pre-write reads
   // and inspections, not only the canvas write) is a retryable sync wait.
-  handleSafe('save-workspace', (event, args) => saveWorkspace(event, args).catch((error) => {
-    throw isWorkspaceSyncLinkRefusal(error) ? workspaceSyncLinkBusyError(error) : error;
-  }));
+  handleSafe('save-workspace', (event, args) => {
+    const started = performance.now();
+    return saveWorkspace(event, args).catch((error) => {
+      throw isWorkspaceSyncLinkRefusal(error) ? workspaceSyncLinkBusyError(error) : error;
+    }).finally(() => recordMainPerf('save-request', performance.now() - started));
+  });
 
   async function saveWorkspace(event, args) {
     const { data, filePath } = args;
@@ -3516,7 +3586,7 @@ export function registerFilesystemHandlers() {
     annotatePortableFilePaths(data, targetPath);
     // Refuse before any mutation below: an oversized write would replace the
     // last good canvas with one the load path cannot open.
-    const serializedCanvas = serializeWorkspaceForSave(data);
+    const serializedCanvas = await serializeWorkspaceForSaveOffThread(data);
 
     // Delete legacy separate sidecar progress file if present. Bind this
     // sibling deletion just like the canvas write: a path swap after the

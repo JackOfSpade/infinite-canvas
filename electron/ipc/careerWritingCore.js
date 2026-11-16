@@ -37,6 +37,11 @@ export const APPLICATION_STAGE_PROFILES = Object.freeze({
   'fact-correction': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   'fact-recheck': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
 });
+// The writer on a cover-letter-only run (it also reads the saved résumé). 2026-11-15: on the one real cover-only
+// prompt, 3 runs per setting, two blind judges ranked Opus medium first both times (7.67 vs 6.50 for Opus low and
+// 6.17 for Sonnet high) at $0.44 vs $0.38 a call. One job only; the owner chose medium on that evidence. Re-test when
+// 3 or more cover-only jobs exist (docs/ai-model-selection.md).
+export const COVER_ONLY_WRITE_PROFILE = Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' });
 // Interview Q&A. qa-research, 2026-11-09: Opus high scored within the run-to-run noise of
 // Opus xhigh in blind judging on three postings at 18-47% less cost; every low and medium
 // setting lost real content (docs/ai-model-selection.md).

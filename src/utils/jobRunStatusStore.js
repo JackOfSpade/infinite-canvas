@@ -10,7 +10,7 @@ const pausable = entry => Boolean(entry?.onPause || entry?.pauseWithoutSave);
 
 const statusKey = entry => JSON.stringify([
   entry.label, entry.headline, entry.lines, entry.pauseKeys, entry.pauseDisabledReason,
-  entry.claudeRequestId, entry.pauseWithoutSave,
+  entry.claudeRequestId, entry.pauseWithoutSave, entry.relatedNodeIds,
 ]);
 
 function publishSnapshot() {
@@ -28,6 +28,9 @@ export function publishJobRunStatus(nodeId, entry, now = Date.now()) {
     claudeRequestId: entry.claudeRequestId || null,
     // The run pauses in place with no save step, so the card still holds a button.
     pauseWithoutSave: entry.pauseWithoutSave === true,
+    // Other nodes whose handoffs this run is part of: a job card's generation
+    // works through prompts its Board owns, and belongs in that Board's tab.
+    relatedNodeIds: (entry.relatedNodeIds || []).filter(value => typeof value === 'string' && value),
   };
   // Card clocks are bookkeeping, not status: both stay out of statusKey, so a
   // fresh timestamp on its own never re-renders the panel. startedAt survives
@@ -127,6 +130,7 @@ export function showsOwnPauseButton(entry, handoffNodeId = null, statuses = snap
 export function runStatusBelongsToHandoff(entry, handoffNodeId) {
   if (typeof handoffNodeId !== 'string' || !handoffNodeId) return false;
   if (entry?.nodeId === handoffNodeId) return true;
+  if (Array.isArray(entry?.relatedNodeIds) && entry.relatedNodeIds.includes(handoffNodeId)) return true;
   return Array.isArray(entry?.pauseKeys) && entry.pauseKeys.includes(`node:${handoffNodeId}`);
 }
 

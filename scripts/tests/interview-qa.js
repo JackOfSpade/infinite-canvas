@@ -305,52 +305,41 @@ export default [
     assert.equal(interviewStageMayOffload('qa-disclosures'), true);
     assert.equal(interviewStageMayOffload('qa-practice-order'), true);
   } },
-  { name: 'interview Q&A offload: an OFFLOAD_ error falls back to a fresh Claude session; credit exhaustion blocks offload', async run() {
-    resetInterviewOffloadBlock();
-    try {
-      const runs = []; let offloadCalls = 0;
-      const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
-        runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
-        routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
-        offloadCall: async () => { offloadCalls += 1; throw Object.assign(new Error('provider'), { code: 'OFFLOAD_PROVIDER_ERROR' }); } });
-      assert.deepEqual(await transport.callText('ORIGINAL', { claudeStage: 'qa-write' }), { ok: true });
-      assert.equal(offloadCalls, 1);
-      assert.equal(runs.length, 1);
-      assert.equal(runs[0].text, 'ORIGINAL');
-      assert.equal(runs[0].resume, false);
-      const credit = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
-        runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
-        routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
-        offloadCall: async () => { offloadCalls += 1; throw Object.assign(new Error('credit'), { code: 'OFFLOAD_CREDIT_EXHAUSTED' }); } });
-      await credit.callText('A', { claudeStage: 'qa-write' });
-      assert.equal(offloadCalls, 2);
-      await credit.callText('B', { claudeStage: 'qa-write' });
-      assert.equal(offloadCalls, 2, 'offload is blocked after credit exhaustion');
-      assert.equal(runs.length, 3);
-      resetInterviewOffloadBlock();
-      await assert.rejects(() => createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
-        runStage: async () => { throw new Error('Claude must not run after a cancel'); },
-        routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
-        offloadCall: async () => { throw Object.assign(new Error('stop'), { code: 'CLAUDE_CANCELLED' }); } }).callText('C', { claudeStage: 'qa-write' }), /stop/u);
-    } finally { resetInterviewOffloadBlock(); }
+  { name: 'interview Q&A offload: an OFFLOAD_ error fails the call loudly with its own code and Claude never answers a routed stage', async run() {
+    const runs = []; let offloadCalls = 0;
+    const make = code => createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      routeFor: () => ({ route: 'deepseek-pro', reasoning: 'high' }),
+      offloadCall: async () => { offloadCalls += 1; throw Object.assign(new Error(code), { code }); } });
+    await assert.rejects(() => make('OFFLOAD_PROVIDER_ERROR').callText('ORIGINAL', { claudeStage: 'qa-write' }), error => error.code === 'OFFLOAD_PROVIDER_ERROR');
+    const credit = make('OFFLOAD_CREDIT_EXHAUSTED');
+    await assert.rejects(() => credit.callText('A', { claudeStage: 'qa-write' }), error => error.code === 'OFFLOAD_CREDIT_EXHAUSTED');
+    await assert.rejects(() => credit.callText('B', { claudeStage: 'qa-write' }), error => error.code === 'OFFLOAD_CREDIT_EXHAUSTED');
+    assert.equal(offloadCalls, 3, 'every call asks DeepSeek; nothing is remembered as blocked');
+    await assert.rejects(() => make('CLAUDE_CANCELLED').callText('C', { claudeStage: 'qa-write' }), error => error.code === 'CLAUDE_CANCELLED');
+    assert.equal(runs.length, 0, 'Claude was never called');
   } },
-  { name: 'interview Q&A offload: rejected offload replies are resent statelessly, and the second rejection escalates to Claude', async run() {
-    resetInterviewOffloadBlock();
+  { name: 'interview Q&A offload: rejected offload replies are resent statelessly to DeepSeek and never escalate to Claude', async run() {
     const runs = []; const offloads = [];
-    const replies = ['{"ok":false}', '{"ok":false}'];
+    const replies = ['{"ok":false}', '{"ok":false}', '{"ok":true}'];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
       runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
       routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
       offloadCall: async args => { offloads.push(args.messages.map(item => ({ ...item }))); return { text: replies.shift(), model: 'd' }; } });
     const validator = (value) => { if (value.ok !== true) throw new Error('ok must be true'); };
     assert.deepEqual(await transport.callText('ORIGINAL', { claudeStage: 'qa-write', responseValidator: validator }), { ok: true });
-    assert.equal(offloads.length, 2);
-    assert.deepEqual(offloads[1].map(item => item.role), ['system', 'user', 'assistant', 'user']);
+    assert.equal(offloads.length, 3);
+    assert.deepEqual(offloads[2].map(item => item.role), ['system', 'user', 'assistant', 'user', 'assistant', 'user']);
     assert.equal(offloads[1][2].content, '{"ok":false}');
     assert.match(offloads[1][3].content, /REJECTED BY THE APP[\s\S]*ok must be true/u);
-    assert.equal(runs.length, 1, 'the third attempt runs on Claude');
-    assert.equal(runs[0].resume, false);
-    assert.match(runs[0].text, /^ORIGINAL\n\nYOUR PREVIOUS REPLY WAS REJECTED BY THE APP[\s\S]*ok must be true/u);
+    assert.equal(runs.length, 0, 'Claude was never called');
+    // Every reply rejected: the call ends as an exhausted validation, still without Claude.
+    const never = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
+      offloadCall: async () => ({ text: '{"ok":false}', model: 'd' }) });
+    await assert.rejects(() => never.callText('ORIGINAL', { claudeStage: 'qa-write', responseValidator: validator }), /ok must be true/u);
+    assert.equal(runs.length, 0);
   } },
   { name: 'interview Q&A shadow: only Claude-answered first attempts of qa-brief and qa-write are measured', async run() {
     resetInterviewOffloadBlock();

@@ -1,6 +1,7 @@
 import { useCallback, useRef, useEffect, useState } from 'react';
 import { DEFAULT_SHORTCUTS } from './useSettings';
 import { EventLogger } from '../utils/EventLogger';
+import { timePerf } from '../utils/perfDiagnostics';
 import { fingerprint } from '../utils/serializationUtils';
 import { TIMINGS, maxUndoHistory } from '../utils/timings';
 import { undoHistoryLimit } from '../utils/undoMemoryBudget';
@@ -15,8 +16,8 @@ import { removedInterviewHelperNodes } from '../utils/interviewHelper';
 import { matchesRedoShortcut, matchesShortcut, matchesStandardRedoShortcut } from '../utils/keyboardShortcuts';
 import { useModalStackCount } from '../components/modalStack';
 
-// Resolved once at module load — each snapshot is a full canvas clone, so this
-// scales down on low-memory devices (see maxUndoHistory).
+// Resolved once at module load — scales down on low-memory devices (see
+// maxUndoHistory).
 const MAX_HISTORY = maxUndoHistory();
 
 /**
@@ -54,23 +55,17 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     futureRef.current = futureRef.current.slice(-historyLimitRef.current);
   }, []);
 
-  const deepCloneState = useCallback(() => {
+  // Canvas state is immutable: every edit replaces the node, edge or drawing
+  // it touches and leaves the rest alone. A history entry therefore keeps the
+  // arrays themselves, so unchanged nodes are shared between entries instead of
+  // being copied. Deep-copying froze the app for about a second after every
+  // edit on a canvas holding large job-search results.
+  const captureState = useCallback(() => {
     const { nodes: n, edges: e, drawings: d } = stateRef.current;
-    try {
-      return {
-        nodes:    structuredClone(n),
-        edges:    structuredClone(e),
-        drawings: structuredClone(d),
-      };
-    } catch (err) {
-      // Fallback: if structuredClone fails (due to non-serializable data in 'data' fields),
-      // we use a JSON-based clone which is safer for standard React Flow data.
-      EventLogger.log('[undo-redo] structuredClone failed, falling back to JSON clone: ' + err.message);
-      return JSON.parse(JSON.stringify({ nodes: n, edges: e, drawings: d }));
-    }
+    return { nodes: n, edges: e, drawings: d };
   }, []);
 
-  const takeSnapshot = useCallback(() => {
+  const takeSnapshot = useCallback(() => timePerf('undo-snapshot', () => {
     if (isRestoringRef.current) return;
     const live = stateRef.current;
     // A running Board/Search owns backend state and a mutable source-card
@@ -86,19 +81,19 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
       }
       return;
     }
-    // Trim before allocating the next clone. The cap never grows during a
+    // Trim before keeping the next entry. The cap never grows during a
     // history session, so older, larger entries remain covered after deletion.
     constrainHistory();
     pastRef.current = pastRef.current.slice(-(historyLimitRef.current - 1));
     futureRef.current = [];
-    const snap = deepCloneState();
+    const snap = captureState();
     lastFingerprintRef.current = fp;
     pastRef.current = [...pastRef.current, snap];
     futureRef.current = []; // any new action clears redo
     syncHistoryLen();
     isStateDirtyRef.current = false;
     setIsStateDirty(false); // State is freshly saved, no longer dirty
-  }, [deepCloneState, syncHistoryLen, constrainHistory]); // isStateDirty intentionally omitted — read via ref
+  }, stateRef.current.nodes?.length), [captureState, syncHistoryLen, constrainHistory]); // isStateDirty intentionally omitted — read via ref
 
   // ── KEY FIX ─────────────────────────────────────────────────────────────────
   // When state changes while we have redo entries AND we're not restoring,
@@ -153,7 +148,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     const past = pastRef.current;
     if (past.length === 0) return;
 
-    const currentState = deepCloneState();
+    const currentState = captureState();
     const currentFp = fingerprint(currentState);
     // Skip the settled current snapshot first, then discard every legacy
     // active-run snapshot until a stable target is found. Checking only the
@@ -221,7 +216,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     isStateDirtyRef.current = false;
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
-  }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef, constrainHistory]);
+  }, [captureState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef, constrainHistory]);
 
   const redo = useCallback(() => {
     if (isAnimatingRef?.current) return;
@@ -240,7 +235,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
       return;
     }
 
-    const currentState = deepCloneState();
+    const currentState = captureState();
     const next        = future[future.length - 1];
     futureRef.current = future.slice(0, -1);
     const restoredNodes = mergeNonRestorableNodeDataFromLive(next.nodes, currentState.nodes);
@@ -280,7 +275,7 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     isStateDirtyRef.current = false;
     setIsStateDirty(false);
     requestAnimationFrame(() => { isRestoringRef.current = false; });
-  }, [deepCloneState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef, constrainHistory]);
+  }, [captureState, setNodes, setEdges, setDrawings, syncHistoryLen, isAnimatingRef, constrainHistory]);
 
   const modalCount = useModalStackCount();
 

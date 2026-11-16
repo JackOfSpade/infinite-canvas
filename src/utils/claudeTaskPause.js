@@ -7,6 +7,7 @@ export const CLAUDE_PAUSE_COPY = Object.freeze({
     CLAUDE_USAGE_LIMIT: 'Claude has reached its usage limit. Work continues when the limit resets.',
     CLAUDE_NOT_SIGNED_IN: 'Claude Code is not signed in. Run claude in a terminal and sign in with your Claude subscription; work continues on its own.',
     CLAUDE_CLI_MISSING: 'Claude Code is not installed or not on PATH. Install it and sign in; work continues on its own.',
+    OFFLOAD_CREDIT_EXHAUSTED: 'DeepSeek credit is exhausted, so AI work is paused. Queued work is saved. Top up DeepSeek, then press Resume.',
     PARALLEL_SEARCH_EXHAUSTED: 'Parallel Search is out of usage, so web research is paused. Queued work is saved. Add credits or an API key at platform.parallel.ai, then press Resume.',
   }),
 });

@@ -10,9 +10,11 @@
  *
  * A stage with a `qa:<stage>` entry in AI_CALL_PROVIDERS is answered through
  * the offload CLI instead (stateless: the messages are resent each attempt).
- * Any OFFLOAD_* error, or a second rejected offload reply, moves the rest of
- * that call to a fresh Claude session. Research and fact-check stages never
- * route: tool use and truth checks stay on Claude.
+ * A routed stage is DeepSeek's alone (the owner's rule, 2026-11-15): an OFFLOAD_*
+ * error fails the call loudly with that code (OFFLOAD_CREDIT_EXHAUSTED when
+ * credit has run out) and a rejected reply is corrected by DeepSeek again; Claude
+ * never steps in. Research and fact-check stages never route: tool use and truth
+ * checks stay on Claude.
  *
  * Research (qa-research) is Parallel Search only: the Parallel MCP server and
  * its six tools, through the SDK stage. Measured 2026-11-14 on 4 briefs with a
@@ -42,15 +44,10 @@ import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 export const INTERVIEW_RESEARCH_MAX_TURNS = 24;
 export const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
 const MAX_REJECTION_CHARS = 6000;
-const OFFLOAD_BLOCK_MS = 30 * 60_000;
-const OFFLOAD_REJECTION_LIMIT = 2;
 const SHADOW_STAGES = Object.freeze(['qa-brief', 'qa-write']);
 
-// Credit exhaustion blocks Q&A offload for every call in this process.
-let offloadBlockedUntil = 0;
-
-/** Clears the Q&A offload credit block (used by tests). */
-export function resetInterviewOffloadBlock() { offloadBlockedUntil = 0; }
+/** Kept for callers and tests from when credit exhaustion blocked offload; a routed stage now simply fails. */
+export function resetInterviewOffloadBlock() {}
 
 /** Research and every truth-check stage stay on Claude even if a table entry exists. */
 export function interviewStageMayOffload(stage) {
@@ -100,7 +97,6 @@ function stepLabel(task) {
   return `${words[0].toUpperCase()}${words.slice(1)}`;
 }
 
-const isOffloadError = error => typeof error?.code === 'string' && error.code.startsWith('OFFLOAD_');
 
 export function createInterviewClaudeTransport({
   runStage = runClaudeStage,
@@ -162,17 +158,10 @@ export function createInterviewClaudeTransport({
     let claudeStarted = false;
     // Research never routes: interviewStageMayOffload excludes it, so it has no offload mode.
     const route = interviewStageMayOffload(stage) ? routeFor(stage) : null;
-    let mode = route && now() >= offloadBlockedUntil ? 'offload' : 'claude';
+    const mode = route ? 'offload' : 'claude';
     // Parallel only: with it exhausted before the first attempt, Claude is never called.
     if (research && !(await parallelAvailable())) throw parallelExhaustedError();
     const messages = handoffMessages({ text: originalText });
-    let offloadRejections = 0;
-    const toFreshClaude = () => {
-      mode = 'claude';
-      sessionId = crypto.randomUUID();
-      claudeStarted = false;
-      text = lastRejection ? `${originalText}\n\n${lastRejection}` : originalText;
-    };
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const started = Date.now();
       let reply = null;
@@ -184,14 +173,14 @@ export function createInterviewClaudeTransport({
           standaloneClaudeActivity.begin(scope.key, { nodeId: scope.nodeId, model: route.route, effort: route.reasoning, countRound: false });
           standaloneClaudeActivity.note(scope.key, attempt > 0 ? `${stepLabel(task)}, corrected reply` : stepLabel(task));
         }
+        // No Claude fallback: a DeepSeek failure ends this call with its own code.
         try {
           reply = await offloadCall({ messages, route: route.route, reasoning: route.reasoning, tag: stage, signal });
-          provider = 'offload';
         } catch (error) {
-          if (!isOffloadError(error)) throw error;
-          if (error.code === 'OFFLOAD_CREDIT_EXHAUSTED') offloadBlockedUntil = now() + OFFLOAD_BLOCK_MS;
-          toFreshClaude();
+          if (scope) standaloneClaudeActivity.released(scope.key);
+          throw error;
         }
+        provider = 'offload';
       }
       if (!reply) {
         if (scope) {
@@ -306,8 +295,6 @@ export function createInterviewClaudeTransport({
       if (provider === 'offload') {
         // The CLI is stateless: the next turn replays the conversation.
         messages.push({ role: 'assistant', content: String(reply.text ?? '') }, { role: 'user', content: lastRejection });
-        offloadRejections += 1;
-        if (offloadRejections >= OFFLOAD_REJECTION_LIMIT) toFreshClaude();
       } else if (research) {
         // A Parallel session is never persisted, so the next Parallel call cannot
         // resume it: it carries the original prompt plus the rejection text.

@@ -97,8 +97,8 @@ import {
 // relevance-span rule whose CHOICE of carriers settles the one apparent
 // contradiction in this pair of checks.
 import {
-  ARGUMENT_RELEVANCE_SPAN_RULE, checkDanglingDemonstrative, checkParagraphOpeners, checkRepeatedTransferCarrier, COVER_LETTER_SALIENT_ECHO_PHRASES,
-  DANGLING_DEMONSTRATIVE_RULE, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE,
+  ARGUMENT_RELEVANCE_SPAN_RULE, checkBodyPointCount, checkDanglingDemonstrative, checkParagraphOpeners, checkPriorEmployerShortForm, checkRepeatedTransferCarrier, COVER_LETTER_SALIENT_ECHO_PHRASES,
+  DANGLING_DEMONSTRATIVE_RULE, checkDisposition, MIN_REPEAT_CONTENT_WORDS, REPEATED_PHRASE_RULE, REPEATED_TRANSFER_CARRIER_RULE,
 } from '../../electron/ipc/coverLetterChecks.js';
 
 function loadFixture(name) {
@@ -1585,6 +1585,85 @@ export default [
     },
   },
   {
+    name: 'cover letter harness: the brief\'s body-point cap and a past employer written by part of its name are recorded by id',
+    run: () => {
+      const thesis = 'I am applying for the grounds supervisor role.';
+      const closing = 'I would welcome the chance to talk about the season ahead.';
+      const atCap = checkBodyPointCount([
+        thesis,
+        'At Acme I rebuilt the intake path.',
+        'At Acme I wrote the runbook the yard uses.',
+        'At Acme I trained the seasonal staff.',
+        closing,
+      ]);
+      assert(atCap.passed && atCap.id === 'body-point-count'
+        && atCap.detail === '3 body point(s) between the thesis and the closing',
+      `three body points sit exactly at the brief's cap: ${atCap.detail}`);
+      const overCap = checkBodyPointCount([
+        thesis,
+        'At Acme I rebuilt the intake path.',
+        'At Acme I wrote the runbook the yard uses.',
+        'At Acme I trained the seasonal staff.',
+        'At Acme I closed out the audit findings.',
+        closing,
+      ]);
+      assert(!overCap.passed && overCap.id === 'body-point-count'
+        && overCap.detail === 'the letter makes 4 body points; keep the three strongest and fold or drop the rest',
+        `a fourth body point is recorded once with its count: ${overCap.detail}`);
+      // The check carries no floor: a letter with no middle paragraph passes,
+      // and the cap is advisory, so the host records it and never rejects.
+      assert(checkBodyPointCount([thesis, closing]).passed
+        && checkBodyPointCount([thesis, closing]).detail === '0 body point(s) between the thesis and the closing',
+        'a letter with no body paragraph passes: the cap has no floor');
+      assert(checkDisposition('body-point-count') === 'advisory',
+        `the body-point cap never rejects a letter: ${checkDisposition('body-point-count')}`);
+
+      const employer = 'Maple Ridge School District';
+      const mapped = { otherNames: ['Acme', 'Acme yard intake rebuild'] };
+      const flagged = [
+        ['a leading-word short form followed by what the candidate did', 'At Maple Ridge I rebuilt the intake path.', 'Maple Ridge'],
+        ['the short form used as a modifier', 'My Maple Ridge work taught me how a yard closes a shift.', 'Maple Ridge'],
+        ['the short form carrying a possessive', 'Maple Ridge’s staff relied on the runbook I wrote.', 'Maple Ridge'],
+        ['the first word used as an adjective', 'The Maple project shipped inside the season.', 'Maple'],
+      ];
+      for (const [label, paragraph, written] of flagged) {
+        const check = checkPriorEmployerShortForm([paragraph], [employer], mapped);
+        assert(!check.passed && check.id === 'prior-employer-short-form'
+          && check.detail === `paragraph 1 writes “${written}” for a past employer; write the employer's full name, or refer to that job without the name`,
+          `${label}: the observation states the rule and quotes only the words written (${check.detail})`);
+      }
+      const firstWord = checkPriorEmployerShortForm(['The Maple project shipped inside the season.'], [employer], mapped);
+      assert(!firstWord.detail.includes(`“${employer}”`) && !firstWord.detail.includes('School'),
+        `the observation never builds a replacement from the employer's own name: ${firstWord.detail}`);
+      const accepted = [
+        ['the full name', 'I rebuilt the intake path at Maple Ridge School District.'],
+        ['a plain reference to the job that uses no part of the name', 'At the district office I rebuilt the intake path.'],
+        ['a trailing corporate suffix left out', 'I rebuilt the intake path at Maple Ridge School District, Inc.'],
+      ];
+      for (const [label, paragraph] of accepted) {
+        const check = checkPriorEmployerShortForm([paragraph], [`${employer}, Inc.`], mapped);
+        assert(check.passed, `${label} passes the naming rule: ${check.detail}`);
+      }
+      for (const [label, employerNames, options, paragraph] of [
+        ['another past employer', [employer, 'Maple Ridge'], mapped, 'At Maple Ridge I rebuilt the intake path.'],
+        ['the target company', [employer], { otherNames: ['Maple Ridge'] }, 'I rebuilt the intake path for Maple Ridge.'],
+        ['a project the candidate names', [employer], { otherNames: ['Acme', 'Maple Ridge intake rebuild'] }, 'The Maple Ridge intake rebuild shipped inside the season.'],
+      ]) {
+        const check = checkPriorEmployerShortForm([paragraph], employerNames, options);
+        assert(check.passed, `a prefix that is the whole name of ${label} is not a truncation: ${check.detail}`);
+      }
+      assert(checkPriorEmployerShortForm(['At Acme I rebuilt the intake path.'], ['Acme']).passed
+        && checkPriorEmployerShortForm(['At Acme I rebuilt the intake path.'], ['Acme, Inc.']).passed,
+        'a name whose remainder is one word has no short form to flag');
+      assert(checkPriorEmployerShortForm(['At Acme Holdings I rebuilt the intake path.'], ['Acme Holdings, Inc.']).passed,
+        'a name minus its trailing corporate suffix is that employer\'s full name');
+      assert(!checkPriorEmployerShortForm(['At Acme I rebuilt the intake path.'], ['Acme Holdings, Inc.']).passed,
+        'a two-word name still flags its first word written alone');
+      assert(checkDisposition('prior-employer-short-form') === 'gate',
+        `a past employer named by part of its name blocks: ${checkDisposition('prior-employer-short-form')}`);
+    },
+  },
+  {
     name: 'cover letter harness: runaway sentences, semicolons, dash splices, and bureaucratic register carry plain repairs',
     run: () => {
       const long = checkSentenceLength(['The scheduling rewrite began when the paper receiving log kept losing signed delivery slips, so I mapped every handoff between the dock, the yard office, and the billing desk in order to find the point where a slip could vanish without anyone noticing it had gone missing at all.']);
@@ -3062,9 +3141,9 @@ export default [
       const fallback = authorCoverLetterEnvelope({ job: {}, evidence: { identity: {} } });
       assert(fallback.recipient === '' && fallback.salutation === 'Dear Hiring Team,' && fallback.signatureTitle === '', 'missing company/title keeps a usable envelope without a recipient block');
       const proseChecks = evaluateCoverLetterChecks({ plan: { mappings: [{}], companyHook: { detail: '' } }, paragraphs: ['The role needs clear prioritization.', 'My triage experience demonstrates that mechanism.'], evidence, researchText: '' });
-      assert(Array.isArray(proseChecks) && proseChecks.length === 53, 'prose helper returns every non-page deterministic check');
+      assert(Array.isArray(proseChecks) && proseChecks.length === 55, 'prose helper returns every non-page deterministic check');
       assert(proseChecks.slice(9).map(check => check.id).join(',')
-        === 'compound-hyphenation,parallel-structure,prior-employer-opening,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,migration-object-clarity,opening-posting-restatement,opening-job-summary-scaffolding,anchor-relevance,target-claim-scope,target-company-binding,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,paragraph-openers,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,letter-proportion,repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment,transfer-carrier-budget,transfer-benefit-support',
+        === 'compound-hyphenation,parallel-structure,prior-employer-opening,prior-employer-short-form,named-artifact-introduction,opening-artifact-context,vague-domain-work-label,reference-clarity,modifier-attachment,migration-object-clarity,opening-posting-restatement,opening-job-summary-scaffolding,anchor-relevance,target-claim-scope,target-company-binding,detached-relevance-claim,prospective-contribution-tense,additive-seam,responsibility-transition,tool-calls-garden-path,low-information-tool-build,containerization-technology-roles,posting-reference,claimed-equivalence,dangling-paragraph-transition,sentence-length,punctuation-style,paragraph-openers,body-point-count,plain-register,introductory-workplace-comma,visual-reference-precision,direct-welcome-closing,opening-demonstrative,opening-employer-shorthand,adjacent-employer-repetition,entailed-premise,repeated-sentence-shape,repeated-phrase,candidate-agency,letter-proportion,repeated-transfer-carrier,dangling-demonstrative,ended-role-current-employment,transfer-carrier-budget,transfer-benefit-support',
       'the register and style checks are appended after the established eight, and all of them read paragraphs only');
       const emptyHookWithResearch = evaluateCoverLetterChecks({
         plan: { mappings: [{ evidence: 'Triaged incomplete emergency reports under time pressure.' }], companyHook: { detail: '' } },
@@ -4450,7 +4529,7 @@ export default [
       ];
       assert(repaired[1] !== embeddedAiLetter[1] && repaired[2] !== embeddedAiLetter[2] && battery(repaired).every(check => check.passed),
         `the minimal repair clears the whole battery (failed=${battery(repaired).filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')})`);
-      assert(battery(repaired).length === 53, 'the repaired letter is graded by every check, not by a shortened battery');
+      assert(battery(repaired).length === 55, 'the repaired letter is graded by every check, not by a shortened battery');
       // Swapping only the verb or only the noun of the shipped sentence is not a rotation.
       const verbOnly = [embeddedAiLetter[0], embeddedAiLetter[1], embeddedAiLetter[2].replace('That judgment would support', 'That practice would help')];
       assert(!checkRepeatedTransferCarrier(verbOnly).passed

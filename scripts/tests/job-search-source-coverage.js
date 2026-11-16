@@ -2,7 +2,12 @@ import { assert, jobSearchNextAnchor, resolveJobSearchDateWindow } from '../test
 import { buildJobSearchDateHistory } from '../../electron/ipc/bugReport/jobSearchDates.js';
 import { completionTimestampIso } from '../../src/utils/completionTimestamp.js';
 import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear.js';
+import { collectionEvidenceForSnapshot } from '../../electron/ipc/jobs.js';
+import { sanitizeJobRunCollectionDiagnostics } from '../../electron/ipc/jobRunStaging.js';
+import { sanitizeJobSearchDateDiagnostics } from '../../src/utils/jobSearchDateDiagnostics.js';
+import fs from 'node:fs';
 import {
+  buildCollectionEvidenceCommitPatch,
   buildSourceCoverageCommitPatch,
   JOB_SOURCE_RESCRAPE_INTERVAL_MS,
   jobSearchSourceAnchor,
@@ -467,6 +472,82 @@ export default [
         && JSON.stringify(partitionSourcesByRescrapeAge({}, [], nowDate)) === JSON.stringify({ due: [], fresh: [] }),
       'missing data or an empty selection partitions without throwing');
       return { freshCounted: partition.fresh.length, dueCounted: partition.due.length };
+    },
+  },
+  {
+    // A card's last scrape was scored and shown from its saved copy, yet every
+    // date stayed at the previous run because the completion was never
+    // recorded on the card. The record now travels with the saved scrape.
+    name: 'Job Search dates move from the saved scrape collection record, one finished platform at a time',
+    run: () => {
+      const nodeId = 'hub-evidence';
+      const runId = `${nodeId}-1794509644237`;
+      const oldStart = 1793492385746;
+      const oldDone = 1793671672921;
+      const startedAt = 1794509644237;
+      const completedAt = 1794541645596;
+      const data = { hubState: 'done', jobRunId: runId, lastSearchCoverageStartedAt: oldStart, lastCompletedRunAt: oldDone };
+      const known = ['alpha', 'beta', 'gamma'];
+
+      const partial = buildCollectionEvidenceCommitPatch(data, {
+        runId, disposition: 'unfinished-sources', startedAt, completedAt, completedSourceIds: ['alpha', 'beta'],
+      }, nodeId, known);
+      assert(partial.sourceCoverage.alpha.coverageStartedAt === startedAt
+        && partial.sourceCoverage.beta.completedAt === completedAt,
+      'each finished platform moves to the walk start of the run that finished it');
+      assert(partial.sourceCoverage.gamma.coverageStartedAt === oldStart,
+        'a platform the record does not list as finished keeps its earlier date');
+      assert(!('lastCompletedRunAt' in partial) && !('lastSearchCoverageStartedAt' in partial),
+        'the card-level date does not move for a collection with unfinished platforms');
+
+      const full = buildCollectionEvidenceCommitPatch(data, {
+        runId, disposition: 'full', startedAt, completedAt, completedSourceIds: known,
+      }, nodeId, known);
+      assert(full.lastCompletedRunAt === completedAt && full.lastSearchCoverageStartedAt === startedAt
+        && known.every(id => full.sourceCoverage[id].coverageStartedAt === startedAt),
+      'a full collection moves the card date and every finished platform');
+      assert(buildCollectionEvidenceCommitPatch({ ...data, ...full }, {
+        runId, disposition: 'full', startedAt, completedAt, completedSourceIds: known,
+      }, nodeId, known) === null, 'applying the same record twice changes nothing');
+
+      const noList = buildCollectionEvidenceCommitPatch(data, { runId, disposition: 'full', startedAt, completedAt }, nodeId, known);
+      assert(noList.lastCompletedRunAt === completedAt && !('sourceCoverage' in noList),
+        'without a finished-platform list no platform date is invented');
+
+      for (const [label, card, evidence] of [
+        ['another run', { ...data, jobRunId: `${nodeId}-1` }, { runId, disposition: 'full', startedAt, completedAt, completedSourceIds: known }],
+        ['a staged completion', { ...data, pendingCollectionCompletion: { runId } }, { runId, disposition: 'full', startedAt, completedAt, completedSourceIds: known }],
+        ['staged platform dates', { ...data, pendingSourceCoverage: { runId } }, { runId, disposition: 'full', startedAt, completedAt, completedSourceIds: known }],
+        ['no times', data, { runId, disposition: 'full', completedSourceIds: known }],
+        ['an end before the start', data, { runId, disposition: 'full', startedAt: completedAt, completedAt: startedAt, completedSourceIds: known }],
+        ['no record', data, null],
+      ]) assert(buildCollectionEvidenceCommitPatch(card, evidence, nodeId, known) === null, `nothing moves for ${label}`);
+
+      // Main process: the record is taken from this run's manifest, survives a
+      // rewrite of the same run, and is never borrowed from another run.
+      const manifest = { runId, collectionDiagnostics: { disposition: 'unfinished-sources', startedAt, completedAt, unfinishedSourceCount: 1, completedSourceIds: ['alpha', 'beta', 'beta', 'Not An Id', 7] } };
+      const fromManifest = collectionEvidenceForSnapshot({ runId }, manifest);
+      assert(JSON.stringify(fromManifest.completedSourceIds) === '["alpha","beta"]' && fromManifest.runId === runId
+        && fromManifest.startedAt === startedAt && fromManifest.disposition === 'unfinished-sources',
+      'the saved scrape copies the host record, with platform ids cleaned');
+      assert(collectionEvidenceForSnapshot({ runId }, null, { runId, collectionEvidence: fromManifest }).completedAt === completedAt,
+        'a rewrite of the same run keeps the record from the file it replaces');
+      assert(collectionEvidenceForSnapshot({ runId: 'other-run' }, manifest, { runId, collectionEvidence: fromManifest }) === null
+        && collectionEvidenceForSnapshot({ runId }, { runId, collectionDiagnostics: { disposition: 'full' } }) === null
+        && collectionEvidenceForSnapshot({}, manifest) === null,
+      'no record for another run, for one without times, or for a snapshot without a run');
+      assert(!('completedSourceIds' in sanitizeJobRunCollectionDiagnostics({ disposition: 'full', startedAt, completedAt })),
+        'an absent finished-platform list stays absent, so older records keep their shape');
+
+      assert(sanitizeJobSearchDateDiagnostics([{ version: 1, event: 'finalization', reason: 'saved-scrape-evidence', recordedAt: completedAt }]).length === 1,
+        'the date history keeps the new reason');
+      const node = fs.readFileSync('src/nodes/JobSearchNode.jsx', 'utf8');
+      assert(/savedScrapeOutcome\?\.status === 'completed'[\s\S]{0,900}buildCollectionEvidenceCommitPatch\(node\?\.data, evidence, id, ALL_JOB_SOURCE_IDS\)/.test(node),
+        'the saved-scrape path applies the record only after its rows are shown');
+      const jobs = fs.readFileSync('electron/ipc/jobs.js', 'utf8');
+      assert(/completedSourceIds,\n\s+\},\n\s+\}\);\n\s+await assertSearchCurrent\(\);/.test(jobs)
+        && /snapshot = await attachCollectionEvidence\(snapshot, jsonPath\);/.test(jobs),
+      'the host writes the finished-platform list at the gathered stage and into the saved scrape');
     },
   },
 ];

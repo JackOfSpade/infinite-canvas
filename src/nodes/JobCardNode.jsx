@@ -9,12 +9,14 @@ import { formatPostedForDisplay } from '../utils/jobPostedDate';
 import { languageLabel } from '../utils/jobLanguageLabels';
 import { NodeHandles } from './_shared/NodeHandles';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { usePublishJobRunStatus } from '../hooks/usePublishJobRunStatus';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { computeJobTreeView, isCompensationRecommendationCurrent, JOB_TREE_LAYOUT_RESTORE_KEY, normalizeCompensationAssessment, shouldReflowMeasuredJobCard } from './jobsearch/buildJobTree';
 import { formatSalaryCurrencyLabel } from '../utils/salaryCurrency';
 import { summarizeJobListingUrl } from '../utils/jobListingUrl';
 import { brokenLocalAiJobDriveState, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_RESULT_SETTLE_MS, LOCAL_AI_STATUS_ERROR_STREAK_LIMIT, registerMountedJobCard, revealSavedLocalApplicationOutputOnce, unregisterMountedJobCard } from '../utils/localAiFallback';
-import { hubCardFilter, isUnscoredPlaceholderCard } from '../utils/jobCardFilters';
+import { hubCardFilter, isUnscoredPlaceholderCard, jobCardClosedAtMostOfficialSource } from '../utils/jobCardFilters';
+import { showBlockingNotice } from '../utils/blockingNotices';
 import { BOTH_APPLICATION_DOCUMENTS, applicationDocumentButtonState, applicationDocumentMustWait, canRegenerateLocalApplication, canSaveImportedLocalApplication, hasLinkedLocalApplicationOutput, localApplicationAfterDiscard, localApplicationBlocksOfficialPostingLookup, queuedLocalApplicationSettlement, queuedLocalApplicationStartDecision, replacedLocalApplicationForCleanup, savedApplicationDocuments, savedApplicationPointer } from '../utils/localAiApplicationLifecycle';
 import { claimApplicationDocumentWaiter, claimRunningApplicationDocument, clearRunningApplicationDocument, getRunningApplicationDocument, releaseApplicationDocumentWaiter, subscribeApplicationDocumentRuns } from '../utils/applicationDocumentRuns';
 import {
@@ -25,6 +27,7 @@ import {
   getDismissedApplicationBundles,
   requestApplicationHandoffFocus,
   requestApplicationHandoffRefresh,
+  subscribeApplicationHandoffs,
 } from '../utils/applicationHandoffDock';
 import { applicationBundleIndicator, APPLICATION_BUNDLE_TONES } from '../utils/jobCardBundleIndicator';
 import { priorRoleIndicator, PRIOR_ROLE_TONE, priorRoleDocuments, bundleDeletionPatches } from '../utils/jobCardPriorRoleIndicator';
@@ -244,6 +247,19 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
   const [showScoreAudit, setShowScoreAudit] = useState(false);
   const [showCompensationDetails, setShowCompensationDetails] = useState(false);
   const [applicationRun, setApplicationRun] = useState({ state: 'idle', position: null });
+  // The job id of a bundle that was just created and is not on the dock yet.
+  // Discovery reads its first prompt off disk a moment after Generate returns;
+  // this covers that moment, and gives up after 20 s so a bundle the dock
+  // never shows cannot leave a status behind.
+  const [dockArrivalJobId, setDockArrivalJobId] = useState(null);
+  useEffect(() => {
+    if (!dockArrivalJobId) return undefined;
+    const timer = setTimeout(() => setDockArrivalJobId(null), 20000);
+    const unsubscribe = subscribeApplicationHandoffs(items => {
+      if (items.some(item => item?.jobId === dockArrivalJobId)) setDockArrivalJobId(null);
+    });
+    return () => { clearTimeout(timer); unsubscribe(); };
+  }, [dockArrivalJobId]);
   // Local AI is deliberately a human-in-the-loop workflow. The durable job
   // folder is authoritative; this persisted pointer lets a remounted card
   // reconnect without implying that an application was submitted.
@@ -503,6 +519,23 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
     ? { state: 'queued', position: queuedApplicationRun.position, blocked: queuedApplicationRun.blocked === true }
     : activeApplicationRun ? (applicationRun.state === 'resolving' ? applicationRun : { state: 'generating', position: null }) : (officialPostingLookup ? null : sharedPreparation) || applicationRun;
   const hasApplicationRun = displayedApplicationRun.state !== 'idle';
+  // The side panel is drawn from pending prompts, and a generation has none
+  // between its steps: after one posting-lookup answer and before the next
+  // prompt, during the pre-generation checks, and while the bundle is created.
+  // Without a status of its own the panel vanished in each of those gaps and
+  // came back for the next step. Publishing the run for its whole life gives
+  // the panel something to show until the bundle's own dock item takes over.
+  // relatedNodeIds files it under the Board, which owns the lookup prompts.
+  usePublishJobRunStatus(id, hasApplicationRun || dockArrivalJobId ? {
+    label: 'Application',
+    headline: dockArrivalJobId && !hasApplicationRun ? 'Opening the first prompt'
+      : displayedApplicationRun.state === 'resolving' ? 'Finding the official posting'
+      : displayedApplicationRun.state === 'queued'
+        ? (displayedApplicationRun.blocked ? 'Waiting for a free application slot' : `Queued · #${displayedApplicationRun.position}`)
+        : 'Preparing the application',
+    lines: [[data.title, data.company].filter(Boolean).join(' · '), 'The next step starts automatically.'],
+    relatedNodeIds: data.hubId ? [data.hubId] : [],
+  } : null);
   const localLookupPending = localApplicationBlocksOfficialPostingLookup(localApplication);
   const runningDocument = useSyncExternalStore(
     subscribeApplicationDocumentRuns,
@@ -1441,19 +1474,33 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
             at: new Date().toISOString(),
             documentScope,
           };
-          updateGlobal(idRef.current, {
+          const listingPatch = {
             listingGenerationNotice,
             ...(prepared?.officialPosting ? { officialPosting: prepared.officialPosting, postedBy: prepared.postedBy } : {}),
             listingLiveness: prepared?.listingLiveness ?? undefined,
             boardClosed: prepared?.boardClosed ?? undefined,
             listingHold: prepared?.listingCheck?.action === 'hold' || !prepared?.listingCheck?.action,
-          });
-          EventLogger.log(`[JobCard] listing check stopped generation action=${listingGenerationNotice.action} verdict=${listingGenerationNotice.verdict} basis=${listingGenerationNotice.basis}`);
-          addToast({
-            title: 'Listing check',
-            description: listingGenerationNotice.message,
-            type: 'error',
-          });
+          };
+          updateGlobal(idRef.current, listingPatch);
+          // A closed job's card is hidden by the Board. Say so in a popup that
+          // must be dismissed: the check can take minutes, and a card that
+          // is simply gone on return looks like lost data.
+          const hidesCard = jobCardClosedAtMostOfficialSource({ ...preparedCard.data, ...listingPatch });
+          EventLogger.log(`[JobCard] listing check stopped generation action=${listingGenerationNotice.action} verdict=${listingGenerationNotice.verdict} basis=${listingGenerationNotice.basis} cardHidden=${hidesCard ? 'yes' : 'no'}`);
+          const hiddenJobName = [preparedCard.data?.title, preparedCard.data?.company].filter(Boolean).join(' at ');
+          if (hidesCard) {
+            showBlockingNotice({
+              title: 'Job closed, card hidden',
+              detail: hiddenJobName,
+              message: `${listingGenerationNotice.message} Nothing was generated. The Job Board hides closed jobs and counts them under its total.`,
+            });
+          } else {
+            addToast({
+              title: 'Listing check',
+              description: listingGenerationNotice.message,
+              type: 'error',
+            });
+          }
           return false;
         }
         if (prepared?.success === false || typeof prepared?.resolutionId !== 'string' || !prepared.resolutionId) {
@@ -1714,6 +1761,7 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       }
       if (isMountedRef.current) {
         setLocalApplication(acceptedJob);
+        setDockArrivalJobId(queued.localJob.id);
         // This card no longer owns a modal for the handoff — the global AI
         // handoff dock does. Ask it to select this job's prompt and to
         // re-read the job folder now, rather than waiting for the dock's own

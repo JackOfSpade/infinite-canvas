@@ -3096,10 +3096,12 @@ export function buildJobCompletionAssessment(
   const placeholders = nonnegativeCount(scoring?.placeholders);
   const unscored = nonnegativeCount(scoring?.unscored);
   const failedBatches = nonnegativeCount(scoring?.failedBatches);
-  const taxonomy = telemetry?.bucketing || null;
-  const taxonomyInput = nonnegativeCount(taxonomy?.input);
-  const taxonomyMissing = nonnegativeCount(taxonomy?.missing);
-  const taxonomyDuplicated = nonnegativeCount(taxonomy?.duplicated);
+  // Reassigned below from the consuming Board's own record when the source hub
+  // holds none: a Board-run scan records taxonomy under the Board.
+  let taxonomy = telemetry?.bucketing || null;
+  let taxonomyInput = nonnegativeCount(taxonomy?.input);
+  let taxonomyMissing = nonnegativeCount(taxonomy?.missing);
+  let taxonomyDuplicated = nonnegativeCount(taxonomy?.duplicated);
   const pipelinePhase = String(telemetry?.pipeline?.phase || '').toLowerCase();
   const receiptCompleted = receipt?.terminal?.status === 'completed';
   const receiptCleanupConfirmed = receipt?.cleanup?.attempted === true && receipt?.cleanup?.cleared === true;
@@ -3401,6 +3403,42 @@ export function buildJobCompletionAssessment(
       || board.clearProvenance?.priorSourceRuns.some((sourceRun) => sourceRun.sourceHubId === activeSourceHubId))
     : [];
   const deliberatelyClearedBoards = relevantBoards.filter(isDeliberatelyClearedForActiveRun);
+  // A Board-run scan records taxonomy and the displayed seen-history write
+  // under the BOARD, not the source hub, so reading only the hub's telemetry
+  // reported both as "not retained" and held every such run at INDETERMINATE
+  // while the Board's own record sat a few sections lower. Borrow that record
+  // only when exactly one finished, non-stale Board combined this hub, and
+  // only a stage stamped after this run began — an older combine of the same
+  // Board is not evidence about this run.
+  const boardStageOwners = activeSourceHubId
+    ? relevantBoards.filter(board => board.id && !board.stale && board.hubState === 'done'
+      && board.combinedSourceHubIds.includes(activeSourceHubId))
+    : [];
+  let boardStageRecord = null;
+  if (boardStageOwners.length === 1 && (!taxonomy || !telemetry?.history?.boardDisplay)) {
+    try {
+      boardStageRecord = getJobsBoardTelemetryForReport(new Set([boardStageOwners[0].id]), reportWindowId, canvasFilePath)
+        .find(entry => entry.boardNodeId === boardStageOwners[0].id) || null;
+    } catch { /* optional Board stage diagnostics */ }
+  }
+  const runStartedAt = receiptCompletionTimestamp(receipt?.startedAt);
+  const boardStageBelongsToRun = stage => !!stage
+    && Number.isFinite(Number(stage.ts))
+    && (!Number.isFinite(runStartedAt) || Number(stage.ts) >= runStartedAt);
+  const boardTaxonomy = !taxonomy && boardStageBelongsToRun(boardStageRecord?.bucketing)
+    ? boardStageRecord.bucketing
+    : null;
+  if (boardTaxonomy) {
+    taxonomy = boardTaxonomy;
+    taxonomyInput = nonnegativeCount(taxonomy.input);
+    taxonomyMissing = nonnegativeCount(taxonomy.missing);
+    taxonomyDuplicated = nonnegativeCount(taxonomy.duplicated);
+  }
+  const boardHistoryWrite = !telemetry?.history?.boardDisplay
+    && boardStageBelongsToRun(boardStageRecord?.history?.boardDisplay)
+    ? boardStageRecord.history.boardDisplay
+    : null;
+  const boardStageNote = ` Recorded by Job Board \`${boardStageOwners.length === 1 ? boardLabel(boardStageOwners[0]) : 'unknown'}\`, which ran this stage.`;
   // Retain the pre-existing global stale-board warning even when an older
   // compact report lacks provenance fields. A stale cascade is explicitly
   // hidden and always deserves its refresh verdict; only a *non-stale* board
@@ -3592,7 +3630,7 @@ export function buildJobCompletionAssessment(
   // is the same listings coming back on the next search. It was rendered in the
   // pipeline section but never reconciled here, so a failed write still earned a
   // green verdict.
-  const historyWrite = telemetry?.history?.boardDisplay || null;
+  const historyWrite = telemetry?.history?.boardDisplay || boardHistoryWrite || null;
   const historyWriteFailed = !!historyWrite?.error;
 
   // `scored` is THIS hub's scoring run; `taxonomyInput` is whatever the board
@@ -3993,10 +4031,10 @@ export function buildJobCompletionAssessment(
 ${foreignRunLine ? `${foreignRunLine}\n` : ''}${receiptLine}
 ${searchLine}
 ${scoringLine}
-${taxonomyLine}
+${taxonomyLine}${boardTaxonomy ? boardStageNote : ''}
 ${snapshotLine}
 ${runCorrelationLine}
-${historyLine}
+${historyLine}${boardHistoryWrite ? boardStageNote : ''}
 ${boardLine}
 ${coverageLine}
 `;
@@ -6828,7 +6866,9 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           // Misnamed: a user-initiated stop sets signal.aborted and resolves to
           // `aborted`. This is the abort-free early exit, and because earlyExit
           // is run-scoped it also ends every source after this one.
-          flag = ' ⚠️ (NOT a user action — `user-done` is the abort-free early exit: a browser crash, or repeated extractor failures including the site-changed/anti-bot give-up. The run stopped here, so later pages and later sources were never read.)';
+          flag = ' ⚠️ (NOT a user action — `user-done` is the abort-free early exit: repeated extractor failures including the site-changed/anti-bot give-up. The run stopped here, so later pages and later sources were never read.)';
+        } else if (v.stopReason === 'browser-closed') {
+          flag = ' ⚠️ (this source\'s browser window disconnected before the walk ended — a crash, a sleep/wake or a closed window all look the same here. Later pages and later queries of this source were never read; later sources still ran.)';
         } else if (v.stopReason === 'detail-enrichment-failed') {
           // Distinct from the detailBlock note below, which does NOT stop the walk.
           flag = ' ⚠️ (the description/detail fetch failed hard and stopped this source mid-walk — later pages were not read, and the run ended here, so any source after it never ran.)';

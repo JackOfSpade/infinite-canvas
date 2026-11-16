@@ -297,7 +297,9 @@ function battery(letter, paragraphs, citations = null) {
       paragraphCitations: citations,
     // paragraph-openers is an advisory record of opening-word variety that never rejects a letter, and these
     // fixtures predate that house rule, so the battery here is every rejecting or advisory check except it.
-    }).filter(check => check.id !== 'paragraph-openers'),
+    // body-point-count is the same kind of advisory record (the brief's three-body-point cap), and the cold-chain
+    // fixture carries four body points by design, so it is filtered here for the same reason.
+    }).filter(check => check.id !== 'paragraph-openers' && check.id !== 'body-point-count'),
   ];
 }
 const failedIds = checks => checks.filter(check => !check.passed).map(check => check.id);
@@ -432,7 +434,7 @@ export default [
       for (const letter of GOOD_LETTERS) {
         const paragraphs = textsOf(letter);
         const checks = battery(letter, paragraphs, citationsOf(letter));
-        assert(checks.length === 55, `${letter.key}: the whole battery ran (checks=${checks.length})`);
+        assert(checks.length === 56, `${letter.key}: the whole battery ran (checks=${checks.length})`);
         assert(!failedIds(checks).length, `${letter.key}: a good letter fails nothing (failed=${failedIds(checks).map(id => `${id}: ${checks.find(check => check.id === id).detail}`).join(' | ')})`);
         const proportion = checks.find(check => check.id === 'letter-proportion');
         assert(proportion && proportion.passed && /within the letter proportion limits/u.test(proportion.detail),
@@ -822,7 +824,7 @@ export default [
         const paragraphs = textsOf(letter);
         const citations = citationsOf(letter);
         const checks = battery(letter, paragraphs, citations);
-        assert(checks.length === 55 && !failedIds(checks).length,
+        assert(checks.length === 56 && !failedIds(checks).length,
           `${letter.key}: the letter passes the whole editorial battery (failed=${failedIds(checks).map(id => `${id}: ${checks.find(check => check.id === id).detail}`).join(' | ')})`);
         const perParagraph = paragraphs.map(paragraph => sentences(paragraph).length);
         assert(perParagraph[0] === 1 && perParagraph.at(-1) === 1 && perParagraph.slice(1, -1).every(count => count >= 2), `${letter.key}: the shape is a one-line hook, proofs and a one-line closing (${perParagraph})`);

@@ -224,6 +224,62 @@ export function buildSourceCoverageCommitPatch(
   return { sourceCoverage: next };
 }
 
+/**
+ * Move a card's dates from the collection record kept with its saved scrape.
+ *
+ * The normal path stages a run's completion on the card when the search
+ * response arrives and commits it at terminal cleanup. When that staging never
+ * happened (the card declined it, or the app restarted first), the rows can
+ * still be scored and shown from the saved scrape while every date stays put,
+ * and the next scan re-walks days it already covered. The main process writes
+ * the same facts into the saved scrape; this applies them once those rows are
+ * on the card.
+ *
+ * Returns null when there is nothing proven to move:
+ * - the record names a different run than the card's results;
+ * - the card already holds a staged completion for this run (terminal cleanup
+ *   owns that commit);
+ * - nothing would move forward.
+ * Each platform moves only if the record lists it as finished. The card-level
+ * date moves only for a full collection.
+ */
+export function buildCollectionEvidenceCommitPatch(data, evidence, nodeId, knownSourceIds = []) {
+  if (!isPlainRecord(evidence)) return null;
+  const runId = typeof evidence.runId === 'string' && evidence.runId ? evidence.runId : null;
+  if (!runId || data?.jobRunId !== runId) return null;
+  if (data?.pendingCollectionCompletion?.runId === runId || data?.pendingSourceCoverage?.runId === runId) return null;
+  const startedAt = normalizeCompletionTimestamp(evidence.startedAt);
+  const completedAt = normalizeCompletionTimestamp(evidence.completedAt);
+  if (startedAt == null || completedAt == null || completedAt < startedAt) return null;
+
+  const patch = {};
+  if (Array.isArray(evidence.completedSourceIds) && evidence.completedSourceIds.length > 0) {
+    const before = normalizeSourceCoverage(data?.sourceCoverage);
+    const { sourceCoverage } = buildSourceCoverageCommitPatch(data, {
+      runId,
+      collectionStartedAt: startedAt,
+      collectionCompletedAt: completedAt,
+      completedSourceIds: evidence.completedSourceIds,
+      knownSourceIds,
+    }, nodeId);
+    const moved = uniqueSourceIds(evidence.completedSourceIds).some(sourceId => (
+      !hasOwn(before, sourceId)
+      || sourceCoverage[sourceId].coverageStartedAt > before[sourceId].coverageStartedAt
+      || sourceCoverage[sourceId].completedAt > before[sourceId].completedAt
+    ));
+    if (moved) patch.sourceCoverage = sourceCoverage;
+  }
+  if (evidence.disposition === 'full') {
+    const previousCompletedAt = normalizeCompletionTimestamp(data?.lastCompletedRunAt);
+    const previousCoverageStartedAt = normalizeCompletionTimestamp(data?.lastSearchCoverageStartedAt);
+    if (previousCompletedAt == null || completedAt > previousCompletedAt) patch.lastCompletedRunAt = completedAt;
+    if (previousCoverageStartedAt == null || startedAt > previousCoverageStartedAt) {
+      patch.lastSearchCoverageStartedAt = startedAt;
+    }
+  }
+  return Object.keys(patch).length > 0 ? patch : null;
+}
+
 /** Newest normalized completion recorded at the hub or on any platform. */
 export function latestSourceCompletedAt(data) {
   const timestamps = [];

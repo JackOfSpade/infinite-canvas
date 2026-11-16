@@ -6,7 +6,9 @@ import {
   WORKSPACE_POOL_KEY,
   WORKSPACE_REF_KEY,
 } from '../../electron/ipc/workspaceContentPool.js';
-import { serializeWorkspaceForSave } from '../../electron/ipc/filesystem.js';
+import { serializeWorkspaceForSave, serializeWorkspaceForSaveOffThread } from '../../electron/ipc/filesystem.js';
+import { fingerprint } from '../../src/utils/serializationUtils.js';
+import { undoHistoryLimit } from '../../src/utils/undoMemoryBudget.js';
 
 const longText = label => `${label} `.repeat(200);
 const roundTrip = data => restoreWorkspaceContent(JSON.parse(JSON.stringify(poolWorkspaceContent(data))));
@@ -76,5 +78,24 @@ export default [
     const saved = serializeWorkspaceForSave(data);
     assert.equal(JSON.stringify(parseWorkspaceText(saved)), JSON.stringify(data));
     assert.throws(() => JSON.parse(saved), SyntaxError, 'a build without the pool refuses this file instead of saving references back');
+  } },
+  { name: 'Saving on the worker thread writes exactly what saving on the main thread writes', async run() {
+    const repeated = repeatedCanvas();
+    assert.equal(await serializeWorkspaceForSaveOffThread(repeated), serializeWorkspaceForSave(repeated));
+    const plain = { schemaVersion: 11, nodes: [{ id: 'n', data: { text: 'short' } }], edges: [] };
+    assert.equal(await serializeWorkspaceForSaveOffThread(plain), JSON.stringify(plain));
+  } },
+  { name: 'Undo fingerprint and size are remembered per node and still see every edit', run() {
+    const card = { id: 'a', type: 'jobcard', position: { x: 0, y: 0 }, data: { description: longText('listing') } };
+    const other = { id: 'b', type: 'text', position: { x: 5, y: 5 }, data: { text: 'note' } };
+    const before = fingerprint({ nodes: [card, other], edges: [], drawings: [] });
+    assert.equal(fingerprint({ nodes: [structuredClone(card), other], edges: [], drawings: [] }), before, 'equal content in a new object fingerprints the same');
+    assert.notEqual(fingerprint({ nodes: [{ ...card, position: { x: 1, y: 0 } }, other], edges: [], drawings: [] }), before);
+    assert.notEqual(fingerprint({ nodes: [{ ...card, data: { ...card.data, description: `${card.data.description}!` } }, other], edges: [], drawings: [] }), before);
+    assert.notEqual(fingerprint({ nodes: [other, card], edges: [], drawings: [] }), before);
+    const big = { id: 'big', data: { payload: 'x'.repeat(4 * 1024 * 1024) } };
+    const first = undoHistoryLimit({ nodes: [big, other], edges: [], drawings: [] }, 100);
+    assert.equal(undoHistoryLimit({ nodes: [big, other], edges: [], drawings: [] }, 100), first);
+    assert(first < 100 && undoHistoryLimit({ nodes: [other], edges: [], drawings: [] }, 100) === 100);
   } },
 ];

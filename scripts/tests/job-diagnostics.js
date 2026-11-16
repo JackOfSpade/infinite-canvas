@@ -15515,6 +15515,7 @@ export default [
         for (const [reason, needle] of [
           ['blocked', 'anti-bot wall ended the walk mid-source'],
           ['user-done', 'NOT a user action'],
+          ['browser-closed', 'browser window disconnected before the walk ended'],
           ['detail-enrichment-failed', 'stopped this source mid-walk'],
           ['aborted', 'cancelled while this source was still walking'],
           ['challenge-recovery-loop', 'bounced the walk back to page 1 twice'],

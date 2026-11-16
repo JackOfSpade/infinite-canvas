@@ -48,6 +48,7 @@ import application_posting_facing_clauses from './tests/application-posting-faci
 import application_career_authority from './tests/application-career-authority.js';
 import application_write_verify from './tests/application-write-verify.js';
 import application_single_document from './tests/application-single-document.js';
+import application_editor_undo from './tests/application-editor-undo.js';
 import official_posting_gates from './tests/official-posting-gates.js';
 import official_posting_r2_subject from './tests/official-posting-r2-subject.js';
 import official_posting_r3_identities from './tests/official-posting-r3-identities.js';
@@ -274,6 +275,7 @@ import practice_call_render from './tests/practice-call-render.js';
 import practice_call_analysis from './tests/practice-call-analysis.js';
 import interview_practice_benchmark from './tests/interview-practice-benchmark.js';
 import interview_preload from './tests/interview-preload.js';
+import interview_app from './tests/interview-app.js';
 import interview_window from './tests/interview-window.js';
 import interview_window_render from './tests/interview-window-render.js';
 import interview_window_e2e from './tests/interview-window-e2e.js';
@@ -376,6 +378,7 @@ const testGroups = [
   ['application-career-authority.js', application_career_authority],
   ['application-write-verify.js', application_write_verify],
   ['application-single-document.js', application_single_document],
+  ['application-editor-undo.js', application_editor_undo],
   ['official-posting-gates.js', official_posting_gates],
   ['official-posting-r2-subject.js', official_posting_r2_subject],
   ['official-posting-r3-identities.js', official_posting_r3_identities],
@@ -607,6 +610,7 @@ const testGroups = [
   ['practice-call-analysis.js', practice_call_analysis],
   ['interview-practice-benchmark.js', interview_practice_benchmark],
   ['interview-preload.js', interview_preload],
+  ['interview-app.js', interview_app],
   ['interview-window.js', interview_window],
   ['interview-window-render.js', interview_window_render],
   ['interview-window-e2e.js', interview_window_e2e],

@@ -3,6 +3,9 @@ import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, AUTOSAVE_FAILURE_RETRY_MS, AUTOSAVE_FAILURE_POLL_MS, AUTOSAVE_SYNC_LINK_RETRY_MS, AUTOSAVE_SYNC_LINK_NOTICE_MS, autosaveDebounceMs } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
+import { msSinceUserInput } from '../utils/userActivity';
+import { recordPerf } from '../utils/perfDiagnostics';
+import { setAutosaveActive } from '../utils/saveActivity';
 
 export function useCanvasInitialization({
   nodes,
@@ -140,7 +143,20 @@ export function useCanvasInitialization({
         failure.toastId = addToast?.({ title: 'Auto-save Failed', description: `Your changes are still unsaved. ${reason} Auto-save will keep retrying.`, type: 'error', duration: 0 });
       }
     };
+    let inputWaitSince = null;
+    // Show "Saving…" for the whole attempt once it is really going to save,
+    // and let it paint first: the hand-off below blocks the window.
     const attemptSave = async () => {
+      try {
+        await attemptSaveWork(async () => {
+          setAutosaveActive(true);
+          await new Promise(resolve => setTimeout(resolve, 32));
+        });
+      } finally {
+        setAutosaveActive(false);
+      }
+    };
+    const attemptSaveWork = async (announceSaving) => {
       if (cancelled || !isCurrentGeneration()) return;
       // Safety guard 1: never auto-save while navigation animations are active
       // as the stack/nodes state may be transient or intermediate.
@@ -173,11 +189,26 @@ export function useCanvasInitialization({
         return;
       }
 
+      // Safety guard 4b: wait for a pause in input. Handing a large canvas to
+      // the save blocks the window for a moment; mid-drag or mid-scroll that
+      // reads as lag. Bounded, so steady activity cannot starve the save.
+      if (msSinceUserInput() < TIMINGS.AUTOSAVE_INPUT_QUIET_MS) {
+        inputWaitSince ??= Date.now();
+        if (Date.now() - inputWaitSince < TIMINGS.AUTOSAVE_INPUT_MAX_WAIT_MS) {
+          retry(TIMINGS.AUTOSAVE_RETRY_INPUT_MS);
+          return;
+        }
+      }
+      inputWaitSince = null;
+
       // Shared with the manual save in useCanvasPersistence — flushes any
       // in-progress contenteditable edit (a text node the user is still
       // typing into) before serializing, so a debounce window landing
       // mid-edit can't silently persist stale pre-edit text.
+      await announceSaving();
+      if (cancelled || !isCurrentGeneration()) return;
       let data;
+      const saveStartedAt = performance.now();
       try {
         data = await buildSaveData({
           flushStack: flushRef.current,
@@ -187,6 +218,7 @@ export function useCanvasInitialization({
         recordFailure(error);
         return;
       }
+      recordPerf('save-prepare', performance.now() - saveStartedAt, stateRef.current?.nodes?.length);
       if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return;
       if (!data.nodes || !Array.isArray(data.nodes)) return;
 
@@ -218,7 +250,13 @@ export function useCanvasInitialization({
 
       const operation = (async () => {
         try {
-          const res = await window.electronAPI.saveWorkspace({ data, filePath: currentFile });
+          // The call returns once the canvas has been copied for the app
+          // process; that copy is the part that blocks this window.
+          const handoffStartedAt = performance.now();
+          const pending = window.electronAPI.saveWorkspace({ data, filePath: currentFile });
+          recordPerf('save-handoff', performance.now() - handoffStartedAt, stateRef.current?.nodes?.length);
+          const res = await pending;
+          recordPerf('save-total', performance.now() - saveStartedAt, stateRef.current?.nodes?.length);
           if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return false;
           const snapshotIsCurrent = currentFileRef.current === currentFile
             && stateRevisionRef.current === savedRevision;

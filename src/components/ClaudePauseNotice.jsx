@@ -14,8 +14,8 @@ export function ClaudePauseNotice({ className = '' }) {
   const { usageLimit, claudeAccounts } = useSyncExternalStore(subscribeClaudeTaskActivity, getClaudeTaskActivity, getClaudeTaskActivity);
   const notice = claudeUsageLimitNotice(usageLimit, claudeAccounts) || claudePauseNotice(status) || searchLimitNotice(status);
   const { pending, message, addAccount, cancelLogin } = useClaudeAccountAddFlow();
-  // Resume clears both a Claude limit and the Parallel Search block.
-  const canResume = Boolean(usageLimit) || status?.pauseCode === 'PARALLEL_SEARCH_EXHAUSTED';
+  // Resume clears a Claude limit, the Parallel Search block and a DeepSeek credit pause.
+  const canResume = Boolean(usageLimit) || status?.pauseCode === 'PARALLEL_SEARCH_EXHAUSTED' || status?.pauseCode === 'OFFLOAD_CREDIT_EXHAUSTED';
   if (!notice) return null;
   return (
     <div

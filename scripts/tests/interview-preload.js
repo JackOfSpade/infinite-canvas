@@ -6,7 +6,9 @@ import { fileURLToPath } from 'node:url';
 import { createDraftWriteBarrier } from '../../electron/utils/draftWriteBarrier.js';
 
 const testPath = fileURLToPath(import.meta.url);
-const preloadPath = fileURLToPath(new URL('../../electron/preload.js', import.meta.url));
+// Interview Helper's renderer bridge is the standalone app's preload; the canvas preload has none of it.
+const preloadPath = fileURLToPath(new URL('../../electron/interviewApp/interviewAppPreload.js', import.meta.url));
+const canvasPreloadPath = fileURLToPath(new URL('../../electron/preload.js', import.meta.url));
 
 /**
  * Evaluate the preload entry with its Electron and bundled draft-helper seams.
@@ -51,9 +53,8 @@ function loadPreloadBridge() {
   );
   vm.runInNewContext(source, sandbox, { filename: preloadPath });
 
-  assert.equal(exposures.length, 1, 'preload must expose one renderer bridge');
-  assert.equal(exposures[0].name, 'electronAPI', 'preload must retain the broad renderer bridge name');
-  return { api: exposures[0].value, invocations };
+  assert.deepEqual(exposures.map(item => item.name), ['electronAPI', 'interviewAppAPI'], 'the app preload exposes the shared bridge name plus its own saved-state bridge');
+  return { api: exposures[0].value, appApi: exposures[1].value, invocations };
 }
 
 const DIRECT_FORWARDING = [
@@ -96,7 +97,22 @@ const tests = [
       for (const method of ['selectInterviewApplicationBundle', 'loadInterviewPractice', 'startInterviewPractice', 'cancelInterviewPractice', 'onInterviewPracticeUpdated']) {
         assert.equal(api[method], undefined, `electronAPI must not expose the removed ${method}`);
       }
+      const canvasPreload = fs.readFileSync(canvasPreloadPath, 'utf8');
+      assert.doesNotMatch(canvasPreload, /interview|practice-call/iu, 'the canvas preload must carry no Interview Helper channel');
       return { methods: DIRECT_FORWARDING.length + 1 };
+    },
+  },
+  {
+    name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
+    run: async () => {
+      const { api, appApi, invocations } = loadPreloadBridge();
+      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'loadState', 'readCanvasInterviews', 'saveState']);
+      await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder(); await appApi.readCanvasInterviews();
+      assert.deepEqual(invocations.map(({ channel }) => channel), ['interview-app:load-state', 'interview-app:save-state', 'interview-app:choose-career-files', 'interview-app:choose-applied-jobs-folder', 'interview-app:read-canvas-interviews']);
+      // There is no canvas here: the application list never forwards a renderer-supplied path.
+      const listed = await api.listInterviewApplicationFolders({ nodeId: 'interview-node', canvasFilePath: '/Users/someone/elsewhere.json' });
+      assert.deepEqual({ ...listed.args[0] }, { nodeId: 'interview-node', canvasFilePath: null });
+      for (const method of ['saveWorkspace', 'readFile', 'searchJobs', 'scoreJobs', 'getSettings']) assert.equal(api[method], undefined, `the app bridge must not expose the canvas method ${method}`);
     },
   },
   {

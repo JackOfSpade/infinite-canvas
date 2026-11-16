@@ -400,6 +400,7 @@ export function NonApiAiDialog() {
   const [submittedResponses, setSubmittedResponses] = useState([]);
   const dockButtonRef = useRef(null);
   const hadPendingRequestsRef = useRef(false);
+  const [continuesHandoffs, setContinuesHandoffs] = useState(false);
   const copiedTimerRef = useRef(null);
   // The dock's two scrollers: the prompt box, and the panel body around it.
   // Both are reused for every prompt this dock ever shows, so their scroll
@@ -472,11 +473,18 @@ export function NonApiAiDialog() {
   const modulesTabDescription = `Running modules: ${unrelatedStatuses.map(entry => entry.label || entry.nodeId).join(', ')}`;
   // Run before paint: after a manual Minimize, a newly populated queue must
   // not flash its compact button for one frame before reopening.
+  // One workflow issues its prompts with gaps between them. While a module is
+  // still running after the queue emptied, the next prompt is a later step of
+  // the same work, not a new queue: the panel stays as the person left it
+  // (see the JobRunStatusDock render below) and Minimize keeps its meaning.
+  const anyModuleRunning = jobRunStatuses.length > 0;
   useLayoutEffect(() => {
     const hasPendingRequests = mergedRequests.length > 0;
-    if (hasPendingRequests && !hadPendingRequestsRef.current) setIsExpanded(true);
+    if (hasPendingRequests && !hadPendingRequestsRef.current && !continuesHandoffs) setIsExpanded(true);
     hadPendingRequestsRef.current = hasPendingRequests;
-  }, [mergedRequests.length]);
+    if (hasPendingRequests) setContinuesHandoffs(true);
+    else if (!anyModuleRunning) setContinuesHandoffs(false);
+  }, [mergedRequests.length, anyModuleRunning, continuesHandoffs]);
   // Publish dismissals where the Generate cap can read them: JobCardNode lives
   // in another tree and must not count a bundle this dock has stopped showing.
   useEffect(() => {
@@ -1709,7 +1717,16 @@ export function NonApiAiDialog() {
     return owners.size > 1;
   }, [mergedRequests]);
 
-  if (!activeRequest) return <JobRunStatusDock yieldsToModal={modalCount > 0} />;
+  if (!activeRequest) {
+    return (
+      <JobRunStatusDock
+        yieldsToModal={modalCount > 0}
+        continuesHandoffs={continuesHandoffs}
+        expanded={isExpanded}
+        onExpandedChange={setIsExpanded}
+      />
+    );
+  }
 
   // "Waiting" stopped being the whole truth once a bundle holds its slot
   // while the app saves it. Calling a bundle that wants nothing from you a

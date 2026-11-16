@@ -543,15 +543,18 @@ export default [
   {
     name: 'interview window entry: branch-selected lazy views do not eagerly import the canvas App',
     run() {
-      const source = fs.readFileSync(path.resolve('src/main.jsx'), 'utf8');
-      // One lazy() wrapping a ternary of two imports made the bundler emit a single preload list (the App's),
+      const source = fs.readFileSync(path.resolve('src/interview-app/main.jsx'), 'utf8');
+      // One lazy() wrapping a ternary of two imports made the bundler emit a single preload list,
       // so the packaged interview window never loaded its own stylesheet. Each view needs its own lazy().
-      assert(!source.includes('lazy(() => isInterviewWindow'), 'entry must not share one lazy boundary between both views');
+      assert(!source.includes('lazy(() => isInterviewWindow'), 'entry must not share one lazy boundary between views');
       assert(source.includes("typeof window.interviewAPI?.getBrief === 'function'"), 'the child route must require its narrow preload bridge, not only a query flag');
-      assert(source.includes("? lazy(() => import('./interview-window/InterviewWindowApp.jsx'))"), 'interview child must be lazy-loaded on the interview branch');
-      assert(source.includes(": lazy(() => import('./App.jsx'))"), 'canvas App must be lazy-loaded on the canvas branch');
-      assert(!source.includes("import App from './App.jsx'"), 'entry must not eagerly import the canvas App into the interview child');
-      assert(!source.includes("import InterviewWindowApp from './interview-window/InterviewWindowApp.jsx'"), 'entry must not eagerly import the child into the canvas view');
+      assert(source.includes("? lazy(() => import('../interview-window/InterviewWindowApp.jsx'))"), 'interview child must be lazy-loaded on the interview branch');
+      assert(source.includes(": lazy(() => import('./InterviewHelperApp.jsx'))"), 'the setup window must be lazy-loaded on its own branch');
+      assert(!/App\.jsx'\)\)/u.test(source.replace(/InterviewHelperApp|InterviewWindowApp|PracticeCallApp/gu, '')) && !source.includes('Canvas'), 'the Interview Helper entry must never import the canvas');
+      // And the canvas entry no longer carries the interview or practice-call views.
+      const canvasEntry = fs.readFileSync(path.resolve('src/main.jsx'), 'utf8');
+      assert(!/import\(['"][^'"]*(?:interview-window|practice-call|interview-app)/u.test(canvasEntry), 'the canvas entry must not import Interview Helper views');
+      assert(canvasEntry.includes("lazy(() => import('./App.jsx'))"), 'canvas App stays lazy-loaded');
     },
   },
   {

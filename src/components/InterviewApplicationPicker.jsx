@@ -80,7 +80,7 @@ export function InterviewApplicationPicker({ nodeId, canvasFilePath = null, disa
         </li>)}
       </ul>
       {loading ? <p role="status" className="p-2 text-xs text-white/60">Loading applications…</p>
-        : !error && !options.length && <p role="status" className="p-2 text-xs text-white/60">{result.reason === 'canvas-unsaved' ? 'Save your canvas to list applications' : query.trim() && result.folders.length ? 'No matching applications.' : 'No application folders found under Applied Jobs.'}</p>}
+        : !error && !options.length && <p role="status" className="p-2 text-xs text-white/60">{result.reason === 'canvas-unsaved' ? 'Save your canvas to list applications' : result.reason === 'folder-unset' ? 'Choose your Applied Jobs folder to list applications.' : result.reason === 'missing-root' ? 'The Applied Jobs folder could not be found. Choose it again.' : query.trim() && result.folders.length ? 'No matching applications.' : 'No application folders found under Applied Jobs.'}</p>}
     </div>}
     {error && <p role="alert" className="mt-1 text-xs text-amber-500">{error}</p>}
   </div>;

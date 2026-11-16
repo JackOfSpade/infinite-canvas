@@ -1,0 +1,5 @@
+/* The canvas stylesheet locks the page (no scrolling, no text selection).
+   This app is an ordinary window: its panes scroll and text can be copied. */
+:root { color-scheme: dark; }
+body { background-color: #111018; overflow: hidden; user-select: text; }
+#root { height: 100vh; }

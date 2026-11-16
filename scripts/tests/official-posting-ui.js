@@ -18,6 +18,7 @@ import {
 } from '../../src/utils/localAiApplicationLifecycle.js';
 import { resolveApplicationCareerSnapshotId } from '../../src/utils/jobBoardCareerOverride.js';
 import { getConnectedJobSearchIds } from '../../src/utils/jobBoardSearchSelection.js';
+import { jobCardClosedAtMostOfficialSource } from '../../src/utils/jobCardFilters.js';
 import { APPLICATION_HANDOFF_LIMIT, countActiveApplicationHandoffs } from '../../src/utils/applicationHandoffDock.js';
 import { dedupJobsAcrossSources, uniqueJobsAcrossSources } from '../../src/utils/jobIdentity.js';
 import { mergeResolvedSourceItems } from '../../src/utils/jobSourceResolveMerge.js';
@@ -53,7 +54,7 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
   const board = { id: 'board', type: 'jobboard', data: {} };
   const search = { id: 'search', type: 'jobhub', data: { careerSnapshotId: 'a'.repeat(64) } };
   const queue = createModuleRunQueue();
-  const states = []; const calls = []; const completed = []; const cancelled = []; const updates = []; const toasts = [];
+  const states = []; const calls = []; const completed = []; const cancelled = []; const updates = []; const toasts = []; const notices = [];
   let leases = 0; let sequence = 0; let laneLabel = '';
   const electronAPI = {
     ...(absent ? {} : { prepareOfficialPostingForGeneration: async args => {
@@ -72,7 +73,8 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     id: 'card', idRef: { current: 'card' }, data, additionalNotes: '',
     nav: { getCurrentFile: () => '/project/canvas.json', enumerateAllNodes: () => [card, board, search].filter(Boolean),
       enumerateAllEdges: () => [{ id: 'connection', source: 'board', target: 'search' }] },
-    resolveApplicationCareerSnapshotId, getConnectedJobSearchIds,
+    resolveApplicationCareerSnapshotId, getConnectedJobSearchIds, jobCardClosedAtMostOfficialSource,
+    showBlockingNotice: notice => notices.push(notice),
     getNodes: () => [], getEdges: () => [], getLiveNode: id => id === 'card' ? card : id === 'board' ? board : null,
     setApplicationRun: state => states.push(state), updateGlobal: (_id, change) => {
       const patch = typeof change === 'function' ? change(card) : change;
@@ -88,7 +90,7 @@ function harness({ prepare, data = row(), queueResult = { success: false }, abse
     acquireModuleRun: options => { leases++; laneLabel = options.label; return queue.acquireModuleRun(options); },
   };
   const generate = runInNewContext(`${generateBody()}\ngenerateApplication;`, context);
-  return { callback: (options = {}) => generate('resume', options), context, states, calls, completed, cancelled, updates, toasts,
+  return { callback: (options = {}) => generate('resume', options), context, states, calls, completed, cancelled, updates, toasts, notices,
     queue, get leases() { return leases; }, get label() { return laneLabel; }, get card() { return card; }, board,
     deleteCard: () => { card = null; } };
 }
@@ -738,6 +740,7 @@ export default [
     name: 'listing liveness card: typed refusal and hold stop before the application lane and retain the returned pair',
     async run() {
       const at = '2026-10-26T12:00:00.000Z';
+      const hiddenByAction = {};
       for (const action of ['refuse-final', 'refuse-retry', 'hold']) {
         const listingLiveness = { verdict: action === 'hold' ? 'pending' : 'closed',
           basis: action === 'hold' ? 'neither' : 'structural', board: 'linkedin', at };
@@ -752,11 +755,31 @@ export default [
         assert.equal(test.card.data.listingGenerationNotice.action, action);
         assert.equal(test.card.data.listingGenerationNotice.message, 'Synthetic listing decision.');
         assert.ok(Number.isFinite(Date.parse(test.card.data.listingGenerationNotice.at)));
-        assert.equal(test.toasts[0]?.title, 'Listing check');
-        assert.equal(test.toasts[0]?.description, 'Synthetic listing decision.');
+        // A closure that hides the card says so in a popup; a card that stays
+        // visible keeps the short notice.
+        const hidden = jobCardClosedAtMostOfficialSource(test.card.data);
+        hiddenByAction[action] = hidden;
+        assert.equal(test.notices.length, hidden ? 1 : 0, action);
+        assert.equal(test.toasts.length, hidden ? 0 : 1, action);
+        if (!hidden) {
+          assert.equal(test.toasts[0]?.title, 'Listing check');
+          assert.equal(test.toasts[0]?.description, 'Synthetic listing decision.');
+        }
         assert.equal(test.states.at(-1)?.state, 'idle');
         assert.equal(test.context.applicationSubmissionRef.current, false);
       }
+      assert.equal(hiddenByAction.hold, false);
+      // The real closed case: the listing itself was read and judged closed, so the Board hides the card.
+      const closedListing = { verdict: 'closed', basis: 'ai', board: 'linkedin', at };
+      const closed = harness({ data: row({ url: 'https://www.linkedin.com/jobs/view/synthetic-card', officialPosting: undefined }),
+        prepare: { success: true, listingCheck: { action: 'refuse-final', verdict: 'closed', basis: 'ai' }, listingLiveness: closedListing, message: 'This job is no longer open.' } });
+      await closed.callback();
+      assert.equal(jobCardClosedAtMostOfficialSource(closed.card.data), true);
+      assert.equal(closed.toasts.length, 0, 'a toast would be gone by the time the person comes back');
+      assert.equal(closed.notices.length, 1);
+      assert.equal(closed.notices[0].title, 'Job closed, card hidden');
+      assert.equal(closed.notices[0].detail, 'Scraped Platform Engineer at Acme Talent Partners');
+      assert.ok(closed.notices[0].message.includes('This job is no longer open.') && closed.notices[0].message.includes('Nothing was generated.'));
     },
   },
   {

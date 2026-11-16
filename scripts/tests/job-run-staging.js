@@ -5942,8 +5942,8 @@ export default [
       // deletion) and the v9 entry (migrateJobHubTitleSourceSingleMode, the
       // migration THIS round of changes added) are actually present there,
       // not merely defined-but-unregistered.
-      assert(CURRENT_SCHEMA_VERSION === 11,
-        `CURRENT_SCHEMA_VERSION must be 11 after the unscored-placeholder marker migration lands, got ${CURRENT_SCHEMA_VERSION}`);
+      assert(CURRENT_SCHEMA_VERSION === 12,
+        `CURRENT_SCHEMA_VERSION must be 12 after the Interview Helper node removal migration lands, got ${CURRENT_SCHEMA_VERSION}`);
       const source = await fs.promises.readFile(path.resolve('src/utils/serializationUtils.js'), 'utf8');
       const migrationsStart = source.indexOf('const MIGRATIONS = [');
       const migrationsEnd = source.indexOf('\n];', migrationsStart);
@@ -5957,12 +5957,14 @@ export default [
         'the v10 step must be registered in MIGRATIONS and wired to migrateConsolidateBoardLocations');
       assert(migrationsBlock.includes('{ version: 11,') && migrationsBlock.includes('migrate: migrateUnscoredPlaceholderStatus'),
         'the v11 step must be registered in MIGRATIONS and wired to migrateUnscoredPlaceholderStatus');
-      // v11 must be the LAST entry — CURRENT_SCHEMA_VERSION is derived
-      // from MIGRATIONS[last].version, so a v11 entry registered anywhere
+      assert(migrationsBlock.includes('{ version: 12,') && migrationsBlock.includes('migrate: migrateRemoveInterviewHelperNodes'),
+        'the v12 step must be registered in MIGRATIONS and wired to migrateRemoveInterviewHelperNodes');
+      // v12 must be the LAST entry — CURRENT_SCHEMA_VERSION is derived
+      // from MIGRATIONS[last].version, so a v12 entry registered anywhere
       // other than last would silently desync the two.
       const lastEntryAt = migrationsBlock.lastIndexOf('{ version:');
-      assert(migrationsBlock.slice(lastEntryAt, lastEntryAt + '{ version: 11,'.length) === '{ version: 11,',
-        'the v11 step must be the LAST entry in MIGRATIONS so CURRENT_SCHEMA_VERSION stays derived correctly');
+      assert(migrationsBlock.slice(lastEntryAt, lastEntryAt + '{ version: 12,'.length) === '{ version: 12,',
+        'the v12 step must be the LAST entry in MIGRATIONS so CURRENT_SCHEMA_VERSION stays derived correctly');
       return { schemaVersion: CURRENT_SCHEMA_VERSION, v8Registered: true, v9Registered: true, v10Registered: true, v11Registered: true };
     },
   },

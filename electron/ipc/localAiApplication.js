@@ -3738,6 +3738,10 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   'additive-seam': 'prose-unit',
   'adjacent-employer-repetition': 'prose-unit',
   'anchor-relevance': 'prose-unit',
+  // Counts the letter's body paragraphs, not one paragraph's wording, and the
+  // repair is to fold or drop the extra point: prose, in the same unit as its
+  // siblings. It is advisory, and the entry only keeps the table total.
+  'body-point-count': 'prose-unit',
   // Reads the whole letter rather than one paragraph: the defect is that no
   // paragraph anywhere states a first-person completed action. The repair is
   // still prose — rewriting an evidence paragraph so the candidate is the
@@ -3794,6 +3798,9 @@ export const PASTE_CHECK_PROSE_UNITS = Object.freeze({
   'plain-register': 'prose-unit',
   'posting-reference': 'prose-unit',
   'prior-employer-opening': 'prose-unit',
+  // Names the paragraph that writes part of an employer's name; writing the
+  // full name, or referring to the job without it, is a rewrite of that prose.
+  'prior-employer-short-form': 'prose-unit',
   'prospective-contribution-tense': 'prose-unit',
   'punctuation-style': 'prose-unit',
   'redundancy': 'prose-unit',

@@ -1359,6 +1359,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
   practiceRegistry = null,
+  resolveAppliedJobsRoot = null,
   logWarning = message => console.warn(message) } = {}) {
   if (!appInstance || typeof appInstance.getPath !== 'function' || typeof registerHandler !== 'function') throw new TypeError('Interview preparation IPC registration is unavailable.');
   // Searchable Applied Jobs list: tokens only; a selection resolves inside main
@@ -1370,6 +1371,9 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   };
   registerHandler('list-interview-application-folders', async (_event, args) => {
     validateFolderListArgs(args);
+    if (typeof resolveAppliedJobsRoot === 'function') {
+      return listApplicationFolders({ nodeId: args.nodeId, registry: folderRegistry, appliedJobsFolder: await resolveAppliedJobsRoot() });
+    }
     return listApplicationFolders({ nodeId: args.nodeId, canvasFilePath: args.canvasFilePath, registry: folderRegistry, assertCanvasPathAllowed });
   }, { validateArgs: validateFolderListArgs });
   registerHandler('select-interview-application-folder', async (_event, args, signal) => {

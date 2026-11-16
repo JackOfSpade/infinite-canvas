@@ -4,6 +4,7 @@ import electron from 'vite-plugin-electron'
 import tailwindcss from '@tailwindcss/vite'
 import { execFileSync } from 'node:child_process'
 import { applicationRendererSourceDigest } from './electron/ipc/applicationV2RendererVersion.js'
+import { MAIN_PROCESS_EXTERNALS } from './vite.main-externals.js'
 
 // package.json stays at 0.0.0, so stamp the main bundle with the commit it was
 // built from; generation logs use it to tell builds apart.
@@ -88,29 +89,7 @@ export default defineConfig({
                   return undefined;
                 },
               },
-              external: [
-                // Native N-API addon with per-platform binaries; loaded from
-                // node_modules (unpacked from the asar) by the practice call.
-                'onnxruntime-node',
-                'puppeteer-core',
-                'puppeteer-extra',
-                'puppeteer-extra-plugin-stealth',
-                // Playwright resolves package metadata, browser descriptors and
-                // injected scripts relative to its own installed package.
-                // Bundling it relocates those reads to dist-electron and makes
-                // official careers rendering fail before a browser can launch.
-                'playwright',
-                // The SDK loads runtime files relative to its own package and
-                // launches the user's installed Claude Code executable.
-                '@anthropic-ai/claude-agent-sdk',
-                // jsdom uses __dirname-relative readFileSync for browser/default-stylesheet.css;
-                // bundling it corrupts that path to dist-electron/ instead of node_modules/jsdom/.
-                'jsdom',
-                // pdf-lib's tslib helpers break under CJS bundling ("Cannot
-                // destructure '__extends'" at main.cjs load) — resolve it from
-                // node_modules at runtime like the other externals.
-                'pdf-lib',
-              ],
+              external: MAIN_PROCESS_EXTERNALS,
             }
           },
         }
@@ -130,38 +109,9 @@ export default defineConfig({
           },
         },
       },
-      // Practice-call model worker thread: its own entry so the worker never loads main.cjs.
-      // onnxruntime-node stays external (native addon, unpacked from the asar).
+      // Canvas save worker thread: its own entry so the worker never loads main.cjs.
       {
-        entry: 'electron/practiceCall/models/inferenceWorkerThread.js',
-        vite: {
-          build: {
-            rollupOptions: {
-              external: ['onnxruntime-node'],
-              output: {
-                format: 'cjs',
-              },
-            },
-          },
-        },
-      },
-      // The practice call window gets its own narrow bridge (window.practiceCallAPI).
-      {
-        entry: 'electron/practiceCallPreload.js',
-        vite: {
-          build: {
-            rollupOptions: {
-              output: {
-                format: 'cjs',
-              },
-            },
-          },
-        },
-      },
-      // Interview child gets a deliberately separate, narrow bridge. It must
-      // never inherit the canvas preload's filesystem/job capabilities.
-      {
-        entry: 'electron/interviewWindowPreload.js',
+        entry: 'electron/ipc/workspaceSaveWorkerThread.js',
         vite: {
           build: {
             rollupOptions: {

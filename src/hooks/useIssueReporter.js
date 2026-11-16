@@ -2,6 +2,7 @@ import { getClaudeApplicationRun } from '../utils/claudeApplicationRuns.js';
 import { useCallback } from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { EventLogger } from '../utils/EventLogger';
+import { perfDiagnosticsSnapshot } from '../utils/perfDiagnostics';
 import { applyBugReportCode } from '../utils/bugReportCodes';
 import { isJobNodeType, isSellNodeType } from '../utils/nodePresence';
 import { buildSellHubResolveSnapshot } from '../utils/sellHubResolveSnapshot';
@@ -371,6 +372,7 @@ export function useIssueReporter({
         eventLogs: filteredLogs,
         eventHistoryMetadata: EventLogger.getEventHistoryMetadata(),
         lastSaveError: EventLogger.getLastSaveError(),
+        perf: perfDiagnosticsSnapshot(),
         activeEditableText,
       };
 

@@ -35,6 +35,9 @@ export const TIMINGS = {
   AUTOSAVE_RETRY_ANIMATING_MS: 1000, // re-poll autosave while a nav animation is mid-flight
   AUTOSAVE_RETRY_SAVING_MS:    500,  // re-poll autosave while a manual save is in-flight
   AUTOSAVE_RETRY_EDITING_MS:   1500, // re-poll autosave while the user is mid-edit in a contenteditable
+  AUTOSAVE_INPUT_QUIET_MS:     1500, // auto-save waits for this long a pause in mouse/keyboard input
+  AUTOSAVE_RETRY_INPUT_MS:     500,  // re-poll auto-save while the person is still moving or typing
+  AUTOSAVE_INPUT_MAX_WAIT_MS:  20000, // ...but never holds a save back longer than this
 
   // ── Transient confirmation feedback: show → auto-clear ────────────────────
   // One value for every "it worked, here's a brief badge" cue: the "Saved" dot,

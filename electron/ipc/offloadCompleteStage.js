@@ -162,6 +162,8 @@ function failureFor(result) {
   };
   if (rawCode.toLowerCase() === 'cancelled') return new ClaudeRunnerError('CLAUDE_CANCELLED', message, detail);
   const suffix = rawCode.toUpperCase().replace(/[^A-Z0-9]+/gu, '_').replace(/^_+|_+$/gu, '');
+  // Nothing falls back to Claude for a routed call, so the person is told what to do about an empty balance.
+  if (suffix === 'CREDIT_EXHAUSTED') return new ClaudeRunnerError('OFFLOAD_CREDIT_EXHAUSTED', 'DeepSeek credit is exhausted. Top up DeepSeek, then retry; saved progress is kept.', detail);
   return new ClaudeRunnerError(`OFFLOAD_${suffix || 'ERROR'}`, message, detail);
 }
 

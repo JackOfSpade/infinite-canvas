@@ -53,6 +53,13 @@ export const CODE_DEFINITIONS = {
     excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
   },
 
+  PERF: {
+    label: 'Performance',
+    description: 'For lag, freezes and slowness: how long the window and the app process were blocked, and how long undo steps and auto-saves took. Included automatically in FULL. Timings only; no canvas content, ids or paths.',
+    logFilter: line => /viewport changed|node resized|save|undo|redo|canvas load|expanded|collapsed/i.test(line),
+    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+  },
+
   BTABS: {
     label: 'Browser Tab Restore',
     description: 'App-owned Chrome tab-restore cleanup outcomes and file counts before launch. Included automatically in FULL. No paths, URLs, cookies or file contents are retained.',

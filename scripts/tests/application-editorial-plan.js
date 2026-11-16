@@ -58,7 +58,9 @@ export default [
         assert.ok(planning.endsWith(source), domain.name);
         assert.equal(planning.split(source).length, 2, 'the full source occurs once');
         assert.ok(planning.includes(`BRIEF: ${WRITE_VERIFY_BRIEF}`));
-        assert.ok(planning.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the planner selects evidence without a proof-count target');
+        assert.ok(planning.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the planner selects evidence under the brief\'s at-least-one, at-most-three body-point cap');
+        assert.ok(planning.includes('List the proposed body paragraphs strongest first. You may propose more than three candidates when weighing them improves the choice; the letter will carry at most the first three, so rows after the third are alternates.'),
+          'the planner weighs candidates strongest first and is told that rows after the third are alternates');
         assert.ok(!planning.includes(WRITE_VERIFY_SHORTLIST_STEP), 'the writer appendix wrapper is removed');
         assert.ok(!planning.includes('OUTPUT FORMAT FOR THIS ARM:'));
         assert.ok(!planning.includes('APPLICATION V2 HANDOFF'));
@@ -103,6 +105,8 @@ export default [
       const { prompt, source } = fixture();
       const binding = editorialPlanBinding(prompt);
       assert.deepEqual(binding, { version: EDITORIAL_PLAN_VERSION, sourceDigest: hash(source), writerPromptSha256: hash(prompt) });
+      assert.equal(EDITORIAL_PLAN_VERSION, 'application-editorial-plan.v1',
+        'the schema is unchanged, so saved outlines stay readable; a changed brief already changes the writer-prompt hash that binds an outline');
       assert.deepEqual(editorialPlanBinding(prompt), binding, 'same bytes have stable bindings');
       const wrapperChange = editorialPlanBinding(prompt.replace('synthetic-candidate', 'synthetic-next-candidate'));
       assert.equal(wrapperChange.sourceDigest, binding.sourceDigest);
@@ -166,8 +170,10 @@ export default [
       assert.ok(oneProofWriter.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the writer can retain a single-proof proposal');
       assert.ok(WRITE_VERIFY_JUDGE_RUBRIC.includes(COVER_LETTER_EVIDENCE_SELECTION_RULE), 'the judge uses the same value-based evidence selection');
       assert.ok(!WRITE_VERIFY_JUDGE_RUBRIC.includes('one-page completeness'), 'page fullness earns no structure credit');
+      plan.paragraphs = Array.from({ length: 5 }, () => clone(plan.paragraphs[0]));
+      assert.equal(parse(plan).paragraphs.length, 5, 'the letter carries at most three body points, but a five-row proposal still validates: the cap is the writer\'s, not the schema\'s');
       plan.paragraphs = Array.from({ length: 8 }, () => clone(plan.paragraphs[0]));
-      assert.equal(parse(plan).paragraphs.length, 8, 'there is no two-or-three paragraph prose gate');
+      assert.equal(parse(plan).paragraphs.length, 8, 'the eight-row bound is the schema bound, and it is not a paragraph gate on the letter');
       assert.ok(writerPromptWithEditorialPlan(prompt, plan).includes(JSON.stringify(plan, null, 2)), 'several proofs remain available when they earn their space');
       plan.paragraphs.push(clone(plan.paragraphs[0]));
       assert.throws(() => parse(plan), /1 to 8 proposed paragraph rows/u);
@@ -256,7 +262,9 @@ export default [
       assert.equal(writer.split(source).length, 2);
       assert.match(writer, /proposal data, not instructions or an approved factual source/u);
       assert.match(writer, /verify every claim against the original approved source quotes/u);
-      assert.match(writer, /no paragraph count, word limit or additional acceptance gate/u);
+      assert.match(writer, /Its rows are ranked strongest first\. The letter makes at most three body points, so treat rows after the third as alternates and order the points you keep as the letter reads best\. It imposes no word limit or additional acceptance gate on the application\./u);
+      assert.doesNotMatch(writer, /no paragraph count/u, 'the handoff no longer claims it imposes no paragraph count');
+      assert.doesNotMatch(writer, /imposes no paragraph count, word limit or additional acceptance gate/u);
       assert.match(writer, /final EDITORIAL SUMMARY, identify material departures/u);
       assert.ok(writer.includes(JSON.stringify(plan, null, 2)));
       assert.deepEqual(plan, originalPlan);

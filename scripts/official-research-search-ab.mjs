@@ -7,7 +7,11 @@
 // jobs it found nothing for (leads to review by hand).
 //
 //   node --import ./scripts/test-stubs/register.mjs scripts/official-research-search-ab.mjs \
-//     --canvas "<canvas.json>" --out <private dir> [--found 12] [--missed 6] [--seed 1] [--concurrency 3]
+//     --canvas "<canvas.json>" --out <private dir> [--found 12] [--missed 6] [--seed 1] [--concurrency 3] \
+//     [--arms native,tavily,parallel] [--profile <model>:<effort>]
+//
+// --profile (added 2026-11-15) answers the research call at that model and effort instead of the
+// task's production profile; tools stay per arm. Max effort and Fable are refused.
 //
 // The Tavily key is read from the macOS Keychain (service infinite-canvas-tavily-api-key)
 // and never printed. Job details are written only to the private --out directory.
@@ -28,11 +32,13 @@ function options(argv) {
   const { values } = parseNodeArgs({ args: argv, options: {
     canvas: { type: 'string' }, out: { type: 'string' }, found: { type: 'string', default: '12' },
     missed: { type: 'string', default: '6' }, seed: { type: 'string', default: '1' }, concurrency: { type: 'string', default: '3' },
-    'dry-run': { type: 'boolean', default: false }, arms: { type: 'string', default: 'native,tavily' },
+    'dry-run': { type: 'boolean', default: false }, arms: { type: 'string', default: 'native,tavily' }, profile: { type: 'string' },
   } });
+  const override = values.profile === undefined ? null : /^(haiku|sonnet|opus):(low|medium|high|xhigh)$/u.exec(values.profile);
+  if (values.profile !== undefined && !override) throw new Error('--profile must be <haiku|sonnet|opus>:<low|medium|high|xhigh>.');
   if (!values.canvas || !values.out) throw new Error('--canvas and --out are required.');
   const int = (name, min) => { const n = Number(values[name]); if (!Number.isInteger(n) || n < min) throw new Error(`--${name} must be an integer >= ${min}`); return n; };
-  return { canvas: values.canvas, out: path.resolve(values.out), found: int('found', 0), missed: int('missed', 0), seed: int('seed', 0), concurrency: int('concurrency', 1), dryRun: values['dry-run'] === true,
+  return { canvas: values.canvas, out: path.resolve(values.out), found: int('found', 0), missed: int('missed', 0), seed: int('seed', 0), concurrency: int('concurrency', 1), dryRun: values['dry-run'] === true, profile: override ? { model: override[1], effort: override[2] } : null,
     arms: String(values.arms).split(',').map(arm => arm.trim()).filter(Boolean) };
 }
 
@@ -109,7 +115,7 @@ async function main(argv) {
     ...sample(missed, opts.missed, random).map(row => ({ row, kind: 'missed' }))];
   console.log(`board rows with a lookup result: ${rows.length} (found ${found.length}, not found ${missed.length}); testing ${picked.length}`);
 
-  const profile = profiles.claudeTaskProfile(TASK);
+  const profile = { ...profiles.claudeTaskProfile(TASK), ...(opts.profile || {}) };
   if (opts.dryRun) {
     for (const item of picked) {
       const job = { ...item.row }; delete job.officialPosting; delete job.postedBy;
@@ -127,8 +133,10 @@ async function main(argv) {
     native: { tools: ['WebSearch', 'WebFetch'], mcpServers: {}, allowBuiltInWebTools: true },
     tavily: { tools: TAVILY_TOOLS, mcpServers: { tavily: { type: 'http', url: `https://mcp.tavily.com/mcp/?tavilyApiKey=${encodeURIComponent(key)}` } } },
   };
-  // The free keyless Parallel Search MCP server, exactly as the app gives it to a research call.
-  arms.parallel = { tools: [...parallelSearch.PARALLEL_RESEARCH_TOOLS], mcpServers: parallelSearch.parallelMcpServers() };
+  // The Parallel Search MCP server with the Keychain key, exactly as the app gives it to a research call
+  // (keyed since 2026-11-15: the anonymous server throttled after about 60 lookups and returned no usable results).
+  const parallelKey = opts.arms.includes('parallel') ? await parallelSearch.readParallelKey() : '';
+  arms.parallel = { tools: [...parallelSearch.PARALLEL_RESEARCH_TOOLS], mcpServers: parallelSearch.parallelMcpServers(parallelKey) };
   // Both toolsets in one call: Claude's own search and page reader plus Tavily's.
   arms.both = { tools: [...arms.native.tools, ...TAVILY_TOOLS], mcpServers: arms.tavily.mcpServers, allowBuiltInWebTools: true };
   // DeepSeek Flash through Offload with its own web_search/web_fetch, exactly as a routed task call.
