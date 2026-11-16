@@ -767,6 +767,16 @@ function sanitizeNestedCanvasEdgesForSave(edges, sanitizedNodes) {
  * This is recursive: group (CanvasNode) nodes can contain arbitrary
  * nested canvases, so we must sanitize down every level.
  */
+// A cleaned copy depends only on the node it was made from, so the same node
+// always gets the same copy. Auto-save tells changed nodes from unchanged ones
+// by identity; a fresh copy on every save would resend the node every time.
+const sanitizedNodeCopies = new WeakMap();
+
+function rememberSanitizedCopy(node, copy) {
+  sanitizedNodeCopies.set(node, copy);
+  return copy;
+}
+
 export function sanitizeNodesForSave(nodes) {
   if (!Array.isArray(nodes)) return nodes;
   // Drop ephemeral nodes (e.g. comp-source cards spawned during price research)
@@ -839,6 +849,12 @@ export function sanitizeNodesForSave(nodes) {
       const innerDrawings = canvasDataIsObject && Array.isArray(rawCanvasData.drawings)
         ? rawCanvasData.drawings
         : [];
+      const rememberedGroup = sanitizedNodeCopies.get(n);
+      if (rememberedGroup) {
+        changed = true;
+        out.push(rememberedGroup);
+        continue;
+      }
       const sanitizedInner = sanitizeNodesForSave(innerNodes);
       const sanitizedInnerEdges = sanitizeNestedCanvasEdgesForSave(
         innerEdges,
@@ -870,7 +886,7 @@ export function sanitizeNodesForSave(nodes) {
         || sanitizedInnerEdges !== innerEdges
       ) {
         changed = true;
-        out.push({
+        out.push(rememberSanitizedCopy(n, {
           ...n,
           data: {
             ...cleanData,
@@ -881,7 +897,7 @@ export function sanitizeNodesForSave(nodes) {
               drawings: innerDrawings,
             },
           },
-        });
+        }));
       } else {
         out.push(n);
       }
@@ -958,6 +974,12 @@ export function sanitizeNodesForSave(nodes) {
       continue;
     }
 
+    const rememberedCopy = sanitizedNodeCopies.get(n);
+    if (rememberedCopy) {
+      changed = true;
+      out.push(rememberedCopy);
+      continue;
+    }
     let result = n;
     if (hasTransientData || hasTransientHubState || hasJobSearchTransient || hasSellHubTransient || hasJobBoardTransient) {
       const {
@@ -987,7 +1009,7 @@ export function sanitizeNodesForSave(nodes) {
       result = { ...result, style: Object.keys(restStyle).length ? restStyle : undefined };
     }
     changed = true;
-    out.push(result);
+    out.push(rememberSanitizedCopy(n, result));
   }
 
   return changed ? out : nodes;

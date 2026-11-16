@@ -3,6 +3,7 @@ import { EventLogger } from '../utils/EventLogger';
 import { TIMINGS, AUTOSAVE_FAILURE_RETRY_MS, AUTOSAVE_FAILURE_POLL_MS, AUTOSAVE_SYNC_LINK_RETRY_MS, AUTOSAVE_SYNC_LINK_NOTICE_MS, autosaveDebounceMs } from '../utils/timings';
 import { useIsMountedRef } from './useIsMountedRef';
 import { buildSaveData } from './canvasSaveData';
+import { createAutosaveSender } from './autosaveSender';
 import { msSinceUserInput } from '../utils/userActivity';
 import { recordPerf } from '../utils/perfDiagnostics';
 import { setAutosaveActive } from '../utils/saveActivity';
@@ -36,6 +37,11 @@ export function useCanvasInitialization({
     stateRef.current = { nodes, edges, drawings };
     stateRevisionRef.current += 1;
   }, [nodes, edges, drawings]);
+
+  // One sender per window: it remembers which nodes the app process already
+  // holds, so an auto-save copies out only the nodes that changed.
+  const sendAutosaveRef = useRef(null);
+  if (sendAutosaveRef.current == null) sendAutosaveRef.current = createAutosaveSender();
 
   // Mirror flushStack and hasUnsavedChanges into refs so the auto-save timer
   // callback can read live values without being a dependency of the effect.
@@ -250,12 +256,16 @@ export function useCanvasInitialization({
 
       const operation = (async () => {
         try {
-          // The call returns once the canvas has been copied for the app
-          // process; that copy is the part that blocks this window.
-          const handoffStartedAt = performance.now();
-          const pending = window.electronAPI.saveWorkspace({ data, filePath: currentFile });
-          recordPerf('save-handoff', performance.now() - handoffStartedAt, stateRef.current?.nodes?.length);
-          const res = await pending;
+          // Only nodes changed since the last auto-save are copied. The
+          // longest single copy is what the window feels, so that is recorded.
+          let longestBlockMs = 0;
+          const res = await sendAutosaveRef.current({
+            api: window.electronAPI,
+            data,
+            filePath: currentFile,
+            onBlocked: (ms) => { longestBlockMs = Math.max(longestBlockMs, ms); },
+          });
+          recordPerf('save-handoff', longestBlockMs, stateRef.current?.nodes?.length);
           recordPerf('save-total', performance.now() - saveStartedAt, stateRef.current?.nodes?.length);
           if (cancelled || !isMountedRef.current || !isCurrentGeneration()) return false;
           const snapshotIsCurrent = currentFileRef.current === currentFile

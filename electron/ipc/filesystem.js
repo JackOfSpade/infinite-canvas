@@ -7,6 +7,7 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import { recordWorkspaceWriteOutcome } from './workspaceIoDiagnostics.js';
 import { recordMainPerf } from './perfDiagnostics.js';
+import { createCanvasDeltaStore } from './workspaceSaveDelta.js';
 import { formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
 import path from 'path';
 import fs from 'fs';
@@ -3537,8 +3538,25 @@ export function registerFilesystemHandlers() {
     }).finally(() => recordMainPerf('save-request', performance.now() - started));
   });
 
+  // What each window's auto-saves have sent so far, so a save can name an
+  // unchanged node instead of sending it again. Dropped with the window.
+  const canvasDeltaStores = new WeakMap();
+  const canvasDeltaStoreFor = (sender) => {
+    let store = canvasDeltaStores.get(sender);
+    if (!store) canvasDeltaStores.set(sender, store = createCanvasDeltaStore());
+    return store;
+  };
+
+  handleSafe('stage-workspace-chunks', async (event, payload) => {
+    if (!canvasDeltaStoreFor(event.sender).stage(payload)) throw new Error('Could not accept canvas changes for saving.');
+  });
+
   async function saveWorkspace(event, args) {
-    const { data, filePath } = args;
+    const { filePath } = args;
+    // An auto-save names unchanged nodes by key. If any key is unknown here,
+    // write nothing and ask the window for the whole canvas.
+    const data = args.canvas ? canvasDeltaStoreFor(event.sender).resolve(args.canvas) : args.data;
+    if (args.canvas && !data) return { needsFullCanvas: true };
     let targetPath = filePath;
     // Keep the renderer-provided owner spelling until the recovery rebind has
     // committed. `reconcileRenamedCanvas` may replace targetPath with a Finder

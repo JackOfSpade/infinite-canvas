@@ -228,6 +228,7 @@ import application_sync_lifecycle from './tests/application-sync-lifecycle.js';
 import quit_autosave from './tests/quit-autosave.js';
 import autosave_recovery from './tests/autosave-recovery.js';
 import workspace_content_pool from './tests/workspace-content-pool.js';
+import workspace_save_delta from './tests/workspace-save-delta.js';
 import job_tree_user_arranged_layout from './tests/job-tree-user-arranged-layout.js';
 import job_card_bundle_indicator from './tests/job-card-bundle-indicator.js';
 import job_card_prior_role_indicator from './tests/job-card-prior-role-indicator.js';
@@ -562,6 +563,7 @@ const testGroups = [
   ['quit-autosave.js', quit_autosave],
   ['autosave-recovery.js', autosave_recovery],
   ['workspace-content-pool.js', workspace_content_pool],
+  ['workspace-save-delta.js', workspace_save_delta],
   ['job-tree-user-arranged-layout.js', job_tree_user_arranged_layout],
   ['job-card-bundle-indicator.js', job_card_bundle_indicator],
   ['job-card-prior-role-indicator.js', job_card_prior_role_indicator],

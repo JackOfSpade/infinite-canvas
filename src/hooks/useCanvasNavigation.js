@@ -255,7 +255,8 @@ export function useCanvasNavigation({
   /**
    * Flush: sync all pending sub-canvas edits back through the stack.
    * Returns the root-level { nodes, edges, drawings } without mutating state.
-   * Called before saving.
+   * Called before saving. The result shares node objects with live state and
+   * must be treated as read-only.
    */
   const flushStack = useCallback(() => {
     const currentStack = stackRef.current;
@@ -265,7 +266,7 @@ export function useCanvasNavigation({
 
     return syncStackUpward(
       nodesRef.current, edgesRef.current, drawingsRef.current,
-      currentStack, currentStack.length - 1
+      currentStack, currentStack.length - 1, 0, { clone: false }
     );
   }, []);
 

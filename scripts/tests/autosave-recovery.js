@@ -192,6 +192,33 @@ export default [
       assert.equal(dirty.at(-1), false);
     });
   } },
+  { name: 'Autosave sends only edited nodes once the app process holds the canvas, and marks the canvas clean', async run() {
+    await withAutosave(async ({ props, writes, dirty, fire, render }) => {
+      const { createCanvasDeltaStore } = await import('../../electron/ipc/workspaceSaveDelta.js');
+      const store = createCanvasDeltaStore();
+      const saved = [];
+      window.electronAPI.stageWorkspaceChunks = async payload => ({ success: store.stage(structuredClone(payload)) });
+      window.electronAPI.saveWorkspace = async (args) => {
+        writes.push(args);
+        const data = args.canvas ? store.resolve(structuredClone(args.canvas)) : args.data;
+        if (!data) return { success: true, needsFullCanvas: true };
+        saved.push(JSON.stringify(data.nodes));
+        return { success: true, filePath: args.filePath };
+      };
+      const kept = { id: 'kept', type: 'text', position: { x: 9, y: 9 }, data: { text: 'Untouched' } };
+      await render({ nodes: [props.nodes[0], kept] });
+      await fire();
+      assert.equal(writes.at(-1).canvas.chunks.length, 4, 'the first auto-save sends both nodes and both lists');
+      assert.equal(saved.at(-1), JSON.stringify([props.nodes[0], kept]));
+      assert.equal(dirty.at(-1), false);
+      await render({ hasUnsavedChanges: false });
+      await render({ hasUnsavedChanges: true, nodes: [{ ...props.nodes[0], data: { text: 'Edited' } }, kept] });
+      await fire();
+      assert.deepEqual(writes.at(-1).canvas.chunks.map(chunk => chunk[1].id), ['note'], 'only the edited node is copied out');
+      assert.equal(saved.at(-1), JSON.stringify(props.nodes));
+      assert.equal(dirty.at(-1), false);
+    });
+  } },
   { name: 'A successful manual save cancels queued autosave recovery and resets the retry allowance', async run() {
     await withAutosave(async ({ props, writes, timers, fire, render, setWrite }) => {
       setWrite(async () => ({ success: false, error: 'Temporary refusal.' }));

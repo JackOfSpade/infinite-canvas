@@ -11,10 +11,14 @@ export function safeClone(data) {
  * Returns the root-level { nodes, edges, drawings }.
  * Pure function — does not mutate state.
  */
-export function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex, stopIndex = 0) {
-  let nodes = safeClone(currentNodes);
-  let edges = safeClone(currentEdges);
-  let drawings = safeClone(currentDrawings);
+export function syncStackUpward(currentNodes, currentEdges, currentDrawings, stack, startIndex, stopIndex = 0, { clone = true } = {}) {
+  // A save only reads the result and copies it out of the window, so it passes
+  // clone: false. Deep-copying a large open level froze the window for about
+  // half a second per auto-save, and gave every node a new identity, which
+  // hides from the save which nodes actually changed.
+  let nodes = clone ? safeClone(currentNodes) : currentNodes;
+  let edges = clone ? safeClone(currentEdges) : currentEdges;
+  let drawings = clone ? safeClone(currentDrawings) : currentDrawings;
 
   for (let i = startIndex; i >= stopIndex; i--) {
     const parentState = stack[i];

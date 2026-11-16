@@ -71,6 +71,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return res.success ? (res.title || null) : null;
   },
   saveWorkspace: (data) => ipcRenderer.invoke('save-workspace', data),
+  // Auto-save sends changed nodes ahead of the save in small calls.
+  stageWorkspaceChunks: (payload) => ipcRenderer.invoke('stage-workspace-chunks', payload),
   loadWorkspace: (opts) => ipcRenderer.invoke('load-workspace', opts),
   scanDirectory: (dirPath) => ipcRenderer.invoke('scan-directory', dirPath),
   startFileWatch: (filePath) => ipcRenderer.invoke('start-file-watch', filePath),
