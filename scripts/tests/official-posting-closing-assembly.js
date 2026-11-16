@@ -82,6 +82,18 @@ export default [
         assert.ok(errors.some(error => /needs at least one career-data evidence ID/u.test(error)), JSON.stringify(ids));
       }
       assert.deepEqual(durations.at(-1), [], 'listing-only duration still receives no career quotes');
+      // The printed contract caps CAREER quotes at four. A paragraph that
+      // cites four of them and the posting quote for the need it answers
+      // follows that contract; only a fifth career quote breaks it.
+      const careerRows = [1, 2, 3, 4, 5].map(n => ({ id: `career-extra-${n}`, sourceId: 'career-data', quote: `Extra approved career quote number ${n}.` }));
+      const wide = { ...state, evidencePlan: { evidence: [...evidence, ...careerRows] } };
+      const cite = ids => validateSharedApplicationContent({ coverLetter: { ...response.coverLetter,
+        paragraphs: [{ ...prior(), evidenceIds: ids }] } }, wide, {}, null, dependencies).filter(error => /evidenceIds; every paragraph/u.test(error));
+      const fourCareer = careerRows.slice(0, 4).map(row => row.id);
+      assert.deepEqual(cite([...fourCareer, 'listing-proof']), [], 'four career quotes plus a listing quote is within the printed cap');
+      const overCap = cite(careerRows.map(row => row.id));
+      assert.equal(overCap.length, 1);
+      assert.match(overCap[0], /carries 5 career-data evidenceIds; every paragraph needs 1 to 4 career-data evidenceIds/u);
     },
   },
   {

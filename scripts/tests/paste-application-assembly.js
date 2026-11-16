@@ -9,7 +9,7 @@ import { careerDataProjectProvenanceHeadingForName } from '../../electron/ipc/jo
 import { recordApplicationCitationFlow, applicationCitationDiagnosticsMarkdown } from '../../electron/ipc/applicationCitationDiagnostics.js';
 import { generateMarkdown } from '../../electron/ipc/bugReport.js';
 import { applyBugReportCode } from '../../src/utils/bugReportCodes.js';
-import { recordApplicationCorrectionCheck, applicationCorrectionDiagnosticsMarkdown, applicationRejectionTextRows, MAX_REJECTION_TEXT_CHECKS, MAX_REJECTION_TEXT_MESSAGES, MAX_REJECTION_TEXT_CHARS } from '../../electron/ipc/applicationCorrectionDiagnostics.js';
+import { recordApplicationCorrectionCheck, recordApplicationRejectionText, applicationCorrectionDiagnosticsMarkdown, applicationRejectionTextRows, MAX_REJECTION_TEXT_CHECKS, MAX_REJECTION_TEXT_MESSAGES, MAX_REJECTION_TEXT_CHARS } from '../../electron/ipc/applicationCorrectionDiagnostics.js';
 import { __writeVerifyCandidateGateForTests } from '../../electron/ipc/localAiApplication.js';
 
 const careerData = 'Ada Lovelace\nada@example.test\n## Analytical Engines\nSoftware Engineer\n\nBuilt reporting systems that reduced manual work.';
@@ -158,6 +158,17 @@ export default [
       }
       assert(!applicationCorrectionDiagnosticsMarkdown().includes('WIDGETRON'), 'the cause-count section stays free of wording');
       assert(applyBugReportCode([], {}, 'APPREJECT').matchedCodes.includes('APPREJECT'), 'registered filter');
+      // A reply rejected before the document gate (a unit patch, a wrong
+      // shape) keeps its wording too, and a gate rejection the round recorder
+      // sees a second time stays one row.
+      const patchWording = 'unit-patch: the patch names a settled unit.';
+      recordApplicationRejectionText({ jobId: 'reject-text-job', stage: 'verify-correction', errors: [patchWording] });
+      recordApplicationRejectionText({ jobId: 'reject-text-job', stage: 'verify-correction', errors: [patchWording] });
+      recordApplicationRejectionText({ jobId: 'reject-text-job', stage: 'verify-correction', errors: [] });
+      const after = applicationRejectionTextRows();
+      assertStrict.deepEqual(after[0].messages, [patchWording]);
+      assertStrict.equal(after[0].stage, 'verify-correction');
+      assert(after[1].messages[0] !== patchWording, 'the same rejection recorded twice in a row is one row');
     },
   },
   {

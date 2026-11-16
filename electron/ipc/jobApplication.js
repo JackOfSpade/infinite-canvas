@@ -354,7 +354,7 @@ export function __pruneEmptyExportDirectoriesForTests(outputRoot, exportDir) {
  * and retryable because no discard occurs on the failed save path.
  */
 export function registerPendingApplicationWorkspace({
-  workDir, senderId, company = '', candidateName = '', documentScope = null, resumeHtmlPath,
+  workDir, senderId, company = '', location = '', candidateName = '', documentScope = null, resumeHtmlPath,
   resumePdfPath = null, coverLetterPdfPath = null, jobListingPath,
   resumePdfPageCount = null, coverLetterPdfPageCount = null,
   generationAuditPath = null, generationAuditJobId = null, generationAuditRequired = null,
@@ -450,7 +450,7 @@ export function registerPendingApplicationWorkspace({
     throw error;
   }
   pendingApplicationArtifacts.set(resolvedWorkDir, {
-    attemptId, senderId, company: String(company || ''), candidateName: String(candidateName || ''),
+    attemptId, senderId, company: String(company || ''), location: typeof location === 'string' ? location.trim() : '', candidateName: String(candidateName || ''),
     documentScope: documentScope === 'resume' || documentScope === 'cover' ? documentScope : null,
     identityCompany: identityCompany == null ? null : String(identityCompany),
     resumeHtmlPath: required[0], resumePdfPath: optional[0], coverLetterPdfPath: optional[1],
@@ -2598,7 +2598,14 @@ export function registerJobApplicationHandlers() {
     // Location is a hard part of job identity (§6.3) but here it's just a path
     // segment — a missing/unresolvable value degrades to a sane folder name
     // rather than collapsing the path (e.g. "Company//Role" if left empty).
-    const whereLocation = sanitizeFilePart(location, 'Unknown Location');
+    // The folder is named for the job as the application was written for it:
+    // the frozen job's location, which is the official posting's when one was
+    // verified. The card still shows what the job board said, and a board can
+    // be wrong (Dice filed a Mountain View, California role under Arkansas),
+    // so the card's value is only the fallback, and the place an earlier
+    // document of this same job may already be saved (see below).
+    const cardLocation = sanitizeFilePart(location, 'Unknown Location');
+    let whereLocation = pending.location ? sanitizeFilePart(pending.location, 'Unknown Location') : cardLocation;
     const role = sanitizeFilePart(jobTitle, 'Role');
     // Local AI registers a pre-validated project-relative root chosen in its
     // editable provider-neutral routine. The canvas-adjacent root remains a safe
@@ -2640,6 +2647,18 @@ export function registerJobApplicationHandlers() {
     } else if (listingSource) {
       try { precheckJobListingData = await fs.promises.readFile(listingSource); }
       catch { precheckJobListingData = null; }
+    }
+    // A second document joins the first one's folder. If this job's earlier
+    // document was saved under the card's location (before the folder took
+    // the official one, or when that lookup found no location), keep using
+    // that folder rather than splitting one application across two.
+    if (whereLocation !== cardLocation && precheckJobListingData && scrapedListingPath) {
+      const earlierDir = path.join(applicationOutputRoot, where, cardLocation, role);
+      try {
+        const earlierListing = await fs.promises.readFile(path.join(earlierDir, 'Scraped Listing.md'));
+        const earlierStat = await fs.promises.lstat(earlierDir);
+        if (earlierStat.isDirectory() && !earlierStat.isSymbolicLink() && earlierListing.equals(Buffer.from(precheckJobListingData))) whereLocation = cardLocation;
+      } catch { /* no earlier folder for this job: use the official location */ }
     }
     const baseDir = path.join(applicationOutputRoot, where, whereLocation, role);
     exportRoot = applicationOutputRoot;

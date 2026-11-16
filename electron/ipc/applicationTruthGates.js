@@ -173,10 +173,18 @@ export function validateSharedApplicationContent(response, state, input, authori
       }
       if (!nonemptyText(paragraph?.text)) errors.push(`${unit} has no text.`);
       const paragraphEvidenceIds = Array.isArray(paragraph?.evidenceIds) ? paragraph.evidenceIds : null;
-      if (!paragraphEvidenceIds || paragraphEvidenceIds.length < 1 || paragraphEvidenceIds.length > MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS) {
-        errors.push(`${unit} carries ${paragraphEvidenceIds ? paragraphEvidenceIds.length : 0} evidenceIds; every paragraph needs 1 to ${MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS} evidenceIds.`);
-      }
       const ids = paragraphEvidenceIds || [];
+      // The printed contract caps the CAREER quotes a paragraph cites ("no more
+      // than four distinct career quotes"). This gate used to count every ID,
+      // so a paragraph that followed the contract and also cited the posting
+      // quote for the need it answers (four career IDs plus one listing ID)
+      // was rejected for a total the prompt never stated.
+      const careerIdCount = new Set(ids.filter(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')).size;
+      if (ids.length < 1) {
+        errors.push(`${unit} carries 0 evidenceIds; every paragraph needs at least one evidenceId.`);
+      } else if (careerIdCount > MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS) {
+        errors.push(`${unit} carries ${careerIdCount} career-data evidenceIds; every paragraph needs 1 to ${MAX_COVER_LETTER_PARAGRAPH_EVIDENCE_IDS} career-data evidenceIds (listing quote IDs do not count toward this limit).`);
+      }
       for (const id of ids) if (!evidenceIds.has(id)) errors.push(`${unit} references unknown evidence ${String(id)}. evidenceIds may only name an ID from the accepted evidence plan.`);
       const careerQuotes = pasteCareerQuotesForEvidenceIds(ids, acceptedEvidence);
       if (!ids.some(id => acceptedEvidence.find(item => item?.id === id)?.sourceId === 'career-data')) {

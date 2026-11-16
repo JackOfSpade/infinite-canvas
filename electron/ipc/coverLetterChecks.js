@@ -3715,10 +3715,25 @@ const TARGET_APPLICATION_CONSTRUCTION = /\b(?:applying|bringing|contributing)\s+
 const TARGET_SCOPE_STOP_WORDS = new Set([
   'about', 'after', 'also', 'and', 'are', 'before', 'between', 'build', 'building', 'by', 'can', 'could', 'design', 'designing', 'develop', 'developing', 'experience', 'for', 'from', 'help', 'implement', 'implementing', 'in', 'into', 'is', 'make', 'making', 'of', 'on', 'or', 'our', 'support', 'supporting', 'that', 'the', 'this', 'through', 'to', 'usable', 'use', 'using', 'web', 'with', 'would', 'your',
 ]);
+// Connectives the closed FRAME_FUNCTION_WORDS set leaves out because the
+// sentence-shape check does not need them. Here they matter: a mechanic is two
+// adjacent CONTENT words, and “testing until” or “move onto” is a verb and the
+// word that joins it to the rest of the sentence. Terms are compared the way
+// scopeTerms writes them: lower case, trailing “s” removed.
+const TARGET_SCOPE_CONNECTIVES = new Set([
+  'onto', 'until', 'upon', 'toward', 'along', 'around', 'beyond', 'near', 'unles', 'once', 'whether', 'instead', 'rather',
+  'just', 'even', 'much', 'many', 'other', 'another', 'again', 'already', 'always', 'never', 'often', 'away', 'back',
+  'down', 'else', 'ever', 'however', 'thus', 'therefore', 'together', 'whenever', 'wherever', 'whatever',
+]);
+function scopeFunctionTerm(term) {
+  // scopeTerms strips a trailing “s”, so “across” arrives as “acros”.
+  return FRAME_FUNCTION_WORDS.has(term) || FRAME_FUNCTION_WORDS.has(`${term}s`) || TARGET_SCOPE_CONNECTIVES.has(term);
+}
 function sourceOnlyTerm(word, jobTerms, evidenceTerms) {
   const normalizedWord = word.replace(/s$/u, '');
   return normalizedWord.length >= 4
     && !TARGET_SCOPE_STOP_WORDS.has(normalizedWord)
+    && !scopeFunctionTerm(word) && !scopeFunctionTerm(normalizedWord)
     && evidenceTerms.has(normalizedWord)
     && !jobTerms.has(normalizedWord);
 }
@@ -3727,7 +3742,10 @@ function scopeTerms(value) {
   return words(value)
     .flatMap(word => word.split('-'))
     .filter(Boolean)
-    .map(word => word.replace(/s$/u, ''));
+    // A possessive is the same word: “approach's” used to become “approach'”,
+    // which no posting term could ever equal, so it always read as source-only.
+    .map(word => word.replace(/['’]s?$/u, '').replace(/s$/u, ''))
+    .filter(Boolean);
 }
 
 // Words that make a sentence target-facing, or carry the offer itself, without
@@ -3901,6 +3919,20 @@ function plausibleNamedCompany(value) {
   return Boolean(compact) && !NON_COMPANY_ACRONYMS.has(compact);
 }
 
+// Any past-tense verb, not a list of the ones seen so far: the regular “-ed”
+// form plus the common irregulars. The two closed lists beside it knew “built”
+// and “worked” but not “learned”, “formed” or “taught”, so the closing the
+// writer brief asks for (what the past work taught me, and how I would apply
+// it here) was refused as work aimed at the prior employer. Read only next to
+// a first-person subject or object (see the two patterns below), because a
+// bare “-ed” word is as often an adjective (“the needed skills”).
+const PAST_TENSE_VERB = String.raw`(?:\p{L}{2,}(?<!e)ed|agreed|began|became|bought|brought|built|came|caught|chose|cut|dealt|did|drew|drove|felt|found|gave|got|grew|had|heard|held|kept|knew|learnt|led|left|lost|made|meant|met|oversaw|paid|put|ran|rebuilt|read|rose|said|saw|sent|set|sold|spent|spoke|stood|taught|thought|told|took|undertook|understood|was|were|won|wrote)`;
+const FIRST_PERSON_PAST_ACTION = new RegExp(String.raw`\b(?:i|we)\s+(?:\p{L}+ly\s+)?${PAST_TENSE_VERB}\b|\b${PAST_TENSE_VERB}\s+(?:me|us)\b`, 'iu');
+// “… the habits I formed at <Employer>”: the employer is where it happened.
+// Not “to”: “the skills I gained to <Employer>” is not English, and “to” is
+// the preposition a destination takes.
+const FIRST_PERSON_PAST_BEFORE_EMPLOYER = new RegExp(String.raw`\b(?:i|we)\s+(?:\p{L}+ly\s+)?${PAST_TENSE_VERB}\s+(?:[\p{L}'’-]+\s+){0,5}(?:at|for|with)\s+$`, 'iu');
+
 function isPriorEmployerEvidenceBeforeProspectiveFrame(sentence, employerIndex) {
   const prospectiveIndex = sentence.search(PROSPECTIVE_COMPANY_FRAME);
   if (prospectiveIndex < 0 || employerIndex >= prospectiveIndex) return false;
@@ -3908,7 +3940,8 @@ function isPriorEmployerEvidenceBeforeProspectiveFrame(sentence, employerIndex) 
   // completed work there and only then turns to the target role. Do not let
   // a bare "At Acme, I would ..." construction borrow that allowance.
   const intervening = sentence.slice(employerIndex, prospectiveIndex);
-  return /\b(?:built|created|delivered|designed|developed|drove|implemented|improved|led|managed|operated|shipped|supported|worked)\b/iu.test(intervening);
+  return /\b(?:built|created|delivered|designed|developed|drove|implemented|improved|led|managed|operated|shipped|supported|worked)\b/iu.test(intervening)
+    || FIRST_PERSON_PAST_ACTION.test(intervening);
 }
 
 // The words of every tool name the module already treats as a technology, so a
@@ -3999,7 +4032,7 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
         ...aliasObjects,
         ...bindingAliases.flatMap(alias =>
           [...value.matchAll(new RegExp(`^(At|For|With|To)\\s+(${escapeRegExp(alias)})(?=,?\\s+(?:i|we)\\s+(?:would|could|can|will)\\b)`, 'giu'))].map(match => ({
-            value: match[2], index: 0, preposition: match[1].toLowerCase(), prefixEnd: match[0].indexOf(match[2]),
+            value: match[2], index: 0, preposition: match[1].toLowerCase(), opener: true, prefixEnd: match[0].indexOf(match[2]),
           }))),
         // Prior-employer subjects and plural possessives are prospective
         // targets too, without widening the ordinary preposition extractor.
@@ -4025,6 +4058,13 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
         const forbidden = sameCompanyReference(named, forbiddenAliases);
         if (knownPrior && isPriorEmployerEvidenceBeforeProspectiveFrame(value, employer.index)) continue;
         if (knownPrior && PAST_HISTORY_BEFORE_EMPLOYER.test(value.slice(0, employer.prefixEnd))) continue;
+        if (knownPrior && FIRST_PERSON_PAST_BEFORE_EMPLOYER.test(value.slice(0, employer.prefixEnd))) continue;
+        // “at <prior employer>” inside a sentence that separately binds the
+        // future work to this role, this team or the target by name says where
+        // the past work happened (“my work as an engineer at <Employer> is
+        // what I would bring to your team”). The sentence-opening “At
+        // <Employer>, I would …” is a separate entry and is still refused.
+        if (knownPrior && explicitlyTargetBound && employer.preposition === 'at' && !employer.opener) continue;
         if (!knownPrior && !forbidden) {
           if (namesOnlyTools(named)) continue;
           if (occursAsWholeName(named, postingCorpus) || occursAsWholeName(named, evidenceCorpus)) continue;

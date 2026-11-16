@@ -72,7 +72,7 @@ function appendLiteralList(lines, label, values) {
  * telemetry.  This function never follows a file path supplied by a renderer
  * or a card, and never reads an application artifact from disk.
  */
-function renderV2Output(output) {
+function renderV2Output(output, documentScope = null) {
   const resume = output?.documents?.resume;
   const coverLetter = output?.documents?.coverLetter;
   if (!resume || typeof resume !== 'object' || Array.isArray(resume)
@@ -80,15 +80,20 @@ function renderV2Output(output) {
   const roles = Array.isArray(resume.roles) ? resume.roles.filter(role => role && typeof role === 'object' && !Array.isArray(role)) : [];
   const projects = Array.isArray(resume.projects) ? resume.projects.filter(project => project && typeof project === 'object' && !Array.isArray(project)) : [];
   const skills = Array.isArray(resume.skills) ? resume.skills.filter(group => group && typeof group === 'object' && !Array.isArray(group)) : [];
-  const lines = [
+  let lines = [
     '',
     '## Application Output Evidence (APPOUTPUT)',
     '- Scope: the complete, typed visible-text projection of the final accepted résumé and cover letter, retained in this process at final-output validation. `FULL` includes this section; `APPOUTPUT` selects it directly.',
     '- Safety: this is an in-memory projection, never a renderer-provided path or a disk reread. Final prose is rendered as literal code and report redaction runs again at this boundary.',
     '- Completeness: no role, bullet, project, skill group/item, education/credential line, or visible cover-letter header/body field is selected as a sample.',
-    '',
-    '### Résumé',
   ];
+  // A one-document job has no other document. Saying "none in final résumé"
+  // for a letter-only run read as a résumé that had lost its content.
+  const resumeLines = [];
+  const letterLines = [];
+  const allLines = lines;
+  lines = resumeLines;
+  lines.push('', '### Résumé');
   const identity = resume.identity && typeof resume.identity === 'object' && !Array.isArray(resume.identity) ? resume.identity : {};
   appendLiteral(lines, 'Name', identity.name);
   appendLiteral(lines, 'Tagline', identity.tagline);
@@ -126,6 +131,7 @@ function renderV2Output(output) {
   } else lines.push('- Skill groups: none in final résumé.');
   appendLiteralList(lines, 'Education / credential line(s)', resume.education);
 
+  lines = letterLines;
   lines.push('', '### Cover Letter');
   appendLiteral(lines, 'Name', coverLetter.name);
   appendLiteral(lines, 'Tagline', coverLetter.tagline);
@@ -138,6 +144,12 @@ function renderV2Output(output) {
   appendLiteralList(lines, 'Final paragraphs', coverLetter.paragraphs);
   appendLiteral(lines, 'Closing', coverLetter.closing);
   appendLiteral(lines, 'Signature title', coverLetter.signatureTitle);
+
+  lines = allLines;
+  if (documentScope === 'cover') lines.push('', '### Résumé', '- Not part of this job: it produced only a cover letter. The résumé in the saved folder came from an earlier job and is not shown here.');
+  else lines.push(...resumeLines);
+  if (documentScope === 'resume') lines.push('', '### Cover Letter', '- Not part of this job: it produced only a résumé.');
+  else lines.push(...letterLines);
 
   const metadata = output.metadata && typeof output.metadata === 'object' && !Array.isArray(output.metadata) ? output.metadata : {};
   const resumeMetadata = metadata.resume && typeof metadata.resume === 'object' && !Array.isArray(metadata.resume) ? metadata.resume : {};
@@ -152,13 +164,15 @@ function renderV2Output(output) {
     ['Skill items', nonNegativeInteger(resumeMetadata.skillItemCount)],
     ['Education / credential lines', nonNegativeInteger(resumeMetadata.educationCount)],
     ['Cover-letter paragraphs', nonNegativeInteger(letterMetadata.paragraphCount)],
-  ].filter(([, value]) => value !== null);
+  ].filter(([, value]) => value !== null)
+    .filter(([label]) => documentScope === 'cover' ? label === 'Retained projection bytes' || label.startsWith('Cover-letter')
+      : documentScope === 'resume' ? !label.startsWith('Cover-letter') : true);
   lines.push('', '### Result Metadata');
   countLines.forEach(([label, value]) => lines.push(`- ${label}: ${value}`));
   const resumeDigest = digest(digests.resume);
   const coverDigest = digest(digests.coverLetter);
-  if (resumeDigest) lines.push(`- Résumé visible-text digest (SHA-256): \`${resumeDigest}\``);
-  if (coverDigest) lines.push(`- Cover-letter visible-text digest (SHA-256): \`${coverDigest}\``);
+  if (resumeDigest && documentScope !== 'cover') lines.push(`- Résumé visible-text digest (SHA-256): \`${resumeDigest}\``);
+  if (coverDigest && documentScope !== 'resume') lines.push(`- Cover-letter visible-text digest (SHA-256): \`${coverDigest}\``);
   const markdown = `${lines.join('\n')}\n`;
   return Buffer.byteLength(markdown, 'utf8') <= MAX_COMPLETE_OUTPUT_RENDER_BYTES ? markdown : null;
 }
@@ -180,7 +194,7 @@ export function buildApplicationOutputMarkdown(application) {
     return '\n## Application Output Evidence (APPOUTPUT)\n- Unavailable/removed: no final application-output snapshot is retained in this running app process. It was not audited. Reports from an earlier app process or after a discard cannot reconstruct it.\n';
   }
   if (output.version === 2 && output.state === 'available') {
-    const rendered = renderV2Output(output);
+    const rendered = renderV2Output(output, application?.documentScope === 'cover' || application?.documentScope === 'resume' ? application.documentScope : null);
     if (rendered) return rendered;
     return '\n## Application Output Evidence (APPOUTPUT)\n- Unavailable/removed: the retained final-output projection was malformed or exceeded the complete-report safety envelope. It was not partially sampled, so no complete prose-quality conclusion can be drawn.\n';
   }

@@ -6183,6 +6183,45 @@ export default [
     },
   },
 {
+    name: 'A letter-only application reports no résumé defect for the résumé it never wrote',
+    run: () => {
+      const prior = getApplicationTelemetry();
+      try {
+        const letterOnly = documentScope => {
+          recordApplicationTelemetry({
+            source: 'local-ai', attemptId: 'letter-only-report-test', nodeId: 'letter-only-card', windowId: 902, status: 'completed', phase: 'imported',
+            ...(documentScope ? { documentScope } : {}),
+            coverLetter: { paragraphs: ['One.', 'Two.'], contact: ['a@example.com'] },
+            render: { targetPageCount: 1, initialPageCount: null, finalPageCount: 1, baselinePageCount: 1, baselinePdfProduced: false,
+              attempts: [], coverLetterPageCount: 1, coverLetterPdfProduced: true },
+            resumeHtmlLen: 0,
+            resumeRoleBlockSample: { found: false },
+            resumeSkillsCoverage: { groups: 0, items: 0, required: [], indexed: ['React'], indexAbsent: ['React'], attested: ['React'] },
+            applicationOutput: { version: 2, state: 'available',
+              documents: { resume: { identity: {}, roles: [], projects: [], skills: [], education: [] },
+                coverLetter: { name: 'Sam Example', contact: [], salutation: 'Dear Team,', paragraphs: ['One.', 'Two.'], closing: 'Best regards,' } },
+              metadata: { retainedBytes: 100, resume: { roleCount: 0 }, coverLetter: { paragraphCount: 2 }, digests: {} } },
+          });
+          return generateMarkdown({ description: 'Letter only.', nodes: [{ id: 'letter-only-card', type: 'jobcard', data: {} }],
+            edges: [], drawings: [], frontEndState: {}, nodeInternals: [], nodeComponentStates: [], filterCode: 'FULL' }, 902).markdown;
+        };
+        const scoped = letterOnly('cover');
+        assert(scoped.includes('Document scope: cover letter only') && scoped.includes('Cover-letter final render: 1p · PDF produced'),
+          'the report names the scope and keeps the letter lines');
+        for (const falseAlarm of ['no PDF (HTML-only)', 'no skills block although', 'was not found in the final résumé markup', 'Résumé markup: 0 chars', 'none in final résumé', 'Résumé roles: 0']) {
+          assert(!scoped.includes(falseAlarm), `a letter-only job does not report ${JSON.stringify(falseAlarm)}`);
+        }
+        assert(scoped.includes('Not part of this job: it produced only a cover letter') && scoped.includes('Dear Team,'),
+          'the output evidence says the résumé was not part of the job and still shows the letter');
+        const both = letterOnly(null);
+        assert(both.includes('no PDF (HTML-only)') && both.includes('was not found in the final résumé markup') && both.includes('none in final résumé'),
+          'a job that owed a résumé still reports its absence');
+      } finally {
+        recordApplicationTelemetry(prior);
+      }
+    },
+  },
+{
     name: 'Application failure telemetry and APPLICATION filter remain diagnosable',
     run: () => {
       const prior = getApplicationTelemetry();

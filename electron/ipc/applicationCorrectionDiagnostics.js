@@ -11,7 +11,7 @@ const rows = [];
 // It exists because the cause codes say THAT a check failed and never why:
 // whether a source-grounding rejection is a real defect or a false alarm can
 // only be read from its wording.
-export const MAX_REJECTION_TEXT_CHECKS = 40;
+export const MAX_REJECTION_TEXT_CHECKS = 80;
 export const MAX_REJECTION_TEXT_MESSAGES = 8;
 export const MAX_REJECTION_TEXT_CHARS = 900;
 const rejectionTexts = [];
@@ -42,13 +42,33 @@ export function recordApplicationCorrectionCheck({ jobId, stage, errors = [] }) 
     outcome: unique.length ? 'rejected' : 'passed',
     findings: unique.length, repeated: errors.length - unique.length, counts });
   if (rows.length > 60) rows.shift();
-  if (unique.length) {
-    rejectionTexts.push({ at: rows.at(-1).at, stage, job: rows.at(-1).job,
-      total: unique.length,
-      messages: unique.slice(0, MAX_REJECTION_TEXT_MESSAGES).map(message => (message.length > MAX_REJECTION_TEXT_CHARS
-        ? `${message.slice(0, MAX_REJECTION_TEXT_CHARS - 1)}…` : message)) });
-    if (rejectionTexts.length > MAX_REJECTION_TEXT_CHECKS) rejectionTexts.shift();
-  }
+  if (unique.length) pushRejectionText({ at: rows.at(-1).at, stage, job: rows.at(-1).job, unique });
+}
+
+function pushRejectionText({ at, stage, job, unique }) {
+  const messages = unique.slice(0, MAX_REJECTION_TEXT_MESSAGES).map(message => (message.length > MAX_REJECTION_TEXT_CHARS
+    ? `${message.slice(0, MAX_REJECTION_TEXT_CHARS - 1)}…` : message));
+  // The document gate and the round recorder both see a gate rejection. Keep
+  // one row for it: the same job, stage and wording, back to back.
+  const last = rejectionTexts.at(-1);
+  if (last && last.job === job && last.stage === stage && last.total === unique.length
+    && last.messages.length === messages.length && last.messages.every((message, index) => message === messages[index])) return;
+  rejectionTexts.push({ at, stage, job, total: unique.length, messages });
+  if (rejectionTexts.length > MAX_REJECTION_TEXT_CHECKS) rejectionTexts.shift();
+}
+
+/**
+ * The wording of ANY rejected round, not only one the document gate judged. A
+ * reply rejected before that gate (a unit patch that named a settled unit, a
+ * reply that was not the asked-for shape, a rejected ranking or fact check)
+ * appeared in the durable trace as a bare check id with no wording anywhere,
+ * so it could not be told apart from a host fault.
+ */
+export function recordApplicationRejectionText({ jobId, stage, errors = [] }) {
+  const unique = [...new Set((Array.isArray(errors) ? errors : []).filter(error => typeof error === 'string' && error))];
+  if (!unique.length || typeof stage !== 'string' || !stage) return;
+  pushRejectionText({ at: new Date().toISOString(), stage: stage.slice(0, 40),
+    job: typeof jobId === 'string' && jobId ? createHash('sha256').update(jobId).digest('hex').slice(0, 10) : 'unknown', unique });
 }
 
 /** Newest first. Copies, so a renderer cannot change what the ring holds. */

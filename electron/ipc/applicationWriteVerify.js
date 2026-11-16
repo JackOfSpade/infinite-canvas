@@ -6,6 +6,7 @@ import { careerChangedFindingErrors, careerFactFindingErrors, careerFactFindings
 import { isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { cleanCareerSkillNames } from './careerCleanLayer.js';
 import { applicationSkillPermittedForPosting } from './applicationCareerAuthority.js';
+import { writeVerifyLetterCapacityLine } from './applicationV2LengthBudget.js';
 export const WRITE_VERIFY_PROTOCOL = 'write-then-verify.v2';
 export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;
 export const WRITE_VERIFY_MAX_CORRECTIONS = 3;
@@ -204,7 +205,10 @@ export function writeVerifySourcePrompt({ posting, requirements, listingEvidence
     `BRIEF: ${writeVerifyBriefFor(documentScope)}`,
     ...(typeof groundingContract === 'string' && groundingContract.trim()
       ? [`GROUNDING CONTRACT (deterministic checks read every unit against the quotes it cites, literally): ${groundingContract}`] : []),
-    Array.isArray(lengthBudget) && documentScope !== 'cover' ? `MEASURED RÉSUMÉ CAPACITY: Choose the structure that best plays this hand. These are upper estimates to help avoid overflow, not amounts to reach. Count résumé-content characters across bullet text, project descriptions and skill items. Actual one-page fit is checked after conversion.${documentScope === 'resume' ? '' : ' Keep the letter within one page too.'}\n${lengthBudget.map(row => `- ${row.structure.roles} roles, ${row.structure.projects} projects, ${row.structure.skillsRows} skills rows, ${row.structure.education} education row: up to ${row.maxBullets} bullets and ${row.maxCharacters} résumé-content characters.`).join('\n')}` : '',
+    Array.isArray(lengthBudget) && documentScope !== 'cover' ? `MEASURED RÉSUMÉ CAPACITY: Choose the structure that best plays this hand. These are upper estimates to help avoid overflow, not amounts to reach. Count résumé-content characters across bullet text, project descriptions and skill items. Actual one-page fit is checked after conversion.\n${lengthBudget.map(row => `- ${row.structure.roles} roles, ${row.structure.projects} projects, ${row.structure.skillsRows} skills rows, ${row.structure.education} education row: up to ${row.maxBullets} bullets and ${row.maxCharacters} résumé-content characters.`).join('\n')}` : '',
+    // A letter is measured against one page as well, and a letter-only job
+    // used to be told nothing about length at all.
+    documentScope !== 'resume' ? writeVerifyLetterCapacityLine() : '',
     `FROZEN POSTING:\n${posting}`,
     `FROZEN REQUIREMENTS AND LISTING QUOTES (extraction/audit only; no candidate matching):\n${JSON.stringify({ requirements, listingEvidence }, null, 2)}`,
     `TRUSTED IDENTITY AND ROLE FIELDS:\n${JSON.stringify({ identity, sourceRoles }, null, 2)}`,

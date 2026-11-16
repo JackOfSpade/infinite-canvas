@@ -9360,6 +9360,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // "why did I get a 2-page résumé" or "why is there no PDF" question is
     // answerable: attempts shows exactly what was tried (density per attempt,
     // measured page count or the error that aborted it) in generation order.
+    // A one-document job renders, measures and ships only that document. The
+    // other one's lines below would report an absence as a defect ("no PDF",
+    // "no skills block", "role block not found") when nothing was attempted.
+    const letterOnly = a.documentScope === 'cover';
+    const resumeOnly = a.documentScope === 'resume';
+    if (letterOnly) lines.push('- Document scope: cover letter only. No résumé was written, rendered or measured by this job, so no résumé line appears below.');
+    if (resumeOnly) lines.push('- Document scope: résumé only. No cover letter was written by this job, so no cover-letter line appears below.');
     if (a.render) {
       const r = a.render;
       // fontsLoaded is per-attempt (renderPdf's document.fonts.ready-plus-
@@ -9384,8 +9391,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       const resumeRevisionLabel = r.revisionApplied
         ? ` · ${r.revisionAttempts ?? 1} length-revision call(s)`
         : '';
-      lines.push(`- Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${resumeRevisionLabel}`);
-      if (attemptsStr) lines.push(`  - attempts: ${attemptsStr}`);
+      if (!letterOnly) lines.push(`- Résumé fit-loop (worst case, ALL candidate skills shown — NOT the shipped page count): target ${r.targetPageCount ?? '?'}p · ${r.initialPageCount ?? '?'}→${r.finalPageCount ?? '?'}p${r.compactApplied ? ' · compact applied' : ''}${resumeRevisionLabel}`);
+      if (attemptsStr && !letterOnly) lines.push(`  - attempts: ${attemptsStr}`);
       if (r.revisionDiagnostics?.input && r.revisionDiagnostics?.output) {
         const before = r.revisionDiagnostics.input;
         const after = r.revisionDiagnostics.output;
@@ -9418,8 +9425,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       // for this diagnostic. `not measured` means the baseline render itself
       // never completed (see the error line below), not that the number was
       // skipped to save time.
-      lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · web fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
-      if (r.coverLetterPageCount != null || r.coverLetterPdfProduced != null || r.coverLetterPdfError) {
+      if (!letterOnly) lines.push(`- Résumé shipped baseline: ${r.baselinePageCount != null ? `${r.baselinePageCount}p` : 'not measured'}${r.baselinePdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF (HTML-only)'}${r.baselineFontsLoaded === false ? ' · web fonts failed to load (page count measured against fallback typefaces — unreliable)' : ''}`);
+      if (!resumeOnly && (r.coverLetterPageCount != null || r.coverLetterPdfProduced != null || r.coverLetterPdfError)) {
         lines.push(`- Cover-letter final render: ${r.coverLetterPageCount != null ? `${r.coverLetterPageCount}p` : 'not measured'}${r.coverLetterPdfProduced ? ' · PDF produced' : ' · ⚠️ no PDF'}${r.coverLetterFontsLoaded === false ? ' · web fonts failed to load' : ''}${r.coverLetterPdfError ? ' · ⚠️ error recorded' : ''}`);
       }
       if (r.locationReviewRequired) {
@@ -9447,13 +9454,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       }
     }
     if (a.variantAttrs) lines.push(`- Résumé variant: \`${String(a.variantAttrs).slice(0, 200)}\``);
-    lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${a.resumeHtmlSample ? ' · sample captured (content withheld)' : ''}`);
+    if (!letterOnly) lines.push(`- Résumé markup: ${a.resumeHtmlLen || 0} chars${a.resumeHtmlSample ? ' · sample captured (content withheld)' : ''}`);
     // Whether the generated résumé's Skills block missed any technology name
     // the listing quotes and the career evidence also states. Metadata-only:
     // groups/items are clamped counts and required/absent are canonical
     // technology names, so a hostile telemetry value cannot smuggle a heading,
     // newline, or long content into the report.
-    if (a.resumeSkillsCoverage != null && typeof a.resumeSkillsCoverage === 'object' && !Array.isArray(a.resumeSkillsCoverage)) {
+    if (!letterOnly && a.resumeSkillsCoverage != null && typeof a.resumeSkillsCoverage === 'object' && !Array.isArray(a.resumeSkillsCoverage)) {
       const cov = a.resumeSkillsCoverage;
       const boundedCount = value => Number.isInteger(value) && value >= 0
         ? Math.min(value, 999)
@@ -9536,7 +9543,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     }
     const paragraphCount = Array.isArray(cl.paragraphs) ? cl.paragraphs.length : 0;
     const contactCount = Array.isArray(cl.contact) ? cl.contact.length : 0;
-    lines.push(`- Cover-letter fields: ${paragraphCount} paragraph(s) · ${contactCount} contact field(s) · content withheld.`);
+    if (!resumeOnly) lines.push(`- Cover-letter fields: ${paragraphCount} paragraph(s) · ${contactCount} contact field(s) · content withheld.`);
     if (a.resumeHtmlSample) {
       lines.push('- Résumé markup sample captured (content withheld).');
     }
@@ -9545,7 +9552,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // head-slice sample above because that slice never reaches it. Pulled
     // from the FINAL document, so a merge/create decision that filed a
     // verified skill under an unexpected heading is visible here.
-    if (a.resumeSkillsDlSample) {
+    if (!letterOnly && a.resumeSkillsDlSample) {
       if (a.resumeSkillsDlSample.found) {
         lines.push(`- Résumé Skills block found in final document${a.resumeSkillsDlSample.truncated ? ' (sample was truncated before withholding)' : ''}.`);
       } else {
@@ -9558,7 +9565,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // at all. One whole role shows what shipped: bullet count per role,
     // whether a role-meta row survived the summary cut, and where the
     // location ended up.
-    if (a.resumeRoleBlockSample) {
+    if (!letterOnly && a.resumeRoleBlockSample) {
       if (a.resumeRoleBlockSample.found) {
         lines.push(`- Résumé role-block structure found: ${a.resumeRoleBlockSample.roleCount || '?'} role(s)${a.resumeRoleBlockSample.truncated ? ' · sampled markup truncated before withholding' : ''}.`);
       } else {

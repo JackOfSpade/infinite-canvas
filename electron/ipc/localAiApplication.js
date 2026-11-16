@@ -43,7 +43,7 @@ import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_SCHEMA_VERSION, careerSn
 import { cleanCareerSkillNames, readCareerCleanLayer } from './careerCleanLayer.js';
 import { authorityEntityEvidenceQuotes, authorityProjectRoleOf, buildApplicationCareerAuthority, resolveAuthorityCertification, resolveAuthorityEducation, resolveAuthorityEvidence, resolveAuthorityProject, validateAuthorityCertificationEvidence, validateAuthorityEducationEvidence, validateAuthorityIdentityAndLocation, validateAuthorityProjectEvidence, validateAuthorityRoleEvidence, validateAuthoritySkillGroup } from './applicationCareerAuthority.js';
 import { recordApplicationCitationFlow } from './applicationCitationDiagnostics.js';
-import { recordApplicationCorrectionCheck } from './applicationCorrectionDiagnostics.js';
+import { recordApplicationCorrectionCheck, recordApplicationRejectionText } from './applicationCorrectionDiagnostics.js';
 import { MAX_SOURCE_GROUNDING_QUOTE_CHARS as SOURCE_GROUNDING_QUOTE_CHARS } from './applicationSourceLimits.js';
 import { canonicalizeHostOwnedResumeFields, hostOwnedResumeRecordFields } from './hostOwnedResumeFields.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
@@ -3069,6 +3069,223 @@ async function assertAuthorityAnchor({ input, jobListing, listingDigest = null, 
   if (canonicalFrozenValue(payload) !== canonicalFrozenValue(expected) || !/^[a-f0-9]{64}$/u.test(String(mac)) || !crypto.timingSafeEqual(Buffer.from(String(mac)), Buffer.from(expectedMac))) {
     throw new Error('The host-owned authority anchor does not match this job.');
   }
+}
+
+// REQUIREMENTS CARRY BETWEEN TWO JOBS OF ONE CARD. A card's résumé job and its
+// later letter-only job read the same posting, and the letter job used to
+// extract and audit that posting's requirements a second time. The first job's
+// private folder (and its authority store) is deleted when its bundle is
+// saved, and the saved bundle is a user-editable folder, so neither can be the
+// source. Instead a job that finishes its requirements audit leaves this
+// host-owned record beside the authority anchors, signed with the anchor key.
+// A letter-only job adopts it only when the record names the same canvas file
+// and card, was extracted from the byte-identical frozen posting (the store's
+// listing digest, which covers the official-posting text), under the same
+// method constants, and never needed a cap override. Adoption then replays the
+// same receipt checks a live requirements phase must pass against the NEW
+// job's own listing pages; anything short of that falls back to extraction.
+const REQUIREMENTS_JOB_CARRY_VERSION = 1;
+const REQUIREMENTS_JOB_CARRY_KIND = 'requirements-job-carry';
+const REQUIREMENTS_JOB_CARRY_MAX_BYTES = 8 * 1024 * 1024;
+const REQUIREMENTS_JOB_CARRY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+let requirementsJobCarryMethodSaltForTests = null;
+export function __setRequirementsJobCarryMethodSaltForTests(salt = null) {
+  requirementsJobCarryMethodSaltForTests = typeof salt === 'string' && salt ? salt : null;
+}
+export function __requirementsJobCarryPathForTests(jobId) {
+  return path.join(app.getPath('userData'), 'local-ai-requirements-carry', `${jobId}.json`);
+}
+// Re-signs an edited record with the real host key, so a test can present
+// content that is authentic by signature and still wrong for the new job.
+export async function __resignRequirementsJobCarryForTests(record) {
+  const { pages, ...payload } = record;
+  delete payload.mac;
+  const signed = { ...payload, pagesDigest: requirementsJobCarryPagesDigest(pages) };
+  return { ...signed, pages, mac: requirementsJobCarryMac(await authorityAnchorKey(await trustedAuthorityAnchorRoot()), signed) };
+}
+
+// Everything that decides what a requirements phase extracts and how it is
+// audited, other than the posting itself. A change to any of these makes an
+// older record a different method's output, so it is not reused.
+function requirementsJobCarryMethodDigest(input) {
+  return pasteJsonHash({
+    carryVersion: REQUIREMENTS_JOB_CARRY_VERSION,
+    applicationVersion: LOCAL_AI_APPLICATION_VERSION,
+    pasteProtocolVersion: PASTE_APPLICATION_PROTOCOL_VERSION,
+    authorityProtocol: authorityProtocolFor(input),
+    applicationProtocol: input?.applicationProtocol || null,
+    listingCoverageVersion: input?.listingCoverageVersion ?? null,
+    adjudicationVersion: REQUIREMENTS_ADJUDICATION_VERSION,
+    unitsPerHandoff: AUTHORITY_LISTING_COVERAGE_UNITS_PER_HANDOFF,
+    listingPageChars: EVIDENCE_PLAN_LISTING_PAGE_CHARS,
+    maxPageEvidence: MAX_EVIDENCE_PLAN_PAGE_EVIDENCE_ITEMS,
+    maxPageRequirements: MAX_EVIDENCE_PLAN_PAGE_REQUIREMENT_ITEMS,
+    maxReEpochs: MAX_REQUIREMENTS_REEPOCHS,
+    classificationDefinition: AUTHORITY_REQUIREMENT_CLASSIFICATION_DEFINITION,
+    ...(requirementsJobCarryMethodSaltForTests ? { testSalt: requirementsJobCarryMethodSaltForTests } : {}),
+  });
+}
+
+async function trustedRequirementsJobCarryRoot() {
+  const root = path.join(app.getPath('userData'), 'local-ai-requirements-carry');
+  await fs.promises.mkdir(root, { recursive: true, mode: 0o700 });
+  const stat = await fs.promises.lstat(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Requirements carry root is not a trusted directory.');
+  return fs.promises.realpath(root);
+}
+
+function requirementsJobCarryMac(key, payload) {
+  return crypto.createHmac('sha256', key).update(canonicalFrozenValue({ domain: REQUIREMENTS_JOB_CARRY_KIND, payload })).digest('hex');
+}
+
+function requirementsJobCarryPagesDigest(pages) {
+  return crypto.createHash('sha256').update(canonicalFrozenValue(pages)).digest('hex');
+}
+
+// Called once, when a job's requirements audit has converged and the manifest
+// says `write`. Returns null when this job's requirements are not reusable.
+async function writeRequirementsJobCarry({ store, input }) {
+  if (!isWriteVerifyJob(input) || !isRequirementsAdjudicationProtocol(input) || !usesAuthorityListingCoverage(input)
+    || typeof input.nodeId !== 'string' || !input.nodeId || !JOB_ID_RE.test(String(input.jobId || ''))) return null;
+  const active = await authorityRequirementsEpoch(store, input);
+  await assertAuthorityRequirementsAdjudicationHistory(store, input, { stage: 'write' });
+  await assertAuthorityListingSemanticAuditComplete(store, active);
+  const auditPageCount = authorityStoreReceipt(store).streams[active.auditStream]?.count || 0;
+  for (let index = 0; index < auditPageCount; index += 1) {
+    const page = await store.getReceiptPage(active.auditStream, index);
+    // A cap override accepted discovery's items over an audit that disagreed.
+    // The job that hit the cap may continue; another job must audit afresh.
+    if ((page.records || []).some(record => record?.receipt?.capOverride !== undefined)) return null;
+  }
+  const pages = [];
+  for await (const page of store.iterateReceiptPages(active.requirementsStream)) {
+    pages.push((page.records || []).map(record => ({ id: record.id, kind: record.kind,
+      ...(record.item !== undefined ? { item: record.item } : {}), ...(record.receipt !== undefined ? { receipt: record.receipt } : {}) })));
+  }
+  if (!pages.length) return null;
+  const payload = {
+    version: REQUIREMENTS_JOB_CARRY_VERSION, kind: REQUIREMENTS_JOB_CARRY_KIND,
+    jobId: input.jobId, canvasFilePath: input.canvasFilePath, nodeId: input.nodeId,
+    listingDigest: store.state.genesis.listingDigest, methodDigest: requirementsJobCarryMethodDigest(input),
+    sourceEpoch: active.epoch, requirementPageCount: pages.length, auditPageCount,
+    pagesDigest: requirementsJobCarryPagesDigest(pages), createdAt: new Date().toISOString(),
+  };
+  const root = await trustedRequirementsJobCarryRoot();
+  const key = await authorityAnchorKey(await trustedAuthorityAnchorRoot());
+  const record = { ...payload, pages, mac: requirementsJobCarryMac(key, payload) };
+  if (Buffer.byteLength(JSON.stringify(record), 'utf8') > REQUIREMENTS_JOB_CARRY_MAX_BYTES) return null;
+  await atomicWriteJson(path.join(root, `${input.jobId}.json`), record, { mode: 0o600, pretty: false, ensureDir: false });
+  // Bounded housekeeping: a letter follows its résumé within days.
+  const cutoff = Date.now() - REQUIREMENTS_JOB_CARRY_RETENTION_MS;
+  for (const entry of await fs.promises.readdir(root, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isFile() || !entry.name.endsWith('.json') || !JOB_ID_RE.test(entry.name.slice(0, -5))) continue;
+    const file = path.join(root, entry.name);
+    const stat = await fs.promises.lstat(file).catch(() => null);
+    if (stat?.isFile() && stat.mtimeMs < cutoff) await fs.promises.unlink(file).catch(() => {});
+  }
+  return payload;
+}
+
+// { carry } when the prior job's record may be adopted by this new job, else
+// { reason } naming the first condition that failed. Never throws.
+async function readRequirementsJobCarry({ priorJobId, input, store }) {
+  try {
+    if (typeof priorJobId !== 'string' || !JOB_ID_RE.test(priorJobId) || priorJobId === input.jobId) return { reason: 'no-prior-job' };
+    const root = await trustedRequirementsJobCarryRoot();
+    let raw;
+    try { raw = await readOwnedFile(root, path.join(root, `${priorJobId}.json`), { maxBytes: REQUIREMENTS_JOB_CARRY_MAX_BYTES, label: 'requirements carry record' }); }
+    catch (error) { if (error?.code === 'ENOENT') return { reason: 'prior-record-missing' }; throw error; }
+    const { mac, pages, ...payload } = JSON.parse(raw);
+    const key = await authorityAnchorKey(await trustedAuthorityAnchorRoot());
+    const expectedMac = requirementsJobCarryMac(key, payload);
+    if (!/^[a-f0-9]{64}$/u.test(String(mac)) || !crypto.timingSafeEqual(Buffer.from(String(mac)), Buffer.from(expectedMac))
+      || !Array.isArray(pages) || !pages.length || payload.pagesDigest !== requirementsJobCarryPagesDigest(pages)
+      || payload.version !== REQUIREMENTS_JOB_CARRY_VERSION || payload.kind !== REQUIREMENTS_JOB_CARRY_KIND
+      || payload.requirementPageCount !== pages.length) return { reason: 'prior-record-invalid' };
+    if (payload.jobId !== priorJobId || typeof input.nodeId !== 'string' || !input.nodeId || payload.nodeId !== input.nodeId
+      || payload.canvasFilePath !== input.canvasFilePath) return { reason: 'different-card' };
+    if (payload.methodDigest !== requirementsJobCarryMethodDigest(input)) return { reason: 'method-changed' };
+    if (payload.listingDigest !== store.state?.genesis?.listingDigest) return { reason: 'posting-changed' };
+    return { carry: { ...payload, pages } };
+  } catch (error) {
+    logger.warn(`[LocalAI] requirements carry record for ${priorJobId} could not be read: ${error?.message || error}`);
+    return { reason: 'prior-record-unreadable' };
+  }
+}
+
+// Writes the carried receipts into a freshly created store and proves them
+// against that store's own listing pages. Throws on any mismatch; the caller
+// then discards this store and starts at `requirements`.
+async function adoptRequirementsJobCarry({ store, input, carry }) {
+  const streams = await authorityRequirementsEpoch(store, input);
+  const receipt = authorityStoreReceipt(store);
+  if (streams.epoch !== 0 || (receipt.streams[streams.requirementsStream]?.count || 0) || (receipt.streams[streams.auditStream]?.count || 0)) {
+    throw new Error('Requirements can only be carried into a new authority store.');
+  }
+  const evidenceIds = new Set(); const requirementIds = new Set(); let requirementCount = 0; let listingEvidenceCount = 0;
+  const entries = [];
+  for (const records of carry.pages) {
+    if (!Array.isArray(records) || !records.length) throw new Error('A carried requirements page is empty.');
+    const coverage = records.filter(record => record?.kind === 'listing-coverage');
+    if (coverage.length !== 1 || !isJsonObject(coverage[0].receipt) || !Number.isSafeInteger(coverage[0].receipt.listingPageIndex)) {
+      throw new Error('A carried requirements page is missing its listing source-coverage receipt.');
+    }
+    const listingPage = await store.listingSlice(coverage[0].receipt.listingPageIndex);
+    entries.push({ stream: streams.requirementsStream, records: records.map(record => {
+      if (record.kind === 'listing-coverage') {
+        if (record.id !== `coverage:${record.receipt.listingPageIndex}:${record.receipt.unitStart}`) throw new Error('A carried listing-coverage receipt has a substituted id.');
+        return { id: record.id, kind: record.kind, receipt: record.receipt };
+      }
+      if (record.kind === 'listing-evidence') {
+        const item = record.item;
+        if (!isJsonObject(item) || record.id !== `e:${item.id}` || item.sourceId !== 'job-listing' || evidenceIds.has(item.id)
+          || requirementsListingQuoteErrors(item, listingPage.text).length) {
+          throw new Error('A carried listing quote is not an exact slice of this job’s frozen listing.');
+        }
+        evidenceIds.add(item.id); listingEvidenceCount += 1;
+        return { id: record.id, kind: record.kind, indexKeys: [authorityScopedRequirementIndexKey(streams.requirementsStream, 'e', item.id)], item };
+      }
+      if (record.kind === 'requirement') {
+        const item = record.item;
+        if (!isJsonObject(item) || record.id !== `r:${item.id}` || requirementIds.has(item.id) || typeof item.text !== 'string' || !item.text.trim()
+          || !Array.isArray(item.evidenceIds) || !item.evidenceIds.length) throw new Error('A carried requirement is malformed.');
+        requirementIds.add(item.id); requirementCount += 1;
+        const text = item.text.trim().replace(/\s+/gu, ' ').toLocaleLowerCase();
+        return { id: record.id, kind: record.kind, indexKeys: [authorityScopedRequirementIndexKey(streams.requirementsStream, 'r', item.id),
+          authorityScopedRequirementIndexKey(streams.requirementsStream, 'text', text)], item };
+      }
+      throw new Error('A carried requirements page holds an unknown record kind.');
+    }) });
+  }
+  for (const entry of entries) {
+    for (const record of entry.records) {
+      if (record.kind === 'requirement' && record.item.evidenceIds.some(id => !evidenceIds.has(id))) throw new Error('A carried requirement cites a listing quote that was not carried.');
+      if (record.kind === 'listing-coverage' && (record.receipt.dispositions || []).some(row => (row?.requirementIds || []).some(id => !requirementIds.has(id)))) {
+        throw new Error('A carried coverage receipt names a requirement that was not carried.');
+      }
+    }
+  }
+  if (entries.length === 1) await store.appendReceiptPage(entries[0].stream, entries[0].records);
+  else await store.appendReceiptPages(entries);
+  // The same replay a live requirements phase is held to: every unit of this
+  // store's own listing pages is covered, in order, by the carried receipts.
+  const cursor = await authorityListingCoverageCursor(store, streams.requirementsStream);
+  if (!cursor.complete) throw new Error('The carried requirements do not cover this job’s whole frozen listing.');
+  let auditPageCount = 0;
+  for (;;) {
+    const page = await authorityListingSemanticAuditPage(store, null, { requirementsStream: streams.requirementsStream, auditStream: streams.auditStream });
+    if (!page) break;
+    await store.appendReceiptPage(streams.auditStream, [{ id: `requirements-audit:${page.index}:${page.auditDigest}:carried-job`, kind: 'listing-semantic-audit',
+      receipt: { version: AUTHORITY_LISTING_COVERAGE_VERSION, auditDigest: page.auditDigest, pageIndex: page.index, pageDigest: page.digest,
+        rows: authoritySemanticAuditRows(page.dispositions), carriedFromJob: { jobId: carry.jobId, epoch: carry.sourceEpoch, pagesDigest: carry.pagesDigest } } }]);
+    auditPageCount += 1;
+  }
+  if (auditPageCount !== carry.auditPageCount) throw new Error('The carried requirements audit does not span the same windows as the job it came from.');
+  await assertAuthorityRequirementsAdjudicationHistory(store, input, { stage: 'write' });
+  await assertAuthorityListingSemanticAuditComplete(store, streams);
+  await currentAuthorityWorkflow(store, input);
+  return { fromJobId: carry.jobId, fromEpoch: carry.sourceEpoch, requirementPageCount: entries.length, auditPageCount,
+    requirementCount, listingEvidenceCount, listingDigest: carry.listingDigest, pagesDigest: carry.pagesDigest };
 }
 
 function assertFrozenEvidencePlanPagingState(paste, input, jobListing) {
@@ -7958,6 +8175,7 @@ async function recordWriteVerifyRoundDiagnostics({ root, dir, jobId, state, rawT
       revision: state.revision, logCount: state.logCount });
     return;
   }
+  recordApplicationRejectionText({ jobId, stage: state.stage, errors });
   const named = pasteRejectionCheckIds(errors);
   const checkIds = checkIdsOverride || named.checkIds;
   const checkFingerprints = checkIdsOverride ? {} : named.checkFingerprints;
@@ -9143,6 +9361,13 @@ export async function submitLocalApplicationHandoff({ jobId, canvasFilePath, han
     await atomicJson(path.join(dir, 'manifest.json'), updatedManifest);
     if (authorityLedgerToWrite || authorityStoreToWrite) await authorityLedgerPersistenceStep('ledger:manifest-pointer');
     if (authorityStoreToWrite) await authorityStoreToWrite.finalizePendingJournal();
+    // The requirements audit has just converged: leave the host-signed copy a
+    // later letter-only job of this card may adopt. Best-effort by design — a
+    // record that could not be written only means that job extracts again.
+    if (authorityStoreToWrite && next.stage === 'write' && ['requirements', 'requirements-audit', 'requirements-adjudication'].includes(state.stage)) {
+      try { await writeRequirementsJobCarry({ store: authorityStoreToWrite, input }); }
+      catch (carryError) { logger.warn(`[LocalAI] could not record reusable requirements for job ${jobId}: ${carryError?.message || carryError}`); }
+    }
     recordPasteHandoffDiagnostic({
       stage: state.stage, outcome: 'accepted', responseChars,
       // The only reason value an accepted outcome carries: a rejection
@@ -16649,10 +16874,37 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       }
     }
     await ensureDirectoryWithinRoot(dir, path.join(dir, 'context'), { mode: 0o700, label: 'Local AI context folder' });
-    const authorityStore = snapshotInput && pasteTransport
+    let authorityStore = snapshotInput && pasteTransport
       ? await createCurrentAuthorityStore({ dir, input: runtimeInput, listing: jobListing })
       : null;
-    const authorityListingPage = authorityStore ? await authorityCurrentListingPage(authorityStore, runtimeInput) : null;
+    // A letter-only job joining a résumé job of the same card adopts that
+    // job's audited requirements when they were extracted from this exact
+    // frozen posting (see REQUIREMENTS CARRY above). Every other outcome
+    // leaves `requirementsCarry` null and the job starts at `requirements`.
+    let requirementsCarry = null;
+    let requirementsCarryEvidencePlan = null;
+    if (authorityStore && isWriteVerifyJob(runtimeInput) && runtimeInput.documentScope === 'cover' && args.priorLocalApplicationId) {
+      const found = await readRequirementsJobCarry({ priorJobId: args.priorLocalApplicationId, input: runtimeInput, store: authorityStore });
+      let skipped = found.reason || null;
+      if (found.carry) {
+        try {
+          requirementsCarry = await adoptRequirementsJobCarry({ store: authorityStore, input: runtimeInput, carry: found.carry });
+          requirementsCarryEvidencePlan = (await writeVerifyFrozenContext(runtimeInput, { authorityStore })).evidencePlan;
+        } catch (carryError) {
+          // The store may hold a partial carry. Nothing else lives in this
+          // new job's context folder yet, so rebuild it from the frozen
+          // sources and extract the requirements as usual.
+          logger.warn(`[LocalAI] carried requirements for job ${id} failed verification: ${carryError?.message || carryError}`);
+          requirementsCarry = null; requirementsCarryEvidencePlan = null; skipped = 'verification-failed';
+          await fs.promises.rm(path.join(dir, 'context'), { recursive: true, force: true });
+          authorityStore = await createCurrentAuthorityStore({ dir, input: runtimeInput, listing: jobListing });
+        }
+      }
+      logger.info(requirementsCarry
+        ? `[LocalAI] job ${id} reuses the requirements of job ${requirementsCarry.fromJobId} (${requirementsCarry.requirementCount} requirements, ${requirementsCarry.auditPageCount} audited page(s))`
+        : `[LocalAI] job ${id} extracts its own requirements (${skipped})`);
+    }
+    const authorityListingPage = authorityStore && !requirementsCarry ? await authorityCurrentListingPage(authorityStore, runtimeInput) : null;
     if (authorityStore) await writeAuthorityAnchor({ input, listingDigest: authorityStore.state.genesis.listingDigest, genesisDigest: authorityStoreGenesisDigest(authorityStore) });
     const manifest = {
       version: LOCAL_AI_APPLICATION_VERSION, id, status: 'queued', createdAt: input.createdAt,
@@ -16667,14 +16919,17 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       transport: pasteTransport ? 'paste' : 'filesystem',
       ...(pasteTransport ? {
         paste: {
-          version: PASTE_APPLICATION_PROTOCOL_VERSION, stage: authorityStore ? 'requirements' : 'evidence-plan', revision: 0,
+          version: PASTE_APPLICATION_PROTOCOL_VERSION, stage: requirementsCarry ? 'write' : authorityStore ? 'requirements' : 'evidence-plan', revision: 0,
           // A freshly created job has rotated no code yet, so there is
           // nothing to tolerate: the array starts empty and every later
           // rotation site (rotatePasteHandoffCode) is what grows it.
           handoffCode: pasteHandoffCode(), priorHandoffCodes: [], baseHashes: pasteBaseHashesFor({}),
           ...(input.careerAuthority ? { careerAuthorityDigest: input.careerAuthority.snapshotDigest } : {}),
           ...(authorityStore ? { authorityStore: authorityStoreReceipt(authorityStore) } : {}),
-          evidencePlan: null, resume: null, coverLetter: null, findings: [], logCount: 0,
+          evidencePlan: requirementsCarry ? requirementsCarryEvidencePlan : null, resume: null, coverLetter: null, findings: [],
+          // The carried-requirements row below is this job's sequence 1.
+          logCount: requirementsCarry ? 1 : 0,
+          ...(requirementsCarry ? { trustedIdentity: authorityTrustedIdentity(applicationCareerAuthority(runtimeInput)) } : {}),
           ...(snapshotInput && !args[LEGACY_APPLICATION_TEST_CAPABILITY]
             ? { writeVerify: initialWriteVerifyState(writeVerifyCandidateCount(args.candidateCount)) } : {}),
         },
@@ -16689,7 +16944,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       canvasRoot: canvas.canvasRoot,
       routinePath,
     });
-    if (pasteTransport) {
+    if (pasteTransport && !requirementsCarry) {
       // Do this before any queue file is written. The exact stage-one prompt
       // includes every frozen component (career corpus, host catalog, skills,
       // listing, role projection, and contracts), so no oversized job can be
@@ -16703,6 +16958,14 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
       ...(snapshotInput ? [] : [fs.promises.writeFile(path.join(dir, 'context', 'career-data.txt'), careerData, { encoding: 'utf8', mode: 0o600 })]),
       ...(pasteTransport ? [appendPasteGenerationLog(dir, { type: 'paste-job-created', sequence: 0, jobId: id, stage: authorityStore ? 'requirements' : 'evidence-plan' })] : [fs.promises.writeFile(path.join(dir, 'LOCAL_AI_PROMPT.md'), launchPrompt, { encoding: 'utf8', mode: 0o600 })]),
     ]);
+    // Metadata only (ids, counts, digests): which job the requirements came
+    // from and that this job never ran the requirements stages itself.
+    if (requirementsCarry) {
+      await appendPasteGenerationLog(dir, { type: 'authority-requirements-carried-from-job', jobId: id, sequence: 1, revision: 0, stage: 'requirements', nextStage: 'write',
+        fromJobId: requirementsCarry.fromJobId, fromEpoch: requirementsCarry.fromEpoch, requirementPageCount: requirementsCarry.requirementPageCount,
+        auditPageCount: requirementsCarry.auditPageCount, requirementCount: requirementsCarry.requirementCount, listingEvidenceCount: requirementsCarry.listingEvidenceCount,
+        listingDigest: requirementsCarry.listingDigest, pagesDigest: requirementsCarry.pagesDigest, storeReceipt: authorityStoreReceipt(authorityStore) });
+    }
     // LOCAL_AI_JOB_PHASES's own header: the first stamp in this job's life,
     // so a folder that later vanishes with no discard/prune/save stamp on top
     // of it still names the one phase the app ever saw it reach. Best-effort —
@@ -16712,7 +16975,7 @@ async function queueLocalApplicationJobWithAuthority(args = {}, signal = null, r
     throwIfAborted(signal);
     return { id, status: 'queued', mode: pasteTransport ? 'paste' : 'filesystem', folder: dir, canvasFilePath: canvas.canonicalCanvasFilePath,
       officialPosting: job.officialPosting, postedBy: job.postedBy, officialPostingTelemetry,
-      prompt: launchPrompt, message: pasteTransport ? `Paste-back application job is ready. Copy the ${authorityStore ? 'requirements' : 'evidence-plan'} prompt and paste the JSON response back into Infinite Canvas.` : 'Local AI job is ready beside this canvas in .local-ai/jobs. Paste LOCAL_AI_PROMPT.md into any local coding-agent with filesystem access.' };
+      prompt: launchPrompt, message: pasteTransport ? `Paste-back application job is ready. Copy the ${requirementsCarry ? 'write' : authorityStore ? 'requirements' : 'evidence-plan'} prompt and paste the JSON response back into Infinite Canvas.` : 'Local AI job is ready beside this canvas in .local-ai/jobs. Paste LOCAL_AI_PROMPT.md into any local coding-agent with filesystem access.' };
   } catch (error) {
     await fs.promises.rm(dir, { recursive: true, force: true }).catch(() => {});
     throw error;
@@ -17818,6 +18081,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       achievements: achievementTelemetry,
       coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
       applicationOutput: localAiApplicationOutputTelemetry(result),
+      // Which document this job produced: a letter-only or résumé-only run
+      // has no other document, and the report must not warn that it is missing.
+      documentScope: documentScope || null,
       render: {
         targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
         finalPageCount: resumeFit.pageCount, attempts: resumeFit.attempts,
@@ -17945,6 +18211,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
       achievements: achievementTelemetry,
       coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
       applicationOutput: localAiApplicationOutputTelemetry(result),
+      // Which document this job produced: a letter-only or résumé-only run
+      // has no other document, and the report must not warn that it is missing.
+      documentScope: documentScope || null,
       render: {
         targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
         finalPageCount: resumeFit.pageCount, baselinePageCount: resumeFit.pageCount,
@@ -18065,6 +18334,9 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
     jobTitle: input.job?.title || '', company: input.job?.company || '', jobLocation: input.job?.location || '',
     coverLetter: localAiCoverLetterTelemetry(result.coverLetter),
     applicationOutput: localAiApplicationOutputTelemetry(result),
+    // Which document this job produced: a letter-only or résumé-only run
+    // has no other document, and the report must not warn that it is missing.
+    documentScope: documentScope || null,
     render: {
       targetPageCount, initialPageCount: resumeFit.attempts[0]?.pageCount ?? null,
       finalPageCount: resumeFit.pageCount, baselinePageCount: resumeFit.pageCount,
@@ -18103,6 +18375,8 @@ async function importLocalApplicationJobAttempt({ jobId, canvasFilePath, senderI
   await assertLocalAiResultHashCurrent(root, dir, resultSha256);
   const workDir = registerPendingApplicationWorkspace({
     workDir: dir, senderId, company: input.job?.company || input.job?.postedBy, candidateName, documentScope,
+    // The frozen job carries the official posting's location when one was verified.
+    location: typeof input.job?.location === 'string' ? input.job.location : '',
     identityCompany: typeof manifest.scrapedCompany === 'string' ? manifest.scrapedCompany : null,
     resumeHtmlPath, resumePdfPath, coverLetterPdfPath, jobListingPath, scrapedListingPath, generationAuditPath, generationLogPath, generationAuditDispositionPath,
     resumePdfPageCount: resumePdf ? resumeFit.pageCount : null,

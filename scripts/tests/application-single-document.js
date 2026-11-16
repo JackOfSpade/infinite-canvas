@@ -247,6 +247,11 @@ export default [
       assert.ok(sourceFor('resume').includes(`BRIEF: ${WRITE_VERIFY_RESUME_BRIEF}`));
       assert.ok(sourceFor('cover').includes(`BRIEF: ${WRITE_VERIFY_COVER_BRIEF}`));
       assert.ok(sourceFor(null).includes(`BRIEF: ${WRITE_VERIFY_BRIEF}`));
+      // The letter is measured against one page in every job that writes one.
+      // A letter-only job used to print no length at all.
+      assert.match(sourceFor('cover'), /MEASURED LETTER CAPACITY: The letter must fit one page/u);
+      assert.match(sourceFor(null), /MEASURED LETTER CAPACITY: The letter must fit one page/u);
+      assert.equal(/MEASURED LETTER CAPACITY/u.test(sourceFor('resume')), false);
       const state = initialWriteVerifyState(1);
       const evidence = { schemaVersion: 'structured-resume.v1', identity: { name: 'N', contact: [] }, roles: [{ id: 'r1', title: 'T', company: 'C', dates: 'D', bullets: [{ id: 'evidence-1', text: 'Approved quote text.', evidenceIds: ['x'] }] }] };
       const letter = { paragraphs: [{ id: 'p1', text: 'Letter text.', evidenceIds: ['x'] }], roleThesis: 'Thesis', coverLetterArgument: { primaryEvidence: { evidence: 'Approved quote text.', evidenceRole: 'T at C', relationToThesis: 'R' } } };
@@ -497,6 +502,50 @@ export default [
         assert.equal(letterPair.generated.resume, '');
         assert.ok(letterPair.generated.letter);
         assert.deepEqual(editSummaries(letterPair.generated, documentSnapshot(synced(coverOnly('log-only'))), 'id', 'at'), []);
+      } finally { await fs.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'the saved folder takes the official posting location, and a second document still joins a folder saved under the card location',
+    async run() {
+      registerJobApplicationHandlers();
+      const saveApplication = ipcMain.__getInvokeHandler('save-application');
+      const listing = '# Synthetic role\n\nThe same original listing.\n';
+      const scraped = '# Synthetic role\n\n**Location:** Lakeview, Arkansas\n\nScraped text.\n';
+      const sender = { id: 942, isDestroyed: () => false, once: () => {}, on: () => {}, removeListener: () => {} };
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-location-save-'));
+      const outputRoot = path.join(root, 'Applied Jobs');
+      await fs.mkdir(outputRoot);
+      await fs.writeFile(path.join(root, 'canvas.json'), '{}');
+      const save = async (name, documentScope, html, { company, officialLocation }) => {
+        const workDir = path.join(root, 'stage', name);
+        await fs.mkdir(workDir, { recursive: true });
+        const resumeHtmlPath = path.join(workDir, 'Application.html');
+        const jobListingPath = path.join(workDir, 'Original Job Listing.md');
+        const scrapedListingPath = path.join(workDir, 'Scraped Listing.md');
+        await fs.writeFile(resumeHtmlPath, html); await fs.writeFile(jobListingPath, listing); await fs.writeFile(scrapedListingPath, scraped);
+        registerPendingApplicationWorkspace({ workDir, senderId: sender.id, company, location: officialLocation, documentScope, applicationRoot: outputRoot,
+          resumeHtmlPath, jobListingPath, scrapedListingPath, cleanupOnDiscard: false, cleanupOnSaveFailure: false,
+          artifactData: { resumeHtml: html, jobListing: listing, scrapedListing: scraped } });
+        return saveApplication({ sender }, { resumeHtmlPath, resumePdfPath: null, coverLetterPdfPath: null, jobListingPath,
+          generationAuditPath: null, generationLogPath: null, scrapedListingPath, workDir,
+          jobTitle: 'Synthetic Role', location: 'Lakeview, Arkansas', canvasFilePath: path.join(root, 'canvas.json'), suppressReveal: true });
+      };
+      try {
+        // The board said Arkansas; the verified official posting says California.
+        const fresh = await save('fresh', 'resume', resumeOnly('loc-r'), { company: 'Fresh Co', officialLocation: 'Lakeview, California' });
+        assert.equal(fresh.success, true, fresh.error);
+        assert.equal(path.basename(path.dirname(fresh.dir)), 'Lakeview, California', 'the folder is named for the official location');
+        const letter = await save('fresh-letter', 'cover', coverOnly('loc-c'), { company: 'Fresh Co', officialLocation: 'Lakeview, California' });
+        assert.equal(letter.dir, fresh.dir, 'the second document joins it');
+        // No official location was found: the card's value still names the folder.
+        const fallback = await save('fallback', 'resume', resumeOnly('loc-f'), { company: 'Fallback Co', officialLocation: '' });
+        assert.equal(path.basename(path.dirname(fallback.dir)), 'Lakeview, Arkansas');
+        // A résumé saved under the card location earlier keeps its folder when the letter arrives with an official one.
+        const joined = await save('joined', 'cover', coverOnly('loc-j'), { company: 'Fallback Co', officialLocation: 'Lakeview, California' });
+        assert.equal(joined.success, true, joined.error);
+        assert.equal(joined.dir, fallback.dir, 'one application is not split across two location folders');
+        assert.deepEqual(joined.savedDocuments, { resume: true, cover: true });
       } finally { await fs.rm(root, { recursive: true, force: true }); }
     },
   },

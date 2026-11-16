@@ -81,6 +81,31 @@ Shadow measurement: launch the app with `INFINITE_CANVAS_SHADOW_OFFLOAD` (comma 
 
 ## Session log
 
+### 2026-11-16 — bug-report fixes from a three-letter run; host checks and letter length; counter not reset
+
+Not a session. A bug report on three letter-only jobs (all saved, 35 to 47 Claude runs each) showed four host causes of wasted rounds. The writer brief, the rubric and the model routing are unchanged.
+
+- **A letter-only job printed no length.** The capacity section was résumé-only and the letter-only brief has no page sentence, so 16 letter drafts measured 102% to 135% of the page. The source prompt now prints `MEASURED LETTER CAPACITY` (about 2,400 paragraph characters at five paragraphs, measured from the three accepted letters and the 917.76px type area) for every job that writes a letter (`applicationV2LengthBudget.js`).
+- **The paragraph citation cap counted listing IDs.** The contract says no more than four career quotes; the gate counted every ID, so four career quotes plus the posting quote was rejected (11 rejections, most of them "carries 5"). The gate now counts career-data IDs.
+- **`target-claim-scope` read connectives as prior-work mechanics** ("while keeping", "move onto", "testing until", and a possessive). A mechanic is now two adjacent content words.
+- **`target-company-binding` refused the closing the brief asks for** ("what I learned at <prior employer> is what I would apply in this role"). A prior employer named as where past work happened, in a sentence bound to this role, is no longer read as the target. Future work aimed at a prior employer is still refused.
+
+Report: a one-document job no longer prints the other document's absence as a defect, and the rejection wording ring now keeps rounds rejected before the document gate (unit patches, wrong shapes).
+
+Test: focused suites and the full unit suite. No live generation was run, so the effect on rounds per letter is not measured yet; the next letter-only bundles are the measurement.
+
+### 2026-11-16 — a letter-only job reuses its card's audited requirements; mechanics only; counter not reset
+
+Evidence: a bug report on three letter-only jobs. Each one extracted and audited the posting's requirements again about 30 minutes after the same card's résumé job had done so. In the one log read closely, the résumé job ran 10 requirements rounds and the letter job 16 more (about 4.5 minutes, a third of that letter's 47 runs) before any letter was written.
+
+Change: when a job's requirements audit converges and it moves to `write`, it now leaves a host-signed copy of the active epoch's requirements pages in `userData/local-ai-requirements-carry/<jobId>.json` (signed with the authority-anchor key, mode 0600, pruned after 30 days). The résumé job's own store cannot be the source: its private folder is deleted when the bundle is saved, and the saved folder is user-editable. A letter-only job (`documentScope: 'cover'`) whose `priorLocalApplicationId` names that job adopts the copy only when all of these hold: the signature and page digest verify; the record names the same canvas file and card (`nodeId`); the new store's listing digest equals the record's (the frozen listing text, which includes the official-posting text); the method digest is unchanged (authority and application protocols, coverage and adjudication versions, units per handoff, page size, per-page limits, re-epoch cap, classification definition); and no audit page of the source epoch was a cap override. Adoption then replays the live phase's own checks against the new job's listing pages: every quote an exact slice of its page, the coverage cursor complete over every source unit, the audit and adjudication history assertions, and the non-empty-requirements check. A failure at any point rebuilds a clean store and the job starts at `requirements` as before. No truth check, prompt, or brief changed.
+
+A carried job starts at `write` with the requirements in its own store, audit receipts marked `carriedFromJob`, and a metadata-only `authority-requirements-carried-from-job` log row at sequence 1 (source job id and epoch, counts, digests).
+
+Not carried, by choice: a source job that reached the re-epoch cap (its audit disagreed and was overridden), and any job other than letter-only.
+
+Test: `local-ai-application.js` drives a résumé job through the requirements phase, then shows a matching letter job starts at `write`, and that a changed posting, another card, a missing record, a different method digest, an edited record, and two host-signed records that do not fit the posting all start at `requirements`. No live generation was run: the saving per letter is every requirements, audit and adjudication round (16 in the logged letter), and the first live letter after a résumé is the measurement.
+
 ### 2026-11-16 — improvement session; no generator change; career source reworded; counter reset
 
 Run with the counter at 3. Coverage: all 3 pairs since the 2026-11-15 session, one model label, none superseded, all on one career snapshot. All three were résumé-only. Two résumés were saved unedited; one carried two bullet edits, both with notes. No truth errors, and no edit was source-resolved.

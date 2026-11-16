@@ -23,3 +23,16 @@ export function writeVerifyLengthBudgets(profile, sourceRoles) {
     ...(projectCount ? [writeVerifyLengthBudgetForStructure({ roles, education, skillsRows: Math.min(1, availableSkills), projects: projectCount })] : []),
   ];
 }
+
+/**
+ * Cover-letter capacity, measured on 2026-11-16 from three accepted one-page
+ * letters and their rendered type area (917.76px): 2,160 paragraph characters
+ * in four paragraphs filled 86% of the page, 2,260 and 2,440 in five filled
+ * 96%. A letter-only job printed no length at all, so 16 of that run's letter
+ * drafts measured 102% to 135% of the page and each cost a shortening round.
+ * An upper estimate that leaves a margin; the fit gate remains the authority.
+ */
+export const WRITE_VERIFY_LETTER_CAPACITY = Object.freeze({ paragraphs: 5, maxCharacters: 2400, perExtraParagraphCharacters: 100 });
+export function writeVerifyLetterCapacityLine({ paragraphs, maxCharacters, perExtraParagraphCharacters } = WRITE_VERIFY_LETTER_CAPACITY) {
+  return `MEASURED LETTER CAPACITY: The letter must fit one page together with its letterhead, date, salutation and closing. At ${paragraphs} paragraphs the page holds about ${maxCharacters} characters of paragraph text, spaces included; each paragraph beyond that costs about ${perExtraParagraphCharacters} characters. This is an upper estimate to help avoid overflow, not an amount to reach. Actual one-page fit is checked after conversion.`;
+}

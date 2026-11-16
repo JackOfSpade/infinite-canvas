@@ -2511,7 +2511,52 @@ export default [
       ].map(sentence => checkTargetClaimScope({}, [sentence], priorWorkEvidence, posting));
       assert(synonymClaims.every(check => check.passed),
         `a single synonym of a posting word is not reported as a leaked prior-work mechanic (${synonymClaims.map(check => check.detail).join(' | ')})`);
+      // A mechanic is two adjacent CONTENT words. A verb and the connective
+      // beside it, or a possessive of a word the posting does not use, is
+      // ordinary sentence glue that happens to occur in the career data.
+      const glueEvidence = {
+        bulletTexts: [
+          ...priorWorkEvidence.bulletTexts,
+          'Migrated clinics onto the new workbook while keeping reports available, testing until each approach\'s results matched.',
+        ],
+      };
+      const glueClaims = [
+        'For this role\'s attendance reporting, I would bring careful rollout habits while keeping managers informed.',
+        'For this role\'s attendance reporting, I would bring care in helping managers move onto new workflows.',
+        'For this role\'s attendance reporting, I would bring a habit of testing until managers trust the result.',
+        'For this role\'s attendance reporting, I would bring a way of weighing each approach\'s cost for managers.',
+      ].map(sentence => checkTargetClaimScope({ roleThesis: sentence }, [sentence], glueEvidence, posting));
+      assert(glueClaims.every(check => check.passed),
+        `a connective beside a verb, or a possessive, is not a prior-work mechanic (${glueClaims.map(check => check.detail).join(' | ')})`);
       return { leaked: leaked.detail, general: general.detail };
+    },
+  },
+  {
+    name: 'cover letter harness: a prior employer named as where past work happened is not a misdirected target',
+    run: () => {
+      const prior = ['Northgate School District', 'Harbor Health Analytics'];
+      const check = sentence => checkTargetCompanyBinding([sentence], 'Lumen Path', prior);
+      // The writer brief asks for exactly these: the need this job has, the
+      // past job the proof comes from, and a closing on what that work taught.
+      const evidenceUses = [
+        'I would bring the habits I formed at Northgate School District to this role.',
+        'What I learned at Northgate School District is what I would apply in this role.',
+        'My work as a Software Engineer at Northgate School District is the experience I would bring to your team.',
+        'Northgate School District\'s internal tools hub taught me how I would plan features for your platform.',
+        'For your need to design and build services, my strongest match is the web app I built from scratch at Northgate School District.',
+      ].map(check);
+      assert(evidenceUses.every(result => result.passed),
+        `past work at a prior employer may be named beside the target it is offered to (${evidenceUses.filter(result => !result.passed).map(result => result.detail).join(' | ')})`);
+      const misdirected = [
+        'At Northgate School District, I would bring this habit to your team.',
+        'I would bring the needed skills to Northgate School District.',
+        'I am excited to join Northgate School District and support your team.',
+        'In this role I would build internal tools for Northgate School District.',
+        'I would improve Northgate School District\'s reporting in this role.',
+        'I can contribute at Northgate School District from day one.',
+      ].map(check);
+      assert(misdirected.every(result => !result.passed),
+        'future work aimed at a prior employer is still refused, whatever else the sentence names');
     },
   },
   {

@@ -5,7 +5,7 @@ import { getRecentLogs } from '../../electron/logger.js';
 import { assert, assertCandidateDashPunctuation, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildCoverLetterDocument, buildLocalGenerationAuditArtifact, buildResumeDocument, careerDataRoleLocation, sanitizeDocumentMainHtml, checkAnchorRelevance, checkDirectWelcomeClosing, checkPriorEmployerOpening, checkResumeBulletLength, checkResumeRoleBulletBudget, evaluateResumeProseChecks, extractResumeEvidence, inspectApplicationExport, renderStructuredApplicationResume, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, RESUME_ROLE_BULLET_CEILING, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume, webFontFacesReadyExpression, canRegenerateLocalApplication, canSaveImportedLocalApplication, discardLocalApplicationJob, discoverLocalApplicationJobs, ensureDirectoryWithinRoot, fs, getApplicationTelemetry, getLocalApplicationHandoff, ipcMain, isPendingApplicationWorkspaceSaveInFlight, JSDOM, openAuthorityLedgerStore, os, path, PDFLib, LOCAL_AI_APPLICATION_VERSION, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, collectNodesDeep, deepUpdateNode, importLocalApplicationJob, isJobCardMounted, localApplicationStatus,   queueLocalApplicationJob, queuedLocalApplicationSettlement, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerLocalAiApplicationHandlers, registerMountedJobCard, registerPendingApplicationWorkspace, replacedLocalApplicationForCleanup, resolveLocalOutputBundleRoot, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, failedOrphanRetireDecision, LOCAL_AI_FAILED_ORPHAN_RETIRE_MS, submitLocalApplicationHandoff, unregisterMountedJobCard, validateLocalApplicationResult, withLocalAiJobPruneClaim, withUnregisteredApplicationWorkspacePruneClaim, __setAuthorityLedgerStoreFaultHookForTests } from '../test-dependencies.js';
 import { localAiSkillsCoverageTelemetry, subscribeLocalApplicationDiscards, APPLICATION_QUALITY_CHECKLIST_VERSION, APPLICATION_QUALITY_CRITERIA, COVER_LETTER_SECONDARY_NARRATIVE_ROLES, LOCAL_AI_GENERATION_AUDIT_VERSION, MAX_CORRECTION_STAGE_PROMPT_SHARE, MAX_SOURCE_GROUNDING_QUOTE_CHARS, MIN_SHARED_SOURCE_TERMS, __assertAuthorityStateGraphForTests, __authorityReviewConvergenceValidationForTests, __currentAuthorityFinalResumeArtifactErrorsForTests, __relinkListingQuoteToExactSliceForTests, __selectedSourceRolesForTests, __snapshotCareerSkillEvidenceForTests, __localAiApplicationOutputTelemetryForTests, __localAiCoverLetterTelemetryForTests, __setAuthorityLedgerPersistenceFaultHookForTests, __setLegacyAuthorityLedgerAccessHookForTests, __setLocalAiRenderPdfForTests, __holdWriteVerifyRenderForTests, _resetPasteCorrectionsForTests, _resetPasteRejectionStreakForTests, boundedRejectionError, localAiHandoffEvent, pasteCorrectionPrompt, pasteRejectionCheckIds, pasteRejectionChangeDocuments, pasteRejectionReason, stageLocalApplicationWorkspaceArtifacts } from '../../electron/ipc/localAiApplication.js';
 import { APPLICATION_PDF_MISMATCH_IS_DETERMINISTIC, APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, APPLICATION_PDF_RECONCILE_REVISION, APPLICATION_PDF_VARIANT_REVISION, checkResumeBulletOpeningVariety } from '../../electron/ipc/jobApplication.js';
-import { __recordWriteVerifyRoundDiagnosticsForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, __setApplicationV2PagePngForTests, __setApplicationV2RendererVersionForTests, PASTE_APPLICATION_STAGES, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
+import { __requirementsJobCarryPathForTests, __resignRequirementsJobCarryForTests, __setRequirementsJobCarryMethodSaltForTests, __recordWriteVerifyRoundDiagnosticsForTests, __reserveNextLocalApplicationJobIdForAcceptanceHarness, __setApplicationV2PagePngForTests, __setApplicationV2RendererVersionForTests, PASTE_APPLICATION_STAGES, queueLocalApplicationJob as queueCurrentLocalApplicationJob } from '../../electron/ipc/localAiApplication.js';
 import { buildPasteRejectionTraceMarkdown } from '../../electron/ipc/bugReport/pasteRejectionTraceRollup.js';
 import { checkEndedRoleCurrentEmployment } from '../../electron/ipc/coverLetterChecks.js';
 import { inspectLocalAiHandoff, waitForLocalAiHandoff } from '../../local_ai/wait-for-handoff.mjs';
@@ -270,7 +270,7 @@ const cleanCareerSnapshotAuditHistory = (corpus, profile) => {
   }];
 };
 
-async function queueDiscardFixture(project) {
+async function queueDiscardFixture(project, overrides = {}) {
   const sourceText = 'Ada Lovelace\nada@example.test\nEngineer at Acme\nBuilt reliable services.\n';
   const corpus = buildCareerSourceCorpus([{ name: 'Discard.md', contentHash: sha256(sourceText), text: sourceText,
     legacyText: sourceText, transcriptionAudit: verbatimCareerTranscriptionAuditReceipt() }]);
@@ -292,7 +292,7 @@ async function queueDiscardFixture(project) {
     reconciliation: emptyCareerReconciliationReceipt(), approvedAt: '2026-10-08T00:00:00.000Z', sources: corpus.sources,
     segments: corpus.segments, profile, auditHistory: cleanCareerSnapshotAuditHistory(corpus, profile) });
   return queueCurrentLocalApplicationJob({ transport: 'paste', canvasFilePath: project.canvasFilePath, careerSnapshotId: snapshotId,
-    job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' } });
+    job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery.' }, ...overrides });
 }
 
 async function atomicReplaceJson(file, value) {
@@ -644,6 +644,113 @@ export default [
   },
 
 
+  {
+    name: 'a letter-only job reuses its card\u2019s audited requirements only for the same posting, card and method',
+    run: async () => {
+      const project = await createCanvasProject();
+      const contextOf = handoff => JSON.parse(handoff.prompt.slice(handoff.prompt.lastIndexOf('\n\nAuthoritative context:\n') + '\n\nAuthoritative context:\n'.length));
+      const logRows = async queued => (await fs.promises.readFile(path.join(queued.folder, 'Generation Log.jsonl'), 'utf8')).split('\n').filter(Boolean).map(row => JSON.parse(row));
+      const stageOf = async queued => JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'manifest.json'), 'utf8')).paste.stage;
+      try {
+        // The card's résumé job runs the whole requirements phase.
+        const resumeJob = await queueDiscardFixture(project, { nodeId: 'card-1', documentScope: 'resume' });
+        const args = { jobId: resumeJob.id, canvasFilePath: project.canvasFilePath };
+        const reply = (handoff, fields) => JSON.stringify({ protocol: 1, jobId: resumeJob.id, stage: handoff.stage,
+          handoffCode: handoff.handoffCode, baseHashes: handoff.baseHashes, ...fields });
+        let current = (await getLocalApplicationHandoff(args)).handoff; let context = contextOf(current);
+        nodeAssert.equal(current.stage, 'requirements');
+        const evidence = [{ id: 'p1-e1', quote: context.requirementsProgress.sourceCoverage.units.find(unit => unit.text.includes('reliable system delivery')).text,
+          requirement: 'Reliable system delivery', priority: 'high' }];
+        const requirements = [{ id: 'p1-r1', text: 'Reliable system delivery', priority: 'high', evidenceIds: ['p1-e1'] }];
+        let accepted = await submitLocalApplicationHandoff({ ...args, handoffCode: current.handoffCode,
+          response: reply(current, { storeDigest: context.authorityStore.digest, complete: true, identity: context.trustedIdentity,
+            evidence, requirements, ...listingCoverageFields(context, evidence, requirements) }) });
+        nodeAssert.equal(accepted.accepted, true, JSON.stringify(accepted.validationErrors)); current = accepted.handoff;
+        let requirementRounds = 1;
+        while (current.stage === 'requirements-audit') {
+          context = contextOf(current);
+          accepted = await submitLocalApplicationHandoff({ ...args, handoffCode: current.handoffCode,
+            response: reply(current, listingSemanticAuditFields(context, evidence, requirements)) });
+          nodeAssert.equal(accepted.accepted, true, JSON.stringify(accepted.validationErrors)); current = accepted.handoff; requirementRounds += 1;
+        }
+        nodeAssert.equal(current.stage, 'write');
+        nodeAssert.ok(requirementRounds >= 2);
+        const carryPath = __requirementsJobCarryPathForTests(resumeJob.id);
+        const carryRaw = await fs.promises.readFile(carryPath, 'utf8');
+        nodeAssert.equal(JSON.parse(carryRaw).jobId, resumeJob.id);
+        nodeAssert.equal((await fs.promises.stat(carryPath)).mode & 0o777, 0o600);
+
+        const letterArgs = { nodeId: 'card-1', documentScope: 'cover', priorLocalApplicationId: resumeJob.id };
+        const startsAtRequirements = async (label, overrides = {}) => {
+          const queued = await queueDiscardFixture(project, { ...letterArgs, ...overrides });
+          nodeAssert.equal(await stageOf(queued), 'requirements', label);
+          const rows = await logRows(queued);
+          nodeAssert.deepEqual(rows.map(row => row.type), ['paste-job-created'], label);
+          const handoff = (await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath: project.canvasFilePath })).handoff;
+          nodeAssert.equal(handoff.stage, 'requirements', label);
+          nodeAssert.equal(contextOf(handoff).authorityStore.streams.requirements, undefined, `${label}: nothing carried into the store`);
+          await fs.promises.rm(queued.folder, { recursive: true, force: true });
+        };
+        await startsAtRequirements('a changed posting', { job: { title: 'Engineer', company: 'Acme', snippet: 'Engineer role focused on reliable system delivery and on-call support.' } });
+        await startsAtRequirements('another card', { nodeId: 'card-2' });
+        await startsAtRequirements('a prior job with no record', { priorLocalApplicationId: crypto.randomUUID() });
+        __setRequirementsJobCarryMethodSaltForTests('a-later-method');
+        try { await startsAtRequirements('a different method version'); }
+        finally { __setRequirementsJobCarryMethodSaltForTests(null); }
+        // An edited record fails its signature.
+        const edited = JSON.parse(carryRaw);
+        edited.pages[0].find(record => record.kind === 'requirement').item.text = 'Ten years of people management';
+        await fs.promises.writeFile(carryPath, JSON.stringify(edited));
+        await startsAtRequirements('an edited record');
+        // A host-signed record whose quote is not in this posting still fails
+        // the receipt replay, and the job rebuilds a clean store.
+        const quote = JSON.parse(carryRaw);
+        quote.pages[0].find(record => record.kind === 'listing-evidence').item.quote = 'a sentence this posting never contained';
+        await fs.promises.writeFile(carryPath, JSON.stringify(await __resignRequirementsJobCarryForTests(quote)));
+        await startsAtRequirements('a signed record with a quote from elsewhere');
+        // A signed record that leaves a source unit uncovered fails as well.
+        const uncovered = JSON.parse(carryRaw);
+        const coverage = uncovered.pages[0].find(record => record.kind === 'listing-coverage').receipt;
+        if (coverage.dispositions.length > 1) {
+          coverage.dispositions = coverage.dispositions.slice(0, -1); coverage.unitEnd -= 1;
+          await fs.promises.writeFile(carryPath, JSON.stringify(await __resignRequirementsJobCarryForTests(uncovered)));
+          await startsAtRequirements('a signed record with an uncovered source unit');
+        }
+        // A two-document or résumé job never adopts another job's requirements.
+        await fs.promises.writeFile(carryPath, carryRaw);
+        await startsAtRequirements('a résumé job', { documentScope: 'resume', nodeId: 'card-3' });
+
+        // The matching letter job starts at `write` with the requirements in
+        // its own store and log, and no requirements round of its own.
+        const letterJob = await queueDiscardFixture(project, letterArgs);
+        nodeAssert.equal(await stageOf(letterJob), 'write');
+        nodeAssert.match(letterJob.message, /write prompt/u);
+        const rows = await logRows(letterJob);
+        nodeAssert.deepEqual(rows.map(row => row.type), ['paste-job-created', 'authority-requirements-carried-from-job']);
+        nodeAssert.deepEqual(rows.map(row => row.sequence), [0, 1]);
+        nodeAssert.equal(rows[1].fromJobId, resumeJob.id);
+        nodeAssert.equal(rows[1].nextStage, 'write');
+        nodeAssert.equal(rows[1].requirementCount, 1); nodeAssert.equal(rows[1].listingEvidenceCount, 1);
+        nodeAssert.equal(rows[1].auditPageCount, requirementRounds - 1);
+        nodeAssert.ok(!JSON.stringify(rows[1]).includes('Reliable system delivery'), 'the log row carries no posting text');
+        const letterManifest = JSON.parse(await fs.promises.readFile(path.join(letterJob.folder, 'manifest.json'), 'utf8'));
+        nodeAssert.equal(letterManifest.paste.logCount, 1);
+        nodeAssert.equal(letterManifest.paste.authorityStore.streams.requirements.count, 1);
+        nodeAssert.equal(letterManifest.paste.authorityStore.streams['requirements-audit'].count, requirementRounds - 1);
+        nodeAssert.deepEqual(letterManifest.paste.evidencePlan.requirements, requirements.map(item => ({ ...letterManifest.paste.evidencePlan.requirements[0], id: item.id, text: item.text })));
+        // The getter replays every store receipt before it builds a prompt.
+        const letterHandoff = (await getLocalApplicationHandoff({ jobId: letterJob.id, canvasFilePath: project.canvasFilePath })).handoff;
+        nodeAssert.equal(letterHandoff.stage, 'write');
+        nodeAssert.ok(letterHandoff.prompt.includes('Reliable system delivery'), 'the writer sees the carried requirement');
+        nodeAssert.ok(letterHandoff.prompt.includes(evidence[0].quote), 'the writer sees the carried listing quote');
+        nodeAssert.equal(current.prompt.includes('Reliable system delivery'), true);
+        return { requirementRoundsSkipped: requirementRounds };
+      } finally {
+        __setRequirementsJobCarryMethodSaltForTests(null);
+        await fs.promises.rm(project.root, { recursive: true, force: true });
+      }
+    },
+  },
   {
     name: 'v2 pick getter reuses current rendered handoffs and rebuilds after renderer changes or unknown fingerprints',
     run: async () => {
