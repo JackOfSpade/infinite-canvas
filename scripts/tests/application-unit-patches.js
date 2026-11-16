@@ -242,8 +242,8 @@ const promptTests = [
     assert(prompt.includes('"protocol":{"const":1}'), 'schema echoes the actual shipped numeric protocol');
     state.candidates[0].unitState = findingsApi.bootstrapApplicationUnitState({ documents: docs, corrections, status: 'correcting' });
     nodeAssert.deepEqual(w5Policy.writeVerifyPrompt(args), prompt);
-    assert(w5Policy.WRITE_VERIFY_BRIEF.length <= 1216, 'writer brief budget remains fixed');
-    assert(w5Policy.WRITE_VERIFY_BRIEF_MAX_CHARS === 1216 && w5Policy.WRITE_VERIFY_BRIEF.length=== 1216, 'the brief ceiling is 1216 characters and the brief measures exactly against it');
+    assert(w5Policy.WRITE_VERIFY_BRIEF.length <= 1554, 'writer brief budget remains fixed');
+    assert(w5Policy.WRITE_VERIFY_BRIEF_MAX_CHARS === 1554 && w5Policy.WRITE_VERIFY_BRIEF.length=== 1554, 'the brief ceiling is 1554 characters and the brief measures exactly against it');
     const convert = w5Policy.writeVerifyPrompt({ ...args, stage: 'convert' });
     assert(convert.includes(corrections[0]) && !w5Policy.writeVerifyPrompt({ ...args, stage: 'convert', corrections: [] }).includes(corrections[0]), 'convert teaches only present corrections');
     const large = clone(docs); large.resume.roles[0].bullets = Array.from({ length: 40 }, (_, i) => ({ id: `b${i}`, text: 'Synthetic statement. '.repeat(20), evidenceIds: ['e1'] }));

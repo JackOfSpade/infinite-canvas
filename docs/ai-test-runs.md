@@ -3511,3 +3511,115 @@ Recorded cost so far: $48.78.
 
 Recorded cost so far: $0.034.
 <!-- /ai-test-run:2026-11-15T18-16-04-048Z-blindjudge1Opussubagent-15a8cd -->
+
+<!-- ai-test-run:2026-11-16T12-45-03-468Z-claude-effort-ladderrun-b9c5b2 -->
+### 2026-11-16 12:45 UTC · claude-effort-ladder run · job-role-screen-batch · haiku:low
+
+- Status: **finished** (updated 2026-11-16 12:45:17 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen.records.jsonl --configs haiku:low --reps 3 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen --concurrency 3`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen.records.jsonl
+- Reps: 3
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-screen-batch haiku:low | 3 | 3 | 0 | $0.007 |  |
+
+Recorded cost so far: $0.007.
+<!-- /ai-test-run:2026-11-16T12-45-03-468Z-claude-effort-ladderrun-b9c5b2 -->
+
+<!-- ai-test-run:2026-11-16T12-46-35-955Z-claude-effort-ladderrun-3124f4 -->
+### 2026-11-16 12:46 UTC · claude-effort-ladder run · job-role-screen-batch · haiku:low
+
+- Status: **finished** (updated 2026-11-16 12:46:49 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen-before`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen-before.records.jsonl --configs haiku:low --reps 5 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen-before --concurrency 5`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen-before.records.jsonl
+- Reps: 5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-screen-batch haiku:low | 5 | 5 | 0 | $0.010 |  |
+
+Recorded cost so far: $0.010.
+<!-- /ai-test-run:2026-11-16T12-46-35-955Z-claude-effort-ladderrun-3124f4 -->
+
+<!-- ai-test-run:2026-11-16T12-46-35-955Z-claude-effort-ladderrun-33668c -->
+### 2026-11-16 12:46 UTC · claude-effort-ladder run · job-role-screen-batch · haiku:low
+
+- Status: **finished** (updated 2026-11-16 12:46:49 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen.records.jsonl --configs haiku:low --reps 5 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen --concurrency 3`
+- Records: 1 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-test-posting-screen.records.jsonl
+- Reps: 5
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| job-role-screen-batch haiku:low | 5 | 5 | 0 | $0.010 |  |
+
+Recorded cost so far: $0.010.
+<!-- /ai-test-run:2026-11-16T12-46-35-955Z-claude-effort-ladderrun-33668c -->
+
+<!-- ai-test-run:2026-11-16T13-17-55-000Z-claude-effort-ladderrun-0d7ff5 -->
+### 2026-11-16 13:17 UTC · claude-effort-ladder run · write · opus:medium
+
+- Status: **finished** (updated 2026-11-16 13:21:44 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-new`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-new-records.jsonl --configs opus:medium --reps 1 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-new --concurrency 5`
+- Records: 15 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-new-records.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:medium | 15 | 15 | 0 | $7.266 |  |
+
+Recorded cost so far: $7.266.
+<!-- /ai-test-run:2026-11-16T13-17-55-000Z-claude-effort-ladderrun-0d7ff5 -->
+
+<!-- ai-test-run:2026-11-16T13-21-59-558Z-claude-effort-ladderrun-f5ac5d -->
+### 2026-11-16 13:21 UTC · claude-effort-ladder run · improvement-panel · sonnet:high
+
+- Status: **finished** (updated 2026-11-16 13:23:09 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel-records.jsonl --configs sonnet:high --reps 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel --concurrency 6`
+- Records: 15 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel-records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| improvement-panel sonnet:high | 30 | 30 | 0 | $0.775 |  |
+
+Recorded cost so far: $0.775.
+<!-- /ai-test-run:2026-11-16T13-21-59-558Z-claude-effort-ladderrun-f5ac5d -->
+
+<!-- ai-test-run:2026-11-16T13-23-16-724Z-claude-effort-ladderrun-898ef5 -->
+### 2026-11-16 13:23 UTC · claude-effort-ladder run · write · opus:medium
+
+- Status: **finished** (updated 2026-11-16 13:26:42 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-c`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-c-records.jsonl --configs opus:medium --reps 1 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-c --concurrency 5`
+- Records: 15 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/writer-c-records.jsonl
+- Reps: 1
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| write opus:medium | 15 | 15 | 0 | $7.101 |  |
+
+Recorded cost so far: $7.101.
+<!-- /ai-test-run:2026-11-16T13-23-16-724Z-claude-effort-ladderrun-898ef5 -->
+
+<!-- ai-test-run:2026-11-16T13-26-48-135Z-claude-effort-ladderrun-b47e0e -->
+### 2026-11-16 13:26 UTC · claude-effort-ladder run · improvement-panel · sonnet:high
+
+- Status: **finished** (updated 2026-11-16 13:27:49 UTC)
+- Out dir: `~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel-writer-c`
+- Command: `node scripts/claude-effort-ladder.mjs run --records ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel-writer-c-records.jsonl --configs sonnet:high --reps 2 --out ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel-writer-c --concurrency 8`
+- Records: 15 from ~/Library/Application Support/infinite-canvas/ai-test-runs/2026-11-16-improvement-session/panel-writer-c-records.jsonl
+- Reps: 2
+
+| Arm | n | Valid | Failed | Cost | Notes |
+|---|---|---|---|---|---|
+| improvement-panel sonnet:high | 30 | 30 | 0 | $0.816 |  |
+
+Recorded cost so far: $0.816.
+<!-- /ai-test-run:2026-11-16T13-26-48-135Z-claude-effort-ladderrun-b47e0e -->
