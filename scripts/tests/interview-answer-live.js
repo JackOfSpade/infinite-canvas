@@ -171,8 +171,6 @@ export default [
           assert(result.answerCard === null && result.plan.status === 'unsupported' && !session.locked, 'an unmatched trailing request must abstain instead of displaying an earlier prepared answer');
           assert(result.plan.question === latest, 'the fallback must identify the trailing question honestly');
         }
-        const source = fs.readFileSync(new URL('../../src/interview-window/InterviewWindowApp.jsx', import.meta.url), 'utf8');
-        assert(source.includes('const mainCard = answerCard || preview?.card || null;') && source.includes('hasPreparedAnswers && plan && !mainCard') && source.includes('No confident prepared answer match.'), 'prepared-answer abstention must keep the visible no-prepared-answer label');
       } finally { session.child.close(); }
     },
   },

@@ -237,7 +237,7 @@ export default [
   } },
   { name: 'interview call audio invariant: capture boundary has no device changes, mic input, persistence, network or playback APIs', run() {
     const files = ['electron/interviewCallAudio.js', 'electron/interviewCallQuestionDetector.js', 'electron/interviewWindow.js',
-      'electron/interviewWindowPreload.js', 'src/interview-window/CallAudioPanel.jsx', 'src/interview-window/InterviewWindowApp.jsx',
+      'electron/interviewWindowPreload.js', 'src/interview-window/CueCardApp.jsx',
       'native/interview-audio/InterviewAudioHelper.swift'];
     const forbidden = /\b(?:setDefaultDevice|setSinkId|selectAudioOutput|getUserMedia|AudioHardwareSetPropertyData|AudioObjectSetPropertyData|AudioHardwareCreateAggregateDevice|AudioHardwareCreateProcessTap|AudioDeviceCreateIOProcID|kAudioHardwarePropertyDefaultOutputDevice|kAudioHardwarePropertyDefaultInputDevice|outputDeviceID|microphoneCaptureDeviceID|AVAudioEngine|AVAudioPlayer|AVAudioRecorder|AVSpeechSynthesizer|AVCaptureDevice|SFSpeechRecognizer|SCRecordingOutput|AudioQueueNewOutput|AudioUnitRender|URLSession|NWConnection|WebSocket)\b|\.play\s*\(|\.duck\s*\(|\.setVolume\s*\(|\.setAudioMuted\s*\(/u;
     for (const file of files) {

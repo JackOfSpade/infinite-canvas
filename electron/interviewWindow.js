@@ -1,3 +1,4 @@
+import { createCueCardLog } from './interviewCueCardLog.js';
 import electronPkg from 'electron';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -273,6 +274,7 @@ function projectAnswerCard(card, bank) {
 // cards exist, in what scope, and with what (possibly user-written) text.
 const LIVE_CARDS = new WeakMap();
 const CARD_META = new WeakMap();
+const CARD_CUES = new WeakMap();
 const OVERLAY_CARDS = new WeakSet();
 export const cardsOf = bank => (bank ? LIVE_CARDS.get(bank) || bank.cards : []);
 const statementOf = value => (typeof value === 'string' ? value : value?.text || '');
@@ -286,6 +288,8 @@ const sameCardText = (left, right) => statementOf(left.headline) === statementOf
 /** Build the live card list for a sealed bank from stored Q&A cards. */
 export function attachInterviewLiveCards(bank, storeCards) {
   if (!bank) return bank;
+  // Cues belong to the stored copy; forget any left on a sealed card by an earlier attach.
+  for (const card of bank.cards) CARD_CUES.delete(card);
   if (!Array.isArray(storeCards) || !storeCards.length) { LIVE_CARDS.delete(bank); return bank; }
   const sealedById = new Map(bank.cards.map(card => [card.id, card]));
   // Foundation (shared) and Company (per helper) ids are only unique per
@@ -316,6 +320,7 @@ export function attachInterviewLiveCards(bank, storeCards) {
       return overlay;
     })();
     const answered = !!(statementOf(card.headline).trim() || (card.bullets || []).some(item => statementOf(item).trim()) || statementOf(card.example).trim());
+    CARD_CUES.set(card, storedCues(stored));
     CARD_META.set(card, Object.freeze({ ...meta, status: answered ? 'ready' : meta.origin === 'disclosed' ? 'needs-prep' : 'empty' }));
     return card;
   });
@@ -339,9 +344,26 @@ function projectOverlayCard(card, bank) {
   });
 }
 
+// Short live-card reminders saved beside stored answer lines, keyed by the
+// exact line text: an unedited card is displayed from its sealed object, which
+// has no cues of its own.
+function storedCues(stored) {
+  const cues = new Map();
+  for (const item of [stored.headline, ...(stored.bullets || []), stored.example, ...(stored.extensions || [])]) {
+    if (item && typeof item === 'object' && typeof item.cue === 'string' && item.cue.trim() && statementOf(item)) cues.set(statementOf(item), item.cue.trim().slice(0, 120));
+  }
+  return cues;
+}
+function withCues(projected, cues) {
+  if (!cues?.size) return projected;
+  const cued = item => (cues.has(item.text) ? Object.freeze({ ...item, cue: cues.get(item.text) }) : item);
+  return Object.freeze({ ...projected, ...(cues.has(projected.headline) ? { headlineCue: cues.get(projected.headline) } : {}),
+    bullets: Object.freeze(projected.bullets.map(cued)), example: cued(projected.example), optionalExtension: Object.freeze(projected.optionalExtension.map(cued)) });
+}
+
 function projectLiveCard(card, bank) {
   if (!card) return null;
-  const projected = OVERLAY_CARDS.has(card) ? projectOverlayCard(card, bank) : projectAnswerCard(card, bank);
+  const projected = withCues(OVERLAY_CARDS.has(card) ? projectOverlayCard(card, bank) : projectAnswerCard(card, bank), CARD_CUES.get(card));
   const meta = CARD_META.get(card);
   return meta ? Object.freeze({ ...projected, scope: meta.scope, origin: meta.origin, source: meta.source, author: meta.author, status: meta.status }) : projected;
 }
@@ -460,6 +482,7 @@ export function createInterviewWindowController({
   devServerUrl = null,
   distHtmlPath = path.join(process.cwd(), 'dist', 'index.html'),
   registerIpc = true,
+  createLog = createCueCardLog,
 } = {}) {
   if (typeof BrowserWindow !== 'function' || !ipcMain || typeof isAuthorizedOwner !== 'function' || typeof loadSnapshot !== 'function' || typeof loadBundle !== 'function' || typeof loadPreparedBrief !== 'function' || typeof loadAnswerBank !== 'function' || typeof buildPlan !== 'function') throw new TypeError('Interview Window dependencies are unavailable.');
   const sessions = new Map();
@@ -494,6 +517,20 @@ export function createInterviewWindowController({
     session.questionSequence += 1;
   };
   const ignoredQuestion = (reason, message) => Object.freeze({ ignored: true, reason, message });
+  // After-interview diagnostics. The cue card itself explains nothing, so
+  // every decision is written to the session's private log file instead.
+  const note = (session, type, data) => { try { session?.log?.write(type, data); } catch { /* logging never affects the call */ } };
+  const noteShown = session => {
+    const display = session?.display;
+    if (!display) return;
+    const shown = { locked: display.answerCard?.id || null, lockedHasAnswer: display.answerCard ? display.answerCard.status !== 'empty' && display.answerCard.status !== 'needs-prep' : null,
+      preview: display.preview ? { cardId: display.preview.cardId, confidence: display.preview.confidence, heard: display.preview.transcript } : null,
+      question: display.question || null, plan: display.plan?.status || null, matching: display.matching || null };
+    const key = JSON.stringify(shown);
+    if (key === session.lastShownKey) return;
+    session.lastShownKey = key;
+    note(session, 'shown', shown);
+  };
   const matchingState = (session, selection = null) => {
     const latency = session.matcher?.getLatency?.() || { p50Ms: null, latencyMode: 'recall' };
     return { ...(selection || {}), mode: session.latencyMode,
@@ -531,7 +568,7 @@ export function createInterviewWindowController({
           card: projectLiveCard(card, sealedBank), confidence: preview.confidence,
           transcript: preview.transcript.slice(0, MAX_QUESTION), updatedAt: preview.updatedAt }) : null;
         session.display = Object.freeze({ ...session.display, preview: projected });
-        if (!session.closing && !session.child.isDestroyed?.()) session.child.webContents.send?.('interview-window:brief-updated', session.display);
+        if (!session.closing && !session.child.isDestroyed?.()) { noteShown(session); session.child.webContents.send?.('interview-window:brief-updated', session.display); }
       },
     });
     session.matcher.start().catch(() => {});
@@ -680,6 +717,7 @@ export function createInterviewWindowController({
         ensureMatcher(existing, existing.answerBank);
         selectIncoming = !!(args.plan && existing.answerBank && !dismissedIncomingPlan);
         existing.display = Object.freeze({ ...existing.display, matching: matchingState(existing, existing.display.matching) });
+        noteShown(existing);
         existing.child.webContents.send?.('interview-window:brief-updated', existing.display);
       }
       existing.child.focus?.();
@@ -707,7 +745,7 @@ export function createInterviewWindowController({
     }
     const child = new BrowserWindow({
       width: 380, height: 560, minWidth: 320, minHeight: 380, resizable: true, modal: false, show: false,
-      title: 'Interview Helper', backgroundColor: '#111018',
+      title: 'Cue card', backgroundColor: '#111018',
       webPreferences: { preload: preloadPath, nodeIntegration: false, contextIsolation: true, sandbox: true },
     });
     // A glanceable companion for a live call: pinned above everything at the
@@ -716,7 +754,10 @@ export function createInterviewWindowController({
     // sees it. It is deliberately unparented so it cannot follow the canvas
     // window when that one minimizes or hides.
     child.setAlwaysOnTop?.(true, 'floating');
-    child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+    // skipTransformProcessType: without it macOS turns the whole app into a
+    // background accessory for this call, which hides the Interview Helper
+    // window and the Dock icon when the cue card opens.
+    child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     child.setContentProtection?.(true);
     const session = {
       owner, ownerId, child, display, brief, snapshotId: args.snapshotId, nodeId: args.nodeId,
@@ -734,6 +775,9 @@ export function createInterviewWindowController({
       // reports for a pending load). crashed: its renderer process died.
       closing: false, crashed: false,
     };
+    try { session.log = createLog({ userDataPath: appInstance?.getPath?.('userData'), onError: error => logger.warn?.(`[cue-card] log unavailable: ${error?.message || error}`) }); } catch { session.log = null; }
+    note(session, 'open', { nodeId: args.nodeId, role: brief.role?.title || null, company: brief.role?.company || null,
+      cards: cardsOf(session.answerBank).map(card => ({ id: card.id, question: card.question, answered: !!statementOf(card.headline).trim() })) });
     sessions.set(ownerId, session);
     ensureMatcher(session, session.answerBank);
     session.display = Object.freeze({ ...session.display, matching: matchingState(session, session.display.matching) });
@@ -746,7 +790,7 @@ export function createInterviewWindowController({
     protect(child);
     child.once?.('ready-to-show', () => child.show?.());
     const onOwnerClosed = () => { if (!child.isDestroyed?.()) child.close?.(); remove(ownerId, session); };
-    child.once?.('close', () => { session.closing = true; session.audio?.stop(); cancelQuestion(session); session.matcher?.close(); });
+    child.once?.('close', () => { note(session, 'close', {}); session.closing = true; session.audio?.stop(); cancelQuestion(session); session.matcher?.close(); });
     child.once?.('closed', () => { session.closing = true; owner.removeListener?.('closed', onOwnerClosed); remove(ownerId, session); });
     owner.once?.('closed', onOwnerClosed);
     // A crashed child renderer cannot recover its memory-only session. Retire
@@ -755,6 +799,7 @@ export function createInterviewWindowController({
       // A 'clean-exit' is the renderer ending normally (for example while its
       // window is being closed), not a crash: only a real crash is a launch failure.
       session.crashed = details?.reason !== 'clean-exit';
+      note(session, 'renderer-gone', { reason: details?.reason || null, exitCode: details?.exitCode ?? null });
       remove(ownerId, session);
       if (!child.isDestroyed?.()) child.close?.();
     });
@@ -768,6 +813,7 @@ export function createInterviewWindowController({
         // Electron rejects a pending loadURL (ERR_ABORTED) when its window
         // closes. That is a retirement, not a load failure.
         if (!session.crashed && (session.closing || sessions.get(ownerId) !== session || child.isDestroyed?.())) return RETIRED;
+        note(session, 'load-failed', { message: String(error?.message || error).slice(0, 300) });
         logger.error('[interview-window] initial load failed:', error);
         throw new Error(session.crashed ? RENDERER_STOPPED_MESSAGE : LOAD_FAILED_MESSAGE);
       },
@@ -974,6 +1020,7 @@ export function createInterviewWindowController({
       session.locked = supported || !!answerCard;
       session.anchorPlan = supported && sameStory ? (followUp && anchorPlan ? anchorPlan : plan) : null;
       onSelection({ stage: 'display', question, cardId: answerCard?.id ?? null, supported, followUp });
+      noteShown(session);
       session.child.webContents.send?.('interview-window:brief-updated', session.display);
       return session.display;
     } finally {
@@ -1020,6 +1067,7 @@ export function createInterviewWindowController({
     session.listeningSnapshot = snapshot;
     session.locked = true;
     session.anchorPlan = null;
+    noteShown(session);
     session.child.webContents.send?.('interview-window:brief-updated', display);
     return display;
   };
@@ -1045,7 +1093,7 @@ export function createInterviewWindowController({
     }
     ensureMatcher(session, session.answerBank);
     session.display = projectInterviewDisplay({ brief: session.brief, snapshotId: session.snapshotId, currentStep: 0, answerBank: session.answerBank, matching: matchingState(session) });
-    if (notify) session.child.webContents.send?.('interview-window:brief-updated', session.display);
+    if (notify) { noteShown(session); session.child.webContents.send?.('interview-window:brief-updated', session.display); }
     return session.display;
   };
   const nextQuestion = event => advanceQuestion(event);
@@ -1059,7 +1107,7 @@ export function createInterviewWindowController({
     // must not see this window either way.
     if (value) {
       session.child.setAlwaysOnTop?.(true, 'floating');
-      session.child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true });
+      session.child.setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
     } else {
       session.child.setAlwaysOnTop?.(false);
       session.child.setVisibleOnAllWorkspaces?.(false);
@@ -1073,6 +1121,7 @@ export function createInterviewWindowController({
     if (!session || !['auto', 'recall'].includes(value)) throw new Error('Interview display mode is invalid.');
     session.latencyMode = value;
     session.display = Object.freeze({ ...session.display, matching: Object.freeze(matchingState(session, session.display.matching)) });
+    noteShown(session);
     session.child.webContents.send?.('interview-window:brief-updated', session.display);
     return session.display;
   };
@@ -1087,6 +1136,8 @@ export function createInterviewWindowController({
           session.audioTurnId = undefined;
           session.suppressedAudioTurn = undefined;
         }
+        const listeningKey = `${state.status}|${state.errorCode || ''}|${state.message || ''}`;
+        if (listeningKey !== session.lastListeningKey) { session.lastListeningKey = listeningKey; note(session, 'listening', { status: state.status, errorCode: state.errorCode || null, message: state.message || null }); }
         session.listeningActive = state.status === 'listening';
         session.speculative?.setListening(session.listeningActive);
         try { session.child.webContents.send?.('interview-window:listening-updated', state); }
@@ -1105,8 +1156,12 @@ export function createInterviewWindowController({
           previousPlanLocked: session.locked && !!session.anchorPlan,
         });
       },
-      onQuestion: async (endpoint, isCurrent, reportSelection = () => undefined) => {
+      onQuestion: async (endpoint, isCurrent, report = () => undefined) => {
         if (!isCurrent() || sessions.get(session.ownerId) !== session || session.closing) return;
+        const heardAt = Date.now();
+        const heard = [endpoint?.text, endpoint?.transcript, endpoint?.question].find(value => typeof value === 'string') ?? null;
+        note(session, 'turn', { turnId: endpoint?.id ?? null, heard });
+        const reportSelection = decision => { note(session, 'decision', { turnId: endpoint?.id ?? null, afterMs: Date.now() - heardAt, ...decision }); return report(decision); };
         if (session.questionOrigin === 'user' || session.suppressedAudioTurn !== undefined && session.suppressedAudioTurn === endpoint.id) {
           session.speculative?.cancel();
           return;

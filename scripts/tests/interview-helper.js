@@ -1069,7 +1069,7 @@ export default [
       const { interviewLaunchErrorMessage } = await import('../../src/utils/interviewHelper.js');
       const wrapped = new Error("Error invoking remote method 'interview-window:launch': Error: Another Interview Helper on this canvas has an active interview rail.");
       assert(/Another Interview Helper on this canvas has an active interview rail/u.test(interviewLaunchErrorMessage(wrapped)), 'a locked-rail refusal must be explained');
-      const generic = 'The interview view could not be opened. Try again from the prepared brief.';
+      const generic = 'The cue card could not be opened. Try again from the prepared brief.';
       for (const error of [new Error('Interview Window brief is unavailable or changed.'), new Error('/Users/someone/Library/Application Support/x: EACCES'), null, undefined, 'raw string', { message: 42 }]) {
         assert(interviewLaunchErrorMessage(error) === generic, `unknown launch failures must stay generic: ${String(error?.message || error)}`);
       }

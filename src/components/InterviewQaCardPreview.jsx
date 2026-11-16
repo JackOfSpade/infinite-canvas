@@ -39,34 +39,28 @@ export function qaCardToDisplayCard(card, scope) {
   };
 }
 
-const hasCitedEvidence = card => [card?.headline?.evidenceIds, card?.example?.evidenceIds,
-  ...(Array.isArray(card?.bullets) ? card.bullets.map(item => item?.evidenceIds) : []),
-  ...(Array.isArray(card?.extensions) ? card.extensions.map(item => item?.evidenceIds) : [])]
-  .some(ids => Array.isArray(ids) && ids.length > 0);
-
-/** The interview window's own answer card, rendered inside the main app. */
+/** The cue card's own answer view, rendered inside the main app. */
 export function InterviewCardPreview({ card, scope }) {
   return <div className="space-y-1">
     <div className="interview-window interview-card-preview" data-testid="interview-card-preview">
       <PreparedAnswer card={qaCardToDisplayCard(card, scope)} />
     </div>
-    {hasCitedEvidence(card) && <p className="text-[11px] text-white/60">Cited evidence quotes appear in the live window.</p>}
   </div>;
 }
 
-/** Exact-only matcher preview: what the live window shows for this question. */
+/** Exact-only matcher preview: what the cue card shows for this question. */
 export function InterviewQaMatchTester({ foundationCards = [], companyCards = [], company = '' }) {
   const [question, setQuestion] = useState('');
   const candidates = [...foundationCards.map(card => ({ card, scope: 'foundation' })), ...companyCards.map(card => ({ card, scope: 'company' }))];
   const scopeOf = new Map(candidates.map(item => [item.card, item.scope]));
   const result = exactInterviewAnswerMatch(question, candidates.map(item => item.card));
   const scopeLabel = scope => scope === 'foundation' ? 'Foundation' : (company || 'Company');
-  return <section aria-label="Preview on the interview card" className="space-y-2 rounded-lg border border-white/15 p-3">
-    <h3 className="text-sm font-semibold">Preview on the interview card</h3>
-    <p className="text-xs text-white/60">Exact question and variant matching only; the live window also uses AI matching.</p>
+  return <section aria-label="Preview on the cue card" className="space-y-2 rounded-lg border border-white/15 p-3">
+    <h3 className="text-sm font-semibold">Preview on the cue card</h3>
+    <p className="text-xs text-white/60">Exact question and variant matching only; the cue card also uses AI matching.</p>
     <label className="block text-xs">Test a question<textarea className={inputClass} rows={2} placeholder="Type the question as the interviewer would ask it" value={question} onChange={event => setQuestion(event.target.value)} /></label>
-    <p role="status" className="text-xs">{result.status === 'none' && 'No exact match. The live window\'s AI matching may still choose a card.'}
-      {result.status === 'ambiguous' && `Matches ${result.cards.length} cards exactly — the live window will not pick one:`}
+    <p role="status" className="text-xs">{result.status === 'none' && 'No exact match. The cue card\'s AI matching may still choose a card.'}
+      {result.status === 'ambiguous' && `Matches ${result.cards.length} cards exactly — the cue card will not pick one:`}
       {result.status === 'match' && `Exact match: ${result.card.question} · ${scopeLabel(scopeOf.get(result.card))}`}</p>
     {result.status === 'ambiguous' && <ul className="list-disc pl-4 text-xs text-white/60">{result.cards.map((card, index) => <li key={`${card.id ?? 'card'}-${index}`}>{card.question}</li>)}</ul>}
     {result.status === 'match' && <InterviewCardPreview card={result.card} scope={scopeOf.get(result.card)} />}

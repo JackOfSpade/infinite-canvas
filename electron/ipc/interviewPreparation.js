@@ -40,7 +40,8 @@ import { INTERVIEW_DISCLOSURE_RESEARCH_INSTRUCTION, mapInterviewDisclosures } fr
 import { factCheckInterviewCards } from './interviewQaFactCheck.js';
 import { planInterviewPracticeOrder } from './interviewQaPractice.js';
 import { configureInterviewPracticeRegistry, getInterviewPracticeRegistry } from './interviewPracticeRegistry.js';
-import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
+import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCues.js';
+import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaCues, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
 import { isRendererPrivateAppPath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 
@@ -1358,6 +1359,7 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
   buildAnswers = buildInterviewPreparedAnswers, publishAnswers = publishInterviewPreparedAnswers, loadAnswers = loadInterviewPreparedAnswerBank,
   aiTransport = createInterviewClaudeTransport(), mapDisclosures = mapInterviewDisclosures, fillQa = fillInterviewQaFromPreparation,
   preparePractice = defaultPreparePractice,
+  fillCues = fillInterviewQaCues,
   practiceRegistry = null,
   resolveAppliedJobsRoot = null,
   logWarning = message => console.warn(message) } = {}) {
@@ -1470,6 +1472,19 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       throwIfAborted(signal);
       const qa = await fillQa({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, bank: checkedBank,
         company: published.brief.role?.company || '', disclosureMapping });
+      throwIfAborted(signal);
+      // Live-card reminders: every stored answer line without a short cue
+      // gets one, including answers kept from an earlier Prepare.
+      if (qa) {
+        try {
+          await fillCues({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, wants: needsGlanceCue,
+            generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) });
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          qaWarning = qaWarning || 'Short reminders could not be written this time; the live card shows trimmed answer lines.';
+          logWarning(`[Interview Q&A] glance cues skipped: ${String(error?.message || error).slice(0, 300)}`);
+        }
+      }
       throwIfAborted(signal);
       // Practice mode: an AI-planned interview order over every Foundation and
       // company question, each recorded once with an on-device voice.

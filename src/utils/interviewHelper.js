@@ -779,13 +779,13 @@ export function interviewHelperSessionReducer(state = createInterviewHelperSessi
 
 export const INTERVIEW_HELPER_UNSUPPORTED_MESSAGE = UNSUPPORTED_MESSAGE;
 
-const LAUNCH_FAILURE_GENERIC = 'The interview view could not be opened. Try again from the prepared brief.';
+const LAUNCH_FAILURE_GENERIC = 'The cue card could not be opened. Try again from the prepared brief.';
 // Main-process launch refusals the canvas may repeat. Electron wraps an IPC
 // rejection as "Error invoking remote method '...': Error: <reason>", so the
 // reason is matched as a substring. Every other failure stays generic because
 // loader errors are already reduced to fixed messages in the main process.
 const LAUNCH_FAILURE_MESSAGES = Object.freeze([
-  ['Another Interview Helper on this canvas has an active interview rail.', 'Another Interview Helper on this canvas has an active interview rail. Finish or close that interview view, then launch this one.'],
+  ['Another Interview Helper on this canvas has an active interview rail.', 'Another Interview Helper on this canvas has an active interview rail. Finish or close that cue card, then launch this one.'],
 ]);
 export function interviewLaunchErrorMessage(error) {
   const raw = typeof error === 'string' ? error : typeof error?.message === 'string' ? error.message : '';

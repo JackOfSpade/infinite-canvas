@@ -259,9 +259,9 @@ export default [
       const child = [...controller.sessions.values()][0].child;
       assert(child.options.parent === undefined && child.options.modal === false && child.options.width === 380 && child.options.height === 560
         && child.options.minWidth === 320 && child.options.minHeight === 380 && child.options.resizable === true
-        && child.options.title === 'Interview Helper' && child.options.backgroundColor === '#111018', 'child must be a compact resizable unparented non-modal window with its ready-state visual shell');
+        && child.options.title === 'Cue card' && child.options.backgroundColor === '#111018', 'child must be a compact resizable unparented non-modal window with its ready-state visual shell');
       assert(child.alwaysOnTop === true && child.alwaysOnTopLevel === 'floating' && child.visibleOnAllWorkspaces === true
-        && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true && child.contentProtection === true, 'a companion must open pinned at the floating level, on every workspace including full-screen spaces, and hidden from screen sharing');
+        && child.visibleOnAllWorkspacesOptions?.visibleOnFullScreen === true && child.visibleOnAllWorkspacesOptions?.skipTransformProcessType === true && child.contentProtection === true, 'a companion must open pinned at the floating level, on every workspace including full-screen spaces, and hidden from screen sharing');
       assert(child.options.webPreferences.nodeIntegration === false && child.options.webPreferences.contextIsolation && child.options.webPreferences.sandbox, 'child must receive hardened narrow web preferences');
       assert(child.webContents.__isInterviewHelperRenderer === true && controller.isInterviewChildWebContents(child.webContents), 'child must be marked for app-wide main-process guards before navigation');
       const display = controller.getBrief({ sender: child.webContents });

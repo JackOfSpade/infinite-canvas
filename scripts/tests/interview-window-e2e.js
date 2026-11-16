@@ -3,10 +3,9 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { assert } from './testHelpers.js';
-import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { createInterviewWindowE2EFixture } from '../fixtures/interview-window-e2e.mjs';
 import { runInterviewWindowE2E } from '../interview-window-e2e.mjs';
-import { createInterviewWindowController, projectInterviewDisplay } from '../../electron/interviewWindow.js';
+import { createInterviewWindowController } from '../../electron/interviewWindow.js';
 import { loadInterviewAnswerBank, publishInterviewAnswerBank } from '../../electron/ipc/interviewAnswerBank.js';
 import { loadInterviewPreparedBrief, publishInterviewPreparedBrief } from '../../electron/ipc/interviewPreparation.js';
 
@@ -30,8 +29,6 @@ class FixtureWindow extends EventEmitter {
   close() { this.destroyed = true; this.emit('closed'); FixtureWindow.windows.delete(this.webContents.id); }
 }
 
-async function flush() { await Promise.resolve(); await Promise.resolve(); }
-function button(window, label) { return [...window.document.querySelectorAll('button')].find(item => item.textContent === label); }
 
 export default [
   {
@@ -96,44 +93,7 @@ export default [
     },
   },
   {
-    name: 'interview window realistic UI: submitted wording survives card-only reload and Edit, with independent optional points',
-    async run() {
-      const fixture = createInterviewWindowE2EFixture();
-      const typed = 'Tell me about leadng a team.';
-      const blank = projectInterviewDisplay({ brief: fixture.brief, snapshotId: fixture.snapshot.snapshotId, currentStep: 0, answerBank: fixture.bank });
-      const answered = projectInterviewDisplay({ brief: fixture.brief, snapshotId: fixture.snapshot.snapshotId, currentStep: 0,
-        answerBank: fixture.bank, answerCard: fixture.bank.cards.find(card => card.id === 'leadership'), question: typed });
-      await withDom(async window => {
-        const bundle = await bundleComponent(path.resolve('src/interview-window/InterviewWindowApp.jsx'), {});
-        window.interviewAPI = { getBrief: async () => answered, onBriefUpdated: () => () => undefined,
-          nextQuestion: async () => blank, close: async () => true, setAlwaysOnTop: async () => true };
-        const root = bundle.module.createRoot(window.document.getElementById('root'));
-        try {
-          await bundle.module.act(async () => { root.render(bundle.module.React.createElement(bundle.module.InterviewWindowApp)); await flush(); });
-          assert(window.document.querySelector('.locked-question-preview').textContent === typed, 'a reloaded card-only view must identify the actual submitted wording rather than replace it with the catalog question');
-          assert(!window.document.querySelector('.evidence-card'), 'card-only regression must not rely on an underlying cue plan');
-          const example = window.document.querySelector('.optional-extension');
-          assert(example.tagName === 'DETAILS' && !example.open && example.querySelector('summary').textContent === 'Optional extension', 'additional career detail must start behind an accessible optional disclosure');
-          example.querySelector('summary').click();
-          assert(example.open && example.querySelectorAll('.extension-points li').length === 2, 'expanding the extension must reveal both independently grounded points');
-          for (const point of answered.answerCard.optionalExtension) {
-            assert(example.textContent.includes(point.text) && example.textContent.includes(point.exampleHook), 'each optional point retains its own wording and example hook');
-          }
-          assert(window.document.querySelector('.prepared-answer-recall .spoken-example').textContent.includes(answered.answerCard.example.text), 'the original concrete example stays in the prepared answer');
-          const citation = example.querySelector('.answer-citation-ref');
-          assert(citation && citation.getAttribute('aria-label').startsWith('Show exact cited evidence'), 'expanded concrete example must retain its native citation button');
-          await bundle.module.act(async () => { citation.click(); await flush(); });
-          const evidence = window.document.querySelector('.answer-evidence');
-          assert(evidence.open && evidence.contains(window.document.activeElement), 'example citation must expand and focus its exact saved source');
-          await bundle.module.act(async () => { button(window, 'Edit question').click(); await flush(); });
-          const input = window.document.querySelector('#interview-question');
-          assert(input.value === typed && window.document.activeElement === input, 'Edit must preserve the actual paraphrase/typo and restore typing focus');
-        } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
-      });
-    },
-  },
-  {
-    name: 'interview window end-to-end Chromium: real key events, sealed controller, paints, clipboard and compact layout',
+    name: 'cue card end-to-end Chromium: sealed controller, cues-only rendering, auto-listen and compact layout',
     async run() {
       // Required integration test: unavailable Chromium is a failure, never a
       // skip or a substitute DOM timing result. The one exception is CI's Linux

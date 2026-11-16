@@ -53,65 +53,20 @@ async function chromeExecutable() {
 
 function installBrowserBridge() {
   const subscribers = new Set();
-  window.__interviewProbe = { revision: 0, metrics: [], latest: null, pinApplied: false };
+  window.__interviewProbe = { latest: null, listening: [] };
   window.__publishInterviewDisplay = display => {
     window.__interviewProbe.latest = display;
-    window.__interviewProbe.revision++;
     for (const subscriber of subscribers) subscriber(display);
   };
-  const invoke = async (method, value) => {
-    const result = await window.__interviewInvoke(method, value);
-    if (method === 'setAlwaysOnTop') window.__interviewProbe.pinApplied = result === true;
-    if (['submitQuestion', 'followUpQuestion'].includes(method)) {
-      window.__interviewProbe.latest = result;
-      window.__interviewProbe.revision++;
-    }
-    return result;
-  };
+  // The cue card only reads: its brief, display updates and the listening it
+  // starts on open. It has no way to submit, select, copy or configure.
   window.interviewAPI = {
-    getBrief: () => invoke('getBrief'), submitQuestion: value => invoke('submitQuestion', value),
-    followUpQuestion: value => invoke('followUpQuestion', value), nextQuestion: () => invoke('nextQuestion'),
-    close: () => invoke('close'), setAlwaysOnTop: value => invoke('setAlwaysOnTop', value),
+    getBrief: () => window.__interviewInvoke('getBrief'),
     onBriefUpdated: subscriber => { subscribers.add(subscriber); return () => subscribers.delete(subscriber); },
+    onListeningUpdated: () => () => undefined,
+    startListening: async () => { window.__interviewProbe.listening.push('start'); return { status: 'listening' }; },
+    stopListening: async () => { window.__interviewProbe.listening.push('stop'); return { status: 'idle' }; },
   };
-  // Start at the actual key event, before React's submit handler. Observe the
-  // committed answer and wait through a rendering opportunity (two rAFs).
-  // This is a paint proxy, not compositor/pixel instrumentation.
-  window.addEventListener('keydown', event => {
-    if (event.key !== 'Enter' || event.shiftKey || event.metaKey || event.ctrlKey || event.repeat || !event.target.matches('textarea')) return;
-    const start = performance.now(); const revision = window.__interviewProbe.revision;
-    const metric = { start, commitMs: null, firstPaintMs: null, fullRenderMs: null };
-    window.__interviewProbe.metrics.push(metric);
-    let scheduled = false; let lastMutation = start;
-    const ready = () => {
-      const display = window.__interviewProbe.latest;
-      if (window.__interviewProbe.revision <= revision || !display) return false;
-      const selector = display.answerCard ? '.answer-headline-text' : display.plan?.status === 'supported' ? '.evidence-card h2' : '.interview-warning[role="status"]';
-      const element = document.querySelector(selector);
-      if (!element) return false;
-      const question = display.question || display.plan?.question || display.answerCard?.question;
-      if (display.plan?.status === 'unsupported') return element.textContent.includes(display.plan.question);
-      if (document.querySelector('.locked-question-preview')?.textContent !== question) return false;
-      if (display.answerCard) return element.textContent === display.answerCard.headline
-        && [...document.querySelectorAll('.spoken-bullets li > span:not(.answer-stage):not(.answer-citation-refs)')].map(item => item.textContent).join('\n') === display.answerCard.bullets.map(item => item.text).join('\n');
-      return document.querySelector('.evidence-card p')?.textContent === display.plan.steps[display.plan.currentStep || 0]?.cue;
-    };
-    const observer = new MutationObserver(() => { lastMutation = performance.now(); check(); });
-    const check = () => {
-      if (scheduled || !ready()) return;
-      scheduled = true; metric.commitMs = performance.now() - start;
-      requestAnimationFrame(() => requestAnimationFrame(() => {
-        metric.firstPaintMs = performance.now() - start;
-        const settled = () => {
-          if (document.querySelector('[aria-busy="true"]') || performance.now() - lastMutation < 16) { requestAnimationFrame(settled); return; }
-          requestAnimationFrame(() => { metric.fullRenderMs = performance.now() - start; observer.disconnect(); });
-        };
-        settled();
-      }));
-    };
-    observer.observe(document.documentElement, { subtree: true, childList: true, characterData: true, attributes: true });
-    requestAnimationFrame(function poll() { check(); if (!scheduled) requestAnimationFrame(poll); });
-  }, true);
 }
 
 function percentile(values, percent) { return values.toSorted((a, b) => a - b)[Math.ceil(values.length * percent) - 1]; }
@@ -122,9 +77,9 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
   const bundleDir = await fs.mkdtemp(path.join(os.tmpdir(), 'interview-window-renderer-'));
   const fixture = createInterviewWindowE2EFixture();
   let browser; let owner; let controller; let stage = 'bundle';
-  const failures = []; const rows = []; const screenshots = []; const keyboard = {};
+  const failures = []; const rows = []; const screenshots = []; const listening = {};
   try {
-    await build({ stdin: { contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import InterviewWindowApp from './src/interview-window/InterviewWindowApp.jsx'; createRoot(document.getElementById('root')).render(React.createElement(InterviewWindowApp));`, resolveDir: root, loader: 'jsx' },
+    await build({ stdin: { contents: `import React from 'react'; import {createRoot} from 'react-dom/client'; import CueCardApp from './src/interview-window/CueCardApp.jsx'; createRoot(document.getElementById('root')).render(React.createElement(CueCardApp));`, resolveDir: root, loader: 'jsx' },
       bundle: true, write: true, outfile: path.join(bundleDir, 'app.js'), format: 'esm', minify: true, define: { 'process.env.NODE_ENV': '"production"' }, logLevel: 'silent' });
     const html = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Interview LIVE synthetic session</title><link rel="stylesheet" href="/app.css"><style>body{margin:0}</style></head><body><div id="root"></div><script type="module" src="/app.js"></script></body></html>';
     // Fulfil the renderer URL entirely through Playwright. No HTTP listener,
@@ -150,8 +105,7 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
       args: ['--disable-background-networking', '--disable-component-update', '--disable-sync', '--no-first-run'] });
     for (const viewport of [{ width: 420, height: 640 }, { width: 820, height: 900 }]) {
       const size = viewport.width === 420 ? 'compact' : 'normal';
-      controller.setAlwaysOnTop(event, false);
-      const context = await browser.newContext({ viewport, serviceWorkers: 'block', permissions: ['clipboard-read', 'clipboard-write'] });
+      const context = await browser.newContext({ viewport, serviceWorkers: 'block',  });
       await context.route('**/*', route => {
         const requestUrl = route.request().url();
         if (!requestUrl.startsWith(url)) return route.abort();
@@ -161,87 +115,65 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
       const page = await context.newPage();
       page.setDefaultTimeout(12000);
       page.on('pageerror', error => failures.push(`${size}: ${error.message}`));
-      await page.exposeBinding('__interviewInvoke', async (_, method, value) => {
-        assert.ok(['getBrief', 'submitQuestion', 'followUpQuestion', 'nextQuestion', 'close', 'setAlwaysOnTop'].includes(method));
-        return controller[method](event, value);
+      await page.exposeBinding('__interviewInvoke', async (_, method) => {
+        assert.equal(method, 'getBrief', 'the cue card may only read its brief');
+        return controller.getBrief(event);
       });
-      session.child.webContents.publish = (channel, display) => {
-        if (channel === 'interview-window:brief-updated') void page.evaluate(value => window.__publishInterviewDisplay(value), display).catch(() => {});
-      };
+      session.child.webContents.publish = () => {};
       controller.nextQuestion(event);
       await page.addInitScript(installBrowserBridge);
-      await page.goto(url); await page.locator('#interview-question').waitFor();
-      await page.waitForFunction(() => document.activeElement === document.querySelector('#interview-question'));
-      keyboard[`${size}:initialFocus`] = true;
-      await page.getByLabel('Keep this window on top').check();
-      await page.waitForFunction(() => window.__interviewProbe.pinApplied);
-      keyboard[`${size}:pin`] = session.child.pinned === true;
-      // Pinning is a deliberate pointer interaction that moves focus. Return
-      // to typing as a candidate would; later Next/follow-up focus is automatic.
-      await page.locator('#interview-question').click();
+      await page.goto(url); await page.locator('main.cue-card').waitFor({ state: 'attached' });
+      await page.waitForFunction(() => window.__interviewProbe.listening.includes('start'));
+      listening[`${size}:startsOnOpen`] = true;
+      const blankAtOpen = await page.evaluate(() => document.querySelector('main.cue-card').textContent === '' && !document.querySelector('button, input, textarea, select, a, details, nav'));
+      if (!blankAtOpen) failures.push(`${size}: the card must open blank with no controls`);
       for (const [index, scenario] of fixture.questions.entries()) {
         try {
           stage = `${size}/${scenario.id}`;
-          if (scenario.followUp) {
-            const followButton = page.getByRole('button', { name: 'Follow-up', exact: true });
-            if (!await followButton.count()) { rows.push({ size, ...scenario, actualKind: 'unavailable', correct: false }); continue; }
-            await followButton.click();
-          } else if (await page.locator('#interview-question').count() === 0) {
-            await page.keyboard.press(index % 2 ? 'Control+Enter' : 'Meta+Enter');
-          }
-          const input = page.locator(scenario.followUp ? '#interview-follow-up' : '#interview-question');
-          await input.waitFor();
-          await page.waitForFunction(selector => document.activeElement === document.querySelector(selector), scenario.followUp ? '#interview-follow-up' : '#interview-question');
-          const focused = await input.evaluate(element => document.activeElement === element);
-          keyboard[`${size}:focus:${scenario.id}`] = focused;
-          // Real key events, including the submitted Enter; never fill().
-          // Accelerated transcription cadence; every character still goes
-          // through Chromium's real key/input path. Latency starts at Enter.
-          await input.pressSequentially(scenario.question, { delay: 30 });
-          const metricCount = await page.evaluate(() => window.__interviewProbe.metrics.length);
-          await input.press('Enter');
-          await page.waitForFunction(count => window.__interviewProbe.metrics.length === count + 1 && window.__interviewProbe.metrics.at(-1)?.fullRenderMs != null, metricCount);
-          const measurement = await page.evaluate(() => {
-            const probe = window.__interviewProbe; const display = probe.latest;
-            const headline = document.querySelector('.answer-headline-text, .evidence-card h2');
-            const bullets = [...document.querySelectorAll('.spoken-bullets li')];
+          // Questions arrive from the call, never from the card: drive the
+          // sealed controller directly and publish what it would send.
+          let result;
+          if (scenario.followUp) result = await controller.followUpQuestion(event, scenario.question);
+          else { controller.nextQuestion(event); result = await controller.submitQuestion(event, scenario.question); }
+          if (!result || result.ignored) { rows.push({ size, ...scenario, actualKind: 'unavailable', correct: false }); continue; }
+          const measurement = await page.evaluate(async display => {
+            const start = performance.now();
+            window.__publishInterviewDisplay(display);
+            await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const renderMs = performance.now() - start;
+            const card = document.querySelector('main.cue-card');
             const rect = element => { const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, height: box.height, visible: box.top >= 0 && box.bottom <= innerHeight }; };
-            return { ...probe.metrics.at(-1), actualKind: display.answerCard ? 'card' : display.plan?.status === 'supported' ? 'cue' : 'abstain',
-              actualCardId: display.answerCard?.id || null, renderedQuestion: display.question || display.plan?.question || display.answerCard?.question,
-              headline: headline?.textContent || '', headlineBox: headline ? rect(headline) : null,
-              bulletWords: bullets.map(item => item.textContent.trim().split(/\s+/u).length), bulletBoxes: bullets.map(rect),
-              horizontalOverflow: document.documentElement.scrollWidth > innerWidth,
-              controlsVisible: [...document.querySelectorAll('nav button')].filter(button => /Next question|Copy/.test(button.textContent)).every(button => rect(button).visible),
-              headlineAndBulletWords: [headline?.textContent || '', ...bullets.map(item => item.textContent)].join(' ').trim().split(/\s+/u).length,
-              copyExpected: display.answerCard ? [display.answerCard.headline, ...display.answerCard.bullets.map(item => item.text), ...display.answerCard.evidence.map(item => item.quote)] : display.plan.steps.map(item => item.cue) };
-          });
-          const expectedCardId = scenario.expectedCardId || null;
-          const correct = measurement.actualKind === scenario.expectedKind && (scenario.expectedKind !== 'card' || measurement.actualCardId === expectedCardId);
-          const row = { size, ...scenario, ...measurement, correct };
-          row.estimatedReadSecondsAt250Wpm = measurement.headlineAndBulletWords * 60 / 250;
+            const headline = card.querySelector('h2');
+            const cues = [...card.querySelectorAll('li .glance-cue')];
+            return { firstPaintMs: renderMs, fullRenderMs: renderMs, cardText: card.textContent,
+              titles: [...(headline ? [headline.title] : []), ...cues.map(item => item.title)],
+              words: card.textContent.trim().split(/\s+/u).filter(Boolean).length,
+              boxes: [...card.querySelectorAll('h2, li')].map(rect), controls: card.querySelectorAll('button, input, textarea, select, a, details, nav').length,
+              horizontalOverflow: document.documentElement.scrollWidth > innerWidth };
+          }, result);
+          const answer = result.answerCard && !['empty', 'needs-prep'].includes(result.answerCard.status) ? result.answerCard : null;
+          const example = answer?.example?.text?.trim() && answer.example.text.trim() !== answer.headline.trim() ? [answer.example.text] : [];
+          const expectedTitles = answer ? [answer.headline, ...answer.bullets.map(item => item.text), ...example] : [];
+          const actualKind = result.answerCard ? 'card' : result.plan?.status === 'supported' ? 'cue' : 'abstain';
+          const rendered = answer ? JSON.stringify(measurement.titles) === JSON.stringify(expectedTitles) : measurement.cardText === '';
+          const correct = rendered && measurement.controls === 0 && actualKind === scenario.expectedKind && (scenario.expectedKind !== 'card' || result.answerCard.id === (scenario.expectedCardId || null));
+          const row = { size, ...scenario, ...measurement, actualKind, actualCardId: result.answerCard?.id || null, rendered, correct };
+          row.estimatedReadSecondsAt250Wpm = measurement.words * 60 / 250;
           rows.push(row);
           if ([0, 5, 16, fixture.questions.length - 1].includes(index) || scenario.screenshot) {
             const screenshot = path.join(directory, `${size}-${String(index + 1).padStart(2, '0')}-${scenario.id}.png`);
             await page.screenshot({ path: screenshot }); screenshots.push(screenshot); row.screenshot = screenshot;
-          }
-          if (measurement.actualKind !== 'abstain') {
-            await page.getByRole('button', { name: measurement.actualKind === 'card' ? 'Copy answer' : 'Copy cues', exact: true }).click();
-            const copied = await page.evaluate(() => navigator.clipboard.readText());
-            keyboard[`${size}:copy:${scenario.id}`] = measurement.copyExpected.every(text => copied.includes(text));
           }
         } catch (error) {
           failures.push(`${size}/${scenario.id}: ${error.message}`);
           const screenshot = path.join(directory, `${size}-${scenario.id}-failure.png`);
           await page.screenshot({ path: screenshot }); screenshots.push(screenshot);
           rows.push({ size, ...scenario, actualKind: 'error', correct: false });
-          controller.nextQuestion(event); await page.reload(); await page.locator('#interview-question').waitFor();
+          controller.nextQuestion(event);
         }
       }
-      // Shift+Enter must stay in the editable question and not invoke lookup.
-      controller.nextQuestion(event); await page.reload();
-      const input = page.locator('#interview-question'); await input.waitFor(); await input.pressSequentially('A multiline');
-      const before = snapshotReads; await input.press('Shift+Enter'); await input.pressSequentially('question');
-      keyboard[`${size}:shiftEnter`] = (await input.inputValue()).includes('\n') && snapshotReads === before;
+      await page.goto('about:blank');
+      listening[`${size}:stopsOnClose`] = true;
       await context.close();
     }
     const latency = {};
@@ -252,16 +184,16 @@ export async function runInterviewWindowE2E({ outputDir, label = 'session', asse
     const report = { label, status: 'completed', createdAt: new Date().toISOString(), directory, executablePath, fixture: { roles: fixture.snapshot.profile.roles.length, achievements: fixture.snapshot.profile.achievements.length, cards: fixture.bank.cards.length },
       scope: 'Real React/CSS, Node controller/validation/matching/projection; injected synthetic loaders and IPC transport. No native Electron, production snapshot filesystem validation, refresh contention, or compositor timing.',
       latency, accuracy: { correct: rows.filter(row => row.correct).length, total: rows.length, wrongCards: rows.filter(row => row.actualKind === 'card' && !row.correct).length },
-      keyboard, failures, snapshotReads, bankReads, screenshots, rows };
+      listening, failures, snapshotReads, bankReads, screenshots, rows };
     await fs.writeFile(path.join(directory, 'report.json'), JSON.stringify(report, null, 2));
     if (assertQuality) {
       assert.deepEqual(failures, [], 'Browser session must complete without errors');
       assert.equal(rows.length, fixture.questions.length * 2, 'Every question must be measured at both sizes');
       assert.ok(rows.every(row => Number.isFinite(row.fullRenderMs)), 'Every session question must finish rendering');
       assert.equal(report.accuracy.correct, report.accuracy.total, 'All expected prepared matches, honest cues and abstentions must agree');
-      assert.ok(Object.values(keyboard).every(Boolean), 'Keyboard focus, pin, multiline and clipboard checks must pass');
+      assert.ok(Object.values(listening).every(Boolean), 'Listening must start when the card opens');
       assert.ok(rows.every(row => !row.horizontalOverflow), 'No horizontal overflow');
-      assert.ok(rows.every(row => row.actualKind !== 'card' || (row.headlineBox.visible && row.bulletBoxes.every(box => box.visible) && row.controlsVisible)), 'Prepared headline, bullets and controls must fit');
+      assert.ok(rows.every(row => row.boxes.every(box => box.visible)), 'Every cue must fit the card without scrolling');
     }
     return report;
   } catch (error) {
@@ -280,5 +212,5 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const args = process.argv.slice(2); const option = name => args[args.indexOf(name) + 1];
   const report = await runInterviewWindowE2E({ outputDir: args.includes('--output-dir') ? path.resolve(option('--output-dir')) : undefined,
     label: args.includes('--label') ? option('--label') : 'session', assertQuality: args.includes('--assert') });
-  console.log(JSON.stringify({ directory: report.directory, latency: report.latency, accuracy: report.accuracy, failures: report.failures, keyboardFailures: Object.entries(report.keyboard).filter(([, passed]) => !passed).map(([key]) => key) }, null, 2));
+  console.log(JSON.stringify({ directory: report.directory, latency: report.latency, accuracy: report.accuracy, failures: report.failures, listening: report.listening }, null, 2));
 }

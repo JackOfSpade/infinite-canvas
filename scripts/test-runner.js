@@ -251,8 +251,6 @@ import interview_speculative_matcher from './tests/interview-speculative-matcher
 import interview_speculative_pool from './tests/interview-speculative-pool.js';
 import interview_speculative_replay from './tests/interview-speculative-replay.js';
 import interview_answer_extensions from './tests/interview-answer-extensions.js';
-import interview_answer_sections_render from './tests/interview-answer-sections-render.js';
-import interview_prepared_picker_render from './tests/interview-prepared-picker-render.js';
 import interview_qa_card_preview_render from './tests/interview-qa-card-preview-render.js';
 import interview_answer_entailment from './tests/interview-answer-entailment.js';
 import interview_spoken_claims from './tests/interview-spoken-claims.js';
@@ -277,15 +275,16 @@ import interview_practice_benchmark from './tests/interview-practice-benchmark.j
 import interview_preload from './tests/interview-preload.js';
 import interview_app from './tests/interview-app.js';
 import interview_window from './tests/interview-window.js';
-import interview_window_render from './tests/interview-window-render.js';
 import interview_window_e2e from './tests/interview-window-e2e.js';
 import interview_call_audio from './tests/interview-call-audio.js';
-import interview_call_audio_render from './tests/interview-call-audio-render.js';
 import interview_call_question_detector from './tests/interview-call-question-detector.js';
 import interview_call_audio_debug from './tests/interview-call-audio-debug.js';
 import interview_call_speech_replay from './tests/interview-call-speech-replay.js';
 import interview_application_folders from './tests/interview-application-folders.js';
 import career_writing_core from './tests/career-writing-core.js';
+import interview_cue_card_log from './tests/interview-cue-card-log.js';
+import interview_cue_card_render from './tests/interview-cue-card-render.js';
+import interview_glance_cues from './tests/interview-glance-cues.js';
 import interview_qa from './tests/interview-qa.js';
 import interview_practice from './tests/interview-practice.js';
 import career_recovery_resume from './tests/career-recovery-resume.js';
@@ -586,8 +585,6 @@ const testGroups = [
   ['interview-speculative-pool.js', interview_speculative_pool],
   ['interview-speculative-replay.js', interview_speculative_replay],
   ['interview-answer-extensions.js', interview_answer_extensions],
-  ['interview-answer-sections-render.js', interview_answer_sections_render],
-  ['interview-prepared-picker-render.js', interview_prepared_picker_render],
   ['interview-qa-card-preview-render.js', interview_qa_card_preview_render],
   ['interview-answer-entailment.js', interview_answer_entailment],
   ['interview-spoken-claims.js', interview_spoken_claims],
@@ -612,15 +609,16 @@ const testGroups = [
   ['interview-preload.js', interview_preload],
   ['interview-app.js', interview_app],
   ['interview-window.js', interview_window],
-  ['interview-window-render.js', interview_window_render],
   ['interview-window-e2e.js', interview_window_e2e],
   ['interview-call-audio.js', interview_call_audio],
-  ['interview-call-audio-render.js', interview_call_audio_render],
   ['interview-call-question-detector.js', interview_call_question_detector],
   ['interview-call-audio-debug.js', interview_call_audio_debug],
   ['interview-call-speech-replay.js', interview_call_speech_replay],
   ['interview-application-folders.js', interview_application_folders],
   ['career-writing-core.js', career_writing_core],
+  ['interview-cue-card-log.js', interview_cue_card_log],
+  ['interview-cue-card-render.js', interview_cue_card_render],
+  ['interview-glance-cues.js', interview_glance_cues],
   ['interview-qa.js', interview_qa],
   ['interview-practice.js', interview_practice],
   ['career-recovery-resume.js', career_recovery_resume],

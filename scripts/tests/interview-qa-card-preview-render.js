@@ -112,8 +112,8 @@ async function withPanel(run) {
   });
 }
 
-const TESTER_LABEL = 'Preview on the interview card';
-const NO_MATCH = "No exact match. The live window's AI matching may still choose a card.";
+const TESTER_LABEL = 'Preview on the cue card';
+const NO_MATCH = "No exact match. The cue card's AI matching may still choose a card.";
 
 function panelTests() {
   return [{
@@ -126,7 +126,7 @@ function panelTests() {
         assert(dialog()?.getAttribute('aria-modal') === 'true', 'Edit Q&A must open the modal dialog');
         const tester = dialog().querySelector(`section[aria-label="${TESTER_LABEL}"]`);
         assert(tester?.querySelector('h3').textContent === TESTER_LABEL, 'the dialog must show the match tester above the sections');
-        assert(tester.querySelector('p').textContent === 'Exact question and variant matching only; the live window also uses AI matching.', 'the tester must say that only exact matching is previewed');
+        assert(tester.querySelector('p').textContent === 'Exact question and variant matching only; the cue card also uses AI matching.', 'the tester must say that only exact matching is previewed');
         const status = () => tester.querySelector('p[role="status"]').textContent;
         const preview = () => tester.querySelector('[data-testid="interview-card-preview"]');
         const input = tester.querySelector('textarea[placeholder="Type the question as the interviewer would ask it"]');
@@ -134,11 +134,11 @@ function panelTests() {
         await act(() => type(window, input, '  introduce   yourself? '));
         assert(status() === 'Exact match: Tell me about yourself. · Foundation', `a variant must report the exact match, got ${status()}`);
         assert(preview().classList.contains('interview-window') && preview().classList.contains('interview-card-preview'), 'the preview must render inside the window-scoped preview box');
-        assert(preview().querySelector('.spoken-answer h2').textContent === 'I am a product engineer.', `the preview headline must match the window, got ${preview().querySelector('.spoken-answer h2').textContent}`);
-        assert(preview().querySelectorAll('.spoken-bullets li').length === 1, 'the foundation preview must show its single bullet');
+        assert(preview().querySelector('.spoken-answer h2').title === 'I am a product engineer.' && preview().querySelector('.spoken-answer h2').textContent === 'product engineer', `the preview headline must show the window's short reminder and keep the full line, got ${preview().querySelector('.spoken-answer h2').textContent}`);
+        assert(preview().querySelectorAll('.spoken-bullets li:not(.glance-example)').length === 1, 'the foundation preview must show its single bullet');
         await act(() => type(window, input, 'How do you prioritize work?'));
         assert(status() === 'Exact match: How do you prioritize work? · Acme', `the company scope must be labelled, got ${status()}`);
-        assert(preview().querySelectorAll('.spoken-bullets li').length === 2, 'the company preview must drop the blank bullet');
+        assert(preview().querySelectorAll('.spoken-bullets li:not(.glance-example)').length === 2, 'the company preview must drop the blank bullet');
         await act(() => type(window, input, 'How do you rank ideas by effort?'));
         assert(status() === NO_MATCH, `an unmatched question must explain the exact-only result, got ${status()}`);
         assert(!preview(), 'an unmatched question must not render a preview card');
@@ -147,10 +147,10 @@ function panelTests() {
         const form = dialog().querySelector('form[aria-label="Edit Tell me about yourself."]');
         const section = form.querySelector('section[aria-label="Interview card preview"]');
         assert(section?.querySelector('h4').textContent === 'On the interview card', 'the card form must head its live preview');
-        assert(section.querySelector('.spoken-answer h2').textContent === 'I am a product engineer.', 'the card form preview must start from the saved draft');
+        assert(section.querySelector('.spoken-answer h2').title === 'I am a product engineer.', 'the card form preview must start from the saved draft');
         const headline = [...form.querySelectorAll('label')].find(item => item.textContent.startsWith('Headline')).querySelector('textarea');
         await act(() => type(window, headline, 'I lead platform reliability.'));
-        assert(section.querySelector('.spoken-answer h2').textContent === 'I lead platform reliability.', `the card form preview must follow the draft headline, got ${section.querySelector('.spoken-answer h2').textContent}`);
+        assert(section.querySelector('.spoken-answer h2').title === 'I lead platform reliability.' && section.querySelector('.spoken-answer h2').textContent === 'lead platform reliability', `the card form preview must follow the draft headline, got ${section.querySelector('.spoken-answer h2').textContent}`);
         assert(status() === NO_MATCH, 'editing a card must not change the tester question');
       });
     },
@@ -169,7 +169,7 @@ function panelTests() {
           const tester = window.document.querySelector(`[role="dialog"] section[aria-label="${TESTER_LABEL}"]`);
           const input = tester.querySelector('textarea[placeholder="Type the question as the interviewer would ask it"]');
           await act(() => type(window, input, 'Tell me about yourself.'));
-          assert(tester.querySelector('p[role="status"]').textContent === 'Matches 2 cards exactly — the live window will not pick one:', `an ambiguous question must be announced, got ${tester.querySelector('p[role="status"]').textContent}`);
+          assert(tester.querySelector('p[role="status"]').textContent === 'Matches 2 cards exactly — the cue card will not pick one:', `an ambiguous question must be announced, got ${tester.querySelector('p[role="status"]').textContent}`);
           assert([...tester.querySelectorAll('li')].map(item => item.textContent).join('|') === 'Tell me about yourself.|Tell me about yourself.', 'every matching card question must be listed');
           assert(!tester.querySelector('[data-testid="interview-card-preview"]'), 'an ambiguous question must not preview any card');
         } finally { await bundle.module.act(async () => root.unmount()); await bundle.dispose(); }
@@ -180,18 +180,16 @@ function panelTests() {
 
 function noteTests() {
   return [{
-    name: 'interview card preview: the evidence note appears only for a card that cites evidence',
+    name: 'interview card preview: a cited card previews its cues with no extra note',
     async run() {
       await withBundled('src/components/InterviewQaCardPreview.jsx', async ({ window, act, module }) => {
         const root = module.createRoot(window.document.getElementById('root'));
         try {
           await act(() => root.render(module.React.createElement(module.InterviewCardPreview, { card: { ...FOUNDATION, headline: { text: 'Headline with a citation.', evidenceIds: ['ev-1'] } }, scope: 'foundation' })));
           const box = window.document.querySelector('[data-testid="interview-card-preview"]');
-          assert(box.querySelector('.spoken-answer h2').textContent === 'Headline with a citation.', 'an object headline must project from its text');
-          const note = box.parentElement.lastElementChild;
-          assert(note.textContent === 'Cited evidence quotes appear in the live window.', `the evidence note must explain the quotes the editor cannot show, got ${note.textContent}`);
+          assert(box.querySelector('.spoken-answer h2').title === 'Headline with a citation.' && box.querySelector('.spoken-answer h2').textContent === 'Headline with citation', 'an object headline must project from its text');
+          assert(box.parentElement.children.length === 1 && box.textContent === 'Headline with citation' + [...box.querySelectorAll('li')].map(item => item.textContent).join(''), 'the preview must contain the cues and nothing else');
           await act(() => root.render(module.React.createElement(module.InterviewCardPreview, { card: FOUNDATION, scope: 'foundation' })));
-          assert(!window.document.body.textContent.includes('Cited evidence quotes appear'), 'a card with no citation ids must not show the evidence note');
         } finally { await act(() => root.unmount()); }
       });
     },

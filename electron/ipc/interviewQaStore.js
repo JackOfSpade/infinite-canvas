@@ -329,6 +329,60 @@ export async function fillInterviewQaFromPreparation({ userDataPath, nodeId, ban
   return loadInterviewQa({ userDataPath, nodeId });
 }
 
+// ------------------------------------------------------------ glance cues --
+
+/** Every stored answer line as `{ field, index, statement }` (object statements only). */
+function cardStatements(card) {
+  const lines = [];
+  const add = (field, index, statement) => { if (statement && typeof statement === 'object' && typeof statement.text === 'string' && statement.text.trim()) lines.push({ field, index, statement }); };
+  add('headline', 0, card.headline);
+  (Array.isArray(card.bullets) ? card.bullets : []).forEach((item, index) => add('bullets', index, item));
+  add('example', 0, card.example);
+  (Array.isArray(card.extensions) ? card.extensions : []).forEach((item, index) => add('extensions', index, item));
+  return lines;
+}
+const hasCue = statement => typeof statement.cue === 'string' && !!statement.cue.trim();
+
+/**
+ * Add a short live-card reminder (`cue`) to stored answer lines that lack one.
+ * `generate(units)` receives `[{ id, text }]` and resolves to a Map of id to
+ * cue. A cue is saved only while its line still has the text it was written
+ * for, so an edit made during the call is never paired with a stale cue.
+ */
+export async function fillInterviewQaCues({ userDataPath, nodeId, generate, wants = () => true }) {
+  const scopes = ['foundation', 'company'];
+  const units = [];
+  for (const scope of scopes) {
+    const store = await readStore(userDataPath, scope, nodeId);
+    for (const card of store.cards) {
+      for (const { field, index, statement } of cardStatements(card)) {
+        if (!hasCue(statement) && wants(statement.text)) units.push({ id: `${scope}:${card.id}.${field}[${index}]`, scope, cardId: card.id, field, index, text: statement.text });
+      }
+    }
+  }
+  if (!units.length) return { requested: 0, saved: 0 };
+  const cues = await generate(units.map(({ id, text }) => ({ id, text })));
+  let saved = 0;
+  for (const scope of scopes) {
+    const mine = units.filter(unit => unit.scope === scope && typeof cues?.get?.(unit.id) === 'string');
+    if (!mine.length) continue;
+    await serialized(queueKey(userDataPath, scope, nodeId), async () => {
+      const store = await readStore(userDataPath, scope, nodeId);
+      let changed = 0;
+      for (const unit of mine) {
+        const card = store.cards.find(item => item.id === unit.cardId);
+        const line = card && cardStatements(card).find(item => item.field === unit.field && item.index === unit.index);
+        if (!line || line.statement.text !== unit.text || hasCue(line.statement)) continue;
+        line.statement.cue = cues.get(unit.id);
+        changed += 1;
+      }
+      if (changed) await writeStore(userDataPath, scope, nodeId, store);
+      saved += changed;
+    });
+  }
+  return { requested: units.length, saved };
+}
+
 /** Live-window cards: Foundation then Company, each tagged with its scope. */
 export async function loadInterviewQaLiveCards({ userDataPath, nodeId }) {
   const [foundation, company] = await Promise.all([readStore(userDataPath, 'foundation', nodeId), readStore(userDataPath, 'company', nodeId)]);
