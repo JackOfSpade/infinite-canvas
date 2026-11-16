@@ -315,6 +315,12 @@ export default [
       const genericAcronym = checkTargetCompanyBinding(['I would bring AI platform experience to this role.'], target, ['Acme']);
       assert(!copied.passed && targetAlias.passed && priorEvidence.passed && genericAcronym.passed,
         `only a mismatched prospective employer is rejected (${JSON.stringify({ copied, targetAlias, priorEvidence, genericAcronym })})`);
+      // No comma after the employer: the pronoun that follows is not part of its name.
+      const pronounAfter = ['What I learned at Acme Unified Schools I would apply in this role.', 'The habits I built at Acme Unified Schools I would bring to your team.']
+        .map(sentence => checkTargetCompanyBinding([sentence], target, ['Acme Unified Schools']));
+      const stillRefused = checkTargetCompanyBinding(['I would bring this work to the team at Acme Unified Schools I think.'], target, ['Acme Unified Schools']);
+      assert(pronounAfter.every(result => result.passed) && !stillRefused.passed && /“Acme Unified Schools”, a prior employer/u.test(stillRefused.detail),
+        `a pronoun after a prior employer must not turn it into an unknown target (${JSON.stringify({ pronounAfter, stillRefused })})`);
       return { copiedTargetRejected: true, targetAliasAllowed: true, priorEvidenceAllowed: true };
     },
   },

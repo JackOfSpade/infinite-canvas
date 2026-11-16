@@ -4023,8 +4023,11 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
       const explicitlyTargetBound = /\b(?:for|in|to)\s+this\s+role\b|\b(?:your|this)\s+(?:team|company|organization|organisation|mission|platform|product)\b/iu.test(value)
         || targetAliases.some(alias => occursAsWholeName(alias, normalized(value)));
       const namedEmployers = [
+        // The capitalized run also swallows the pronoun that starts the next
+        // clause (“what I learned at <Employer> I would apply in this role”).
+        // Left on, the name matches no known employer and reads as a new target.
         ...[...value.matchAll(NAMED_COMPANY_AFTER_PREPOSITION)].map(match => ({
-          value: match[2], index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].length - match[2].length,
+          value: match[2].replace(/(?<=\S)\s+I$/u, ''), index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].length - match[2].length,
         })),
         ...[...value.matchAll(NAMED_COMPANY_POSSESSIVE)].map(match => ({
           value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,

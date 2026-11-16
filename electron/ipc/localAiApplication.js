@@ -6346,7 +6346,7 @@ export function pasteAttributionScopeErrors({ unitLabel, unitId, finalText, evid
             if (new RegExp(`\\bat\\s+${written.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')}`, 'iu').test(sourceText)) continue;
           }
           reported.add(written.toLowerCase());
-          errors.push(`${unit} names ${JSON.stringify(written)} as the candidate's employer, but it is not an employer, school, issuer, or project in the approved career, and a client, vendor, example, or posting company the evidence merely mentions is not one. Name only an approved employer, or describe the work without an employer.`);
+          errors.push(`${unit} names ${JSON.stringify(written)} as the candidate's employer (in ${JSON.stringify(match[0].replace(/^[.!?]\s+/u, '').trim())}), but it is not an employer, school, issuer, or project in the approved career, and a client, vendor, example, or posting company the evidence merely mentions is not one. Name only an approved employer, or describe the work without an employer.`);
         }
       }
     }

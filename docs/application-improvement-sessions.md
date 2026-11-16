@@ -102,6 +102,19 @@ Test (runs journaled in `docs/ai-test-runs.md`): the 15 archived letter-only wri
 
 Validation: 5,613 unit tests passed with zero failures; lint is clean on the changed files. The oracle gate reports two ngram findings, neither from this change: the quoted source phrase in the 2026-11-06 entry of this file, and a phrase in `scripts/tests/interview-glance-cues.js`. Frozen regression set: the three oldest pairs dropped, the three edited-letter pairs of this window added (20). Watch list reviewed for all three pairs. Counter reset after this entry.
 
+### 2026-11-16 — bug-report fixes from a two-résumé, one-letter run; one host check, one convert rule; counter not reset
+
+Not a session. A bug report on two résumé jobs and one letter-only job (all saved, 30 and 41 Claude runs on the two cards) showed two more causes of wasted rounds. The writer brief, the rubric and the model routing are unchanged.
+
+- **`target-company-binding` read a prior employer plus the pronoun after it as a new company.** In "what I learned at <prior employer> I would apply in this role", with no comma, the capitalized-name extractor kept the "I". The name then matched no known employer, so every prior-employer exemption was skipped. One letter candidate was rejected four times on the same sentence and dropped. The extractor now leaves a trailing "I" off the name. Future work aimed at a prior employer is still refused, and the message again says "a prior employer".
+- **Every résumé convert failed `project-field-occurs-in-cited-career-evidence`** (8 converts across the two jobs, one correction round each). The project's name is its own short quote in the approved catalog, and the convert rules said only that the name must match the project, so the converter spent its four citations on descriptive quotes. The convert rules now say one cited quote must be the quote that states the name, counted within the four.
+
+Report: the employer-name rejection ("names X as the candidate's employer") now quotes the phrase it read, so a tool read as an employer can be told from a real one. One such rejection named "React"; its sentence was not retained, so that check is unchanged.
+
+Not changed: three of five letter candidates still measured 105% to 108% of the page on first convert, down from 102% to 135% before the capacity section. Each cost one fit round.
+
+Test: focused suites and the full unit suite. No live generation was run; the next bundles are the measurement.
+
 ### 2026-11-16 — bug-report fixes from a three-letter run; host checks and letter length; counter not reset
 
 Not a session. A bug report on three letter-only jobs (all saved, 35 to 47 Claude runs each) showed four host causes of wasted rounds. The writer brief, the rubric and the model routing are unchanged.
