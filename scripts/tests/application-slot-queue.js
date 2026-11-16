@@ -182,6 +182,7 @@ export default [
       assert(start >= 0 && end > start, 'the actual Generate callback is available');
       for (const gateResult of [
         { success: true, blocked: true, patterns: [{ summary: 'Shortens the opening summary', count: 3 }] },
+        { success: true, blocked: true, patterns: [], reason: 'session-due', sessionDue: { count: 7, limit: 6 } },
         { success: false, error: 'handoff failed' },
         { success: true, blocked: false, patterns: [] },
       ]) {
@@ -193,9 +194,11 @@ export default [
         const gateCalls = [];
         const completed = [];
         const toasts = [];
+        const notices = [];
         const runStates = [];
         const callback = runInNewContext(`${source.slice(start, end)}\ngenerateApplication;`, {
           useCallback: fn => fn,
+          showBlockingNotice: notice => notices.push(notice),
           window: { electronAPI: {
             queueLocalApplication: async () => { queueCalls += 1; return { success: false }; },
             prepareOfficialPostingForGeneration: async () => ({ success: true, resolutionId: 'prepared-source', preparedAt: new Date().toISOString(), listingCheck: { action: 'proceed' } }),
@@ -231,10 +234,16 @@ export default [
         assert(runStates.at(-1) === 'idle', `${label}: the card returns to idle`);
         if (gateResult.success && !gateResult.blocked) {
           assert(queueCalls === 1, 'an unblocked gate lets Generate queue the handoff');
+        } else if (gateResult.success && gateResult.reason === 'session-due') {
+          assert(queueCalls === 0, 'a due session never queues the handoff');
+          assert(toasts.length === 0 && notices.length === 1 && notices[0].title === 'Generation stopped: improvement session due'
+            && notices[0].message.includes('7 bundles') && notices[0].message.includes('the limit is 6'),
+            'the due-session refusal is a must-dismiss notice carrying the count and limit it was given');
         } else if (gateResult.success) {
           assert(queueCalls === 0, 'a blocked gate never queues the handoff');
-          assert(toasts.length === 1 && toasts[0].title === 'Improvement session required'
-            && toasts[0].description.includes('Shortens the opening summary'), 'the refusal names the recurring pattern');
+          assert(toasts.length === 0 && notices.length === 1 && notices[0].title === 'Generation stopped: improvement session required'
+            && notices[0].message.includes('Shortens the opening summary') && notices[0].message.includes('Nothing was generated'),
+            'the refusal is a must-dismiss notice that names the recurring pattern');
         } else {
           assert(queueCalls === 0, 'a failed check refuses generation (fail closed)');
           assert(toasts.length === 1 && toasts[0].title === 'Generation Error' && toasts[0].description === 'handoff failed',

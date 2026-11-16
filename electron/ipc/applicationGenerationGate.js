@@ -7,7 +7,9 @@
  * ordinary manual-AI handoff) whether the edited bundles since the last
  * improvement session show one kind of change recurring in at least
  * GATE_RECURRENCE_MIN of them. If so, generation is refused until a session
- * runs; the session's counter reset clears the stored result.
+ * runs; the session's counter reset clears the stored result. Generation is
+ * also refused, with no AI call, once the bundle counter since the last
+ * session reaches SESSION_DUE_COUNT.
  *
  * Cost: the check runs at most once per input digest (edited pair ids, save
  * times, note times, last session) and not at all below
@@ -21,6 +23,7 @@ import { callLLMText } from './llm.js';
 import {
   GATE_MIN_EDITED_BUNDLES,
   GATE_RECURRENCE_MIN,
+  SESSION_DUE_COUNT,
   generationGateInputDigest,
   generationGateInputs,
   writeGenerationGate,
@@ -100,6 +103,15 @@ function fromRecord(record, reason) {
 
 export async function evaluateApplicationGenerationGate({ root, callText, signal, now = () => new Date().toISOString() }) {
   const { state, editedPairs, gate } = await generationGateInputs(root);
+  // A due improvement session also refuses generation: past the limit, each
+  // new bundle adds unreviewed output. Decided from the counter alone, before
+  // the recurrence handoff, so it costs no AI call. The limit is read from
+  // SESSION_DUE_COUNT, the same constant the status command reports `due` by.
+  const sessionCount = state.countSinceSession || 0;
+  if (sessionCount >= SESSION_DUE_COUNT) {
+    return { blocked: true, checked: false, patterns: [], editedBundleCount: editedPairs.length,
+      reason: 'session-due', sessionDue: { count: sessionCount, limit: SESSION_DUE_COUNT } };
+  }
   if (editedPairs.length < GATE_MIN_EDITED_BUNDLES) {
     if (gate && gate.lastSessionAt !== (state.lastSessionAt || null)) await writeGenerationGate(root, null);
     return { blocked: false, checked: false, patterns: [], editedBundleCount: editedPairs.length, reason: 'fewer-than-three-edited-bundles' };

@@ -56,7 +56,7 @@ export default [{
         let status = await improvementStatus(root);
         assert.equal(status.earlyDue, false, `${career}: three of eight is below the floor`);
         assert.deepEqual(status.recurring, []);
-        assert.equal(status.due, true, 'eight bundles exceed the three-bundle review threshold');
+        assert.equal(status.due, true, 'eight bundles exceed the five-bundle review threshold');
         // A fourth edit in the same section inside the window flips it.
         await logSavedBundle({ root, workspaceDir: path.join(root, 'b7'), html: html(resume('Skills', `${career} draft b7 trimmed`), `<p>${career} letter</p>`) });
         status = await improvementStatus(root);
@@ -94,7 +94,7 @@ export default [{
         await logGeneratedBundle({ root, workspaceDir, html: html(`<p>${career} draft</p>`, `<p>${career} letter</p>`), posting: `Synthetic ${career} posting`, appVersion: 'test' });
         const status = await improvementStatus(root);
         assert.equal(status.count, index + 1, 'review preserves the collection counter');
-        assert.equal(status.due, index + 1 >= 3, 'review becomes due at three bundles');
+        assert.equal(status.due, false, 'review is not due below five bundles');
         await logSavedBundle({ root, workspaceDir, html: html(`<p>${career} first edit</p>`, `<p>${career} letter edit</p>`) });
         await logSavedBundle({ root, workspaceDir, html: html(`<p>${career} final edit</p>`, `<p>${career} final letter</p>`) });
       }
@@ -125,10 +125,10 @@ export default [{
       assert.equal(removedPair.saved.letter, null);
       assert(state.summaries.some(row => row.id === removedPair.id && row.document === 'letter' && row.op === 'not needed'));
       for (let i = 3; i < 105; i++) {
-        if (i === 3 || i === 4) {
+        if (i === 4 || i === 5) {
           const status = await improvementStatus(root);
           assert.equal(status.count, i, 'a status review preserves the collection counter');
-          assert.equal(status.due, i >= 3, 'review is due at three bundles and stays due while collecting more evidence');
+          assert.equal(status.due, i >= 5, 'review is due at five bundles and not before');
         }
         await logGeneratedBundle({ root, workspaceDir: path.join(root, `bundle-${i}`), html: html('<p>resume</p>', '<p>letter</p>'), posting: 'Synthetic role', appVersion: 'test' });
       }

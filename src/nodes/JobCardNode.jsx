@@ -1623,15 +1623,32 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
       window.electronAPI.completeNonApiAiRun?.(gateRunId)?.catch?.(() => {});
       if (!gate?.success) throw new Error(gate?.error || 'The edit-history check did not complete.');
       if (gate.blocked) {
-        const summaries = (gate.patterns || []).map(p => p.summary).filter(Boolean).slice(0, 3).join(' · ');
-        EventLogger.log('[JobCard] generation blocked by recurring edits id=' + idRef.current + ' patterns=' + (gate.patterns || []).length);
-        if (isMountedRef.current) {
-          addToast({
-            title: 'Improvement session required',
-            description: 'Your recent edits repeat the same change in 3 or more bundles: ' + summaries + '. Run the application improvement session from Claude Code or Codex, then generate again.',
-            type: 'error',
+        const jobName = (card => [card?.title, card?.company].filter(Boolean).join(' at '))(getLiveNode(idRef.current)?.data);
+        // A popup that must be dismissed, as for a job closed mid-check: the
+        // check can take a while, and a toast that came and went leaves a
+        // Generate button that silently does nothing.
+        if (gate.reason === 'session-due') {
+          EventLogger.log('[JobCard] generation blocked by due improvement session id=' + idRef.current + ' count=' + gate.sessionDue?.count + ' limit=' + gate.sessionDue?.limit);
+          showBlockingNotice({
+            title: 'Generation stopped: improvement session due',
+            detail: jobName,
+            message: 'Nothing was generated. ' + gate.sessionDue?.count + ' bundles have been generated since the last application improvement session, and the limit is '
+              + gate.sessionDue?.limit + '. New bundles stay blocked until a session is run from Claude Code.',
           });
+          return;
         }
+        // Name the changes that reached the bar; fall back to all of them for
+        // an older stored result without per-pattern counts.
+        const blocking = (gate.patterns || []).filter(p => p.summary && Number(p.count) >= 3);
+        const summaries = (blocking.length ? blocking : (gate.patterns || []).filter(p => p.summary))
+          .slice(0, 3).map(p => p.summary).join(' · ');
+        EventLogger.log('[JobCard] generation blocked by recurring edits id=' + idRef.current + ' patterns=' + (gate.patterns || []).length);
+        showBlockingNotice({
+          title: 'Generation stopped: improvement session required',
+          detail: jobName,
+          message: 'Nothing was generated. You made the same change by hand in 3 or more recent bundles: ' + summaries.replace(/[.\s]+$/u, '')
+            + '. New bundles stay blocked until an application improvement session is run from Claude Code.',
+        });
         return;
       }
 

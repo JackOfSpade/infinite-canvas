@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   GATE_MIN_EDITED_BUNDLES,
   GATE_RECURRENCE_MIN,
+  SESSION_DUE_COUNT,
   editDiffs,
   editSummaries,
   editedPairsSinceSession,
@@ -42,7 +43,7 @@ async function withRoot(run) {
 }
 
 async function addBundle(root, index, { edited = true, notes } = {}) {
-  const word = WORDS[index];
+  const word = WORDS[index % WORDS.length];
   const workspaceDir = path.join(root, `bundle-${index}`);
   await logGeneratedBundle({ root, workspaceDir, html: html(resumeFor(word), letterFor(word)), posting: `Synthetic posting ${index}`, appVersion: 'test' });
   await pause(3);
@@ -252,4 +253,21 @@ export default [{
     assert(body.includes('        careerSnapshotId,\n'), 'queue payload anchor intact');
     assert(card.includes("import { generateId } from '../utils/idGenerator';"));
   },
+}, {
+  name: 'generation gate: a due improvement session blocks with no AI call, at whatever SESSION_DUE_COUNT is, and clears on reset',
+  run: async () => withRoot(async root => {
+    const { calls, callText } = fakeCallText([]);
+    for (let index = 0; index < SESSION_DUE_COUNT - 1; index += 1) await addBundle(root, index, { edited: false });
+    let result = await evaluateApplicationGenerationGate({ root, callText });
+    assert.deepEqual([result.blocked, result.reason], [false, 'fewer-than-three-edited-bundles'], 'one below the limit still generates');
+    await addBundle(root, SESSION_DUE_COUNT - 1, { edited: false });
+    result = await evaluateApplicationGenerationGate({ root, callText });
+    assert.deepEqual([result.blocked, result.checked, result.reason, result.sessionDue, calls.length],
+      [true, false, 'session-due', { count: SESSION_DUE_COUNT, limit: SESSION_DUE_COUNT }, 0]);
+    await resetImprovementCounter(root);
+    result = await evaluateApplicationGenerationGate({ root, callText });
+    assert.equal(result.blocked, false, 'the session reset clears the block');
+    const source = await fs.readFile(new URL('../../electron/ipc/applicationGenerationGate.js', import.meta.url), 'utf8');
+    assert(!/sessionCount >= \d/.test(source), 'the limit is never a literal');
+  }),
 }];

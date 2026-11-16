@@ -444,7 +444,7 @@ export async function logSavedBundle({ root, workspaceDir, html, letterRemoved =
 // rather than volume: one section of one document edited in
 // RECURRING_MIN_BUNDLES of the last RECURRING_WINDOW accepted bundles logged
 // since the last session. It suggests a session; it never starts one.
-export const SESSION_DUE_COUNT = 3;
+export const SESSION_DUE_COUNT = 5;
 export const RECURRING_WINDOW = 8;
 export const RECURRING_MIN_BUNDLES = 4;
 const EDIT_OPS = new Set(['added', 'removed', 'rewritten', 'moved']);
