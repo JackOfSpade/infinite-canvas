@@ -134,11 +134,11 @@ function panelTests() {
         await act(() => type(window, input, '  introduce   yourself? '));
         assert(status() === 'Exact match: Tell me about yourself. · Foundation', `a variant must report the exact match, got ${status()}`);
         assert(preview().classList.contains('interview-window') && preview().classList.contains('interview-card-preview'), 'the preview must render inside the window-scoped preview box');
-        assert(preview().querySelector('.spoken-answer h2').title === 'I am a product engineer.' && preview().querySelector('.spoken-answer h2').textContent === 'product engineer', `the preview headline must show the window's short reminder and keep the full line, got ${preview().querySelector('.spoken-answer h2').textContent}`);
-        assert(preview().querySelectorAll('.spoken-bullets li:not(.glance-example)').length === 1, 'the foundation preview must show its single bullet');
+        assert(preview().querySelector('.answer-headline .glance-cue').title === 'I am a product engineer.' && preview().querySelector('.answer-headline .glance-cue').textContent === 'product engineer', `the preview headline must show the window's short reminder and keep the full line, got ${preview().querySelector('.answer-headline .glance-cue').textContent}`);
+        assert(preview().querySelectorAll('.spoken-bullets .answer-point').length === 1, 'the foundation preview must show its single bullet');
         await act(() => type(window, input, 'How do you prioritize work?'));
         assert(status() === 'Exact match: How do you prioritize work? · Acme', `the company scope must be labelled, got ${status()}`);
-        assert(preview().querySelectorAll('.spoken-bullets li:not(.glance-example)').length === 2, 'the company preview must drop the blank bullet');
+        assert(preview().querySelectorAll('.spoken-bullets .answer-point').length === 2, 'the company preview must drop the blank bullet');
         await act(() => type(window, input, 'How do you rank ideas by effort?'));
         assert(status() === NO_MATCH, `an unmatched question must explain the exact-only result, got ${status()}`);
         assert(!preview(), 'an unmatched question must not render a preview card');
@@ -147,10 +147,10 @@ function panelTests() {
         const form = dialog().querySelector('form[aria-label="Edit Tell me about yourself."]');
         const section = form.querySelector('section[aria-label="Interview card preview"]');
         assert(section?.querySelector('h4').textContent === 'On the interview card', 'the card form must head its live preview');
-        assert(section.querySelector('.spoken-answer h2').title === 'I am a product engineer.', 'the card form preview must start from the saved draft');
+        assert(section.querySelector('.answer-headline .glance-cue').title === 'I am a product engineer.', 'the card form preview must start from the saved draft');
         const headline = [...form.querySelectorAll('label')].find(item => item.textContent.startsWith('Headline')).querySelector('textarea');
         await act(() => type(window, headline, 'I lead platform reliability.'));
-        assert(section.querySelector('.spoken-answer h2').title === 'I lead platform reliability.' && section.querySelector('.spoken-answer h2').textContent === 'lead platform reliability', `the card form preview must follow the draft headline, got ${section.querySelector('.spoken-answer h2').textContent}`);
+        assert(section.querySelector('.answer-headline .glance-cue').title === 'I lead platform reliability.' && section.querySelector('.answer-headline .glance-cue').textContent === 'lead platform reliability', `the card form preview must follow the draft headline, got ${section.querySelector('.answer-headline .glance-cue').textContent}`);
         assert(status() === NO_MATCH, 'editing a card must not change the tester question');
       });
     },
@@ -187,8 +187,9 @@ function noteTests() {
         try {
           await act(() => root.render(module.React.createElement(module.InterviewCardPreview, { card: { ...FOUNDATION, headline: { text: 'Headline with a citation.', evidenceIds: ['ev-1'] } }, scope: 'foundation' })));
           const box = window.document.querySelector('[data-testid="interview-card-preview"]');
-          assert(box.querySelector('.spoken-answer h2').title === 'Headline with a citation.' && box.querySelector('.spoken-answer h2').textContent === 'Headline with citation', 'an object headline must project from its text');
-          assert(box.parentElement.children.length === 1 && box.textContent === 'Headline with citation' + [...box.querySelectorAll('li')].map(item => item.textContent).join(''), 'the preview must contain the cues and nothing else');
+          assert(module.qaCardToDisplayCard({ id: 'q', question: 'Q?', headline: { text: 'I led the long migration project.', cue: 'led migration' }, bullets: [{ text: 'I planned every step carefully.', cue: 'planned steps' }], example: { text: 'One example line here.', cue: 'the example' } }, 'company').headlineCue === 'led migration', 'the preview must carry saved cues, as the cue card does');
+          assert(box.querySelector('.answer-headline .glance-cue').title === 'Headline with a citation.' && box.querySelector('.answer-headline .glance-cue').textContent === 'Headline with citation', 'an object headline must project from its text');
+          assert(box.parentElement.children.length === 1 && box.textContent === [...box.querySelectorAll('.glance-cue')].map(item => item.textContent).join('') && box.querySelector('.glance-cue').textContent === 'Headline with citation', 'the preview must contain the cues and nothing else');
           await act(() => root.render(module.React.createElement(module.InterviewCardPreview, { card: FOUNDATION, scope: 'foundation' })));
         } finally { await act(() => root.unmount()); }
       });

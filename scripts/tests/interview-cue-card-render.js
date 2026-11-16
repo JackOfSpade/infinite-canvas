@@ -37,7 +37,7 @@ async function mounted(api, run) {
   });
 }
 const main = window => window.document.querySelector('main.cue-card');
-const lines = window => [...main(window).querySelectorAll('h2, li')].map(item => item.textContent);
+const lines = window => [...main(window).querySelectorAll('.glance-cue')].map(item => item.textContent);
 
 export default [
   { name: 'cue card: blank until a question is recognised, then only the cues for it', async run() {
@@ -50,7 +50,9 @@ export default [
         assert(!window.document.body.textContent.includes(hidden), `the card must not show ${hidden}`);
       }
       assert(!window.document.querySelector('button, input, textarea, select, a, details, summary, nav, header, form, [role="status"], [role="alert"]'), 'the card must contain nothing to click, type into or read as status');
-      assert(main(window).querySelector('h2').title === CARD.headline, 'the full line stays available as a hover title only');
+      const list = main(window).querySelector('ul.spoken-bullets');
+      assert(!main(window).querySelector('h1, h2, h3') && [...list.children].map(item => item.className).join('|') === 'answer-headline|answer-point|answer-point|glance-example' && !list.querySelector('ul'), 'lines that share no topic must be sibling bullets, never nested under the headline');
+      assert(main(window).querySelector('.answer-headline > .glance-cue').title === CARD.headline, 'the full line stays available as a hover title only');
     });
   } },
   { name: 'cue card: a confident guess mid-question replaces the last answer at once; unmatched or unprepared questions go blank', async run() {

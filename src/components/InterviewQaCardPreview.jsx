@@ -6,6 +6,8 @@ const inputClass = 'mt-1 w-full rounded-md border border-white/15 bg-[#0f0e14] p
 
 const statementOf = value => typeof value === 'string' ? value : (typeof value?.text === 'string' ? value.text : '');
 const evidenceIdsOf = value => Array.isArray(value?.evidenceIds) ? value.evidenceIds : [];
+// The saved short reminder for a line, which the cue card shows in place of the line.
+const cueOf = value => (typeof value?.cue === 'string' && value.cue.trim() ? { cue: value.cue.trim().slice(0, 120) } : {});
 
 /** The main process's stored-card projection, mirrored locally for the editor. */
 // eslint-disable-next-line react-refresh/only-export-components
@@ -14,8 +16,8 @@ export function qaCardToDisplayCard(card, scope) {
   const headline = statementOf(source.headline);
   const bullets = (Array.isArray(source.bullets) ? source.bullets : [])
     .filter(item => statementOf(item).trim())
-    .map(item => ({ stage: typeof item?.stage === 'string' && item.stage ? item.stage : 'point', text: statementOf(item), evidenceIds: evidenceIdsOf(item) }));
-  const example = { text: statementOf(source.example), evidenceIds: evidenceIdsOf(source.example) };
+    .map(item => ({ stage: typeof item?.stage === 'string' && item.stage ? item.stage : 'point', text: statementOf(item), evidenceIds: evidenceIdsOf(item), ...cueOf(item) }));
+  const example = { text: statementOf(source.example), evidenceIds: evidenceIdsOf(source.example), ...cueOf(source.example) };
   const optionalExtension = (Array.isArray(source.extensions) ? source.extensions : [])
     .filter(item => statementOf(item).trim())
     .map((item, index) => ({ id: typeof item?.id === 'string' && item.id ? item.id : `ext-${index + 1}`, text: statementOf(item), exampleHook: '', sourceLabel: '', evidenceIds: evidenceIdsOf(item) }));
@@ -25,6 +27,7 @@ export function qaCardToDisplayCard(card, scope) {
     id: source.id,
     question: source.question,
     headline,
+    ...(cueOf(source.headline).cue ? { headlineCue: cueOf(source.headline).cue } : {}),
     headlineEvidenceIds: evidenceIdsOf(source.headline),
     bullets,
     example,

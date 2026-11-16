@@ -1,8 +1,12 @@
 /* The cue card: cues only, sized to be read in one glance. */
-.interview-window { box-sizing: border-box; min-width: 280px; min-height: 100vh; margin: 0; padding: 14px 16px; color: #f5f3ff; background: #111018; font: 18px/1.3 Inter, ui-sans-serif, system-ui, sans-serif; overflow-wrap: anywhere; }
+.interview-window { box-sizing: border-box; min-width: 280px; min-height: 100vh; margin: 0; padding: 14px 16px; color: #f5f3ff; background: #111018; font: 500 18px/1.35 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif; overflow-wrap: anywhere; }
 .interview-window *, .interview-window *::before, .interview-window *::after { box-sizing: border-box; }
 .interview-window .spoken-answer { margin: 0; }
-.interview-window .spoken-answer h2 { margin: 0 0 10px; color: #faf8ff; font-size: 22px; line-height: 1.2; font-weight: 700; letter-spacing: 0; }
-.interview-window .spoken-bullets { display: grid; gap: 8px; margin: 0; padding-left: 20px; font-size: 18px; line-height: 1.3; }
+/* One type size and weight for every line; depth is shown by indent alone. */
+.interview-window .spoken-bullets, .interview-window .spoken-bullets ul { margin: 0; padding-left: 20px; list-style: disc; font: inherit; }
+.interview-window .spoken-bullets ul { list-style: circle; }
+.interview-window .spoken-bullets li { margin: 0; font: inherit; }
+.interview-window .spoken-bullets li li { margin-top: 5px; }
+.interview-window .spoken-bullets > li + li { margin-top: 10px; }
 /* The same card shown inside Edit Q&A. */
 .interview-window.interview-card-preview { min-height: 0; width: 380px; max-width: 100%; border-radius: 10px; }

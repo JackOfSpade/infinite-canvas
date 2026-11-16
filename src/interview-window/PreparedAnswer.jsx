@@ -12,28 +12,31 @@ export function normalizeAnswerCard(card) {
   return { ...card, bullets: card.bullets || [], example: typeof card.example === 'string' ? { text: card.example, evidenceIds: [] } : card.example || { text: '', evidenceIds: [] }, evidence: card.evidence || [], optionalExtension: card.optionalExtension || card.extensions || [] };
 }
 
-/** The short reminder shown for one prepared line; the full line stays in its title. */
-function Cue({ text, cue }) {
-  return <span className="glance-cue" title={text}>{glanceCueOf(text, cue)}</span>;
+/** One reminder; the full prepared line stays in its hover title. */
+function CueLine({ line }) {
+  return <li className={line.kind}><span className="glance-cue" title={line.text}>{glanceCueOf(line.text, line.cue)}</span></li>;
 }
 
 /**
- * The cues for one prepared answer, and nothing else: the headline reminder,
- * then one line per bullet and one for the example. No labels, citations or
- * optional points. Every extra word costs glance time in a live interview.
- * Renders nothing for a question that has no prepared answer.
+ * The cues for one prepared answer, and nothing else, as one bullet list in a
+ * single type size: the headline, each point and the example are sibling
+ * bullets. Separate prepared lines are separate stories, so none is nested
+ * under another. No labels, citations or optional points. Every extra word
+ * costs glance time in a live interview. Renders nothing for a question with
+ * no prepared answer.
  */
 export function PreparedAnswer({ card: rawCard }) {
   if (!hasPreparedAnswer(rawCard)) return null;
   const card = normalizeAnswerCard(rawCard);
   // A thin required card may reuse its headline as its example; say it once.
   const example = card.example.text?.trim() && card.example.text.trim() !== (card.headline || '').trim() ? card.example : null;
+  const lines = [
+    ...(card.headline?.trim() ? [{ kind: 'answer-headline', text: card.headline, cue: card.headlineCue }] : []),
+    ...card.bullets.filter(bullet => bullet.text?.trim()).map(bullet => ({ kind: 'answer-point', text: bullet.text, cue: bullet.cue })),
+    ...(example ? [{ kind: 'glance-example', text: example.text, cue: example.cue }] : []),
+  ];
   return <section className="spoken-answer" aria-label="Cues">
-    {card.headline?.trim() && <h2 title={card.headline}><span className="answer-headline-text">{glanceCueOf(card.headline, card.headlineCue)}</span></h2>}
-    <ul className="spoken-bullets">
-      {card.bullets.filter(bullet => bullet.text?.trim()).map((bullet, index) => <li key={index}><Cue text={bullet.text} cue={bullet.cue} /></li>)}
-      {example && <li className="glance-example"><Cue text={example.text} cue={example.cue} /></li>}
-    </ul>
+    <ul className="spoken-bullets">{lines.map((line, index) => <CueLine key={index} line={line} />)}</ul>
   </section>;
 }
 
