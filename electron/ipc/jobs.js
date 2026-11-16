@@ -17,6 +17,7 @@ import crypto from 'crypto';
 import { callLLMText, callLLMRaw, checkPromptFits } from './llm.js';
 import { NON_API_AI_TRANSPORT, durableRunHasAnyTask, durableRunSettlementSummary, isNonApiAiStepBackError, recallRunMigration, rememberRunMigration } from './nonApiAi.js';
 import { readPlainTextDocumentWithReason } from './docUtils.js';
+import { isWorkspaceLinkCountSafe } from './filesystem.js';
 import { isRendererSensitivePath, isSystemSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import {
   careerDataFromCareerSnapshot,
@@ -1110,7 +1111,7 @@ function careerInputSensitiveError(filePath) {
   return error;
 }
 
-function assertCareerInputRegularSingleLink(stat, displayName) {
+async function assertCareerInputRegularSingleLink(stat, displayName, canonicalPath) {
   if (!stat?.isFile?.() || stat.isSymbolicLink?.()) {
     if (/\.app$/i.test(displayName)) {
       throw new Error(`${displayName} is a macOS app, not a resume. Drop a PDF, DOCX, TXT, or image of your resume instead.`);
@@ -1121,7 +1122,14 @@ function assertCareerInputRegularSingleLink(stat, displayName) {
   // that record.  Refuse every multi-link source instead of attempting to
   // infer which names are private; this is available on macOS/Windows and
   // closes the alias before any source bytes are read.
-  if (Number(stat.nlink) !== 1) throw careerInputHardlinkError();
+  // One exception, shared with the workspace writer: Google Drive for desktop
+  // hard-links every file it uploads into `.tmp.driveupload` until the upload
+  // finishes.  A link count of exactly 2 whose other name is proven to be that
+  // staging entry leaves no room for a private name, so it is accepted.
+  if (Number(stat.nlink) !== 1
+    && !(canonicalPath && await isWorkspaceLinkCountSafe(canonicalPath, stat))) {
+    throw careerInputHardlinkError();
+  }
   if (stat.size > CAREER_INPUT_MAX_FILE_BYTES) {
     throw new Error(`${displayName} is larger than the ${Math.floor(CAREER_INPUT_MAX_FILE_BYTES / (1024 * 1024))} MiB career-file safety limit. Split or reduce the file before importing it.`);
   }
@@ -1171,7 +1179,7 @@ async function inspectRendererCareerInputPath(filePath) {
   // closing the post-realpath swap window, the familiar attachment refusal
   // keeps the target's sensitivity/availability out of the error surface.
   if (lexicalStat.isSymbolicLink()) throw careerInputSensitiveError(normalizedPath);
-  assertCareerInputRegularSingleLink(lexicalStat, displayName);
+  await assertCareerInputRegularSingleLink(lexicalStat, displayName, normalizedPath);
 
   // The selected spelling need not BE the canonical spelling: a folder reached
   // through a symlinked ancestor, a differently-cased name on a
@@ -1209,7 +1217,7 @@ async function inspectRendererCareerInputPath(filePath) {
     || !sameCareerFileIdentity(lexicalParentStat, parentStat)) {
     throw careerInputChangedError();
   }
-  assertCareerInputRegularSingleLink(canonicalStat, displayName);
+  await assertCareerInputRegularSingleLink(canonicalStat, displayName, realPath);
   if (!sameCareerFileIdentity(lexicalStat, canonicalStat)) throw careerInputChangedError();
   return {
     displayName, normalizedPath, realPath, parentPath, realParent,
@@ -1252,7 +1260,7 @@ async function openRendererCareerInput(filePath, { afterInspection = null } = {}
 
 async function assertRendererCareerInputHandleBinding(source, binding) {
   const opened = await source.stat();
-  assertCareerInputRegularSingleLink(opened, binding.displayName);
+  await assertCareerInputRegularSingleLink(opened, binding.displayName, binding.realPath);
   if (!sameCareerFileVersion(opened, binding.fileVersion)) throw careerInputChangedError();
   const current = await inspectRendererCareerInputPath(binding.normalizedPath);
   if (!sameCareerFileIdentity(current.fileIdentity, binding.fileIdentity)

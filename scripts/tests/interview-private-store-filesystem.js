@@ -1647,6 +1647,34 @@ export default [
     },
   },
   {
+    name: 'career staging: a career file hard-linked only into Google Drive upload staging is still imported',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.career-drive-staging-'));
+      const stagingRoot = path.join(root, 'career-input-staging');
+      const source = path.join(root, 'career data.md');
+      const driveDir = path.join(root, '.tmp.driveupload');
+      let staged = null;
+      try {
+        await fs.promises.mkdir(driveDir);
+        await fs.promises.writeFile(source, 'career source uploading to Drive');
+        await fs.promises.link(source, path.join(driveDir, '60779'));
+        staged = await __stageCareerInputFilesForTests([source], { stagingRoot });
+        assert(staged?.stagedPaths?.length === 1, 'a Drive upload staging link does not block the career import');
+        await staged.cleanup?.();
+        staged = null;
+        // A third name is not explained by Drive staging and still refuses.
+        await fs.promises.link(source, path.join(root, 'third-name.md'));
+        let thirdLinkError = null;
+        try { staged = await __stageCareerInputFilesForTests([source], { stagingRoot }); } catch (error) { thirdLinkError = error; }
+        assert(thirdLinkError?.code === 'CAREER_INPUT_HARDLINK_UNSUPPORTED', 'an extra unexplained link still refuses the import');
+        return { driveStagingAccepted: true, thirdLinkRejected: true };
+      } finally {
+        await staged?.cleanup?.();
+        await fs.promises.rm(root, { recursive: true, force: true });
+      }
+    },
+  },
+  {
     name: 'career staging: renderer input admission rejects registered userData, hard-link aliases, and lstat-to-open replacements before bytes are copied',
     run: async () => {
       const root = await fs.promises.mkdtemp(path.join(process.cwd(), '.career-source-admission-'));
