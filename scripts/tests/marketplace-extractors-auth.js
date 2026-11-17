@@ -1919,6 +1919,11 @@ export default [
         currentUrl: 'https://www.ebay.com/',
       }) === null,
       'platforms without a logged-in URL marker are unaffected');
+      const googleLogin = new URL(PLATFORM_LOGIN_URLS.google);
+      assert(googleLogin.hostname === 'accounts.google.com',
+        'the Google login window opens the sign-in form, not myaccount (signed out, that lands on a marketing page with no form)');
+      assert(googleLogin.searchParams.get('continue') === 'https://myaccount.google.com/',
+        'a completed Google sign-in must land on the page the logged-in check accepts');
       return { ok: true };
     },
   }

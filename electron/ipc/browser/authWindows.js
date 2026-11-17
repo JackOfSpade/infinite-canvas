@@ -1015,14 +1015,17 @@ export function isNativeLoginSuccess(platformId, url, title = '') {
 /** Known platform login URLs */
 export const PLATFORM_LOGIN_URLS = {
   // Job platforms
-  // Navigate to myaccount directly — a LOGGED-IN session STAYS on
-  // myaccount.google.com, while an anonymous one is sent AWAY from it (to
-  // accounts.google.com/signin?continue=myaccount, and google.com/account/about
-  // is part of that signed-out marketing path, NOT proof of login). So Google has
-  // no auth-gated URL marker: the window confirms login via the DOM signal below
-  // and the post-close HTTP verify (connectedFinalUrlMustContain:
-  // 'myaccount.google.com').
-  google:        'https://myaccount.google.com/',
+  // Open Google's own sign-in form with myaccount as the destination. A
+  // LOGGED-IN session is sent straight through to myaccount.google.com; a
+  // signed-out one sees the sign-in form and lands on myaccount after signing in.
+  // Do NOT open myaccount.google.com directly: a signed-out request there is
+  // sent to google.com/account/about, a marketing page with no sign-in form, and
+  // its "Go to Google Account" button opens the form in a NEW tab (the reported
+  // three-attempt login). Google has no auth-gated URL marker: the window
+  // confirms login via the DOM signal on myaccount.google.com
+  // (PLATFORM_LOGGED_IN_URL_MARKERS) and the post-close HTTP verify
+  // (connectedFinalUrlMustContain: 'myaccount.google.com').
+  google:        'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmyaccount.google.com%2F',
   linkedin:      'https://www.linkedin.com/login',
   // Continue to an authenticated account page, not public /jobs.  The native
   // auto-close may only claim success once Indeed itself admits this session to
@@ -1468,6 +1471,23 @@ export async function openLoginWindow(platformId, sender = null, signal = null) 
     const runAutoClosePoll = createNonOverlappingRunner(async () => {
       if (isTerminated) return;
       try {
+        // Follow the tab the user is actually looking at. A site may open its
+        // sign-in form in a new tab (Google's "Go to Google Account" does); the
+        // poll used to watch only the first tab, so a login completed in the
+        // second one was never detected and the window never closed itself.
+        // Switch only when the watched tab is closed or hidden, so two visible
+        // windows cannot make the poll flip between them.
+        const isForeground = (candidate) => candidate.evaluate(() => document.visibilityState === 'visible').catch(() => false);
+        if (page.isClosed?.() || !(await isForeground(page))) {
+          const openPages = await loginBrowser.pages().catch(() => []);
+          for (const candidate of openPages) {
+            if (candidate === page || candidate.isClosed?.()) continue;
+            if (!(await isForeground(candidate))) continue;
+            logger.info(`[StealthBrowser] ${platformId} login window: now watching the foreground tab (${openPages.length} open)`);
+            page = candidate;
+            break;
+          }
+        }
         if (page.isClosed?.()) return;
         const currentUrl = page.url();
         if (!currentUrl || currentUrl === 'about:blank') return;
