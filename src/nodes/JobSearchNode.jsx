@@ -13234,6 +13234,47 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     }
   }, [addToast, continueSavedJobsRescore, epoch, getEdges, getNode, getNodes, id, isMountedRef, settleManualAiRetirement, updateGlobal]);
 
+  // The saved-compilation banner hides the card's ordinary Clear Career Data
+  // control, and both of its other actions reuse the retained files. This is
+  // the way out for someone who wants to import different career data: retire
+  // the saved run first, then run the one protected clear.
+  const clearCareerFromCompilationBusyRef = useRef(false);
+  const [clearCareerFromCompilationBusy, setClearCareerFromCompilationBusy] = useState(false);
+  const handleClearCareerFromSavedCompilation = useCallback(async () => {
+    const live = getNode(id)?.data || {};
+    const marker = live.manualAiResume;
+    const runId = marker?.runId;
+    if (!runId || !isCareerCompilationTask(marker?.task)
+      || clearCareerFromCompilationBusyRef.current || restartCareerCompilationBusyRef.current
+      || live.locked || live.queuedModuleRun
+      || processingRunsRef.current.active || isJobWorkflowDeletionPending(id)
+      || hasPendingManualAiRetirement(live)
+      || findJobSearchBoardRecoveryOwner(id, runId, getNodes(), getEdges())) return;
+    clearCareerFromCompilationBusyRef.current = true;
+    setClearCareerFromCompilationBusy(true);
+    try {
+      epoch.bump();
+      await settleManualAiRetirement({ runId, marker,
+        retirementReason: 'career-data-clear', requireCancellationAck: true });
+      await waitForRendererCommitFrame();
+      // A failed retirement keeps its receipt; never clear over it.
+      if (hasPendingManualAiRetirement(getNode(id)?.data || {})) throw new Error('The saved compilation could not be cancelled. Try again.');
+      autoResumedManualAiRunRef.current = null;
+      manualAiAutoResumeAttemptRef.current = null;
+      manualAiStaleRecoveryActionRunIdRef.current = null;
+      setManualAiStaleRecoveryActionRunId(null);
+      setManualAiExplicitResumeRequest(null);
+      EventLogger.log(`[JobSearch][${id}] Saved career compilation cancelled; clearing career data for new input`);
+      // 'career' keeps saved jobs on a completed hub and is the full clear otherwise.
+      await handleClearCareerFiles(null, 'career');
+    } catch (error) {
+      addToast({ title: 'Could not clear career data', description: error?.message || 'Cleanup did not finish. Try again.', type: 'error' });
+    } finally {
+      clearCareerFromCompilationBusyRef.current = false;
+      if (isMountedRef.current) setClearCareerFromCompilationBusy(false);
+    }
+  }, [addToast, epoch, getEdges, getNode, getNodes, handleClearCareerFiles, id, isMountedRef, settleManualAiRetirement]);
+
   // What will Continue really do for a saved career compilation?  Answered by
   // the main process from the files' content and the compiler contract, never
   // assumed: the banner must not call a restart an exact resume.
@@ -13775,7 +13816,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         {manualAiRecoveryThroughBoard
           ? 'Your saved work is retained. Choose Continue saved AI handoff or Retry recovery on the connected Job Board to continue, or Discard it here.'
           : careerResumeExplanation
-          ? `${careerResumeExplanation.body} Restart career compilation re-reads your career files and starts fresh AI compilation and audits. Your saved jobs are kept.`
+          ? `${careerResumeExplanation.body} Restart career compilation re-reads your career files and starts fresh AI compilation and audits. Clear career data cancels this compilation so you can add different files. Your saved jobs are kept.`
           : savedReanalysisManualAiRecovery
           ? `Your saved listings and revised Search Brief are retained. ${manualAiRecoveryNextStep}`
           : pausedManualAiRecovery
@@ -13786,7 +13827,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               ? `This saved AI handoff is older than 24 hours or its age could not be verified. Its exact checkpoint and original date window are kept. ${manualAiRecoveryNextStep}`
               : `This AI handoff was interrupted. Continue resumes its exact saved checkpoint; restarting the app never submits it silently. ${manualAiRecoveryNextStep}`}
       </div>
-      <div className="flex gap-1.5 mt-1.5">
+      <div className="flex flex-wrap gap-1.5 mt-1.5">
         {careerResumeExplanation ? (
           <>
             <button
@@ -13798,8 +13839,17 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             <button type="button"
               className="nodrag px-2 py-0.5 rounded text-[10px] border border-amber-500/40 text-amber-200 disabled:opacity-50"
               onClick={handleRestartCareerCompilation}
-              disabled={baseControlsLocked || manualAiRecoveryActionBusy || restartCareerCompilationBusy || !canvasFilePath || !careerResumePaths.length}
+              disabled={baseControlsLocked || manualAiRecoveryActionBusy || restartCareerCompilationBusy || clearCareerFromCompilationBusy || !canvasFilePath || !careerResumePaths.length}
             >Restart career compilation</button>
+            <TwoStepConfirmButton
+              label="Clear career data"
+              confirmLabel="Click again to clear"
+              onConfirm={handleClearCareerFromSavedCompilation}
+              title="Cancel this compilation and remove these career files so you can add different ones. Search settings, scan dates and saved jobs are kept."
+              className="nodrag px-2 py-0.5 rounded text-[10px] border border-amber-500/40 text-amber-200 disabled:cursor-default disabled:opacity-50"
+              armedClassName="nodrag px-2 py-0.5 rounded text-[10px] border border-amber-400/70 bg-amber-500/25 text-amber-100 disabled:cursor-default disabled:opacity-50"
+              disabled={baseControlsLocked || manualAiRecoveryActionBusy || restartCareerCompilationBusy || clearCareerFromCompilationBusy || !canvasFilePath}
+            />
           </>
         ) : (
           <>
