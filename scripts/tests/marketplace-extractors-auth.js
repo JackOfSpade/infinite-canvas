@@ -1890,5 +1890,36 @@ export default [
       'Cloudflare challenge URLs block auto-close even when an auth cookie is present');
       return { ok: true };
     },
+  },
+{
+    name: 'login auto-close: Google signed-out landing page is not a completed login',
+    run: () => {
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'google',
+        currentUrl: 'https://www.google.com/account/about/',
+      }) === 'signed-out-landing-url',
+      'google.com/account/about is where a signed-out myaccount request lands; the window must stay open');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'google',
+        currentUrl: 'https://www.google.com/account/about/?continue=https://myaccount.google.com/',
+      }) === 'signed-out-landing-url',
+      'the marker is matched on the host, not anywhere in the URL');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'google',
+        currentUrl: 'https://myaccount.google.com/',
+      }) === null,
+      'a signed-in session stays on myaccount.google.com, where the DOM signal may close the window');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'google',
+        currentUrl: 'https://accounts.google.com/v3/signin/identifier',
+      }) === 'login-url',
+      'the Google sign-in form still reports as a login URL');
+      assert(getLoginAutoCloseWaitReason({
+        platformId: 'ebay',
+        currentUrl: 'https://www.ebay.com/',
+      }) === null,
+      'platforms without a logged-in URL marker are unaffected');
+      return { ok: true };
+    },
   }
 ];

@@ -401,6 +401,27 @@ export function canAuthCookieBypassLoginUrl(platformId) {
   return AUTH_COOKIE_LOGIN_URL_BYPASS_PLATFORMS.has(String(platformId || '').toLowerCase());
 }
 
+// Platforms whose logged-in state is only ever shown on ONE host/path, and whose
+// signed-out visitors are sent to a public page that is neither a login URL nor a
+// challenge. Google is the reported case: a signed-out myaccount.google.com
+// request lands on google.com/account/about, a marketing page whose copy mentions
+// signing out — so the DOM logged-in heuristic fired there, the window closed
+// after ~4s before the user could sign in, and the platform was cached as
+// connected with the HTTP re-verify skipped. Outside the marker the poll keeps
+// WAITING unless a real auth cookie is present. This is a NECESSARY condition
+// only (the cookie/DOM signal must still fire), so unlike PLATFORM_AUTH_GATED_URLS
+// it is safe for the marker to be the login window's start URL.
+const PLATFORM_LOGGED_IN_URL_MARKERS = {
+  google: 'myaccount.google.com',
+};
+export function isOutsideLoggedInUrlMarker(platformId, url) {
+  const marker = PLATFORM_LOGGED_IN_URL_MARKERS[String(platformId || '').toLowerCase()];
+  if (!marker) return false;
+  let host = '';
+  try { host = new URL(String(url || '')).hostname.toLowerCase(); } catch { return true; }
+  return host !== marker;
+}
+
 export function getLoginAutoCloseWaitReason({
   platformId,
   currentUrl,
@@ -415,6 +436,7 @@ export function getLoginAutoCloseWaitReason({
   if (isLoginUrlPath(url) && !(cookieSignal && canAuthCookieBypassLoginUrl(platformId))) {
     return cookieSignal ? 'login-url-cookie-not-trusted' : 'login-url';
   }
+  if (!cookieSignal && isOutsideLoggedInUrlMarker(platformId, url)) return 'signed-out-landing-url';
   return null;
 }
 
