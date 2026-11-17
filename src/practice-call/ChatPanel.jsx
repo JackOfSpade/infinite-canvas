@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { Send } from 'lucide-react';
+import { Send, X } from 'lucide-react';
 
-export default function ChatPanel({ chat, typing, onSend, onTyping }) {
+export default function ChatPanel({ chat, typing, onSend, onTyping, onClose }) {
   const [draft, setDraft] = useState('');
   const [composing, setComposing] = useState(false);
   const notifyTyping = value => { if (typeof onTyping === 'function') onTyping(!!value); };
@@ -13,20 +13,23 @@ export default function ChatPanel({ chat, typing, onSend, onTyping }) {
     notifyTyping(false);
   };
   const messages = Array.isArray(chat) ? chat : [];
-  return <section className="flex h-full min-h-0 flex-col rounded-lg border border-white/10 bg-black/25" aria-label="Call chat">
-    <p className="border-b border-white/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-white/45">Chat</p>
-    <ol className="min-h-0 flex-1 space-y-1.5 overflow-y-auto p-2" aria-live="polite">
-      {messages.length === 0 && <li className="text-[11px] text-white/40">Type instead of speaking. The interviewer reads it on the call.</li>}
-      {messages.map((message, index) => <li key={`${message.atMs ?? index}-${index}`} className={message.from === 'candidate' ? 'text-right' : ''}>
-        <span className="block text-[9px] uppercase text-white/40">{message.from === 'candidate' ? 'You' : 'Interviewer'}</span>
-        <span className={`inline-block rounded-md px-1.5 py-1 text-[11px] ${message.from === 'candidate' ? 'bg-violet-500/25 text-violet-50' : 'bg-white/10 text-white/85'}`}>{message.text}</span>
+  return <section className="flex h-full min-h-0 flex-col rounded-2xl bg-white text-[#202124]" aria-label="Call chat">
+    <header className="flex items-center justify-between px-5 pb-2 pt-4">
+      <h2 className="text-lg font-normal">In-call messages</h2>
+      {typeof onClose === 'function' && <button type="button" aria-label="Close chat" onClick={onClose} className="grid h-9 w-9 place-items-center rounded-full text-[#5f6368] hover:bg-black/5"><X size={18} aria-hidden="true" /></button>}
+    </header>
+    <p className="mx-4 rounded-lg bg-[#f1f3f4] px-3 py-2 text-center text-xs text-[#5f6368]">Type instead of speaking. The interviewer reads it on the call.</p>
+    <ol className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 py-3" aria-live="polite">
+      {messages.map((message, index) => <li key={`${message.atMs ?? index}-${index}`} className="pc-fade">
+        <span className="block text-[13px] font-medium">{message.from === 'candidate' ? 'You' : 'Interviewer'}</span>
+        <span className="block whitespace-pre-wrap break-words text-[13px] leading-snug text-[#3c4043]">{message.text}</span>
       </li>)}
-      {typing && <li data-testid="chat-typing" aria-label="Interviewer is typing" className="text-[10px] text-violet-200">Interviewer is typing…</li>}
+      {typing && <li data-testid="chat-typing" aria-label="Interviewer is typing" className="text-xs text-[#5f6368]">Interviewer is typing…</li>}
     </ol>
-    <form className="flex items-center gap-1 border-t border-white/10 p-1.5" aria-label="Send a chat message" onSubmit={event => { event.preventDefault(); submit(); }}>
+    <form className="m-4 mt-0 flex items-center gap-1 rounded-full bg-[#f1f3f4] py-1 pl-4 pr-1" aria-label="Send a chat message" onSubmit={event => { event.preventDefault(); submit(); }}>
       <input
         aria-label="Chat message"
-        className="min-w-0 flex-1 rounded border border-white/10 bg-black/30 px-1.5 py-1 text-[11px] text-white/85 outline-none focus-visible:ring-2 focus-visible:ring-violet-300/60"
+        className="min-w-0 flex-1 bg-transparent text-[13px] text-[#202124] outline-none placeholder:text-[#5f6368]"
         value={draft}
         onChange={event => { setDraft(event.target.value); notifyTyping(true); }}
         onFocus={() => notifyTyping(true)}
@@ -38,9 +41,9 @@ export default function ChatPanel({ chat, typing, onSend, onTyping }) {
           event.preventDefault();
           submit();
         }}
-        placeholder="Type a message"
+        placeholder="Send a message"
       />
-      <button type="submit" aria-label="Send chat message" className="rounded border border-white/10 p-1 text-violet-200 hover:bg-white/5 disabled:opacity-40" disabled={!draft.trim()}><Send size={12} aria-hidden="true" /></button>
+      <button type="submit" aria-label="Send chat message" className="grid h-9 w-9 place-items-center rounded-full text-[#1a73e8] hover:bg-black/5 disabled:text-[#9aa0a6] disabled:hover:bg-transparent" disabled={!draft.trim()}><Send size={18} aria-hidden="true" /></button>
     </form>
   </section>;
 }

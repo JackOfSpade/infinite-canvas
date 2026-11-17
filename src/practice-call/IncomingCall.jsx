@@ -11,7 +11,7 @@ export default function IncomingCall({ persona, onAnswer, onDecline }) {
     return stop;
   }, []);
   const name = persona?.name || 'Interviewer';
-  return <main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-[#111018] p-4 text-violet-50" aria-label="Incoming practice call">
+  return <main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-[#202124] p-4 text-violet-50" aria-label="Incoming practice call">
     <p className="text-[10px] font-semibold uppercase tracking-widest text-violet-300">Incoming practice call</p>
     <div className="flex flex-col items-center gap-2">
       <div className="grid h-20 w-20 place-items-center rounded-full border border-violet-300/40 bg-violet-500/15 text-2xl font-semibold text-violet-100 ring-4 ring-violet-400/20" aria-hidden="true">{initialsOf(persona)}</div>

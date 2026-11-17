@@ -121,6 +121,8 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
   const transcript = Array.isArray(callRecord.transcript) ? callRecord.transcript : [];
   const role = [line(brief?.role?.title) || line(brief?.title), line(brief?.role?.company) || line(brief?.company)].filter(Boolean).join(' at ');
   const focus = line(callRecord.steering);
+  // The candidate hung up or closed the window while the interviewer was still in the call.
+  const endedEarly = callRecord.reason === 'candidate' || callRecord.reason === 'window-closed';
   const header = [
     `call id: ${line(callRecord.callId) || '(unknown)'}`,
     `interviewer persona: ${line(callRecord.persona) || '(unknown)'}`,
@@ -129,6 +131,9 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     `started: ${line(callRecord.startedAt) || '(unknown)'}`,
     role ? `role: ${role}` : '',
     `length: ${clock(callRecord.durationMs)}`,
+    endedEarly ? 'how the call ended: the candidate ended the call early, before the interviewer had wrapped up or said goodbye' : '',
+    endedEarly ? 'review only the part of the call that took place. Planned questions that were never reached are not asked: do not score them or count them against the candidate, and do not treat the missing wrap-up or the candidate\'s closing questions as a gap. Say once in the overall summary that the call was ended early and the review covers the call up to that point' : '',
+    callRecord.reason === 'interviewer' ? 'how the call ended: the interviewer wrapped up and ended the call' : '',
   ].filter(Boolean).join('\n');
   const sections = [
     RULES,

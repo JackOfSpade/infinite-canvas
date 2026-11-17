@@ -3,8 +3,8 @@ import { ShieldCheck } from 'lucide-react';
 import { MODEL_SIZES } from './callModel.js';
 
 export default function ConsentScreen({ onAgree, busy }) {
-  return <main className="flex min-h-screen items-center justify-center bg-[#111018] p-4 text-violet-50" aria-label="Practice call setup">
-    <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#181521] p-4">
+  return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-4 text-violet-50" aria-label="Practice call setup">
+    <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#2d2e30] p-4">
       <h1 className="text-base font-semibold text-violet-100">Practice call</h1>
       <p className="text-[12px] text-white/70">An AI interviewer calls you in this window. It hears you through the microphone on this Mac, answers in a voice you can play back, and analyses the call afterwards.</p>
       <div className="rounded-lg border border-white/10 bg-black/20 p-2">

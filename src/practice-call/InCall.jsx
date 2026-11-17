@@ -1,18 +1,32 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Captions, ListChecks, MessageSquare, Mic, MicOff, PhoneOff, Video, VideoOff } from 'lucide-react';
+import { Captions, CaptionsOff, ListChecks, MessageSquare, Mic, MicOff, PhoneOff, Video, VideoOff, X } from 'lucide-react';
 import ChatPanel from './ChatPanel.jsx';
 import { initialsOf, roleLine } from './persona.js';
 import { formatTime } from './replayModel.js';
 
-const controlClass = pressed => `flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] ${pressed ? 'border-violet-300/60 bg-violet-500/30 text-violet-50' : 'border-white/10 bg-black/25 text-white/70 hover:bg-white/5'}`;
+// Meeting-style controls: a round neutral button, red when the device is off,
+// light blue when a view (captions, a side panel) is switched on.
+const roundClass = tone => `grid h-10 w-10 place-items-center rounded-full transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8] ${
+  tone === 'off' ? 'bg-[#ea4335] text-white hover:bg-[#ec5345]'
+    : tone === 'active' ? 'bg-[#8ab4f8] text-[#202124] hover:bg-[#93bbf9]'
+      : 'bg-[#3c4043] text-[#e8eaed] hover:bg-[#4a4e51]'}`;
+const flatClass = active => `grid h-10 w-10 place-items-center rounded-full transition-colors duration-150 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#8ab4f8] ${active ? 'bg-[#8ab4f8]/20 text-[#8ab4f8]' : 'text-[#e8eaed] hover:bg-white/10'}`;
 
-export default function InCall({ state, api }) {
+function SpeakingBadge() {
+  return <span aria-hidden="true" className="pc-bars absolute right-3 top-3 flex h-7 w-7 items-center justify-center gap-[3px] rounded-full bg-[#1a73e8]"><i /><i /><i /></span>;
+}
+
+export default function InCall({ state, api, leaveRequest = 0 }) {
   const [captionsOn, setCaptionsOn] = useState(false);
-  const [cardsOpen, setCardsOpen] = useState(false);
+  // One side panel at a time, as in a meeting window: 'chat', 'cards' or none.
+  const [panel, setPanel] = useState(null);
   const [cards, setCards] = useState([]);
-  const [chatOpen, setChatOpen] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [cameraError, setCameraError] = useState(null);
+  const [leaving, setLeaving] = useState(false);
+  // Closing the window mid-call arrives as a new request number and opens the same dialog.
+  const [seenLeaveRequest, setSeenLeaveRequest] = useState(leaveRequest);
+  if (leaveRequest !== seenLeaveRequest) { setSeenLeaveRequest(leaveRequest); setLeaving(true); }
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const stopCamera = useCallback(() => {
@@ -55,54 +69,90 @@ export default function InCall({ state, api }) {
     } catch { if (current()) setCameraError('Camera permission was denied. The call continues without video.'); }
   };
   const toggleCards = async () => {
-    if (cardsOpen) { setCardsOpen(false); return; }
-    setCardsOpen(true);
+    if (panel === 'cards') { setPanel(null); return; }
+    setPanel('cards');
     if (typeof api?.getPreparedCards !== 'function') return;
     try { const result = await api.getPreparedCards(); setCards(Array.isArray(result) ? result : []); } catch { setCards([]); }
   };
-  const hangUp = () => {
+  // The red button only asks; the call ends once the candidate picks how to leave.
+  const leave = feedback => {
+    setLeaving(false);
     stopCamera();
-    if (typeof api?.hangUp === 'function') api.hangUp();
+    if (typeof api?.hangUp === 'function') api.hangUp({ feedback });
   };
   const muted = !!state?.muted;
   const captions = Array.isArray(state?.captions) ? state.captions : [];
-  return <main className="flex min-h-screen flex-col bg-[#111018] text-violet-50" aria-label="Practice call in progress">
-    <header className="flex items-center justify-between border-b border-white/10 px-3 py-1.5">
-      <p className="text-[11px] text-white/60">Practice call · {roleLine(state?.persona) || 'Interviewer'}</p>
-      <p role="timer" aria-label="Call timer" className="font-mono text-[11px] text-white/70">{formatTime(state?.elapsedMs)}</p>
-    </header>
-    <div className="flex min-h-0 flex-1 gap-2 p-2">
-      <div className="flex min-h-0 flex-1 flex-col gap-2">
-        <div className="grid flex-1 grid-cols-1 gap-2 sm:grid-cols-2">
-          <section aria-label="Interviewer" data-speaking={state?.speaking === 'interviewer' ? 'true' : 'false'} className={`relative grid place-items-center rounded-xl border bg-[#181521] p-3 transition ${state?.speaking === 'interviewer' ? 'border-violet-300/60 ring-4 ring-violet-400/30' : 'border-white/10'}`}>
-            <div className={`grid h-16 w-16 place-items-center rounded-full bg-violet-500/20 text-xl font-semibold text-violet-100 ${state?.speaking === 'interviewer' ? 'animate-pulse ring-4 ring-violet-300/40' : ''}`} aria-hidden="true">{initialsOf(state?.persona)}</div>
-            <p className="absolute bottom-2 left-2 text-[11px] text-white/75">{state?.persona?.name || 'Interviewer'}{state?.speaking === 'interviewer' && <span className="ml-1 text-violet-200">speaking</span>}</p>
+  const interviewerLeft = !!state?.interviewerLeft;
+  const interviewerSpeaking = !interviewerLeft && state?.speaking === 'interviewer';
+  const name = state?.persona?.name || 'Interviewer';
+  const chatOpen = panel === 'chat';
+  const cardsOpen = panel === 'cards';
+  return <main className="flex h-screen flex-col bg-[#202124] text-[#e8eaed]" aria-label="Practice call in progress">
+    <div className="flex min-h-0 flex-1 gap-4 px-4 pt-4">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+        <div className="relative min-h-0 flex-1">
+          <section aria-label="Interviewer" data-speaking={interviewerSpeaking ? 'true' : 'false'} data-left={interviewerLeft ? 'true' : 'false'}
+            className={`relative grid h-full place-items-center overflow-hidden rounded-xl bg-[#3c4043] outline outline-[3px] -outline-offset-[3px] transition-[outline-color] duration-200 ${interviewerSpeaking ? 'outline-[#8ab4f8]' : 'outline-transparent'}`}>
+            <div className={`grid h-28 w-28 place-items-center rounded-full bg-[#7b1fa2] text-4xl font-medium text-white transition-[box-shadow,opacity] duration-300 ${interviewerSpeaking ? 'shadow-[0_0_0_10px_rgba(138,180,248,0.18)]' : ''} ${interviewerLeft ? 'opacity-30' : ''}`} aria-hidden="true">{initialsOf(state?.persona)}</div>
+            {interviewerSpeaking && <SpeakingBadge />}
+            {interviewerLeft && <p role="status" aria-label="Interviewer left" className="pc-rise absolute bottom-12 left-4 rounded-lg bg-[#202124]/90 px-4 py-2.5 text-sm text-white shadow-lg">{name} left the call. You're the only one here.</p>}
+            <p className="absolute bottom-3 left-4 text-sm font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">{name}{interviewerSpeaking && <span className="sr-only"> speaking</span>}</p>
           </section>
-          <section aria-label="Your camera" data-camera={cameraOn ? 'on' : 'off'} className="relative grid min-h-24 place-items-center overflow-hidden rounded-xl border border-white/10 bg-[#181521] p-3">
-            {cameraOn && <video ref={videoRef} autoPlay playsInline muted aria-label="Local camera preview" className="h-full w-full rounded-lg object-cover" />}
-            {!cameraOn && <p className="text-[11px] text-white/45">Camera off</p>}
-            <p className="absolute bottom-2 left-2 text-[10px] text-white/50">You{cameraOn ? ' · preview only, not sent' : ''}</p>
+          <section aria-label="Your camera" data-camera={cameraOn ? 'on' : 'off'}
+            className="absolute bottom-3 right-3 grid aspect-video w-[22%] min-w-36 max-w-60 place-items-center overflow-hidden rounded-xl bg-[#4a4e51] shadow-[0_2px_10px_rgba(0,0,0,0.45)]">
+            {cameraOn && <video ref={videoRef} autoPlay playsInline muted aria-label="Local camera preview" className="h-full w-full -scale-x-100 object-cover" />}
+            {!cameraOn && <div className="grid h-12 w-12 place-items-center rounded-full bg-[#00796b] text-base font-medium text-white" aria-hidden="true">You</div>}
+            {!cameraOn && <span className="sr-only">Camera off</span>}
+            {muted && <span aria-hidden="true" className="absolute right-2 top-2 grid h-6 w-6 place-items-center rounded-full bg-[#202124]/70 text-white"><MicOff size={13} /></span>}
+            <p className="absolute bottom-1.5 left-2 text-xs font-medium text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.6)]">You{cameraOn ? ' · preview only, not sent' : ''}</p>
           </section>
         </div>
-        {cameraError && <p role="alert" className="text-[11px] text-amber-100">{cameraError}</p>}
-        {captionsOn && <section aria-label="Live captions" className="max-h-24 space-y-0.5 overflow-y-auto rounded-lg border border-white/10 bg-black/25 p-2 text-[11px] text-white/75">
-          {captions.length === 0 && <p className="text-white/40">Captions appear as the call goes on.</p>}
-          {captions.map((caption, index) => <p key={`${caption.atMs ?? index}-${index}`}><span className="text-violet-200">{caption.speaker === 'candidate' ? 'You' : 'Interviewer'}:</span> {caption.text}</p>)}
-        </section>}
-        {cardsOpen && <section aria-label="Prepared answer cards" className="max-h-48 space-y-1.5 overflow-y-auto rounded-lg border border-white/10 bg-black/25 p-2">
-          {cards.length === 0 && <p className="text-[11px] text-white/40">No prepared answers for this interview.</p>}
-          {cards.map(card => <article key={card.id || card.question} className="rounded border border-white/10 p-1.5"><p className="text-[11px] text-violet-100">{card.question}</p><p className="text-[11px] whitespace-pre-wrap text-white/70">{card.answer}</p></article>)}
+        {cameraError && <p role="alert" className="pc-fade rounded-lg bg-[#3c4043] px-3 py-2 text-xs text-[#fdd663]">{cameraError}</p>}
+        {captionsOn && <section aria-label="Live captions" className="pc-rise max-h-28 space-y-1.5 overflow-y-auto px-2 text-[15px] leading-snug text-white">
+          {captions.length === 0 && <p className="text-[#9aa0a6]">Captions appear as the call goes on.</p>}
+          {captions.map((caption, index) => <p key={`${caption.atMs ?? index}-${index}`}><span className="mr-2 text-xs font-medium text-[#9aa0a6]">{caption.speaker === 'candidate' ? 'You' : 'Interviewer'}:</span> {caption.text}</p>)}
         </section>}
       </div>
-      {chatOpen && <div className="w-64 shrink-0"><ChatPanel chat={state?.chat} typing={!!state?.typing} onSend={api?.sendChat} onTyping={api?.setTyping} /></div>}
+      {chatOpen && <div className="pc-panel w-[340px] shrink-0"><ChatPanel chat={state?.chat} typing={!!state?.typing} onSend={api?.sendChat} onTyping={api?.setTyping} onClose={() => setPanel(null)} /></div>}
+      {cardsOpen && <section aria-label="Prepared answer cards" className="pc-panel flex w-[340px] shrink-0 flex-col rounded-2xl bg-white text-[#202124]">
+        <header className="flex items-center justify-between px-5 pb-2 pt-4">
+          <h2 className="text-lg font-normal">Prepared answers</h2>
+          <button type="button" aria-label="Close prepared answers" onClick={() => setPanel(null)} className="grid h-9 w-9 place-items-center rounded-full text-[#5f6368] hover:bg-black/5"><X size={18} aria-hidden="true" /></button>
+        </header>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-5 pb-4">
+          {cards.length === 0 && <p className="text-sm text-[#5f6368]">No prepared answers for this interview.</p>}
+          {cards.map(card => <article key={card.id || card.question} className="border-b border-[#e8eaed] pb-3 last:border-0"><p className="text-sm font-medium">{card.question}</p><p className="mt-1 whitespace-pre-wrap text-[13px] leading-snug text-[#3c4043]">{card.answer}</p></article>)}
+        </div>
+      </section>}
     </div>
-    <footer className="flex flex-wrap items-center justify-center gap-1.5 border-t border-white/10 px-2 py-2">
-      <button type="button" className={controlClass(muted)} aria-pressed={muted} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => { if (typeof api?.setMuted === 'function') api.setMuted(!muted); }}>{muted ? <MicOff size={12} aria-hidden="true" /> : <Mic size={12} aria-hidden="true" />}{muted ? 'Unmute' : 'Mute'}</button>
-      <button type="button" className={controlClass(captionsOn)} aria-pressed={captionsOn} aria-label="Captions" onClick={() => setCaptionsOn(value => !value)}><Captions size={12} aria-hidden="true" />Captions</button>
-      <button type="button" className={controlClass(cardsOpen)} aria-pressed={cardsOpen} aria-label="Prepared answer cards" onClick={toggleCards}><ListChecks size={12} aria-hidden="true" />Cards</button>
-      <button type="button" className={controlClass(chatOpen)} aria-pressed={chatOpen} aria-label="Chat" onClick={() => setChatOpen(value => !value)}><MessageSquare size={12} aria-hidden="true" />Chat</button>
-      <button type="button" className={controlClass(cameraOn)} aria-pressed={cameraOn} aria-label={cameraOn ? 'Turn off camera' : 'Turn on camera'} onClick={toggleCamera}>{cameraOn ? <VideoOff size={12} aria-hidden="true" /> : <Video size={12} aria-hidden="true" />}Camera</button>
-      <button type="button" className="flex items-center gap-1 rounded-md border border-red-400/40 bg-red-500/25 px-2 py-1 text-[11px] text-red-100 hover:bg-red-500/35" aria-label="Hang up" onClick={hangUp}><PhoneOff size={12} aria-hidden="true" />Hang up</button>
+    <footer className="grid h-20 shrink-0 grid-cols-[1fr_auto_1fr] items-center gap-3 px-6">
+      <p className="flex min-w-0 items-center gap-3 text-sm font-medium text-[#e8eaed]">
+        <span role="timer" aria-label="Call timer" className="tabular-nums">{formatTime(state?.elapsedMs)}</span>
+        <span aria-hidden="true" className="h-4 w-px bg-white/40" />
+        <span className="truncate">{roleLine(state?.persona) || 'Practice call'}</span>
+      </p>
+      <div className="flex items-center gap-3">
+        <button type="button" className={roundClass(muted ? 'off' : 'idle')} aria-pressed={muted} aria-label={muted ? 'Unmute microphone' : 'Mute microphone'} onClick={() => { if (typeof api?.setMuted === 'function') api.setMuted(!muted); }}>{muted ? <MicOff size={20} aria-hidden="true" /> : <Mic size={20} aria-hidden="true" />}</button>
+        <button type="button" className={roundClass(cameraOn ? 'idle' : 'off')} aria-pressed={cameraOn} aria-label={cameraOn ? 'Turn off camera' : 'Turn on camera'} onClick={toggleCamera}>{cameraOn ? <Video size={20} aria-hidden="true" /> : <VideoOff size={20} aria-hidden="true" />}</button>
+        <button type="button" className={roundClass(captionsOn ? 'active' : 'idle')} aria-pressed={captionsOn} aria-label="Captions" onClick={() => setCaptionsOn(value => !value)}>{captionsOn ? <Captions size={20} aria-hidden="true" /> : <CaptionsOff size={20} aria-hidden="true" />}</button>
+        <button type="button" className="grid h-10 w-14 place-items-center rounded-full bg-[#ea4335] text-white transition-colors duration-150 hover:bg-[#ec5345] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8ab4f8]" aria-label="Hang up" aria-haspopup="dialog" onClick={() => setLeaving(true)}><PhoneOff size={20} aria-hidden="true" /></button>
+      </div>
+      <div className="flex items-center justify-end gap-1">
+        <button type="button" className={flatClass(cardsOpen)} aria-pressed={cardsOpen} aria-label="Prepared answer cards" onClick={toggleCards}><ListChecks size={20} aria-hidden="true" /></button>
+        <button type="button" className={flatClass(chatOpen)} aria-pressed={chatOpen} aria-label="Chat" onClick={() => setPanel(value => (value === 'chat' ? null : 'chat'))}><MessageSquare size={20} aria-hidden="true" /></button>
+      </div>
     </footer>
+    {leaving && <div className="pc-fade fixed inset-0 z-30 grid place-items-center bg-black/60 p-4" onClick={event => { if (event.target === event.currentTarget) setLeaving(false); }}>
+      <section role="dialog" aria-modal="true" aria-label="Leave the call" className="pc-rise w-full max-w-sm rounded-3xl bg-white p-6 text-[#202124] shadow-2xl"
+        onKeyDown={event => { if (event.key === 'Escape') setLeaving(false); }}>
+        <h2 className="text-xl font-normal">Leave the call?</h2>
+        <p className="mt-2 text-sm leading-snug text-[#5f6368]">{interviewerLeft ? 'Generating feedback uses AI to transcribe and review the recording.' : 'The interviewer has not wrapped up yet. Feedback can still be generated for the call up to this point; it uses AI to transcribe and review the recording.'} Leaving without it saves the recording and transcript only.</p>
+        <div className="mt-5 flex flex-col gap-2">
+          <button type="button" autoFocus onClick={() => leave(true)} className="rounded-full bg-[#1a73e8] px-5 py-2.5 text-sm font-medium text-white hover:bg-[#1b66c9] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#1a73e8]">Leave and generate feedback</button>
+          <button type="button" onClick={() => leave(false)} className="rounded-full border border-[#dadce0] px-5 py-2.5 text-sm font-medium text-[#1a73e8] hover:bg-[#f6fafe]">Leave without feedback</button>
+          <button type="button" onClick={() => setLeaving(false)} className="rounded-full px-5 py-2.5 text-sm font-medium text-[#5f6368] hover:bg-black/5">Stay on the call</button>
+        </div>
+      </section>
+    </div>}
   </main>;
 }

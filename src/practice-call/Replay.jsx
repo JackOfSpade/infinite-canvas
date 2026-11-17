@@ -232,9 +232,11 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
   const currentChapterIndex = chapterIndexAt(chapters, positionMs);
   const currentChapterTitle = currentChapterIndex >= 0 ? String(chapters[currentChapterIndex]?.title || `Chapter ${currentChapterIndex + 1}`) : '';
   const showChapters = () => chaptersRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
-  return <main className="min-h-screen space-y-2 bg-[#111018] p-3 text-violet-50" aria-label="Practice call replay">
-    <header className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-1.5">
-      <h1 className="text-sm font-semibold text-violet-100">Practice call replay</h1>
+  const hasFeedback = !!replay?.feedback;
+  // The review leads: it is what the call window turns into once processing is done.
+  return <main className="min-h-screen bg-[#202124] p-4 text-violet-50" aria-label="Practice call replay">
+    <header className="pc-rise flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
+      <h1 className="text-lg font-normal text-white">{hasFeedback ? 'Your call feedback' : 'Practice call replay'}</h1>
       <div className="flex items-center gap-1">
         <button type="button" aria-label={playing ? 'Pause recording' : 'Play recording'} onClick={togglePlay} disabled={!audioUrl}
           className="flex items-center gap-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[11px] text-violet-100 hover:bg-white/5 disabled:opacity-40">
@@ -246,6 +248,12 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         </button>
       </div>
     </header>
+    <div className={`mt-3 grid items-start gap-4 ${hasFeedback ? 'md:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]' : ''}`}>
+    {hasFeedback && <section aria-label="Feedback" className="pc-rise space-y-2 rounded-xl bg-[#2d2e30] p-3" style={{ animationDelay: '80ms' }}>
+      <FeedbackView feedback={replay.feedback} />
+      <DeliverySection delivery={replay.feedback.delivery} />
+    </section>}
+    <div className="pc-rise min-w-0 space-y-2" style={{ animationDelay: hasFeedback ? '180ms' : '80ms' }}>
     <audio ref={audioRef} src={audioUrl || undefined} preload="metadata" aria-label="Call recording"
       onLoadedMetadata={applyPendingSeek}
       onTimeUpdate={event => { if (pendingSeekRef.current === null) setPositionMs((Number(event.currentTarget.currentTime) || 0) * 1000); }}
@@ -268,7 +276,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         </button>
         : null}
     </div>
-    <div className="grid gap-2 md:grid-cols-2">
+    <div className={`grid gap-2 ${hasFeedback ? '' : 'md:grid-cols-2'}`}>
       <section aria-label="Chapters" ref={chaptersRef} className="rounded-md border border-white/10 bg-black/20 p-2">
         <p className="text-[10px] font-semibold uppercase text-white/45">Chapters</p>
         {chapters.length === 0 && <p className="text-[11px] text-white/40">No chapters yet.</p>}
@@ -307,10 +315,8 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         <button type="button" onClick={() => setConfirmingDelete(false)} className="rounded border border-white/15 px-2 py-1 text-white/70 hover:bg-white/5">Keep recording</button>
       </div>
     </div>}
-    {replay?.feedback && <section aria-label="Feedback" className="space-y-2">
-      <FeedbackView feedback={replay.feedback} />
-      <DeliverySection delivery={replay.feedback.delivery} />
-    </section>}
+    </div>
+    </div>
   </main>;
 }
 

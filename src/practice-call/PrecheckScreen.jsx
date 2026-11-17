@@ -4,8 +4,8 @@ import { USAGE_WARNING, levelPercent } from './callModel.js';
 
 export default function PrecheckScreen({ level, usageWarning, persona }) {
   const percent = levelPercent(level);
-  return <main className="flex min-h-screen items-center justify-center bg-[#111018] p-4 text-violet-50" aria-label="Microphone check">
-    <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#181521] p-4">
+  return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-4 text-violet-50" aria-label="Microphone check">
+    <section className="w-full max-w-md space-y-3 rounded-xl border border-white/10 bg-[#2d2e30] p-4">
       <h1 className="text-base font-semibold text-violet-100">Checking your audio</h1>
       <p className="text-[12px] text-white/70">{persona?.name ? `${persona.name} is about to call.` : 'The interviewer is about to call.'} Say something so the level meter moves.</p>
       <div className="space-y-1">

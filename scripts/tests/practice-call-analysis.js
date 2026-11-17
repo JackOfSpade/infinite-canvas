@@ -240,6 +240,21 @@ export default [
     },
   },
   {
+    name: 'practice call analysis: the review prompt says when the candidate ended the call early and never when the interviewer ended it',
+    async run() {
+      const build = reason => buildReviewPrompt({ callRecord: { ...callRecord, reason }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      for (const reason of ['candidate', 'window-closed']) {
+        const early = build(reason);
+        assert.equal(early.includes('the candidate ended the call early'), true, `${reason} is an early end`);
+        assert.equal(early.includes('review only the part of the call that took place'), true);
+      }
+      const finished = build('interviewer');
+      assert.equal(finished.includes('ended the call early'), false, 'an interviewer wrap-up is not an early end');
+      assert.equal(finished.includes('the interviewer wrapped up and ended the call'), true);
+      assert.equal(build(undefined).includes('how the call ended'), false, 'an unknown ending says nothing');
+    },
+  },
+  {
     name: 'practice call analysis: the review prompt carries the candidate-requested interview focus only when one was set',
     async run() {
       const focus = 'Final round before an offer: ask my salary expectations.';

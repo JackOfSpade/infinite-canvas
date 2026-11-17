@@ -22,6 +22,8 @@ export default function PracticeCallApp() {
   const [state, setState] = useState(initialState);
   const [replay, setReplay] = useState(null);
   const [busy, setBusy] = useState(false);
+  // Counts window-close attempts during a call; the call screen answers each with its leave dialog.
+  const [leaveRequest, setLeaveRequest] = useState(0);
 
   useEffect(() => {
     const api = readApi();
@@ -29,6 +31,7 @@ export default function PracticeCallApp() {
     let live = true;
     const apply = value => { if (live && value && typeof value === 'object') setState(previous => mergeState(previous, value)); };
     const offState = typeof api.onState === 'function' ? api.onState(apply) : null;
+    const offLeave = typeof api.onLeaveRequested === 'function' ? api.onLeaveRequested(() => { if (live) setLeaveRequest(value => value + 1); }) : null;
     const offEvent = typeof api.onEvent === 'function' ? api.onEvent(event => { if (live) setState(previous => mergeEvent(previous, event)); }) : null;
     try {
       const initial = api.getState();
@@ -39,6 +42,7 @@ export default function PracticeCallApp() {
       live = false;
       if (typeof offState === 'function') offState();
       if (typeof offEvent === 'function') offEvent();
+      if (typeof offLeave === 'function') offLeave();
     };
   }, []);
 
@@ -78,17 +82,20 @@ export default function PracticeCallApp() {
   };
 
   if (!state) {
-    return <main role="status" aria-live="polite" aria-label="Loading practice call" className="grid min-h-screen place-items-center bg-[#111018] text-[11px] text-violet-100">Loading practice call…</main>;
+    return <main role="status" aria-live="polite" aria-label="Loading practice call" className="grid min-h-screen place-items-center bg-[#202124] text-[11px] text-violet-100">Loading practice call…</main>;
   }
+  // Keyed by stage of the session so each hand-over (call, processing, feedback) fades in.
+  const stageKey = state.phase === 'ended' || state.phase === 'analyzing' ? 'processing' : state.phase;
+  const renderPhase = () => {
   switch (state.phase) {
     case 'consent': return <ConsentScreen onAgree={agree} busy={busy} />;
     case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
     case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} />;
     case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('hangUp')} />;
     case 'connecting': return <ConnectingScreen persona={state.persona} />;
-    case 'in-call': return <InCall state={state} api={{
+    case 'in-call': return <InCall state={state} leaveRequest={leaveRequest} api={{
       setMuted: value => invoke('setMuted', value),
-      hangUp: () => invoke('hangUp'),
+      hangUp: options => invoke('hangUp', options),
       getPreparedCards: () => invoke('getPreparedCards'),
       sendChat: text => invoke('sendChat', text),
       setTyping: value => invoke('setTyping', value),
@@ -99,6 +106,8 @@ export default function PracticeCallApp() {
     case 'error': return <ErrorScreen error={state.error} onClose={() => invoke('close')} />;
     default: return <ErrorScreen error={state.error || { code: 'unknown-phase', message: `The call window received an unknown phase (${String(state.phase)}).` }} onClose={() => invoke('close')} />;
   }
+  };
+  return <div key={stageKey} className="pc-fade">{renderPhase()}</div>;
 }
 
 export { PracticeCallApp };

@@ -128,8 +128,12 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   const createdAt = (deps.now ?? (() => new Date().toISOString()))();
   const clients = await resolveClients(deps);
 
+  // Progress for the call window; a listener that throws never stops the analysis.
+  const stage = name => { try { deps.onStage?.(name); } catch { /* display only */ } };
+
   let words = [];
   let transcriptionError = null;
+  stage('transcribing');
   try {
     const scribed = await clients.transcribe({ path: path.join(callDir, 'candidate.wav') });
     words = list(scribed?.words);
@@ -139,6 +143,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   }
   let metrics = null;
   let metricsError = null;
+  stage('metrics');
   try {
     metrics = await clients.metrics({
       transcript,
@@ -159,6 +164,7 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
 
   let checked = null;
   let error = null;
+  stage('review');
   for (let attempt = 0; attempt <= MAX_FEEDBACK_RETRIES && !checked; attempt += 1) {
     const request = { prompt: buildReviewPrompt({ callRecord, plan, brief, metrics, wordsByTurn, transcriptionError, correction: error }),
       schema: REVIEW_SCHEMA, profile: REVIEW_PROFILE };

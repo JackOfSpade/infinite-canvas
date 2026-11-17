@@ -40,6 +40,21 @@ export function downloadPercent(download) {
   return Math.min(100, Math.max(0, Math.round((received / total) * 100)));
 }
 
+// Post-call processing steps, in the order the service reports them.
+export const ANALYSIS_STAGES = Object.freeze([
+  { key: 'recording', label: 'Saving the recording' },
+  { key: 'transcribing', label: 'Transcribing your answers' },
+  { key: 'metrics', label: 'Measuring pace, pauses and tone' },
+  { key: 'review', label: 'Writing the feedback' },
+  { key: 'saving', label: 'Saving to your practice history' },
+]);
+
+// An unknown or missing stage reads as the first step, never as a finished one.
+export function analysisStageIndex(stage) {
+  const index = ANALYSIS_STAGES.findIndex(item => item.key === stage);
+  return index < 0 ? 0 : index;
+}
+
 export const USAGE_WARNING = 'The interviewer is an AI voice. It hears everything you say and the call is analysed afterwards, so use real examples only.';
 
 export const levelPercent = level => {

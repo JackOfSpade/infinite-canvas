@@ -203,6 +203,13 @@ export default [
         for (const fragment of ['aria-label="Analysing the call"', 'role="status"', 'Analysing the recording', '1:12']) {
           assert(analysing.includes(fragment), `analysing screen is missing ${fragment}`);
         }
+        // The processing steps tick off in order: earlier ones done, the reported one active, the rest pending.
+        const reviewing = renderToStaticMarkup(React.createElement(EndedScreen, { state: { phase: 'analyzing', analysisStage: 'review', elapsedMs: 72_000, persona: PERSONA } }));
+        for (const fragment of ['aria-label="Processing steps"', 'data-stage="recording" data-status="done"', 'data-stage="transcribing" data-status="done"', 'data-stage="metrics" data-status="done"', 'data-stage="review" data-status="active" aria-current="step"', 'data-stage="saving" data-status="pending"', 'Writing the feedback']) {
+          assert(reviewing.includes(fragment), `the processing screen is missing ${fragment}`);
+        }
+        assert(analysing.includes('data-stage="recording" data-status="active"'), 'an unreported stage reads as the first step in progress');
+        assert(!analysing.includes('data-status="done"'), 'no step is shown finished before the service reports progress');
         const ended = renderToStaticMarkup(React.createElement(EndedScreen, { state: { phase: 'ended', elapsedMs: 5_000 } }));
         for (const fragment of ['aria-label="Call ended"', 'being analysed', '0:05']) {
           assert(ended.includes(fragment), `ended screen is missing ${fragment}`);
@@ -287,11 +294,13 @@ export default [
         await withDom(async window => {
           const listeners = [];
           const invoked = [];
+          const hangUps = [];
           window.practiceCallAPI = {
             getState: async () => ({ phase: 'consent' }),
             onState: listener => { listeners.push(listener); return () => { const at = listeners.indexOf(listener); if (at >= 0) listeners.splice(at, 1); }; },
             onEvent: () => () => {},
             agreeModelDownload: async () => { invoked.push('agree'); },
+            hangUp: async options => { hangUps.push(options); },
             getReplay: async () => REPLAY,
           };
           const root = bundle.module.createRoot(window.document.getElementById('root'));
@@ -312,6 +321,19 @@ export default [
             await push({ phase: 'in-call', persona: PERSONA, elapsedMs: 65_000, speaking: 'interviewer' });
             assert(byLabel('Hang up') && byLabel('Mute microphone') && byLabel('Captions'), 'in-call must expose the control bar');
             assert(byLabel('Call timer')?.textContent === '1:05', 'the in-call timer must follow elapsedMs');
+            // The interviewer leaving keeps the call screen up; the red button asks how to leave.
+            await push({ interviewerLeft: true, speaking: null });
+            assert(byLabel('Interviewer left')?.textContent.includes('Dana Whitfield left the call'), 'the call screen must say the interviewer left');
+            assert(byLabel('Hang up') && !byLabel('Leave the call'), 'the call stays up with no dialog until Hang up is pressed');
+            await act(() => byLabel('Hang up').click());
+            assert(hangUps.length === 0, 'pressing Hang up alone must not end the call');
+            const choices = [...byLabel('Leave the call').querySelectorAll('button')].map(node => node.textContent);
+            assert(choices.join('|') === 'Leave and generate feedback|Leave without feedback|Stay on the call', `unexpected leave choices: ${choices.join('|')}`);
+            await act(() => [...byLabel('Leave the call').querySelectorAll('button')].find(node => node.textContent === 'Stay on the call').click());
+            assert(!byLabel('Leave the call') && byLabel('Hang up'), 'staying closes the dialog and keeps the call');
+            await act(() => byLabel('Hang up').click());
+            await act(() => [...byLabel('Leave the call').querySelectorAll('button')].find(node => node.textContent === 'Leave without feedback').click());
+            assert(hangUps.length === 1 && hangUps[0]?.feedback === false, 'leaving without feedback must pass feedback: false');
             await push({ phase: 'replay' });
             assert(byLabel('Replay position')?.getAttribute('aria-valuemax') === '600000', 'replay must render the loaded replay payload');
           } finally { await act(() => root.unmount()); }

@@ -152,7 +152,8 @@ function promptBrief(brief) {
 function freshState() {
   return {
     phase: 'precheck', callId: null, persona: null, elapsedMs: 0, muted: false, level: 0, speaking: null,
-    typing: false, chat: [], captions: [], modelDownload: null, usageWarning: null, error: null,
+    typing: false, chat: [], captions: [], modelDownload: null, usageWarning: null, error: null, analysisStage: null,
+    interviewerLeft: false, feedbackRequested: true,
   };
 }
 function errorState(code, message) {
@@ -613,7 +614,20 @@ export function createPracticeCallService(deps = {}) {
       emitEvent({ type: 'chat', ...event });
       return;
     }
-    if (event.type === 'ended') { finishCall(event.reason || 'ended').catch(() => {}); return; }
+    if (event.type === 'ended') {
+      // The interviewer hanging up leaves the candidate in the call window: the
+      // call is only finished, and feedback only generated, when they choose to.
+      if (event.reason === 'interviewer' && call && !call.finished && call.inCall) {
+        call.interviewerLeft = true;
+        state.interviewerLeft = true;
+        state.speaking = null;
+        state.typing = false;
+        publish();
+        return;
+      }
+      finishCall(event.reason || 'ended').catch(() => {});
+      return;
+    }
     emitEvent(event);
   }
 
@@ -635,9 +649,11 @@ export function createPracticeCallService(deps = {}) {
     return snapshot();
   }
 
-  async function finishCall(reason = 'candidate') {
+  async function finishCall(requestedReason = 'candidate', { analyze: wantsAnalysis = true } = {}) {
     if (!call || call.finished) return snapshot();
     const self = call;
+    const reason = self.interviewerLeft ? 'interviewer' : requestedReason;
+    state.feedbackRequested = !!wantsAnalysis;
     // R7: everything below reads `self`, never the shared `call` handle.
     self.finished = true;
     finishing = true;
@@ -661,9 +677,13 @@ export function createPracticeCallService(deps = {}) {
         persona: self.persona ? { ...self.persona } : null, steering: self.steering || null, transcript: engineState.transcript || [],
         timings: { ...self.timings, finalizeMs: Math.round(clock.now() - self.startedAt - durationMs) },
         toneNotes: self.toneSamples.slice(), thresholds: deps.thresholds ?? null, reason,
+        ...(wantsAnalysis ? {} : { feedbackSkipped: true }),
       };
       self.record = record;
       await store.writeRecord(self.callId, record);
+      // The window shows these steps while the review is prepared.
+      const setStage = stage => { state.analysisStage = stage; publish(); };
+      state.analysisStage = 'recording';
       setPhase('analyzing');
       let audio = false;
       try {
@@ -685,7 +705,10 @@ export function createPracticeCallService(deps = {}) {
       let analysis = { status: 'failed', error: 'analysis unavailable' };
       let feedback = null;
       let analysisWritten = false;
+      // Leaving without feedback spends nothing on transcription or the review.
+      if (wantsAnalysis) {
       try {
+        setStage('transcribing');
         const analyze = await resolve('analyze');
         const transcribe = async request => {
           const extra = request && typeof request === 'object' ? request : {};
@@ -697,7 +720,7 @@ export function createPracticeCallService(deps = {}) {
         };
         const produced = await analyze({
           callDir: self.dir, callRecord: record, plan: self.plan, brief: self.brief,
-          deps: { ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe },
+          deps: { ...(typeof deps.callText === 'function' ? { callText: deps.callText } : {}), transcribe, onStage: setStage },
         });
         const report = produced?.analysis && typeof produced.analysis === 'object' ? produced.analysis : produced;
         const raw = produced?.feedback ?? (report && typeof report === 'object' ? report.feedback : null);
@@ -709,6 +732,7 @@ export function createPracticeCallService(deps = {}) {
         analysis = { status: 'failed', error: 'The call review could not be written.' };
         state.error = errorState('analysis-failed', analysis.error);
       }
+      setStage('saving');
       const stored = { callId: self.callId, createdAt: Date.now(), ...analysis };
       try { await store.writeAnalysis(self.callId, stored); analysisWritten = true; } catch { /* record still replays */ }
       self.analysis = stored;
@@ -739,8 +763,9 @@ export function createPracticeCallService(deps = {}) {
           }
         } catch { emitEvent({ type: 'feedback-error', message: 'The practice history could not be updated.' }); }
       }
+      }
       // R9: keep the WAV sources only when the mixdown exists and the review was stored.
-      if (audio && analysisWritten) {
+      if (audio && (analysisWritten || !wantsAnalysis)) {
         for (const name of ['candidate.wav', 'interviewer.wav']) {
           const file = path.join(self.dir, name);
           try {
@@ -749,6 +774,7 @@ export function createPracticeCallService(deps = {}) {
           } catch { /* already gone */ }
         }
       }
+      state.analysisStage = null;
       setPhase('replay');
       const replay = await getReplay(self.callId).catch(() => null);
       if (call === self) call = null;
@@ -853,7 +879,7 @@ export function createPracticeCallService(deps = {}) {
       } catch (error) { fail('engine-failed', error); }
       return snapshot();
     },
-    hangUp: async () => finishCall('candidate'),
+    hangUp: async options => finishCall('candidate', { analyze: options?.feedback !== false }),
     abandon: async () => (call && !call.finished ? finishCall('window-closed') : snapshot()),
     setMuted: muted => {
       state.muted = !!muted;

@@ -91,13 +91,25 @@ export function createPracticeCallController(deps = {}) {
       return win;
     }
     const options = {
-      width: 960, height: 640, title: 'Practice call', backgroundColor: '#111018', show: false,
+      width: 960, height: 640, title: 'Practice call', backgroundColor: '#202124', show: false,
       webPreferences: { preload: preloadPath, contextIsolation: true, nodeIntegration: false, sandbox: true },
     };
     winMode = replay ? 'replay' : 'call';
     win = new BrowserWindow(options);
     const created = win;
     created.once?.('ready-to-show', () => { try { created.show(); } catch { /* closed before show */ } });
+    // Closing the window mid-call asks the same question as the red button. A second
+    // close within ten seconds goes through, so a stuck page can never trap the window.
+    let leaveAskedAt = 0;
+    created.on?.('close', event => {
+      if (win !== created || winMode !== 'call' || service.getState?.()?.phase !== 'in-call') return;
+      const now = Date.now();
+      if (now - leaveAskedAt < 10_000) return;
+      leaveAskedAt = now;
+      try { event?.preventDefault?.(); } catch { return; }
+      send(`${WINDOW_PREFIX}leave-requested`, null);
+      try { created.show(); created.focus(); } catch { /* window is going away */ }
+    });
     created.on?.('closed', () => {
       if (win !== created) return;
       const mode = winMode;
@@ -124,7 +136,13 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'get-state']() { return service.getState(); },
     async [WINDOW_PREFIX + 'agree-model-download']() { return service.agreeModelDownload(); },
     async [WINDOW_PREFIX + 'answer']() { return service.answer(); },
-    async [WINDOW_PREFIX + 'hang-up']() { return service.hangUp(); },
+    async [WINDOW_PREFIX + 'hang-up'](options) {
+      const feedback = options?.feedback !== false;
+      const state = await service.hangUp({ feedback });
+      // Leaving without feedback has nothing more to show, so the window goes with the call.
+      if (!feedback && windowAlive()) win.close();
+      return state;
+    },
     async [WINDOW_PREFIX + 'set-muted'](muted) { return service.setMuted(muted); },
     async [WINDOW_PREFIX + 'send-chat'](text) { return service.sendChat(text); },
     async [WINDOW_PREFIX + 'set-typing'](typing) { return service.setTyping(typing); },

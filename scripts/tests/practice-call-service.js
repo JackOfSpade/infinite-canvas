@@ -170,6 +170,30 @@ test('hang-up finalises in order and deletes WAVs only with audio', async () => 
   assert.equal(record.transcript[0].text, 'hello');
 });
 
+test('leaving without feedback saves the recording and spends nothing on analysis', async () => {
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-no-feedback-'));
+  const { deps } = makeDeps({ tmp, modelReady: true, deps: { afconvert: async args => { await nodeFs.writeFile(args.at(-1), 'm4a'); } } });
+  let analysed = 0;
+  let transcribed = 0;
+  deps.analyze = async () => { analysed += 1; return { status: 'ready', chapters: [], feedback: null }; };
+  deps.transcribe = async () => { transcribed += 1; return { words: [] }; };
+  const service = createPracticeCallService(deps);
+  await service.start(ARGS);
+  await service.answer();
+  const callDir = path.join(tmp, 'practice-calls', 'call-1');
+  await nodeFs.writeFile(path.join(callDir, 'candidate.wav'), 'candidate');
+  await nodeFs.writeFile(path.join(callDir, 'interviewer.wav'), 'interviewer');
+  const state = await service.hangUp({ feedback: false });
+  assert.equal(state.phase, 'replay');
+  assert.equal(state.feedbackRequested, false);
+  assert.equal(analysed + transcribed, 0, 'no analysis or transcription runs');
+  assert.equal(await deps.store.readAnalysis('call-1'), null, 'no analysis is stored');
+  const record = await deps.store.readRecord('call-1');
+  assert.equal(record.feedbackSkipped, true);
+  assert.equal(record.transcript[0].text, 'hello');
+  assert.equal((await service.getReplay('call-1')).feedback, null);
+});
+
 test('hang-up from every phase is safe', async () => {
   for (const [phase, setup] of [
     ['ringing', async service => service.start(ARGS)],
@@ -192,7 +216,12 @@ test('engine ended and helper error end the call', async () => {
   await endedService.answer();
   ended.engine()({ type: 'ended', reason: 'interviewer' });
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(['ended', 'analyzing', 'replay'].includes(endedService.getState().phase), true);
+  // The interviewer leaving does not end the call for the candidate.
+  assert.equal(endedService.getState().phase, 'in-call');
+  assert.equal(endedService.getState().interviewerLeft, true);
+  assert.equal((await endedService.hangUp()).phase, 'replay');
+  assert.equal((await ended.deps.store.readRecord('call-1')).reason, 'interviewer');
+  ended.engine()({ type: 'ended', reason: 'timeout' });
   const errorTmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-helper-error-'));
   const failed = makeDeps({ tmp: errorTmp, modelReady: true, helperError: true });
   const errorService = createPracticeCallService(failed.deps);
@@ -1134,6 +1163,52 @@ test('a missing, throwing or unusable draw is voice-library-unavailable', async 
     const stamped = await readFile(poolFilePath(tmp), 'utf8').then(() => true, () => false);
     assert.equal(stamped, false, `${label}: no lastUsed stamp is saved`);
   }
+});
+
+test('closing the window during a call asks how to leave before it closes', async () => {
+  const { createPracticeCallController } = await import('../../electron/practiceCall/callWindow.js');
+  const tmp = await mkdtemp(path.join(os.tmpdir(), 'practice-call-close-ask-'));
+  const sent = [];
+  let made = null;
+  class FakeWindow {
+    constructor() { this.destroyed = false; this.handlers = {}; this.webContents = { send: channel => sent.push(channel), mainFrame: {} }; made = this; }
+    once(name, fn) { this.handlers[name] = fn; }
+    on(name, fn) { this.handlers[name] = fn; }
+    isDestroyed() { return this.destroyed; }
+    show() {} focus() {} loadFile() {}
+    // Electron semantics: 'close' may veto, 'closed' follows only when it did not.
+    close() {
+      if (this.destroyed) return;
+      let vetoed = false;
+      this.handlers.close?.({ preventDefault() { vetoed = true; } });
+      if (vetoed) return;
+      this.destroyed = true; this.handlers.closed?.();
+    }
+  }
+  const ipc = new Map();
+  const ipcMain = { handle: (channel, fn) => ipc.set(channel, fn), removeHandler: channel => ipc.delete(channel) };
+  let phase = 'in-call';
+  const abandons = [];
+  const hangUps = [];
+  const service = {
+    onState() {}, onEvent() {}, onReplayUpdated() {},
+    getState: () => ({ phase, callId: 'call-1' }),
+    start: async () => ({ phase: 'ringing', callId: 'call-1' }),
+    hangUp: async options => { hangUps.push(options); phase = 'replay'; return { phase }; },
+    abandon: async () => { abandons.push(1); return { phase: 'replay' }; },
+  };
+  createPracticeCallController({
+    BrowserWindow: FakeWindow, ipcMain, isAuthorizedOwner: () => true, userDataPath: tmp,
+    store: { readRecord: async callId => ({ callId, nodeId: 'n1' }) }, service,
+  });
+  await ipc.get('practice-call:start')({}, { nodeId: 'n1' });
+  made.close();
+  assert.equal(made.destroyed, false, 'the first close is held back');
+  assert.equal(sent.includes('practice-call-window:leave-requested'), true, 'the window is asked to show its leave dialog');
+  assert.equal(abandons.length, 0);
+  await ipc.get('practice-call-window:hang-up')({}, { feedback: false });
+  assert.deepEqual(hangUps, [{ feedback: false }]);
+  assert.equal(made.destroyed, true, 'leaving without feedback closes the window');
 });
 
 test('a full start never sends POST or DELETE to the voices API', async () => {
