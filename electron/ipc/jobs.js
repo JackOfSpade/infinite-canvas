@@ -6212,7 +6212,7 @@ function careerCompilationOwnedBy(nodeId, telemetry) {
 }
 
 export const CAREER_CONVERGENCE_CATEGORIES = Object.freeze(['coverage', 'grounding', 'attribution', 'metrics', 'skills', 'conflict']);
-const CAREER_CONVERGENCE_COUNTERS = Object.freeze(['editsApplied', 'decisionsTotal', 'challengesAccepted', 'adjudications', 'findingsRejected', 'editRepairs', 'deterministicErrors']);
+const CAREER_CONVERGENCE_COUNTERS = Object.freeze(['editsApplied', 'decisionsTotal', 'challengesAccepted', 'adjudications', 'findingsRejected', 'editRepairs', 'repairsDeclined', 'deterministicErrors']);
 export const CAREER_CONVERGENCE_ROUND_CAP = 64;
 
 const isCareerCount = value => Number.isSafeInteger(value) && value >= 0;

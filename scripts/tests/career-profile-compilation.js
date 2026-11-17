@@ -381,6 +381,7 @@ const editProtocolTests = [
         adjudications: 0,
         findingsRejected: 0,
         editRepairs: 0,
+        repairsDeclined: 0,
         deterministicErrors: 0,
       };
       const repairProgress = log.progress.filter(event => event.phase === 'repairing');
@@ -1208,6 +1209,35 @@ const w6ReproTests = [
     if (allDecline) assert(caught?.code === 'CAREER_SNAPSHOT_NONCONVERGENT' && JSON.stringify(calls) === '[0,1,2]', 'all declines leave the profile and ledger unchanged and stop');
     else assert(!caught && JSON.stringify(calls) === '[0,1]' && finalDecisionLog(completed.result).targets.length === 1 && convergencePayloads(completed.log)[0].editRepairs === 1, 'declines consume no decisions or repair count and a fixed error never fans out later');
   } })),
+  { name: 'W6 cross-page skills: a page told another page holds the skill may not re-add it under a different eligibility', run: async () => {
+    // 2026-11-16: page 3 deleted its duplicate skill row, its page-local skills
+    // audit re-added it with a different indexEligible, and the duplicate-name
+    // error came back until the repair declined and the compile stopped.
+    const files = pagedSourceFiles(['Ada Lovelace', 'Software Engineer Engineer Acme January 2020 Present Toronto', 'Built Python service used by 50 users.', 'Built Python report used by 60 users.']);
+    const prompts = new Map();
+    const { result, log } = await runEditProtocol({ files, pageMaxSegments: 1,
+      compile: (corpus, pageIndex) => {
+        const shard = crossPageShard(corpus, pageIndex);
+        if (pageIndex !== 3) return shard;
+        return { ...shard, skills: [], segmentCoverage: [{ segmentId: corpus.segments[3].id, disposition: 'achievement', entityIds: ['identity', shard.achievements[0].id] }] };
+      },
+      audit: ({ lane, round, corpus, pageIndex, prompt, scopeKind }) => {
+        if (lane !== 'skills' || round !== 0 || scopeKind === 'host-merged-patches') return [{ findings: [] }];
+        prompts.set(pageIndex, prompt);
+        if (pageIndex !== 3) return [{ findings: [] }];
+        const row = { id: 'p0004-skill-python-readded', name: 'Python', category: 'language', capabilityKind: 'language', supportMode: 'direct',
+          directEvidenceSegmentIds: [corpus.segments[3].id], indexEligible: false, roleIds: [], evidenceSegmentIds: [corpus.segments[3].id] };
+        return [{ findings: [editFinding({ id: 'python-skill-missing', segmentIds: [corpus.segments[3].id], sourceQuote: 'Built Python report', entityIds: ['p0004-achievement-3'],
+          edits: [{ op: 'add', group: 'skills', entityId: row.id, field: '', valueJson: JSON.stringify(row) }] })] }, { findings: [] }];
+      },
+    });
+    const rejected = log.rejected.filter(item => (item.ruleIds || []).includes('AUDIT_CROSS_PAGE_SKILL_DUPLICATE'));
+    assert(rejected.length === 1 && rejected[0].pageIndex === 3 && rejected[0].correctionDetails.some(line => line.includes('page-0003') && line.includes('already bound')), 'the re-add is refused at the answer validator with the reason');
+    assert(auditPayload(prompts.get(3)).skillsHeldByOtherPages?.[0]?.name === 'Python' && prompts.get(3).includes('it is not a missing skill'), 'the page that references another page skill is told so up front');
+    assert(!('skillsHeldByOtherPages' in auditPayload(prompts.get(2))) && !prompts.get(2).includes('skillsHeldByOtherPages'), 'pages that hold their own row keep the unchanged prompt');
+    assert(validateCurrentCareerSnapshot(result.snapshot).valid && result.profile.skills.filter(skill => skill.name === 'Python').length === 1, 'the compile approves with one skill row');
+    assert(!log.calls.some(call => call.phase === 'edit-repair'), 'no deterministic repair round is spent');
+  } },
   { name: 'W6 deterministic decline requires explanatory notes in the answer validator', run: async () => {
     const { log } = await runEditProtocol({ files: pagedSourceFiles(['Synthetic page']), pageMaxSegments: 1,
       compile: corpus => emptyPageShard(corpus.segments[0].id, { contacts: ['missing@example.test'] }),

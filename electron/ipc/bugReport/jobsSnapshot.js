@@ -5930,7 +5930,7 @@ export function renderCareerConvergenceLines(rounds, evicted) {
     const categories = CAREER_CONVERGENCE_CATEGORIES
       .filter(category => entry.byCategory[category] && (entry.byCategory[category].blocker > 0 || entry.byCategory[category].warning > 0))
       .map(category => `${category} ${entry.byCategory[category].blocker}b/${entry.byCategory[category].warning}w`);
-    out.push(`  - round ${entry.round} · findings ${entry.findings.blocker} blocker / ${entry.findings.warning} warning · edits applied ${n(entry.editsApplied)} · decisions ${n(entry.decisionsTotal)} · challenges ${n(entry.challengesAccepted)} · adjudications ${n(entry.adjudications)} · rejected ${n(entry.findingsRejected)} · edit repairs ${n(entry.editRepairs)} · deterministic errors ${n(entry.deterministicErrors)}${categories.length ? ` · by category: ${categories.join(', ')}` : ''}`);
+    out.push(`  - round ${entry.round} · findings ${entry.findings.blocker} blocker / ${entry.findings.warning} warning · edits applied ${n(entry.editsApplied)} · decisions ${n(entry.decisionsTotal)} · challenges ${n(entry.challengesAccepted)} · adjudications ${n(entry.adjudications)} · rejected ${n(entry.findingsRejected)} · edit repairs ${n(entry.editRepairs)}${n(entry.repairsDeclined) ? ` · repairs declined ${n(entry.repairsDeclined)}` : ''} · deterministic errors ${n(entry.deterministicErrors)}${categories.length ? ` · by category: ${categories.join(', ')}` : ''}`);
   }
   const first = entries[0];
   const last = entries[entries.length - 1];
