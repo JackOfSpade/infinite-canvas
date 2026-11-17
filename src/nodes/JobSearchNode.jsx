@@ -12,7 +12,7 @@ import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES, ALL_JOB_SOURCE_IDS } from '../utils/constants';
-import { isJobSourceEnabledInScope, JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
+import { JOB_SEARCH_TEST_MODE } from '../utils/jobSourceScope';
 // Same-run merges use dedupJobsAcrossSources/uniqueJobsAcrossSources — the
 // backend's location-aware cross-source dedup — so a posting that arrives
 // late (post-Solve resolve, background USAJobs) collapses against the copy
@@ -85,6 +85,14 @@ import { classifyJobBoardSourceAdmission } from '../utils/jobBoardSourceAdmissio
 import { getSavedAnalysisAvailability, publishSavedAnalysisAvailability, savedAnalysisResumeAdmission } from '../utils/jobSavedAnalysisAvailability';
 import { hasStoredPreferenceVerdicts, mergeScoredJobs, splitKeptScores } from '../utils/jobSearchPreferenceReevaluation';
 import { CopyBriefButton } from './jobsearch/CopyBriefButton';
+import {
+  createPrefixedManualAiRunId,
+  normalizeManualAiCleanupReceipts,
+  rememberBoundedRunId,
+  removeManualAiCleanupReceipt,
+  upsertManualAiCleanupReceipt,
+  waitForRendererCommitFrame,
+} from './jobsearch/manualAiRunReceipts';
 import { buildJobHubCareerOnlyClearPatch, buildJobHubScrapeClearPatch, buildSavedJobsRescoreMarker, hubRetainsSavedJobs, isCareerClearedWithSavedJobs, pendingSavedJobsRescore, savedJobCount as countSavedJobs, savedJobsReevaluationKeepsScores, savedJobsRescoreCompletionPatch } from '../utils/jobSearchSplitClear';
 import { createJobCareerImportCapability, freshJobCareerImportCapability, jobCareerImportBoardAdmission, jobCareerImportConsumptionPatch, retryableUnstartedJobCareerImportCapability, retryableCancelledJobCareerImportCapability } from '../utils/jobCareerImportCapability';
 import { isCareerCompilerTask } from '../utils/careerCompilerTasks';
@@ -94,8 +102,6 @@ import { moduleFingerprint } from './jobboard/mergeJobs';
 import {
   JOB_CONTINUATION_RECEIPTS_FIELD,
   findJobContinuationAppliedReceipt,
-  jobContinuationAppliedReceipt,
-  upsertJobContinuationAppliedReceipt,
 } from '../utils/jobContinuationReceipt';
 import {
   jobSearchHistoricalAnchor,
@@ -128,13 +134,6 @@ import { CAREER_TEXT_ONLY_MESSAGE, isCareerTextFileName } from '../utils/careerT
 const SKIP_AI_FOR_TESTING = JOB_SEARCH_TEST_MODE.enabled && JOB_SEARCH_TEST_MODE.skipAI;
 // ─────────────────────────────────────────────────────────────────────────────
 
-// A scrape warning "gates" the pipeline — pauses it in 'sources-ready' until the
-// user Solves or Skips — when it's a hard block/paste (captcha, login wall) OR a
-// LinkedIn guest rate-limit. The rate-limit is technically a 'throttle', but a
-// Solve (switch VPN → re-enrich the missing descriptions) recovers real data, so
-// we hold scoring rather than burn AI tokens on description-less LinkedIn jobs;
-// the user can still Skip to score with what we have. Everything else (info,
-// transient throttles on other sources) flows straight through to scoring.
 const STATE_LABELS = {
   empty: null,
   parsing: 'Processing career data...',
@@ -185,38 +184,7 @@ function materializedSearchHistoryOnCareerClear(data, nodeId) {
 }
 
 function createManualAiRunId(nodeId) {
-  const entropy = globalThis.crypto?.randomUUID?.()
-    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `job-search:${nodeId}:${entropy}`;
-}
-
-function rememberBoundedRunId(runIds, runId, limit = 32) {
-  if (!runId) return;
-  runIds.add(runId);
-  while (runIds.size > limit) {
-    runIds.delete(runIds.values().next().value);
-  }
-}
-
-function normalizeManualAiCleanupReceipts(receipts) {
-  if (!Array.isArray(receipts)) return [];
-  const byRunId = new Map();
-  for (const receipt of receipts) {
-    if (typeof receipt?.runId !== 'string' || !receipt.runId) continue;
-    byRunId.set(receipt.runId, { ...(byRunId.get(receipt.runId) || {}), ...receipt });
-  }
-  return [...byRunId.values()].slice(-32);
-}
-
-function upsertManualAiCleanupReceipt(receipts, receipt) {
-  return normalizeManualAiCleanupReceipts([
-    ...normalizeManualAiCleanupReceipts(receipts).filter(item => item.runId !== receipt?.runId),
-    receipt,
-  ]);
-}
-
-function removeManualAiCleanupReceipt(receipts, runId) {
-  return normalizeManualAiCleanupReceipts(receipts).filter(receipt => receipt.runId !== runId);
+  return createPrefixedManualAiRunId('job-search', nodeId);
 }
 
 function hasCancellationPendingManualAiCleanup(data) {
@@ -417,23 +385,6 @@ function pausedCareerInputMatches(source) {
   );
 }
 
-function preferenceArtifactsMatch(source, careerSnapshotId) {
-  if (!source?.preferenceEvaluation && !Array.isArray(source?.preferenceCandidatePool)) return true;
-  return careerSnapshotBindingMatches(
-    { careerSnapshotId: source?.preferenceCareerSnapshotId },
-    careerSnapshotId,
-  );
-}
-
-function scoringArtifactsMatch(source, careerSnapshotId) {
-  const scoredJobs = Array.isArray(source?.scoredJobs) ? source.scoredJobs : [];
-  if (scoredJobs.length === 0) return true;
-  return careerSnapshotBindingMatches(
-    { careerSnapshotId: source?.scoringCareerSnapshotId },
-    careerSnapshotId,
-  ) && scoredJobs.every(job => normalizedJobCareerSnapshotId(job?.careerSnapshotId) === careerSnapshotId);
-}
-
 // The main process accepts only this full-input parse fingerprint for durable
 // recovery. Treat missing, legacy, or malformed values as non-recoverable;
 // never synthesize identity from the mutable stored profile object.
@@ -518,16 +469,15 @@ function mergePreferenceEvaluations(existing, incoming) {
     company: audit.company,
     __audit: audit,
   }))).map(audit => audit.__audit);
-  const uniqueLegacyAudits = legacyAudits.filter((audit, index, list) => {
+  const seenLegacyAuditKeys = new Set();
+  const keptAudits = new Set(uniqueIdentifiedAudits);
+  for (const audit of legacyAudits) {
     const key = `${audit?.title || ''}|${audit?.company || ''}|${audit?.status || ''}|${audit?.summary || ''}`;
-    return list.findIndex((candidate) => `${candidate?.title || ''}|${candidate?.company || ''}|${candidate?.status || ''}|${candidate?.summary || ''}` === key) === index;
-  });
-  const uniqueAudits = audits.filter(audit => (
-    (audit?.listingIdentity && typeof audit.listingIdentity === 'object'
-      ? uniqueIdentifiedAudits
-      : uniqueLegacyAudits
-    ).includes(audit)
-  ));
+    if (seenLegacyAuditKeys.has(key)) continue;
+    seenLegacyAuditKeys.add(key);
+    keptAudits.add(audit);
+  }
+  const uniqueAudits = audits.filter(audit => keptAudits.has(audit));
   return {
     preferencePlan: incoming.preferencePlan || existing.preferencePlan || null,
     audits: uniqueAudits,
@@ -999,26 +949,6 @@ function insertRestoredItemsAtCapturedAnchors(currentItems, restoredItems, captu
   return result;
 }
 
-function waitForRendererCommitFrame() {
-  return new Promise((resolve) => {
-    let settled = false;
-    let fallbackTimer = null;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      if (fallbackTimer != null) clearTimeout(fallbackTimer);
-      resolve();
-    };
-    // A hidden/minimized Electron window can throttle animation frames. Keep a
-    // short timer fallback so a completed source never holds the Board lane
-    // indefinitely merely because the canvas is not being painted right now.
-    fallbackTimer = setTimeout(finish, 50);
-    if (typeof globalThis.requestAnimationFrame === 'function') {
-      globalThis.requestAnimationFrame(finish);
-    }
-  });
-}
-
 function sourceGraphRollbackIsVisible(hubId, nodes, edges, snapshot) {
   const expectedNodes = Array.isArray(snapshot?.nodes) ? snapshot.nodes : [];
   const expectedEdges = Array.isArray(snapshot?.edges) ? snapshot.edges : [];
@@ -1212,7 +1142,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const [selectedCanvasFileSelections, setSelectedCanvasFileSelections] = useState([]);
   const canvasCareerFiles = useMemo(() => canvasCareerImportCandidates(canvasNodes), [canvasNodes]);
   const processingRunsRef = useRef(createRunOwnershipGuard());
-  const directSearchDeferralEventsRef = useRef(new Set());
   // Snapshot equality is intentionally insufficient: a second request may use
   // the same immutable career snapshot. This ledger revokes the first request
   // synchronously at admission and its serialized receipt gives every
@@ -1413,14 +1342,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const localQueueAdmissionRef = useRef(null);
   const standaloneCancellationRef = useRef(null);
   const initialDropAcceptedRef = useRef(false);
-  // Legacy drop-created hubs persist the source file path so they can begin
-  // after React mounts.  Keep the one automatic launch scoped to this mounted
-  // node and this exact path: failures intentionally retain the path for the
-  // explicit Try Again action, but must never recursively re-launch themselves
-  // merely because they return the hub to its empty state.
-  const autoStartedFilePathRef = useRef(null);
   const pendingUSAJobsRefreshRef = useRef(false);
-  const usaJobsRefreshAdmissionRef = useRef(null);
   const autoClaimedJobContinuationIdsRef = useRef(new Set());
   const scrapeWarningsRef = useRef(data.scrapeWarnings);
   const hubStateRef = useRef(data.hubState);
@@ -2786,807 +2708,27 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     ));
   }, [getNode, id, updateGlobal]);
 
-  const triggerUSAJobsBackgroundSearch = useCallback(async ({ continuation = null } = {}) => {
+  const triggerUSAJobsBackgroundSearch = useCallback(async () => {
     if (isJobWorkflowDeletionPending(id)) {
       pendingUSAJobsRefreshRef.current = true;
       return;
     }
     if (processingRunsRef.current.active) return;
     const currentId = id;
-    const boardConnectionOwnsRefresh = () => isJobSearchConnectedToBoard(
-      currentId,
-      getNodes(),
-      getEdges(),
-    );
-    const clearOwnQueueMarker = () => updateGlobal(currentId, (node) => (
+    // Product decision: only a Job Board starts a search. This refresh is an
+    // automatic credentials/continuation retry with no Board run behind it, so
+    // a card must not contact the provider itself; a connected Board owns every
+    // new search admission.
+    pendingUSAJobsRefreshRef.current = false;
+    updateGlobal(currentId, (node) => (
       node?.data?.queuedModuleRun?.label === 'Refreshing USAJobs'
         ? { queuedModuleRun: null }
         : null
     ));
-    // This refresh is a new provider/scoring transaction, not cleanup for the
-    // already-committed generation. Once a Board is connected it owns every new
-    // search admission, including this automatic credentials-change retry.
-    if (boardConnectionOwnsRefresh()) {
-      pendingUSAJobsRefreshRef.current = false;
-      clearOwnQueueMarker();
-      EventLogger.log(
-        `[JobSearch][${id}] USAJobs background search dropped because a connected Job Board owns search admission.`,
-      );
-      return;
-    }
-    // Product decision: only a Job Board starts a search. This refresh is an
-    // automatic credentials/continuation retry with no Board run behind it, so
-    // an unconnected card must not contact the provider either.
-    if (!boardConnectionOwnsRefresh()) {
-      pendingUSAJobsRefreshRef.current = false;
-      clearOwnQueueMarker();
-      EventLogger.log(
-        `[JobSearch][${id}] USAJobs background search dropped because searches run only from a Job Board.`,
-      );
-      return;
-    }
-    const recoveryReservation = () => {
-      const liveNode = getNode(currentId);
-      if (
-        !liveNode
-        || liveNode.data?.terminalFinalizationRecovery
-        || liveNode.data?.manualAiResume?.runId
-        || hasPendingManualAiRetirement(liveNode.data)
-      ) return true;
-      return !!findJobSearchBoardActiveRecoveryOwner(
-        currentId,
-        getNodes(),
-        getEdges(),
-      );
-    };
-    if (recoveryReservation()) {
-      pendingUSAJobsRefreshRef.current = true;
-      EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because durable recovery owns this module.`);
-      return;
-    }
-    if (!isJobSourceEnabledInScope('usajobs') || !activeEnabledSourceIds.includes('usajobs')) {
-      pendingUSAJobsRefreshRef.current = false;
-      EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because its platform is disabled.`);
-      return;
-    }
-    // A queued refresh reads live credentials/settings only after its lane turn,
-    // so repeated settings events can coalesce into that exact admission. Work
-    // that is not this refresh (saved scoring, re-analysis, etc.) cannot absorb
-    // the provider retry; preserve the latch until that workflow releases.
-    if (usaJobsRefreshAdmissionRef.current) {
-      pendingUSAJobsRefreshRef.current = false;
-      EventLogger.log(`[JobSearch][${id}] Duplicate USAJobs background search coalesced into its queued refresh.`);
-      return;
-    }
-    if (localQueueAdmissionRef.current) {
-      pendingUSAJobsRefreshRef.current = true;
-      EventLogger.log(`[JobSearch][${id}] USAJobs background search deferred behind existing Search work.`);
-      return;
-    }
-    const admissionToken = Symbol(`usajobs-refresh:${currentId}`);
-    usaJobsRefreshAdmissionRef.current = admissionToken;
-    localQueueAdmissionRef.current = admissionToken;
-    // Consume the admitted intent before it enters the queue. A later settings
-    // event can set a new intent while this turn waits or runs; a recovery
-    // reservation discovered at queue start explicitly re-latches it.
-    pendingUSAJobsRefreshRef.current = false;
-    const epochCancelled = epoch.start();
-    let refreshOperation = null;
-    const cancelled = () => epochCancelled()
-      || (refreshOperation != null && !canCommitAnalysisOperation(refreshOperation));
-    // A late USAJobs append can still reach the same manual-AI handoff as a
-    // foreground search. It needs one durable identity across preferences and
-    // scoring, and must own the shared job lane before either can begin.
-    const manualAiRunId = createManualAiRunId(currentId);
-    let lease = null;
-    let processingToken = null;
-    let refreshClaimedByBoard = false;
-    let refreshData = null;
-    let refreshGenerationRunId = null;
-    let refreshGenerationFingerprint = null;
-    let refreshGenerationDisposition = null;
-    let refreshGenerationCareerSnapshotId = null;
-    let continuationIntent = continuation;
-    let continuationLeaseToken = null;
-    let clearContinuationOnExit = false;
-    let terminalContinuationCheckpoint = null;
-    let continuationResultIntegrated = false;
-    let retireContinuationAsSuperseded = false;
-    const canCommitRefresh = () => {
-      // Recovery created after this refresh acquired the FIFO lane is a waiter,
-      // not authority to revoke the current owner mid-transaction. It will
-      // revalidate against the committed generation when its own turn starts.
-      if (cancelled()) return false;
-      const liveData = getNode(currentId)?.data;
-      return !!liveData
-        && (liveData.jobRunId || null) === refreshGenerationRunId
-        && (liveData.resultDisposition || null) === refreshGenerationDisposition
-        && normalizedJobCareerSnapshotId(liveData.careerSnapshotId) === refreshGenerationCareerSnapshotId
-        && moduleFingerprint(liveData.scoredJobs) === refreshGenerationFingerprint;
-    };
-
-    try {
-      lease = await moduleRunQueue.acquireModuleRun({
-        nodeId: currentId,
-        kind: 'jobsearch',
-        lane: 'job-search',
-        label: 'Refresh USAJobs',
-        onQueued: ({ position }) => {
-          updateGlobal(currentId, {
-            queuedModuleRun: { label: 'Refreshing USAJobs', position },
-          });
-        },
-        onQueueUpdate: ({ position }) => {
-          updateGlobal(currentId, { queuedModuleRun: { label: 'Refreshing USAJobs', position } });
-        },
-        onStart: () => {
-          if (cancelled() || isJobWorkflowDeletionPending(currentId)) throw new Error('Node deleted');
-          if (boardConnectionOwnsRefresh()) {
-            refreshClaimedByBoard = true;
-            return;
-          }
-          clearOwnQueueMarker();
-        },
-      });
-      if (refreshClaimedByBoard) {
-        pendingUSAJobsRefreshRef.current = false;
-        clearOwnQueueMarker();
-        EventLogger.log(
-          `[JobSearch][${id}] Queued USAJobs background search dropped because a connected Job Board now owns search admission.`,
-        );
-        return;
-      }
-      if (isJobWorkflowDeletionPending(currentId)) {
-        pendingUSAJobsRefreshRef.current = true;
-        EventLogger.log(`[JobSearch][${id}] USAJobs background search deferred while deletion is pending.`);
-        return;
-      }
-      if (cancelled() || recoveryReservation()) {
-        pendingUSAJobsRefreshRef.current = !cancelled();
-        EventLogger.log(`[JobSearch][${id}] USAJobs background search yielded to durable recovery at queue start.`);
-        return;
-      }
-      refreshData = getNode(currentId)?.data || null;
-      const refreshEnabledSourceIds = normalizeEnabledJobSourceIds(refreshData?.enabledSourceIds);
-      const refreshCollectionLimits = normalizeJobCollectionLimits(refreshData?.collectionLimits);
-      const refreshRunnableSources = getRunnableJobSourceIds(
-        refreshEnabledSourceIds,
-        ACTIVE_JOB_SOURCES,
-        refreshCollectionLimits,
-      );
-      if (!refreshData || !refreshRunnableSources.includes('usajobs')) {
-        EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because its live platform selection changed.`);
-        return;
-      }
-      if (refreshData.hubState !== 'done' && refreshData.hubState !== 'sources-ready') {
-        EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because the live search is not appendable.`);
-        return;
-      }
-      const refreshCareerSnapshotId = normalizedJobCareerSnapshotId(refreshData.careerSnapshotId);
-      if (
-        !refreshCareerSnapshotId
-        || !careerDerivedStateMatches(refreshData, refreshCareerSnapshotId)
-        || !careerSnapshotBindingMatches(
-          { careerSnapshotId: refreshData.queryCareerSnapshotId },
-          refreshCareerSnapshotId,
-        )
-        || !roleLockMatchesBrief(refreshData, refreshCareerSnapshotId)
-        || !preferenceArtifactsMatch(refreshData, refreshCareerSnapshotId)
-        || !scoringArtifactsMatch(refreshData, refreshCareerSnapshotId)
-      ) {
-        EventLogger.log(`[JobSearch][${id}] USAJobs background search skipped because its retained career-derived inputs are not bound to the current approved snapshot.`);
-        return;
-      }
-      const query = flattenJobSearchQueries(refreshData.queries)[0] || '';
-      if (!query) {
-        EventLogger.log(`[JobSearch][${id}] No stored queries found to run USAJobs background search.`);
-        return;
-      }
-      processingToken = processingRunsRef.current.start();
-      if (!processingToken) return;
-      // Publish ownership before any await that can enter the manual-AI path.
-      // Reset can now perform acknowledged cancellation even if the global
-      // pending event has not reached this node yet.
-      activeManualAiRunIdRef.current = manualAiRunId;
-      refreshGenerationRunId = refreshData.jobRunId || null;
-      refreshGenerationFingerprint = moduleFingerprint(refreshData.scoredJobs);
-      refreshGenerationDisposition = refreshData.resultDisposition || null;
-      refreshGenerationCareerSnapshotId = refreshCareerSnapshotId;
-      refreshOperation = await claimAnalysisOperation('usajobs-late-append', {
-        runId: refreshGenerationRunId,
-        fingerprint: refreshGenerationFingerprint,
-      });
-      if (!refreshOperation) return;
-      if (cancelled()) return;
-      const continuationOperationInput = {
-        query,
-        searchWindow: refreshData.searchWindow || null,
-        collectionLimits: refreshCollectionLimits,
-        enabledSourceIds: refreshEnabledSourceIds,
-        preferredLocation: (refreshData.canonicalLocation || refreshData.preferredLocation || '').trim(),
-        jobPreferences: refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '',
-        preferencePlan: refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null,
-      };
-      const continuationIdentity = {
-        canvasFilePath,
-        nodeId: currentId,
-        operationAuthority: continuationIntent?.operationAuthority || operationAuthorityFor(refreshOperation),
-        careerSnapshotId: continuationIntent?.careerSnapshotId || refreshGenerationCareerSnapshotId,
-        parentArtifactFingerprint: continuationIntent?.parentArtifactFingerprint || null,
-        parentRunId: refreshGenerationRunId,
-        profileFingerprint: normalizeResumeProfileFingerprint(refreshData.resumeFingerprint),
-        kind: 'late-source-refresh',
-        operation: 'search-jobs-single-source',
-        sourceId: 'usajobs',
-        searchWindow: refreshData.searchWindow || null,
-        canonicalLocation: (refreshData.canonicalLocation || refreshData.preferredLocation || '').trim(),
-        generationFingerprint: `${refreshGenerationDisposition || ''}:${refreshGenerationFingerprint}`,
-        ...(!continuationIntent?.intentId || continuationIntent.operationInputFingerprint
-          ? { operationInput: continuationOperationInput }
-          : {}),
-      };
-      if (
-        !continuationIdentity.parentRunId
-        || !continuationIdentity.profileFingerprint
-        || !canvasFilePath
-        || !window.electronAPI?.beginJobContinuation
-      ) {
-        throw new Error('USAJobs refresh could not save its exact restart checkpoint.');
-      }
-      if (continuationIntent?.intentId) {
-        const claim = await window.electronAPI.claimJobContinuation?.({
-          ...continuationIntent,
-          canvasFilePath,
-          intentId: continuationIntent.intentId,
-          autoResume: true,
-          automaticOperation: continuationIntent.terminalResultAvailable ? 'replay' : 'execute',
-        });
-        if (claim?.success !== true || claim?.ok !== true) {
-          // Exact input/run mismatch means the old intent no longer owns this
-          // generation. Retire it without dispatching provider work.
-          if (claim?.tokenMismatch || claim?.absent) {
-            await window.electronAPI.completeJobContinuation?.({
-              canvasFilePath,
-              nodeId: currentId,
-              careerSnapshotId: continuationIntent.careerSnapshotId,
-              operationAuthority: continuationIntent.operationAuthority,
-              parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
-              parentRunId: continuationIntent.parentRunId,
-              intentId: continuationIntent.intentId,
-              operation: continuationIntent.operation,
-              superseded: true,
-            });
-          }
-          EventLogger.log(`[JobSearch][${id}] Saved USAJobs continuation no longer matches the live generation.`);
-          return;
-        }
-        continuationIntent = claim.intent;
-        continuationLeaseToken = claim.leaseToken || null;
-      } else {
-        const begun = await window.electronAPI.beginJobContinuation({
-          ...continuationIdentity,
-          recoveryMode: 'automatic',
-          allowManualResume: false,
-        });
-        if (begun?.success !== true || begun?.ok !== true || !begun?.intent?.intentId) {
-          if (begun?.manual) {
-            EventLogger.log(`[JobSearch][${id}] USAJobs continuation is explicitly paused.`);
-            return;
-          }
-          throw new Error('USAJobs refresh restart checkpoint could not be committed.');
-        }
-        continuationIntent = begun.intent;
-        const claim = await window.electronAPI.claimJobContinuation?.({
-          ...continuationIntent,
-          canvasFilePath,
-          intentId: continuationIntent.intentId,
-        });
-        if (claim?.success !== true || claim?.ok !== true || !claim?.leaseToken) {
-          if (claim?.busy) {
-            EventLogger.log(`[JobSearch][${id}] USAJobs continuation is already running in another window.`);
-            return;
-          }
-          throw new Error('USAJobs refresh could not claim its restart checkpoint.');
-        }
-        continuationIntent = claim.intent;
-        continuationLeaseToken = claim.leaseToken;
-      }
-      if (!continuationLeaseToken) {
-        EventLogger.log(`[JobSearch][${id}] USAJobs continuation has no executable lease.`);
-        return;
-      }
-      autoClaimedJobContinuationIdsRef.current.add(continuationIntent.intentId);
-      EventLogger.log(`[JobSearch][${id}] Starting USAJobs background search for query: "${query}"`);
-
-      let res;
-      if (continuationIntent.terminalResultAvailable) {
-        const replay = await window.electronAPI.readJobContinuationResult?.({
-          canvasFilePath,
-          nodeId: currentId,
-          careerSnapshotId: continuationIntent.careerSnapshotId,
-          operationAuthority: continuationIntent.operationAuthority,
-          parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
-          parentRunId: continuationIntent.parentRunId,
-          intentId: continuationIntent.intentId,
-          leaseToken: continuationLeaseToken,
-        });
-        if (replay?.success !== true || replay?.found !== true || !replay.result) {
-          throw new Error('The saved USAJobs result could not be read for exact replay.');
-        }
-        res = replay.result;
-        terminalContinuationCheckpoint = {
-          resultKey: replay.resultKey,
-          processEpoch: replay.processEpoch,
-        };
-        EventLogger.log(`[JobSearch][${id}] Replaying saved USAJobs result ${continuationIntent.intentId}`);
-      } else {
-        res = await window.electronAPI.searchJobsSingleSource({
-          query,
-          sourceId: 'usajobs',
-          careerSnapshotId: continuationIntent.careerSnapshotId,
-          operationAuthority: continuationIntent.operationAuthority,
-          parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
-        // Use the post-queue live snapshot rather than the render that scheduled
-        // this refresh; a foreground/Board run may have finished while it waited.
-        searchWindow: refreshData.searchWindow || null,
-        collectionLimits: refreshCollectionLimits,
-        enabledSourceIds: refreshEnabledSourceIds,
-        canvasFilePath,
-        nodeId: currentId,
-        // Background USAJobs is part of the completed search generation; its
-        // tagged progress must survive the JobSearch token-aware guard.
-        jobRunId: refreshGenerationRunId,
-        // Prefer the query-gen-normalized location (typo-safe) over the raw input
-        // — USAJobs LocationName is an exact-ish match and won't tolerate "denvr".
-        preferredLocation: (refreshData.canonicalLocation || refreshData.preferredLocation || '').trim(),
-        // This late source belongs to the completed search generation, so
-        // this reads the frozen refreshData snapshot, never the live/editable
-        // hub value (which may already describe the *next* run). Role
-        // relevance for this source's rows is judged the same way as every
-        // other source's: the AI role screen inside per-listing preference
-        // evaluation.
-        jobPreferences: refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '',
-        preferencePlan: refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null,
-        continuationIntentId: continuationIntent.intentId,
-          continuationLeaseToken,
-        });
-        if (res?.continuationCheckpoint?.saved === true) {
-          terminalContinuationCheckpoint = res.continuationCheckpoint;
-        }
-      }
-
-      if (!canCommitRefresh()) {
-        EventLogger.log(`[JobSearch][${id}] USAJobs background result ignored because its owning generation changed.`);
-        retireContinuationAsSuperseded = true;
-        clearContinuationOnExit = true;
-        return;
-      }
-
-      if (res?.operationSuperseded === true) {
-        retireContinuationAsSuperseded = true;
-        clearContinuationOnExit = true;
-        return;
-      }
-
-      if (!res.success) {
-        throw new Error(res.error || 'Failed to search USAJobs');
-      }
-
-      const freshJobs = res.jobs || [];
-      const newWarning = res.warning || null;
-      const filteredWarnings = (scrapeWarningsRef.current || []).filter(
-        w => w.sourceId !== 'usajobs'
-      );
-      if (newWarning) {
-        filteredWarnings.push({ sourceId: 'usajobs', ...newWarning });
-      }
-
-      const currentState = refreshData.hubState;
-
-      if (currentState === 'sources-ready') {
-        const prevPending = Array.isArray(pendingJobsRef.current) ? pendingJobsRef.current : [];
-        const { mergedPending } = mergeResolvedSourceItems(prevPending, freshJobs, 'usajobs');
-        // This source completed after the main search paused. Its collected
-        // volume belongs in the funnel even when every returned row collapses
-        // against another source before scoring.
-        gatheredCountRef.current = Math.max(
-          0,
-          (Number(gatheredCountRef.current) || 0) + freshJobs.length,
-        );
-        pendingJobsRef.current = mergedPending;
-        scrapeWarningsRef.current = filteredWarnings;
-        updateGlobal(currentId, {
-          pendingJobs: mergedPending,
-          jobCount: mergedPending.length,
-          gatheredCount: gatheredCountRef.current,
-          scrapeWarnings: filteredWarnings,
-        });
-        await waitForRendererCommitFrame();
-        if (!canCommitRefresh()) {
-          retireContinuationAsSuperseded = true;
-          clearContinuationOnExit = true;
-          return;
-        }
-
-        const remainingBlocks = filteredWarnings.filter(isJobSourceWarningGating);
-        // No pending-length gate: a paused run that collected nothing must still
-        // resume, exactly as the Skip/resolve handlers do. resumeScoring's empty
-        // branch finishes it in 'done' rather than stranding it in a
-        // 'sources-ready' screen with no remaining blocks and no action.
-        if (remainingBlocks.length === 0) {
-          EventLogger.log(`[JobSearch][${id}] Auto-resuming scoring from sources-ready state.`);
-          // resumeScoring acquires this lane itself. Drop both this lane lease
-          // and this processing token before handing off, so it cannot wait on
-          // its own still-held lease or see the background pass as active.
-          if (cancelled()) return;
-          lease?.release();
-          lease = null;
-          if (isMountedRef.current && processingRunsRef.current.finish(processingToken)) {
-            pendingUSAJobsRefreshRef.current = false;
-            await resumeScoringRef.current?.();
-            continuationResultIntegrated = true;
-            clearContinuationOnExit = true;
-          }
-          return;
-        }
-        continuationResultIntegrated = true;
-        clearContinuationOnExit = true;
-      } else if (currentState === 'done') {
-        if (freshJobs.length > 0) {
-          setScoringProgress(null); // clear prior counter; backend re-paints "0 / M"
-          updateGlobal(currentId, {
-            hubState: 'scoring',
-            scrapeWarnings: filteredWarnings,
-          });
-
-          const profile = refreshData.resumeProfile;
-          const activeJobPreferences = refreshData.activeJobPreferences ?? refreshData.jobPreferences ?? '';
-          const jobPreferencesInterpretation = refreshData.jobPreferencePlan ?? refreshData.jobPreferencesInterpretation ?? null;
-          const locationSnapshot = refreshData.locationSnapshot || {
-            searchLocation: getSearchLocation({
-              searchLocation: refreshData.searchLocation,
-              preferredLocation: refreshData.preferredLocation,
-              canonicalLocation: refreshData.canonicalLocation,
-            }),
-            remoteResidences: normalizeRemoteResidences(refreshData.remoteResidences),
-          };
-
-          // The background source's raw volume belongs in the gathered funnel,
-          // but preferences must only assess genuinely new listings. Otherwise
-          // a duplicate USAJobs row can inflate matched/filtered counts and
-          // append duplicate audit evidence after the candidate pool dedupes.
-          const existingPreferencePool = Array.isArray(refreshData.preferenceCandidatePool)
-            ? refreshData.preferenceCandidatePool
-            : (Array.isArray(refreshData.scoredJobs) ? refreshData.scoredJobs : []);
-          const newPreferenceCandidates = uniqueJobsAcrossSources(existingPreferencePool, freshJobs);
-          if (newPreferenceCandidates.length === 0) {
-            if (!canCommitRefresh()) {
-              retireContinuationAsSuperseded = true;
-              clearContinuationOnExit = true;
-              return;
-            }
-            updateGlobal(currentId, {
-              hubState: 'done',
-              scrapeWarnings: filteredWarnings,
-              gatheredCount: (Number(refreshData.gatheredCount) || 0) + freshJobs.length,
-            });
-            continuationResultIntegrated = true;
-            clearContinuationOnExit = true;
-            return;
-          }
-
-          const preferenceResult = await evaluatePreferencesForRun({
-            jobs: newPreferenceCandidates,
-            profile,
-            careerData: refreshData.careerData,
-            careerSnapshotId: refreshData.careerSnapshotId || null,
-            activeJobPreferences,
-            jobPreferencesInterpretation,
-            locationSnapshot,
-            manualAiRunId,
-            manualAiRecoveryMode: 'append-scored-jobs',
-          });
-          if (!canCommitRefresh()) {
-            retireContinuationAsSuperseded = true;
-            clearContinuationOnExit = true;
-            return;
-          }
-          const combinedPreferenceCandidatePool = mergePreferenceCandidatePools(
-            refreshData.preferenceCandidatePool,
-            preferenceResult.candidatePool,
-          );
-          const combinedPreferenceEvaluation = mergePreferenceEvaluations(
-            refreshData.preferenceEvaluation,
-            preferenceResult.evaluation,
-          );
-          const combinedPreferenceMatchedCount = (Number(refreshData.preferenceMatchedCount) || 0)
-            + (preferenceResult.matchedCount || 0);
-          const combinedPreferenceFilteredCount = (Number(refreshData.preferenceFilteredCount) || 0)
-            + (preferenceResult.filteredCount || 0);
-          if (preferenceResult.jobs.length === 0) {
-            // A background source can be the first source to find listings
-            // after an authoritative empty. Persist its filtered candidate
-            // pool before returning to done so a later preference edit can
-            // re-evaluate it without another scrape.
-            try {
-              await window.electronAPI?.saveJobAnalysisSnapshot?.({
-                jobs: combinedPreferenceCandidatePool,
-                profile,
-                careerData: refreshData.careerData,
-                careerSnapshotId: refreshData.careerSnapshotId || null,
-                nodeId: currentId,
-                operationAuthority: operationAuthorityFor(refreshOperation),
-                jobPreferences: activeJobPreferences,
-                jobPreferencePlan: jobPreferencesInterpretation,
-                preferenceEvaluation: combinedPreferenceEvaluation,
-                preferenceCandidatePool: combinedPreferenceCandidatePool,
-                snapshotContext: {
-                  sourceHubId: currentId,
-                  runId: refreshGenerationRunId,
-                  canvasFilePath,
-                  resumeSummary: buildResumeSummary(profile),
-                  sourceGatheredCount: (Number(refreshData.gatheredCount) || 0) + freshJobs.length,
-                  locationSnapshot,
-                  searchLocation: locationSnapshot.searchLocation,
-                  remoteResidences: locationSnapshot.remoteResidences,
-                },
-              });
-            } catch (snapshotError) {
-              EventLogger.error(`[JobSearch][${id}] Failed to save preference-filtered USAJobs snapshot:`, snapshotError);
-            }
-            if (!canCommitRefresh()) {
-              retireContinuationAsSuperseded = true;
-              clearContinuationOnExit = true;
-              return;
-            }
-            updateGlobal(currentId, {
-              hubState: 'done',
-              scrapeWarnings: filteredWarnings,
-              // The late source was genuinely gathered even though every new
-              // listing failed preferences. Keep the done funnel truthful.
-              gatheredCount: (Number(refreshData.gatheredCount) || 0) + freshJobs.length,
-              preferenceMatchedCount: combinedPreferenceMatchedCount,
-              preferenceFilteredCount: combinedPreferenceFilteredCount,
-              preferenceEvaluation: combinedPreferenceEvaluation,
-              preferenceCandidatePool: combinedPreferenceCandidatePool,
-              resultDisposition: (Array.isArray(refreshData.scoredJobs) && refreshData.scoredJobs.length > 0)
-                ? 'scored'
-                : 'preference-filtered',
-            });
-            await completeManualAiRun(manualAiRunId);
-            continuationResultIntegrated = true;
-            clearContinuationOnExit = true;
-            return;
-          }
-
-          const scoreResult = await window.electronAPI.scoreJobs({
-            jobs: preferenceResult.jobs,
-            operationAuthority: operationAuthorityFor(refreshOperation),
-            profile,
-            careerData: refreshData.careerData,
-            careerSnapshotId: refreshData.careerSnapshotId || null,
-            nodeId: currentId,
-            manualAiRunId,
-            manualAiRecoveryMode: 'append-scored-jobs',
-            jobPreferences: activeJobPreferences,
-            jobPreferencePlan: jobPreferencesInterpretation,
-            preferenceEvaluation: combinedPreferenceEvaluation,
-            preferenceCandidatePool: combinedPreferenceCandidatePool,
-            searchLocation: locationSnapshot.searchLocation,
-            remoteResidences: locationSnapshot.remoteResidences,
-            snapshotContext: {
-              sourceHubId: currentId,
-              runId: refreshGenerationRunId,
-              canvasFilePath,
-              resumeSummary: buildResumeSummary(profile),
-              sourceGatheredCount: (Number(refreshData.gatheredCount) || 0) + freshJobs.length,
-              searchLocation: locationSnapshot.searchLocation,
-              remoteResidences: locationSnapshot.remoteResidences,
-            },
-          });
-
-          if (!canCommitRefresh()) {
-            retireContinuationAsSuperseded = true;
-            clearContinuationOnExit = true;
-            return;
-          }
-
-          if (scoreResult?.operationSuperseded === true) {
-            retireContinuationAsSuperseded = true;
-            clearContinuationOnExit = true;
-            return;
-          }
-
-          if (!scoreResult.success) {
-            throw new Error(scoreResult.error || 'Failed to score background USAJobs');
-          }
-
-          // `scoreJobs` saves its own prompt snapshot, but this background pass
-          // scores only the new USAJobs subset. Replace that transient subset
-          // snapshot with the same deduped union the done state is about to
-          // expose, so Saved Scrape recovery never drops previously visible
-          // results after a late source refresh.
-          const existingScoredJobs = Array.isArray(refreshData.scoredJobs) ? refreshData.scoredJobs : [];
-          const freshScoredJobs = Array.isArray(scoreResult.scoredJobs) ? scoreResult.scoredJobs : [];
-          const addedScoredJobs = uniqueJobsAcrossSources(existingScoredJobs, freshScoredJobs);
-          const combinedScoredJobs = addedScoredJobs.length
-            ? [...existingScoredJobs, ...addedScoredJobs]
-            : existingScoredJobs;
-          const aggregateSourceGatheredCount = (Number(refreshData.gatheredCount) || 0) + freshJobs.length;
-          try {
-            const saved = await window.electronAPI?.saveJobAnalysisSnapshot?.({
-              jobs: combinedScoredJobs,
-              profile,
-              careerData: refreshData.careerData,
-              careerSnapshotId: refreshData.careerSnapshotId || null,
-              nodeId: currentId,
-              operationAuthority: operationAuthorityFor(refreshOperation),
-              jobPreferences: activeJobPreferences,
-              jobPreferencePlan: jobPreferencesInterpretation,
-              preferenceEvaluation: combinedPreferenceEvaluation,
-              preferenceCandidatePool: combinedPreferenceCandidatePool,
-              snapshotContext: {
-                sourceHubId: currentId,
-                runId: refreshGenerationRunId,
-                canvasFilePath,
-                resumeSummary: buildResumeSummary(profile),
-                sourceGatheredCount: aggregateSourceGatheredCount,
-                locationSnapshot,
-                searchLocation: locationSnapshot.searchLocation,
-                remoteResidences: locationSnapshot.remoteResidences,
-                jobPreferences: activeJobPreferences,
-                jobPreferencePlan: jobPreferencesInterpretation,
-                preferenceCandidatePool: combinedPreferenceCandidatePool,
-              },
-            });
-            if (saved && !saved.saved) {
-              EventLogger.error(`[JobSearch][${id}] Failed to save combined USAJobs snapshot: ${saved.error || 'unknown error'}`);
-            }
-          } catch (snapshotError) {
-            // The append itself is already valid; a local recovery snapshot
-            // failure must not turn a successful background refresh into an error.
-            EventLogger.error(`[JobSearch][${id}] Failed to save combined USAJobs snapshot:`, snapshotError);
-          }
-
-          const appendCommitted = await appendJobsToDoneCanvas({
-            scoredJobs: scoreResult.scoredJobs,
-            filteredWarnings,
-            gatheredDelta: freshJobs.length,
-            preferenceMatchedDelta: preferenceResult.matchedCount,
-            preferenceFilteredDelta: preferenceResult.filteredCount,
-            preferenceEvaluation: preferenceResult.evaluation,
-            preferenceCandidatePool: preferenceResult.candidatePool,
-            baseData: refreshData,
-            canCommit: canCommitRefresh,
-          });
-          if (!appendCommitted) {
-            retireContinuationAsSuperseded = !canCommitRefresh();
-            clearContinuationOnExit = retireContinuationAsSuperseded;
-            return;
-          }
-          await completeManualAiRun(manualAiRunId);
-          continuationResultIntegrated = true;
-          clearContinuationOnExit = true;
-        } else {
-          if (!canCommitRefresh()) {
-            retireContinuationAsSuperseded = true;
-            clearContinuationOnExit = true;
-            return;
-          }
-          updateGlobal(currentId, {
-            hubState: 'done',
-            scrapeWarnings: filteredWarnings,
-          });
-          continuationResultIntegrated = true;
-          clearContinuationOnExit = true;
-        }
-      }
-    } catch (err) {
-      if (isNodeDeletedAbort(err) || isJobWorkflowDeletionPending(currentId)) {
-        // Explicit deletion/cancel retires this late append; it must not
-        // silently return after the user deliberately removed its owner.
-        pendingUSAJobsRefreshRef.current = true;
-        retireContinuationAsSuperseded = true;
-        clearContinuationOnExit = true;
-        return;
-      }
-      if (cancelled() || (refreshData && !canCommitRefresh())) return;
-      EventLogger.error(`[JobSearch][${id}] USAJobs background search/integrate failed:`, err);
-      addToast({
-        title: 'USAJobs Refresh Failed',
-        description: err?.message || String(err),
-        type: 'error',
-      });
-      // Restore a terminal state from ANY transient processing state, not just
-      // 'scoring'. This refresh also passes through 'evaluating-preferences',
-      // and leaving the hub parked there is not merely cosmetic: every state in
-      // TRANSIENT_PROCESSING_HUB_STATES is rewritten to 'empty' on save, so a
-      // failed background append turned a hub that already held complete
-      // results into an empty drop card on the next reload.
-      const strandedState = getNode(currentId)?.data?.hubState || hubStateRef.current;
-      const stranded = TRANSIENT_PROCESSING_HUB_STATES.includes(strandedState);
-      updateGlobal(currentId, {
-        hubState: stranded ? 'done' : strandedState,
-        ...(stranded ? { resultDisposition: 'incomplete' } : {}),
-        errorMessage: err?.message || String(err),
-      });
-    } finally {
-      if (
-        clearContinuationOnExit
-        && continuationIntent?.intentId
-        && terminalContinuationCheckpoint
-        && continuationResultIntegrated
-      ) {
-        const receipt = jobContinuationAppliedReceipt(
-          continuationIntent,
-          terminalContinuationCheckpoint,
-        );
-        if (receipt) {
-          const liveData = getNode(currentId)?.data || {};
-          updateGlobal(currentId, {
-            [JOB_CONTINUATION_RECEIPTS_FIELD]: upsertJobContinuationAppliedReceipt(liveData, receipt),
-          });
-        }
-      }
-      const shouldRetireSupersededContinuation = !!(
-        clearContinuationOnExit
-        && retireContinuationAsSuperseded
-        && continuationIntent?.intentId
-      );
-      // Drop the execution's long canvas read lease before a sidecar mutation
-      // acquires a new read. This avoids deadlocking with a Save-As writer that
-      // is already waiting for the execution lease to drain.
-      if (continuationIntent?.intentId && continuationLeaseToken) {
-        try {
-          await window.electronAPI?.releaseJobContinuation?.({
-            intentId: continuationIntent.intentId,
-            leaseToken: continuationLeaseToken,
-          });
-        } catch { /* renderer teardown releases sender-owned leases in main */ }
-        continuationLeaseToken = null;
-      }
-      if (shouldRetireSupersededContinuation) {
-        try {
-          await window.electronAPI?.completeJobContinuation?.({
-            canvasFilePath,
-            nodeId: currentId,
-            careerSnapshotId: continuationIntent.careerSnapshotId,
-            operationAuthority: continuationIntent.operationAuthority,
-            parentArtifactFingerprint: continuationIntent.parentArtifactFingerprint,
-            parentRunId: continuationIntent.parentRunId,
-            intentId: continuationIntent.intentId,
-            operation: continuationIntent.operation,
-            superseded: true,
-          });
-        } catch (error) {
-          EventLogger.error(`[JobSearch][${id}] Could not retire USAJobs restart checkpoint:`, error);
-        }
-      }
-      clearOwnQueueMarker();
-      if (activeManualAiRunIdRef.current === manualAiRunId) {
-        activeManualAiRunIdRef.current = null;
-      }
-      if (processingToken && isMountedRef.current && processingRunsRef.current.finish(processingToken)) {
-        if (
-          pendingUSAJobsRefreshRef.current
-          && !isJobWorkflowDeletionPending(currentId)
-        ) {
-          pendingUSAJobsRefreshRef.current = false;
-          setTimeout(() => {
-            if (isMountedRef.current) void triggerUSAJobsBackgroundSearch();
-          }, 0);
-        }
-      }
-      if (localQueueAdmissionRef.current === admissionToken) {
-        localQueueAdmissionRef.current = null;
-      }
-      if (usaJobsRefreshAdmissionRef.current === admissionToken) {
-        usaJobsRefreshAdmissionRef.current = null;
-      }
-      if (lease) await waitForRendererCommitFrame();
-      lease?.release();
-    }
-  }, [id, activeEnabledSourceIds, canvasFilePath, epoch, updateGlobal, addToast, appendJobsToDoneCanvas, canCommitAnalysisOperation, claimAnalysisOperation, completeManualAiRun, evaluatePreferencesForRun, isMountedRef, moduleRunQueue, getNode, getNodes, getEdges, operationAuthorityFor]);
+    EventLogger.log(
+      `[JobSearch][${id}] USAJobs background search dropped because searches run only from a Job Board.`,
+    );
+  }, [id, updateGlobal]);
 
   const handleJobsSettingsChange = useCallback(async () => {
     if (settingsDebounceTimerRef.current) {
@@ -4778,7 +3920,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     // must remain this hub's id), but it must not try to acquire the same lane
     // again or the parent/child workflow would deadlock.
     queueManagedByBoard = false,
-    queueManagedExternally = false,
     parentCancelled = null,
     orchestratorNodeId = null,
     boardRunId = null,
@@ -4796,31 +3937,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     if (!queueManagedByBoard) {
       EventLogger.log(`[JobSearch][${id}] Direct search refused — searches run only from a Job Board`);
       return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });
-    }
-    if (!queueManagedByBoard) {
-      const durableBoardOwner = findJobSearchBoardActiveRecoveryOwner(
-        id,
-        getNodes(),
-        getEdges(),
-      );
-      if (durableBoardOwner) {
-        const deferralRunId = boardRunId || getNode(id)?.data?.jobRunId || durableBoardOwner.boardRunId || 'unscoped';
-        const deferralKey = `${id}|${deferralRunId}|${durableBoardOwner.orchestratorNodeId}`;
-        const seenDeferrals = directSearchDeferralEventsRef.current;
-        if (!seenDeferrals.has(deferralKey)) {
-          seenDeferrals.add(deferralKey);
-          while (seenDeferrals.size > 128) seenDeferrals.delete(seenDeferrals.values().next().value);
-          EventLogger.log(`[JobSearch][${id}] Direct search deferred to durable Job Board ${durableBoardOwner.orchestratorNodeId} run=${deferralRunId}`);
-        }
-        addToast({
-          title: 'Run from Job Board',
-          description: 'This Job Search is reserved by an interrupted Job Board run. Finish or cancel that Board first.',
-          type: 'info',
-        });
-        return searchRunOutcome('paused', {
-          error: 'This Job Search is reserved by an interrupted Job Board run.',
-        });
-      }
     }
     const liveData = getNode(id)?.data || data;
     // Verify the immutable compiler receipt before *any* location, queue,
@@ -4870,7 +3986,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       analysisOperationLedgerRef.current.canCommit(analysisOperation)
       && jobAnalysisOperationMatches(getNode(id)?.data, analysisOperation)
     );
-    if (processingRunsRef.current.active || (!queueManagedByBoard && localQueueAdmissionRef.current)) {
+    if (processingRunsRef.current.active) {
       return searchRunOutcome('busy', { error: 'This Job Search module is already running.' });
     }
     // Capture these once per run. A user may edit fields while a long scrape is
@@ -4960,8 +4076,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         return searchRunOutcome('recovery-inspection-failed', { error: message });
       }
     }
-    const admissionToken = Symbol(`job-search:${id}`);
-    if (!queueManagedByBoard) localQueueAdmissionRef.current = admissionToken;
     let processingToken = null;
     // Capture cancellation epoch at start; cancelled() returns true after
     // any reset/unmount so we can drop late settlements without mutating
@@ -4970,103 +4084,14 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     const cancelled = () => locallyCancelled()
       || (typeof parentCancelled === 'function' && parentCancelled())
       || !canCommitAnalysisOperation();
-    let lease = null;
-    let standaloneBecameBoardRecoveryManaged = false;
-    let staleRecoveryBlockedAtLaneStart = false;
-    let deletionBlockedAtLaneStart = false;
     // Kept outside the try so a rejected compiler handoff can atomically mark
     // this exact receipt failed in the shared error path.
     let compilationGeneration = null;
     let compilationAttempt = null;
     try {
-      if (!queueManagedByBoard && !queueManagedExternally) {
-        lease = await moduleRunQueue.acquireModuleRun({
-          nodeId: currentId,
-          kind: 'jobsearch',
-          // Job-domain AI is a single copy/paste handoff surface. Keep whole
-          // job-search workflows in one FIFO lane so prompts and results from
-          // different hubs can never overlap or be mistaken for one another.
-          lane: 'job-search',
-          label: 'Job search',
-          onQueued: ({ position }) => {
-            updateGlobal(currentId, {
-              queuedModuleRun: { label: 'Job search', position },
-            });
-          },
-          onQueueUpdate: ({ position }) => {
-            updateGlobal(currentId, { queuedModuleRun: { label: 'Job search', position } });
-          },
-          onStart: () => {
-            if (isJobWorkflowDeletionPending(currentId)) deletionBlockedAtLaneStart = true;
-            if (cancelled() || isJobWorkflowDeletionPending(currentId)) throw new Error('Node deleted');
-            // An idle Board connection does not own this explicit re-scan.
-            // Only a durable interrupted Board transaction can reserve the
-            // child while this request waits in the shared lane.
-            if (findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())) {
-              standaloneBecameBoardRecoveryManaged = true;
-              return;
-            }
-            const laneData = getNode(currentId)?.data || {};
-            if (staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume, {
-              manualAiRunId: effectiveManualAiRunId,
-              explicitResumeRunId: manualAiStaleRecoveryActionRunIdRef.current,
-              boardOwnsRecovery: queueManagedByBoard
-                && isLiveManualAiRecoveryBoardOwner(
-                  findJobSearchBoardRecoveryOwner(currentId, laneData.manualAiResume?.runId, getNodes(), getEdges()),
-                ),
-            })) {
-              staleRecoveryBlockedAtLaneStart = true;
-              return;
-            }
-            updateGlobal(currentId, { queuedModuleRun: null });
-          },
-        });
-      } else if (queueManagedByBoard) {
-        if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.');
-        updateGlobal(currentId, { queuedModuleRun: null });
-        EventLogger.log(`[JobSearch][${currentId}] Queue delegated to Job Board ${orchestratorNodeId}`);
-      }
-
-      if (standaloneBecameBoardRecoveryManaged) {
-        // Queue presentation changed only this transient receipt. Preserve
-        // every live edit made while waiting instead of replacing the whole
-        // node with a click-time snapshot.
-        updateGlobal(currentId, { queuedModuleRun: null });
-        EventLogger.log(
-          `[JobSearch][${currentId}] Queued direct run declined — an interrupted Job Board recovery now owns search admission`,
-        );
-        addToast({
-          title: 'Job Board recovery in progress',
-          description: 'This queued re-scan was kept unchanged. Finish or cancel the interrupted Job Board run first.',
-          type: 'info',
-        });
-        return searchRunOutcome('paused', { error: 'This Job Search is reserved by an interrupted Job Board run.' });
-      }
-
-      if (staleRecoveryBlockedAtLaneStart) {
-        updateGlobal(currentId, { queuedModuleRun: null });
-        return searchRunOutcome('not-ready', {
-          error: 'Choose Resume for the saved manual-AI recovery, or use Clear career data to deliberately remove it before another search.',
-        });
-      }
-
-      if (
-        !queueManagedByBoard
-        && findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())
-      ) {
-        updateGlobal(currentId, { queuedModuleRun: null });
-        EventLogger.log(
-          `[JobSearch][${currentId}] Direct run declined after queue admission — an interrupted Job Board recovery now owns this Search`,
-        );
-        addToast({
-          title: 'Run from Job Board',
-          description: 'This queued search was reserved by an interrupted Job Board run and was kept unchanged.',
-          type: 'info',
-        });
-        return searchRunOutcome('paused', {
-          error: 'This queued search was reserved by an interrupted Job Board run.',
-        });
-      }
+      if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.');
+      updateGlobal(currentId, { queuedModuleRun: null });
+      EventLogger.log(`[JobSearch][${currentId}] Queue delegated to Job Board ${orchestratorNodeId}`);
 
       const laneTurnData = getNode(currentId)?.data || null;
       if (
@@ -5507,14 +4532,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
               `[JobSearch][${currentId}] Reclaimed legacy unstarted Board import for post-login retry board=${boardRunId}`,
             );
           }
-        }
-      } else if (!queueManagedByBoard) {
-        const standaloneCapability = freshJobCareerImportCapability(providerData, { nodeId: currentId });
-        if (standaloneCapability) {
-          updateGlobal(currentId, jobCareerImportConsumptionPatch({
-            capability: standaloneCapability, origin: 'standalone',
-          }));
-          await waitForRendererCommitFrame();
         }
       }
 
@@ -6249,12 +5266,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // it, we'd write a useless errorMessage onto data that's about to
       // be discarded and log a misleading "pipeline failed" line.
       if (cancelled() || isNodeDeletedAbort(error)) {
-        return searchRunOutcome('cancelled', {
-          runId: jobRunIdRef.current,
-          ...(deletionBlockedAtLaneStart
-            ? { error: 'This Job Search is pending deletion.' }
-            : {}),
-        });
+        return searchRunOutcome('cancelled', { runId: jobRunIdRef.current });
       }
       if (!error?.isLoginGate) EventLogger.error('JobSearchNode pipeline failed:', error);
       // Revert to the logical step ('done' if any results exist on the
@@ -6285,13 +5297,6 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         error,
       });
     } finally {
-      if (!queueManagedByBoard && getNode(currentId)) {
-        updateGlobal(currentId, (node) => (
-          node?.data?.queuedModuleRun?.label === 'Job search'
-            ? { queuedModuleRun: null }
-            : null
-        ));
-      }
       if (activeManualAiRunIdRef.current === effectiveManualAiRunId) {
         activeManualAiRunIdRef.current = null;
       }
@@ -6308,13 +5313,8 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           }, 0);
         }
       }
-      if (!queueManagedByBoard && localQueueAdmissionRef.current === admissionToken) {
-        localQueueAdmissionRef.current = null;
-      }
-      if (lease) await waitForRendererCommitFrame();
-      lease?.release();
     }
-  }, [id, updateGlobal, getNode, getNodes, getEdges, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, moduleRunQueue, isMountedRef, addToast, claimAnalysisOperation, completeManualAiRun, completeJobRun, evaluatePreferencesForRun, operationAuthorityFor, recordCollectionCompletion]);
+  }, [id, updateGlobal, getNode, getNodes, getEdges, canvasFilePath, data, collectionLimits, enabledSourceIds, activeEnabledSourceIds, ensureSourceCards, handlePostSearchResult, epoch, resetSourceProgress, runScoringAndSpawn, triggerUSAJobsBackgroundSearch, cancelCleanSourceCardDismiss, isMountedRef, addToast, claimAnalysisOperation, completeManualAiRun, completeJobRun, evaluatePreferencesForRun, operationAuthorityFor, recordCollectionCompletion]);
 
   const startProcessing = useCallback((fileOrFiles, {
     frameSourceCards = true,
@@ -6452,7 +5452,10 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         generation: compilationGeneration,
         manualAiRunId,
       });
-      if (!compilationAttempt) return searchRunOutcome('failed', { error: 'Could not create a career compilation receipt.' });
+      if (!compilationAttempt) {
+        if (isMountedRef.current) processingRunsRef.current.finish(processingToken);
+        return searchRunOutcome('failed', { error: 'Could not create a career compilation receipt.' });
+      }
       const exactRecoveryMarkerStillOwns = (current) => !requestedManualAiRunId || (
         current?.manualAiResume?.runId === manualAiRunId
         && current?.careerImportGeneration === compilationGeneration
@@ -8756,7 +7759,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       // Only a confirmed resolve overrides the backend's final warning. A
       // failed `resolved:false` event may restore the card locally, but it must
       // never hide the still-authoritative warning returned by the live search.
-      if (hubStateRef.current === 'searching' && e.detail?.resolved === true) {
+      if (hubStateRef.current === 'searching') {
         sourceWarningOverridesDuringSearchRef.current.set(resolvedSourceId, e.detail?.warning || null);
       }
       // Merge new items into pendingJobs. LinkedIn re-fetch returns the full
@@ -9173,66 +8176,21 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     getEdges, getNode, getNodes, id,
   ]);
 
-  // Auto-start legacy drop-created hubs once per mounted node/path (must come
-  // after startProcessing is declared — referencing it earlier would hit the
-  // const TDZ on first render). A pipeline failure deliberately retains the
-  // path so Try Again can re-parse it; the latch is what stops that failure
-  // returning to `empty` from becoming an automatic restart loop. Comparing
-  // the exact normalized path, rather than a boolean, still lets a genuinely
-  // changed persisted path launch on this mounted node.
+  // A Job Search card never starts a provider search by itself, and connecting
+  // a Board is not a search trigger either: a persisted legacy file path stays
+  // untouched here so a Board-managed run still owns it. The recovery peek is
+  // asynchronous, so the suppression is only logged once it has settled.
   useEffect(() => {
-    const autoStartPath = typeof data.filePath === 'string' ? data.filePath.trim() : '';
-    if (!autoStartPath || hubState !== 'empty' || processingRunsRef.current.active) return;
+    const legacyFilePath = typeof data.filePath === 'string' ? data.filePath.trim() : '';
+    if (!legacyFilePath || hubState !== 'empty' || processingRunsRef.current.active) return;
     if (isJobWorkflowDeletionPending(id)) return;
-    if (autoStartedFilePathRef.current === autoStartPath) return;
-    // The recovery peek is asynchronous.  Do not let a persisted legacy path
-    // begin fresh-run UI setup until that exact canvas/hub inspection proves
-    // there is no protected unfinished checkpoint.
     if (!recoveryPeekResolved) return;
     if (recoveryPeekHasProtectedCheckpoint) {
       EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — saved checkpoint is available for Resume`);
       return;
     }
-    // Product decision: a Job Search card never starts a provider search by
-    // itself, and connecting a Board is not a search trigger either. The
-    // standalone launch below is retired for good; the latch is deliberately
-    // not consumed so a Board-managed run still owns this persisted path.
-    const standaloneAutoStartRetired = true;
-    if (standaloneAutoStartRetired) {
-      EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — searches run only from a Job Board`);
-      return;
-    }
-    if (managedByJobBoard || activeBoardRecoveryOwnerKey) {
-      EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — connected Job Board owns search admission`);
-      return;
-    }
-    // Do not consume the one-shot latch while the Board owns admission. If the
-    // edge is removed before that Board runs, this effect re-evaluates and the
-    // now-standalone legacy input remains runnable.
-    autoStartedFilePathRef.current = autoStartPath;
-    void Promise.resolve(startProcessing(autoStartPath)).then((outcome) => {
-      // Deletion can become pending after this effect consumes the latch but
-      // before the queued lane starts. Keep the durable file eligible so an
-      // aborted OS deletion wakes the auto-start on the lifecycle revision.
-      const blockedByDeletion = outcome?.error === 'This Job Search is pending deletion.'
-        || (outcome?.status === 'cancelled' && isJobWorkflowDeletionPending(id));
-      const claimedByBoard = ['paused', 'not-ready'].includes(outcome?.status)
-        && !!findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges());
-      if (
-        (blockedByDeletion || claimedByBoard)
-        && autoStartedFilePathRef.current === autoStartPath
-      ) {
-        autoStartedFilePathRef.current = null;
-      }
-    }).catch(() => {
-      if (
-        isJobWorkflowDeletionPending(id)
-        && autoStartedFilePathRef.current === autoStartPath
-      ) {
-        autoStartedFilePathRef.current = null;
-      }
-    });
-  }, [activeBoardRecoveryOwnerKey, data.filePath, deletionLifecycleRevision, getEdges, getNodes, hubState, id, managedByJobBoard, recoveryPeekHasProtectedCheckpoint, recoveryPeekResolved, startProcessing]);
+    EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed — searches run only from a Job Board`);
+  }, [data.filePath, hubState, id, recoveryPeekHasProtectedCheckpoint, recoveryPeekResolved]);
 
   // A replacement career snapshot compiled beside kept saved jobs is owed a
   // re-score. Standalone hubs start it now; a connected Job Board owns it, so
@@ -9501,7 +8459,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
     e?.stopPropagation();
     if (lifecycleQuit && !forceSavedRecovery && !jobWorkflowNeedsQuitPause({ type: 'jobhub', data: getNode(id)?.data || data })
       && !processingRunsRef.current.active && !localQueueAdmissionRef.current
-      && !scoringContinuationAdmissionRef.current && !usaJobsRefreshAdmissionRef.current
+      && !scoringContinuationAdmissionRef.current
       && !activeManualAiRunIdRef.current && !boardRunControlRef.current && !standaloneCancellationRef.current) {
       return { success: true, settled: true, idle: true };
     }
@@ -9814,8 +8772,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // the destructive user-Stop reset below. Every other Stop path — a
         // user Stop, a non-quit pause, a run without an exact checkpoint, and
         // the re-analysis restore — keeps today's behavior.
-        const transientUniverseAtPauseRequest = typeof TRANSIENT_PROCESSING_HUB_STATES !== 'undefined'
-          && TRANSIENT_PROCESSING_HUB_STATES.includes(resetData?.hubState);
+        const transientUniverseAtPauseRequest = TRANSIENT_PROCESSING_HUB_STATES.includes(resetData?.hubState);
         const gatheredUniverseAtPauseRequest = resetData?.hubState === 'sources-ready'
           || (transientUniverseAtPauseRequest && Array.isArray(resetData?.pendingJobs))
           || Array.isArray(pendingJobsRef.current);

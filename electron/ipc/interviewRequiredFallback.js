@@ -4,14 +4,14 @@ import { buildInterviewAnswerEvidence, inspectInterviewAnswerCards,
   INTERVIEW_ANSWER_QUESTION_CATALOG, INTERVIEW_REQUIRED_QUESTIONS,
   isNarrowRequiredInterviewCard } from './interviewAnswerBank.js';
 import { deriveInterviewResumeConsistency } from './interviewResumeCoverage.js';
+import { roleEnd } from './interviewSpokenClaims.js';
 import { interviewResearchInterestText, isInterviewWhyQuestion } from './interviewQuestionFit.js';
 
 const MAX_CANDIDATES = 8;
 const MAX_SOURCE_ATTEMPTS = 32;
 const controls = /[\p{Cc}\p{Cf}]/u;
 const complete = /[.!?]["'’”]?$/u;
-const roleEnd = source => /\b(?:present|current)\b/iu.test(source.roleContext?.endDate || '')
-  ? Infinity : Date.parse(source.roleContext?.endDate || '') || 0;
+const SENTENCES = new Intl.Segmenter('en', { granularity: 'sentence' });
 
 function statement(value) {
   if (!value || typeof value.text !== 'string' || !Array.isArray(value.evidenceIds) || !Array.isArray(value.quotes)) return null;
@@ -69,7 +69,7 @@ export function interviewRequiredFallbackCandidates(card, context, { validatedCl
   }
   for (const source of ordered.slice(0, MAX_SOURCE_ATTEMPTS)) {
     let attempted = 0;
-    for (const { segment } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(source.text)) {
+    for (const { segment } of SENTENCES.segment(source.text)) {
       const text = segment.trim();
       if (!complete.test(text) || controls.test(text)) continue;
       add(sourceStatement(source, text));

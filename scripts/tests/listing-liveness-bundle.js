@@ -14,6 +14,7 @@ import {
   __projectLocalApplicationJobForAcceptanceHarness as project,
   buildLocalGenerationAuditArtifact, queueLocalApplicationJob,
 } from '../../electron/ipc/localAiApplication.js';
+import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { getPreparedOfficialPosting, prepareOfficialPostingForGeneration } from '../../electron/ipc/officialPostingGeneration.js';
 import { LISTING_LIVENESS_RULES } from '../../electron/ipc/listingLiveness.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
@@ -245,10 +246,11 @@ export default [
       const liveOfficial = { level: 'L4', outcome: 'link-only', employer: confirmed.company,
         sourceUrl: 'https://careers.example.test/jobs/synthetic-open-official',
         officialApplyUrl: 'https://careers.example.test/jobs/synthetic-open-official',
-        trail: ['description-anchor'] };
+        trail: ['semantic-match-v1', 'comparative-match'] };
       const preparedClosed = await prepareOfficialPostingForGeneration({ job: confirmed }, {
-        projectJob: project, semanticMatching: false, store: { find: async () => null },
-        resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: liveOfficial }], telemetry: {} }),
+        projectJob: project, store: { find: async () => null },
+        resolve: async rows => ({ jobs: [{ ...rows[0], officialPosting: { ...liveOfficial,
+          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(rows[0]), sourceHash: 'a'.repeat(64) } } }], telemetry: {} }),
         bridgeStatus: () => ({ enabled: false }),
         listingProbe: { probe: async () => { throw new Error('official live must skip the listing probe'); } },
       });

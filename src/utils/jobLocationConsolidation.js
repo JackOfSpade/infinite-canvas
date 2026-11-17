@@ -153,8 +153,10 @@ function vocabularyCoverage(left, right) {
  * must obtain a separate AI confirmation before a non-identical pair merges.
  */
 export function descriptionSimilarity(leftJob, rightJob) {
-  const left = descriptionTerms(leftJob);
-  const right = descriptionTerms(rightJob);
+  return similarityOfTerms(descriptionTerms(leftJob), descriptionTerms(rightJob));
+}
+
+function similarityOfTerms(left, right) {
   const tokenDice = multisetDice(left, right);
   const shingleDice = multisetDice(wordTrigrams(left), wordTrigrams(right));
   const coverage = vocabularyCoverage(left, right);
@@ -314,7 +316,7 @@ export function findSimilarLocationCandidates(jobs, {
     if (!isConsolidationCandidate(job)) return;
     const key = [normalizeText(job.title), normalizeText(job.company)].join('|');
     if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({ job, index });
+    groups.get(key).push({ job, index, terms: descriptionTerms(job), fingerprint: descriptionFingerprint(job) });
   });
   const candidates = [];
   for (const entries of groups.values()) {
@@ -326,8 +328,8 @@ export function findSimilarLocationCandidates(jobs, {
         // Exact text stays on the no-AI path. Asking the model about it would
         // waste a worker and make an established deterministic result depend on
         // an external response.
-        if (descriptionFingerprint(a.job) === descriptionFingerprint(b.job)) continue;
-        const similarity = descriptionSimilarity(a.job, b.job);
+        if (a.fingerprint === b.fingerprint) continue;
+        const similarity = similarityOfTerms(a.terms, b.terms);
         if (similarity.score < threshold) continue;
         candidates.push({
           id: locationSimilarityPairId(a.index, b.index),

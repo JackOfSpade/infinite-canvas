@@ -20,7 +20,6 @@ const INTRO = normalizeQuestion('Tell me about yourself.');
 const LIMITS = Object.freeze({
   text: 600, long: 1500, short: 300, transcriptText: 4000, transcript: 200, planned: PRACTICE_MAX_QUESTIONS, moments: 30, priorities: 5,
 });
-export const PRACTICE_FEEDBACK_LIMITS = LIMITS;
 export const PRACTICE_MOMENT_KINDS = Object.freeze(['small-talk', 'curveball', 'off-topic', 'follow-up', 'questions-for-interviewer', 'closing', 'other']);
 
 export function newPracticeCode(randomBytes = crypto.randomBytes) {

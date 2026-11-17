@@ -322,12 +322,13 @@ export function getStealthBrowserInfo() {
   };
 }
 
-function browserProcessExited(proc) {
+export function isBrowserProcessExited(proc) {
   return !proc || proc.exitCode != null || proc.signalCode != null;
 }
 
-function waitForOwnedBrowserExit(proc, timeoutMs) {
-  if (browserProcessExited(proc)) return Promise.resolve(true);
+/** Resolves true once `proc` has exited, or its exit state after `timeoutMs`. */
+export function waitForBrowserProcessExit(proc, timeoutMs) {
+  if (isBrowserProcessExited(proc)) return Promise.resolve(true);
   return new Promise(resolve => {
     let timer;
     const done = () => {
@@ -336,10 +337,11 @@ function waitForOwnedBrowserExit(proc, timeoutMs) {
       resolve(true);
     };
     proc.once('exit', done);
-    if (browserProcessExited(proc)) return done();
+    // Close the tiny race between the pre-check and listener registration.
+    if (isBrowserProcessExited(proc)) return done();
     timer = setTimeout(() => {
       proc.removeListener?.('exit', done);
-      resolve(browserProcessExited(proc));
+      resolve(isBrowserProcessExited(proc));
     }, timeoutMs);
   });
 }
@@ -357,7 +359,7 @@ export async function closeOwnedBrowserProcess(browser, {
 } = {}) {
   if (!browser) return { exited: true, disposition: 'already-closed' };
   const proc = browser.process?.();
-  const gracefulExit = waitForOwnedBrowserExit(proc, gracefulMs);
+  const gracefulExit = waitForBrowserProcessExit(proc, gracefulMs);
   // Do not await this directly: a wedged CDP close used to leave the FIFO
   // permanently held even though we knew the owned PID and could terminate it.
   // Keep a rejection handler attached for a late close failure, then let the
@@ -367,14 +369,14 @@ export async function closeOwnedBrowserProcess(browser, {
   if (await gracefulExit) return { exited: true, disposition: 'graceful-exit' };
 
   logger.warn(`[StealthBrowser] ${label} did not exit within ${gracefulMs}ms of close(); sending SIGTERM before releasing the shared profile`);
-  try { if (!browserProcessExited(proc)) proc.kill('SIGTERM'); } catch { /* already gone */ }
-  if (await waitForOwnedBrowserExit(proc, OWNED_BROWSER_TERM_EXIT_MS)) {
+  try { if (!isBrowserProcessExited(proc)) proc.kill('SIGTERM'); } catch { /* already gone */ }
+  if (await waitForBrowserProcessExit(proc, OWNED_BROWSER_TERM_EXIT_MS)) {
     return { exited: true, disposition: 'sigterm-exit' };
   }
 
   logger.warn(`[StealthBrowser] ${label} ignored SIGTERM; sending SIGKILL before releasing the shared profile`);
-  try { if (!browserProcessExited(proc)) proc.kill('SIGKILL'); } catch { /* already gone */ }
-  const exited = await waitForOwnedBrowserExit(proc, OWNED_BROWSER_KILL_EXIT_MS);
+  try { if (!isBrowserProcessExited(proc)) proc.kill('SIGKILL'); } catch { /* already gone */ }
+  const exited = await waitForBrowserProcessExit(proc, OWNED_BROWSER_KILL_EXIT_MS);
   if (!exited) logger.error(`[StealthBrowser] ${label} did not exit after bounded SIGKILL wait; a later launch will retain profile-lock diagnostics`);
   return { exited, disposition: 'sigkill-fallback' };
 }
@@ -739,17 +741,22 @@ export async function getStealthBrowser() {
   if (browserLaunchPromise) return browserLaunchPromise;
 
   browserLaunchPromise = (async () => {
-    assertSharedProfileAvailable('headless stealth browser launch');
-    const executablePath = process.env.CHROME_PATH || await findChromePath();
-    // Include whether this is the prompt-free Playwright path so the log line
-    // is enough to diagnose "why am I getting the macOS App Management prompt?"
-    const usingPlaywright = executablePath.includes('/ms-playwright/');
-    logger.info(
-      `[StealthBrowser] Launching with: ${path.basename(executablePath)} ` +
-      `(${usingPlaywright ? 'Playwright bundle, no Sequoia prompt' : 'system Chrome — first launch may prompt'})`
-    );
-
+    // The mutex is cleared in the finally below, so everything that can throw
+    // (the reservation check, a missing Chrome install) must sit inside the
+    // try, and the first await lets `browserLaunchPromise` be assigned before
+    // that finally can run. Otherwise a rejected launch stays cached forever.
+    await null;
     try {
+      assertSharedProfileAvailable('headless stealth browser launch');
+      const executablePath = process.env.CHROME_PATH || await findChromePath();
+      // Include whether this is the prompt-free Playwright path so the log line
+      // is enough to diagnose "why am I getting the macOS App Management prompt?"
+      const usingPlaywright = executablePath.includes('/ms-playwright/');
+      logger.info(
+        `[StealthBrowser] Launching with: ${path.basename(executablePath)} ` +
+        `(${usingPlaywright ? 'Playwright bundle, no Sequoia prompt' : 'system Chrome — first launch may prompt'})`
+      );
+
       browserInstance = await launchWithProfileLockRetry({
         headless: 'new',
         executablePath,
@@ -879,12 +886,17 @@ export async function createStealthPage() {
 // e.g. as needs-login instead of an opaque error). Shared by fetchHtmlAuthed and
 // fetchHtmlClean so this fragile Puppeteer workaround has only one copy to fix.
 async function readPageHtmlBounded(page, timeoutMs, finalUrl) {
-  const readContent = () => Promise.race([
-    page.content(),
-    new Promise((_, reject) => setTimeout(
-      () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
-      Math.max(3000, Math.min(8000, timeoutMs - 2000)))),
-  ]);
+  const readContent = () => {
+    let timer = null;
+    return Promise.race([
+      page.content(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')),
+          Math.max(3000, Math.min(8000, timeoutMs - 2000)));
+      }),
+    ]).finally(() => clearTimeout(timer));
+  };
   try {
     const html = await readContent();
     return { html, finalUrl };
@@ -1547,10 +1559,11 @@ async function _browserRefreshDiceApiKey() {
       logger.warn(`[Dice API] Browser HTML scan skipped: ${error?.message || error}`);
     }
 
+    let keyWaitTimer = null;
     const newKey = await Promise.race([
       keyPromise,
-      new Promise(r => setTimeout(() => r(null), 20000)),
-    ]);
+      new Promise(r => { keyWaitTimer = setTimeout(() => r(null), 20000); }),
+    ]).finally(() => clearTimeout(keyWaitTimer));
 
     if (newKey) {
       saveDiceApiKey(newKey);

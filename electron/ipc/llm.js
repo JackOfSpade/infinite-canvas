@@ -427,7 +427,7 @@ async function readRendererAttachmentForBridge(filePath) {
 // Detect a plain AbortSignal and wrap it as `{ signal, task: undefined }`.
 // New call sites should pass `{ signal, task }`.
 function normalizeOpts(opts) {
-  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.displayOnlyPromptSuffix !== undefined || opts.responseValidator !== undefined || opts.measureProgressUnits !== undefined || opts.manualHandoff !== undefined || Object.keys(opts).length === 0)) {
+  if (opts && typeof opts === 'object' && (opts.task !== undefined || opts.signal !== undefined || opts.hints !== undefined || opts.responseSchema !== undefined || opts.cachedPrefix !== undefined || opts.grounding !== undefined || opts.meta !== undefined || opts.retryOnTruncation !== undefined || opts.displayOnlyPromptSuffix !== undefined || opts.responseValidator !== undefined || opts.measureProgressUnits !== undefined || opts.measureResponseUnits !== undefined || opts.manualHandoff !== undefined || Object.keys(opts).length === 0)) {
     const suppliedManualHandoff = opts.manualHandoff && typeof opts.manualHandoff === 'object'
       ? opts.manualHandoff
       : {};

@@ -45,6 +45,7 @@ const words = text => String(text).match(WORD_RE) || [];
 const digits = text => String(text).match(NUMBER_RE) || [];
 const annotations = text => String(text).match(/\[[^\]]*\]/gu) || [];
 const lower = text => text.toLocaleLowerCase('en');
+const skillRowName = text => /^\s*-\s*(.*?)\s+\[Skill ID:/u.exec(text)?.[1];
 const proper = text => /\p{Lu}/u.test(text[0] || '') || /[\p{Ll}][\p{Lu}]/u.test(text);
 
 function editDistance(a, b) {
@@ -155,8 +156,8 @@ export function cleanCareerSkillNames(profile, catalog) {
   for (const skill of profile?.skills || []) {
     const row = byId.get(`host.career.skill.${skill.id}.1`);
     if (!row || typeof row.cleanQuote !== 'string') continue;
-    const original = /^\s*-\s*(.*?)\s+\[Skill ID:/u.exec(row.quote)?.[1];
-    const clean = /^\s*-\s*(.*?)\s+\[Skill ID:/u.exec(row.cleanQuote)?.[1];
+    const original = skillRowName(row.quote);
+    const clean = skillRowName(row.cleanQuote);
     if (original !== skill.name || !clean || !verifyCareerCleanText(original, clean)) continue;
     names.set(skill.id, clean);
   }
@@ -166,9 +167,9 @@ export function cleanCareerSkillNames(profile, catalog) {
 function verifiedCleanRow(row, clean) {
   if (!verifyCareerCleanText(row.quote, clean)) return false;
   if (!row.id.startsWith('host.career.skill.')) return true;
-  const originalSkill = /^\s*-\s*(.*?)\s+\[Skill ID:/u.exec(row.quote)?.[1];
+  const originalSkill = skillRowName(row.quote);
   if (!originalSkill) return true;
-  const cleanSkill = /^\s*-\s*(.*?)\s+\[Skill ID:/u.exec(clean)?.[1];
+  const cleanSkill = skillRowName(clean);
   return Boolean(cleanSkill) && lower(originalSkill.replace(/[^\p{L}\p{N}]/gu, ''))
     === lower(cleanSkill.replace(/[^\p{L}\p{N}]/gu, ''));
 }
@@ -219,7 +220,7 @@ export async function writeCareerCleanLayer(root, layer) {
 export async function readCareerCleanLayer(root, snapshotId, catalog) {
   let layer;
   try { layer = JSON.parse(await fs.promises.readFile(layerPath(root, snapshotId), 'utf8')); }
-  catch (error) { if (error?.code === 'ENOENT') return null; return null; }
+  catch { return null; }
   if (layer?.version !== CAREER_CLEAN_LAYER_VERSION || layer.snapshotId !== snapshotId
     || layer.catalogDigest !== careerCleanCatalogDigest(catalog) || !Array.isArray(layer.items)
     || layer.items.length !== catalog.length) return null;

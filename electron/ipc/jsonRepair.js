@@ -38,17 +38,19 @@ function removeStructuralTrailingCommas(value) {
   return result;
 }
 
-function jsonErrorLocation(error, source) {
-  const message = String(error?.message || '');
-  const positionMatch = message.match(/(?:at\s+)?position\s+(\d+)/i);
-  if (!positionMatch) return '';
+// Line/column of the position a V8 JSON error message names, or null.
+function jsonErrorPosition(error, source) {
+  const positionMatch = String(error?.message || '').match(/(?:at\s+)?position\s+(\d+)/i);
+  if (!positionMatch) return null;
   const position = Math.max(0, Math.min(Number(positionMatch[1]), source.length));
-  if (!Number.isFinite(position)) return '';
+  if (!Number.isFinite(position)) return null;
   const before = source.slice(0, position);
-  const line = before.split('\n').length;
-  const lastNewline = before.lastIndexOf('\n');
-  const column = position - lastNewline;
-  return ` near line ${line}, column ${column}`;
+  return { position, line: before.split('\n').length, column: position - before.lastIndexOf('\n') };
+}
+
+function jsonErrorLocation(error, source) {
+  const at = jsonErrorPosition(error, source);
+  return at ? ` near line ${at.line}, column ${at.column}` : '';
 }
 
 // Diagnostics go into the application's bug-report event log. Keep them
@@ -56,17 +58,10 @@ function jsonErrorLocation(error, source) {
 // listings, or other private text. Location and shape are enough to distinguish
 // a truncation from a serializer error without exporting any response fragment.
 function jsonErrorMetadata(error, source) {
-  const message = String(error?.message || '');
-  const positionMatch = message.match(/(?:at\s+)?position\s+(\d+)/i);
-  const length = source.length;
-  if (!positionMatch) return `position=unknown length=${length}`;
-  const position = Math.max(0, Math.min(Number(positionMatch[1]), length));
-  if (!Number.isFinite(position)) return `position=unknown length=${length}`;
-  const before = source.slice(0, position);
-  const line = before.split('\n').length;
-  const lastNewline = before.lastIndexOf('\n');
-  const column = position - lastNewline;
-  return `position=${position} line=${line} column=${column} length=${length}`;
+  const at = jsonErrorPosition(error, source);
+  return at
+    ? `position=${at.position} line=${at.line} column=${at.column} length=${source.length}`
+    : `position=unknown length=${source.length}`;
 }
 
 function jsonParseErrorCategory(error) {

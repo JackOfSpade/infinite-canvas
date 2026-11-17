@@ -169,8 +169,3 @@ export function validateJobBoardRunExecution(args = {}, { sender = null } = {}) 
     && record.claimToken === claimToken
     && (!operation || record.operation === operation);
 }
-
-export const __jobBoardRunLeaseForTests = {
-  activeClaims,
-  automaticAttempts,
-};

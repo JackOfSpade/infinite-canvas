@@ -90,6 +90,16 @@ function formatPriceDropLogPrice(value) {
   return `$${Number.isInteger(rounded) ? rounded : rounded.toFixed(2)}`;
 }
 
+// Another priced item hub that an "apply to all" from `sourceHubId` may
+// overwrite: not locked (its plan is read-only) and not opted out.
+function isPriceDropApplyTarget(node, sourceHubId) {
+  return node.type === 'sellhub'
+    && node.id !== sourceHubId
+    && node.data?.hubState === 'priced'
+    && !node.data?.locked
+    && !node.data?.priceDropApplyAllExcluded;
+}
+
 export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
 
   // Surface runaway re-render bursts (effect/state loops, unstable props) in bug
@@ -618,6 +628,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     recoveryPeekScopeRef.current = scope;
     setRecoveryHydrated(false);
     let disposed = false;
+    let hydrated = false;
     void (async () => {
       try {
         if (!canvasFilePath || !window.electronAPI?.peekMarketplaceRecovery) return;
@@ -657,10 +668,18 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       } catch (error) {
         EventLogger.error(`[SellHub][${id}] Recovery hydration failed:`, error);
       } finally {
-        if (!disposed) setRecoveryHydrated(true);
+        if (!disposed) {
+          hydrated = true;
+          setRecoveryHydrated(true);
+        }
       }
     })();
-    return () => { disposed = true; };
+    return () => {
+      disposed = true;
+      // The disposed pass never reports hydration, so the next pass must peek
+      // again rather than skip on the scope it left behind.
+      if (!hydrated && recoveryPeekScopeRef.current === scope) recoveryPeekScopeRef.current = null;
+    };
   }, [canvasFilePath, id, updateGlobal]);
 
   // A restart in 'comps-ready' restores the warnings but NOT the comp cards.
@@ -690,6 +709,8 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     if (missing.length === 0) return;
 
     const hubPos = getNode(id)?.position || { x: 0, y: 0 };
+    // Same circle layout as spawnCompSourceCards, so a re-spawned card lands
+    // where the live paused view had it (its index in ACTIVE_COMP_SOURCES).
     // Same circle layout as spawnCompSourceCards, so a re-spawned card lands
     // where the live paused view had it (its index in ACTIVE_COMP_SOURCES).
     const count  = ACTIVE_COMP_SOURCES.length;
@@ -849,13 +870,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
       startAnalysis(data.imagePaths);
     }
   }, [data.imagePaths, data.marketplaceRunResume, data.locked, hubState, data.errorMessage, recoveryHydrated, startAnalysis]);
-
-  // A settings-changed listener used to live here, logging (but not acting
-  // on) changes to the 'ai' section for bug-report telemetry. The 'ai'
-  // settings section was deleted along with all live LLM HTTP API support —
-  // no event can ever carry it any more — and 'ai' was the ONLY section this
-  // listener handled, so the whole effect (not just the branch) is now dead
-  // code and was removed rather than left as a listener with nothing to do.
 
   // ── Comp-source cards (ephemeral, one per PRICE_COMP_SOURCE) ──────────────
   // Per-source progress shown as real canvas nodes connected by edges —
@@ -1246,11 +1260,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           updateGlobal(id, { hubState: 'researching', queuedModuleRun: null });
         },
       });
-      if (priorRecovery?.inputKey !== synthesisRecovery.inputKey) {
-        await checkpointRecovery(synthesisRecovery, priorRecovery?.inputKey);
-      } else {
-        await checkpointRecovery(synthesisRecovery, synthesisRecovery.inputKey);
-      }
+      await checkpointRecovery(synthesisRecovery, priorRecovery?.inputKey);
       marketplaceRecoveryRef.current = synthesisRecovery;
       await synthesizeAndPrice(items, scrapeWarnings, cancelled, synthesisRecovery, options);
     } finally {
@@ -1889,7 +1899,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           cancelled,
         );
       } catch (err) {
-        if (isNodeDeletedAbort(err)) return;
+        if (cancelled() || isNodeDeletedAbort(err)) return;
         EventLogger.error(`[SellHub][${id}] resolve/rescrape ${resolvedSourceId} failed:`, err);
         hubStateRef.current = 'comps-ready';
         updateGlobal(id, { hubState: 'comps-ready' });
@@ -1912,7 +1922,19 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
           manualPause: null,
           updatedAt: Date.now(),
         };
-        await checkpointRecovery(nextRecovery, priorRecovery.inputKey);
+        try {
+          await checkpointRecovery(nextRecovery, priorRecovery.inputKey);
+        } catch (err) {
+          if (cancelled()) return;
+          // Leave the pause visible with the merged comps rather than a hub
+          // stranded in 'researching' with nothing running.
+          EventLogger.error(`[SellHub][${id}] Could not persist resolved ${resolvedSourceId}:`, err);
+          hubStateRef.current = 'comps-ready';
+          updateGlobal(id, { hubState: 'comps-ready', pendingItems: mergedItems, scrapeWarnings: remainingWarnings });
+          addToast({ title: 'Resolve not saved', description: err?.message || String(err), type: 'error' });
+          return;
+        }
+        if (cancelled()) return;
         marketplaceRecoveryRef.current = nextRecovery;
         updateGlobal(id, { marketplaceRunResume: nextRecovery });
       }
@@ -2150,13 +2172,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   // is naturally scoped to "current canvas in the hierarchy". Skips locked hubs
   // (their plan UI is read-only) and cards opted out via the exclude toggle.
   const applyPlanTargetCount = useStore(
-    useCallback((s) => s.nodes.filter(n => (
-      n.type === 'sellhub'
-      && n.id !== id
-      && n.data?.hubState === 'priced'
-      && !n.data?.locked
-      && !n.data?.priceDropApplyAllExcluded
-    )).length, [id])
+    useCallback((s) => s.nodes.filter(n => isPriceDropApplyTarget(n, id)).length, [id])
   );
 
   // Broadcast this hub's price-drop plan to every eligible sibling item card on
@@ -2171,13 +2187,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
     const startingTier = normalizePriceDropStartingTier(data.priceDropStartingTier);
     // Re-query live at click time (the render-time count can lag a sibling's
     // exclude-toggle change since ReactFlow only re-renders changed nodes).
-    const targets = getNodes().filter(n => (
-      n.type === 'sellhub'
-      && n.id !== id
-      && n.data?.hubState === 'priced'
-      && !n.data?.locked
-      && !n.data?.priceDropApplyAllExcluded
-    ));
+    const targets = getNodes().filter(n => isPriceDropApplyTarget(n, id));
     if (targets.length === 0) {
       addToast?.({ title: 'No other item cards to apply to', description: 'Only priced, non-excluded items on this canvas are updated.', type: 'info' });
       return;

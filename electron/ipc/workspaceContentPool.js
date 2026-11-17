@@ -10,6 +10,7 @@ import { createHash } from 'crypto';
 export const WORKSPACE_POOL_KEY = '$canvasContentPool';
 export const WORKSPACE_REF_KEY = '$canvasRef';
 const POOL_VERSION = 1;
+export const WORKSPACE_FORMAT_UNSUPPORTED = 'WORKSPACE_FORMAT_UNSUPPORTED';
 // A pooled file is deliberately not plain JSON. A build without this code would
 // otherwise parse it, treat each reference as real data and save those references
 // back with the pool gone, destroying the content. This line makes it refuse.
@@ -157,7 +158,7 @@ export function restoreWorkspaceContent(parsed) {
   if (parsed === null || typeof parsed !== 'object' || !Object.hasOwn(parsed, WORKSPACE_POOL_KEY)) return parsed;
   const pool = parsed[WORKSPACE_POOL_KEY];
   if (pool?.version !== POOL_VERSION || !Array.isArray(pool.values)) {
-    throw new Error('Canvas file uses a newer or unknown storage format.');
+    throw Object.assign(new Error('Canvas file uses a newer or unknown storage format.'), { code: WORKSPACE_FORMAT_UNSUPPORTED });
   }
   const { values } = pool;
   const restore = (value) => {

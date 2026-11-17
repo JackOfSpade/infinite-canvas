@@ -557,6 +557,15 @@ const SUBDIVISION_COUNTRY = Object.fromEntries([
   ...Object.keys(CA_PROVINCES).map(code => [code, 'Canada']),
 ]);
 
+// Resolve an alpha-only token ("co", "newyork") to its subdivision code, or ''.
+function subdivisionCodeForAlpha(key) {
+  if (SUBDIVISIONS[key]) return key;
+  for (const [candidate, name] of Object.entries(SUBDIVISIONS)) {
+    if (name.replace(/\s/g, '') === key) return candidate;
+  }
+  return '';
+}
+
 function normalizedLocationKey(raw) {
   return String(raw || '')
     .trim()
@@ -574,12 +583,7 @@ function normalizedLocationKey(raw) {
 function normalizeSubdivision(raw, country = '') {
   const key = normalizedLocationKey(raw).replace(/[^a-z]/g, '');
   if (!key) return { code: '', label: '', country: '' };
-  let code = SUBDIVISIONS[key] ? key : '';
-  if (!code) {
-    for (const [candidate, name] of Object.entries(SUBDIVISIONS)) {
-      if (name.replace(/\s/g, '') === key) { code = candidate; break; }
-    }
-  }
+  const code = subdivisionCodeForAlpha(key);
   if (!code) return { code: '', label: '', country: '' };
   const subdivisionCountry = SUBDIVISION_COUNTRY[code];
   const canonicalCountry = normalizeCountry(country);
@@ -723,12 +727,7 @@ export function normalizeLocationInput(raw) {
 // Unknown tokens (non-US / unrecognized) fall back to matching the token as-is.
 function buildStateRegex(stateToken) {
   if (!stateToken) return null;
-  let code = SUBDIVISIONS[stateToken] ? stateToken : null;
-  if (!code) {
-    for (const [c, name] of Object.entries(SUBDIVISIONS)) {
-      if (name.replace(/\s/g, '') === stateToken) { code = c; break; }
-    }
-  }
+  const code = subdivisionCodeForAlpha(stateToken);
   if (!code) return new RegExp(`\\b${escapeRegExp(stateToken)}\\b`, 'i');
   // Two-letter codes such as ON/IN/OR are ordinary English words. A code is
   // location evidence only when it occupies a structured subdivision slot
@@ -743,11 +742,7 @@ function buildStateRegex(stateToken) {
 function subdivisionCode(seg) {
   const alpha = String(seg || '').toLowerCase().replace(/[^a-z]/g, '');
   if (!alpha) return null;
-  if (SUBDIVISIONS[alpha]) return alpha;
-  for (const [code, name] of Object.entries(SUBDIVISIONS)) {
-    if (name.replace(/\s/g, '') === alpha) return code;
-  }
-  return null;
+  return subdivisionCodeForAlpha(alpha) || null;
 }
 
 // Subdivisions we can enumerate per country, for country-level adherence (below).

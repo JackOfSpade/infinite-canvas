@@ -2,6 +2,7 @@
  * Equivalences below normalize grammar, not new achievements. Exact sources
  * remain the authority; a fluent sentence alone never establishes entailment.
  */
+const SENTENCES = new Intl.Segmenter('en', { granularity: 'sentence' });
 const WORDS = /[\p{L}]+(?:\+\+|#|\*)?|\d+(?:[.,]\d+)*|[%$£€]/gu;
 const FUNCTION_WORDS = new Set(('a an the i we my our me us it its they their them he she his her this that these those and or but so as at by for from in into of on to with without through between against than until while which who whom what when where how each all some others another other one both also then there had has have having be been being am is are was were do did does can could would should will may might not no never only already about over under up out before after more most such per very own together solo co closely correctly example work job approach strength strengths experience taking').split(' '));
 const NUMBER_WORDS = new Map(Object.entries({ zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', thirteen: '13', fourteen: '14', fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19', twenty: '20', thirty: '30', forty: '40', fifty: '50', sixty: '60', seventy: '70', eighty: '80', ninety: '90', hundred: '100', thousand: '1000', million: '1000000', billion: '1000000000' }));
@@ -82,7 +83,7 @@ function tokens(value) {
 }
 function quantities(value) {
   const result = [];
-  for (const { segment } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(value)) {
+  for (const { segment } of SENTENCES.segment(value)) {
     const words = tokens(segment);
     for (const [index, word] of words.entries()) {
       if (!/^\d/u.test(word)) continue;
@@ -102,7 +103,6 @@ function negativePredicates(value) {
 }
 export function interviewSpokenWordCount(value) { return String(value || '').trim().split(/\s+/u).filter(Boolean).length; }
 const ACTION_ROOTS = new Set(['build', 'maintain', 'improve', 'implement', 'test', 'migrate', 'create', 'lead', 'review', 'coordinate', 'evaluate', 'add', 'write', 'ship', 'automate', 'resolv', 'coach', 'trac', 'choose', 'interview', 'stop']);
-export function interviewClaimActions(value) { return [...new Set(tokens(value).filter(token => ACTION_ROOTS.has(token)))].sort(); }
 export function interviewClaimContent(value) {
   // Filter grammar before inflection normalization: has/had must not become
   // content roots such as ha. Number words retain their normalized quantity.
@@ -110,9 +110,7 @@ export function interviewClaimContent(value) {
   return [...new Set(tokens(content.join(' ')).filter(token => !FUNCTION_WORDS.has(token)
     && !['approximately', 'roughly', 'around', 'nearly'].includes(token)))];
 }
-function oneSentence(value) {
-  return [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(value)].filter(item => item.segment.trim()).length === 1;
-}
+const oneSentence = value => sentenceCount(value) === 1;
 
 export function deriveInterviewCandorFlags(value) {
   const flags = new Set();
@@ -225,10 +223,10 @@ function quoted(values) { return [...new Set(values)].map(value => JSON.stringif
 function matches(value, pattern) { return [...value.matchAll(pattern)].map(match => match[0]); }
 function agencyWords(value) { return matches(value, /\b(?:I|we|my|our)\b/giu); }
 function numericWords(value) { return rawTokens(value).filter(token => NUMBER_WORDS.has(token.toLowerCase()) || /^\d|^[%$£€]$/u.test(token)); }
-function sentenceCount(value) { return [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(value)].filter(item => item.segment.trim()).length; }
+function sentenceCount(value) { return [...SENTENCES.segment(value)].filter(item => item.segment.trim()).length; }
 
 const literalPattern = value => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-const roleEnd = item => /\b(?:present|current)\b/iu.test(item.roleContext?.endDate || '')
+export const roleEnd = item => /\b(?:present|current)\b/iu.test(item.roleContext?.endDate || '')
   ? Infinity : Date.parse(item.roleContext?.endDate || '') || 0;
 
 /** The intro may summarize employment metadata without claiming any of the
@@ -274,7 +272,7 @@ function outcomeObject(value) {
 function achievedOutcome(claimText, outcome, sources) {
   const claimObject = outcomeObject(claimText.slice(outcome.index + outcome[0].length));
   if (!claimObject.length) return false;
-  return sources.some(source => [...new Intl.Segmenter('en', { granularity: 'sentence' }).segment(source.text)].some(({ segment }) => {
+  return sources.some(source => [...SENTENCES.segment(source.text)].some(({ segment }) => {
     for (const match of segment.matchAll(OUTCOME_VERBS)) {
       if (root(match[0]) !== root(outcome[0])) continue;
       const prefix = segment.slice(0, match.index);

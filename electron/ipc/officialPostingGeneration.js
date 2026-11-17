@@ -1,26 +1,17 @@
 import crypto from 'node:crypto';
-import { stripHtmlToText } from '../../src/utils/textEncoding.js';
 import { handleSafe } from './ipcUtils.js';
 import { officialPostingAliases, officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { getOfficialPostingStore, mergeOfficialPostingTelemetry, resolveOfficialPostings } from './officialPostingService.js';
 import { fetchOfficialPosting } from './officialPostingFetch.js';
-import { extractOfficialPostingCandidates } from './officialPostingExtractors.js';
-import { evaluateOfficialPostingMatch, flatPostingText, frozenOfficialEmployer } from './officialPostingMatch.js';
-import { extractAtsTenant, strictEmployerEqual } from './officialSourceHosts.js';
-import { officialPostingAdapterUrl, readableOfficialPostingDescription, unresolvedOfficialPosting, verifiedOfficialPostingApplyUrl, shouldPersistOfficialPostingResult } from './officialPostingResolver.js';
-import { normalizeAlternateListings, normalizeOfficialLocation, normalizeOfficialPosting, normalizeOfficialSalary, officialHttpsUrl, boundedOfficialPostingTrail, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingFetchFailure, officialPostingCitedLeadUrls } from './officialPostingFields.js';
-import { checkListingForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
-import { checkPostingVariantsForGeneration } from './listingLivenessProbe.js';
+import { unresolvedOfficialPosting } from './officialPostingResolver.js';
+import { normalizeAlternateListings, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
+import { checkListingForGeneration, checkPostingVariantsForGeneration, decideGenerationListingCheck, normalizeListingAudit, recordGenerationFallbackHold } from './listingLivenessProbe.js';
 import { normaliseJobPostingVariants } from './applicationBundle.js';
-import { normalizeBoardClosed, normalizeListingLiveness } from './officialPostingFields.js';
-import { buildListingLivenessRequest, validateListingLivenessResponse } from './listingLivenessAi.js';
-import { LISTING_LIVENESS_RULES, classifyListingLiveness, evidenceFromHtml } from './listingLiveness.js';
-import { cappedHandoff } from './officialPostingService.js';
 import { callLLMText } from './llm.js';
-import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches, officialPostingSemanticSourceHash } from './officialPostingSemantic.js';
+import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { registerOfficialPostingRefreshHandler } from './officialPostingRefresh.js';
 
-export const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
+const OFFICIAL_POSTING_PREPARE_TIMEOUT_MS = 15 * 60 * 1000;
 const PREPARED_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_PREPARED_RECORDS = 128;
 const MAX_PREPARED_BYTES = 32 * 1024 * 1024;
@@ -28,10 +19,8 @@ const STORE_DRAIN_TIMEOUT_MS = 2_000;
 const prepared = new Map();
 const officialLevels = new Set(['L1', 'L2', 'L3', 'L4']);
 const textLevels = new Set(['L1', 'L2', 'L3']);
-const sha256 = text => crypto.createHash('sha256').update(text).digest('hex');
 const aliasesOf = job => officialPostingAliases(job).sort();
 function errorWithCode(code) { return Object.assign(new Error(code), { code }); }
-function withTrail(posting, ...codes) { return { ...posting, trail: boundedOfficialPostingTrail([...(posting.trail || []), ...codes]) }; }
 function active(signal) { if (signal?.aborted) throw signal.reason || errorWithCode('worker-aborted'); }
 
 export function createOfficialPostingPrepareSemaphore(limit = 3) {
@@ -58,7 +47,13 @@ export function createOfficialPostingPrepareSemaphore(limit = 3) {
 }
 const semaphore = createOfficialPostingPrepareSemaphore();
 
-function remember(scrapedJob, result, now, semanticMatching = true) {
+const preparedByteSizes = new WeakMap();
+function preparedBytes(record) {
+  if (!preparedByteSizes.has(record)) preparedByteSizes.set(record, Buffer.byteLength(JSON.stringify(record)));
+  return preparedByteSizes.get(record);
+}
+
+function remember(scrapedJob, result, now) {
   for (const [id, entry] of prepared) if (now - entry.createdAt >= PREPARED_TTL_MS) prepared.delete(id);
   const aliases = aliasesOf(scrapedJob);
   const officialPosting = normalizeOfficialPosting(result?.officialPosting) || unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['failed'] }).officialPosting;
@@ -70,14 +65,13 @@ function remember(scrapedJob, result, now, semanticMatching = true) {
     listingLinkUrl: officialHttpsUrl(result.listingLinkUrl) || '',
     postingVariants: normaliseJobPostingVariants(result.postingVariants ?? scrapedJob.postingVariants),
     listingLiveness: normalizeListingLiveness(result.listingLiveness),
-    boardClosed: normalizeBoardClosed(result.boardClosed), aliases, createdAt: now, semanticMatching,
-    ...(semanticMatching ? { freshness: 'fresh-discovery' } : {}),
-    ...(semanticMatching ? { inputHash: officialPostingSemanticInputHash(scrapedJob) } : {}) };
+    boardClosed: normalizeBoardClosed(result.boardClosed), aliases, createdAt: now, semanticMatching: true,
+    freshness: 'fresh-discovery', inputHash: officialPostingSemanticInputHash(scrapedJob) };
   const resolutionId = crypto.randomUUID();
   prepared.set(resolutionId, record);
-  let bytes = [...prepared.values()].reduce((sum, value) => sum + Buffer.byteLength(JSON.stringify(value)), 0);
+  let bytes = [...prepared.values()].reduce((sum, value) => sum + preparedBytes(value), 0);
   while (prepared.size > MAX_PREPARED_RECORDS || bytes > MAX_PREPARED_BYTES) {
-    const first = prepared.keys().next().value; bytes -= Buffer.byteLength(JSON.stringify(prepared.get(first))); prepared.delete(first);
+    const first = prepared.keys().next().value; bytes -= preparedBytes(prepared.get(first)); prepared.delete(first);
   }
   return { resolutionId: prepared.has(resolutionId) ? resolutionId : undefined,
     preparedAt: new Date(record.createdAt).toISOString(),
@@ -135,182 +129,10 @@ export function getPreparedOfficialPosting(resolutionId, scrapedJob, { now = Dat
   if (!record || now - record.createdAt >= PREPARED_TTL_MS) { prepared.delete(resolutionId); return null; }
   if (!officialPostingRecordMatchesScrapedIdentity(scrapedJob, record)
     || JSON.stringify(aliasesOf(scrapedJob)) !== JSON.stringify(record.aliases)) return null;
-  if (record.semanticMatching) {
-    try { if (record.inputHash !== officialPostingSemanticInputHash(scrapedJob)) return null; }
-    catch { return null; }
-    if (officialLevels.has(record.officialPosting.level) && !officialPostingSemanticProofMatches(scrapedJob, record.officialPosting)) return null;
-  }
+  try { if (record.inputHash !== officialPostingSemanticInputHash(scrapedJob)) return null; }
+  catch { return null; }
+  if (officialLevels.has(record.officialPosting.level) && !officialPostingSemanticProofMatches(scrapedJob, record.officialPosting)) return null;
   return structuredClone(record);
-}
-
-function failedBoardPayload(data) {
-  return Boolean(data?.success === false || data?.ok === false || data?.error
-    || Array.isArray(data?.errors) && data.errors.length || data?.errors && !Array.isArray(data.errors)
-    || typeof data?.status === 'string' && /^(?:error|failed|failure|unavailable)$/iu.test(data.status)
-    || Number.isFinite(data?.statusCode) && data.statusCode >= 400);
-}
-function failedBoardPage(page) {
-  try { return failedBoardPayload(JSON.parse(page.body)); } catch { return false; }
-}
-function authoritativeBoardPage(page, route) {
-  if (!/json/iu.test(page?.contentType || '') || typeof page.body !== 'string') return false;
-  let data;
-  try { data = JSON.parse(page.body); } catch { return false; }
-  if (failedBoardPayload(data)) return false;
-  const jobs = route.ats === 'lever' ? data : ['ashby', 'greenhouse'].includes(route.ats) ? data?.jobs : null;
-  if (!Array.isArray(jobs) || data?.hasMore === true || data?.more === true || data?.nextPage || data?.nextCursor || data?.links?.next) return false;
-  if (data?.meta?.total !== undefined && (!Number.isInteger(data.meta.total) || data.meta.total < 0 || data.meta.total > jobs.length)) return false;
-  return jobs.every(job => {
-    const url = officialHttpsUrl(route.ats === 'ashby' ? job?.jobUrl : route.ats === 'greenhouse' ? job?.absolute_url : job?.hostedUrl);
-    const tenant = url && extractAtsTenant(url);
-    const id = job?.id; const title = route.ats === 'lever' ? job?.text : job?.title;
-    return job && typeof job === 'object' && !Array.isArray(job)
-      && (typeof id === 'string' && id.trim() || typeof id === 'number' && Number.isFinite(id))
-      && typeof title === 'string' && title.trim()
-      && tenant?.ats === route.ats && tenant?.tenant === route.tenant;
-  });
-}
-
-async function reverify(job, record, { fetch, signal, now, store, callText, deadline, manualAiRunId, nodeId,
-  semanticMatching, resolveFresh, invalidateCachedProof }) {
-  const prior = record.officialPosting; const url = prior.sourceUrl;
-  const postedBy = strictEmployerEqual(job.company, prior.employer) ? '' : job.company;
-  const reverifiedPosting = () => {
-    const { fetchFailures: _previousFailures, ...previous } = prior;
-    return withTrail({ ...previous, trail: (previous.trail || []).filter(code => code !== 'reverify-failed'
-      && !(previous.trail?.includes('reverify-failed') && code === 'fetch-failed')) }, 'reverified');
-  };
-  const preserve = async (code, fetchFailure) => {
-    if (semanticMatching && code === 'unsafe-url') {
-      invalidateCachedProof();
-      return unresolvedOfficialPosting(job, { outcome: 'failed', trail: ['unsafe-url', 'reverify-failed'] });
-    }
-    let description;
-    if (textLevels.has(prior.level) && prior.contentHash) try { description = await store.readText(prior.contentHash); } catch { /* A missing text file cannot invalidate the proof record. */ }
-    active(signal);
-    // A failed recheck does not turn the prior complete discovery proof into
-    // a partial crawl. Keep old trail codes; classify only this new failure.
-    const recheckCode = ['fetch-timeout', 'crawl-budget'].includes(code) ? 'fetch-failed' : code;
-    const { fetchFailures: _previousFailures, ...previous } = prior;
-    return { postedBy, officialPosting: { ...withTrail(previous, recheckCode, 'reverify-failed'),
-      ...(fetchFailure ? { fetchFailures: [fetchFailure] } : {}) }, ...(typeof description === 'string' ? { description } : {}) };
-  };
-  const closed = () => {
-    if (semanticMatching) invalidateCachedProof();
-    const result = unresolvedOfficialPosting(job, { outcome: 'closed', trail: ['closed'] });
-    if (semanticMatching) result.officialPosting = withTrail({ ...result.officialPosting, semanticMatch: prior.semanticMatch }, 'semantic-match-v1');
-    return result;
-  };
-  if (!url) return preserve('unreadable');
-  let page;
-  try { page = await fetch(url, { signal }); active(signal); }
-  catch (error) {
-    active(signal);
-    return [404, 410].includes(error?.statusCode) ? closed()
-      : preserve(error?.code || 'fetch-failed', officialPostingFetchFailure({ ...error, code: error?.code || 'fetch-failed' }, url));
-  }
-  if (!page || typeof page !== 'object') return preserve('unreadable');
-  const fetchedUrl = officialHttpsUrl(page?.url || page?.sourceUrl || url);
-  if (fetchedUrl !== officialHttpsUrl(url) || page.requestedUrl && officialHttpsUrl(page.requestedUrl) !== officialHttpsUrl(url)) return preserve('unsafe-url');
-  if ([404, 410].includes(page.statusCode)) return closed();
-  if (page.statusCode && page.statusCode !== 200) return preserve('fetch-failed', officialPostingFetchFailure({ code: 'fetch-failed', statusCode: page.statusCode }, url));
-  if (failedBoardPage(page)) return preserve('unreadable');
-  if (!prior.employer) return preserve('unreadable');
-  const route = extractAtsTenant(url, { html: page.body });
-  const extract = value => extractOfficialPostingCandidates({ body: value.body, sourceUrl: value.url || value.sourceUrl || url,
-    contentType: value.contentType, ats: route?.ats || prior.ats || '', tenant: route?.tenant || prior.tenant || '', employer: prior.employer, now });
-  let candidates;
-  try { candidates = extract(page).filter(candidate => officialHttpsUrl(candidate.sourceUrl) === officialHttpsUrl(url)); }
-  catch { return preserve('unreadable'); }
-  let authoritativeBoard = false;
-  if (!candidates.length && route && route.tenant === prior.tenant && (!prior.ats || prior.ats === route.ats)) {
-    // Delisting needs the complete board, whereas discovery prefers a small
-    // exact-detail response. Absence from one detail response is no board proof.
-    const adapter = officialPostingAdapterUrl(route, route.ats === 'greenhouse' ? new URL('/', url).href : url);
-    if (adapter) try {
-      const board = await fetch(adapter, { signal }); active(signal);
-      if (officialHttpsUrl(board.url || board.sourceUrl || adapter) === officialHttpsUrl(adapter)
-        && (!board.requestedUrl || officialHttpsUrl(board.requestedUrl) === officialHttpsUrl(adapter))
-        && (!board.statusCode || board.statusCode === 200)) {
-        if (!failedBoardPage(board)) {
-          authoritativeBoard = authoritativeBoardPage(board, route);
-          candidates = extract(board).filter(candidate => officialHttpsUrl(candidate.sourceUrl) === officialHttpsUrl(url));
-        }
-      }
-    } catch { active(signal); }
-  }
-  if (!candidates.length) return authoritativeBoard ? closed() : preserve('unreadable');
-  if (candidates.length !== 1) return preserve('ambiguous');
-  const candidate = candidates[0];
-  if (authoritativeBoard && candidate.isListed === false) return closed();
-  // Only this exact stored URL inherits host provenance. Semantic changes
-  // require a new AI comparison; the legacy contract retains its hard gates.
-  const verified = { ...candidate, tenantProven: Boolean(route && prior.tenant && route.tenant === prior.tenant),
-    employerDomainProven: !route, officialPortalProven: /^(?:www\.)?usajobs\.gov$/u.test(new URL(url).hostname),
-    ...(semanticMatching && ['L1', 'L2', 'L3'].includes(prior.level)
-      ? { provenance: { L1: 'employer', L2: 'careers', L3: 'structured' }[prior.level] } : {}) };
-  const pastValidThrough = candidate.validThrough && Number.isFinite(Date.parse(candidate.validThrough))
-    && Date.parse(candidate.validThrough) < now();
-  if (!semanticMatching) {
-    const evaluation = evaluateOfficialPostingMatch(job, verified, { now: now(), employerHypotheses: [prior.employer] });
-    if (!strictEmployerEqual(candidate.employer, prior.employer)
-      || (!evaluation.passed && evaluation.reason !== 'no-anchor' && !(evaluation.reason === 'closed' && pastValidThrough))) {
-      return preserve(strictEmployerEqual(candidate.employer, prior.employer) ? evaluation.reason : 'employer-mismatch');
-    }
-  }
-  if (typeof candidate.description !== 'string' || !candidate.description.trim()) return preserve('unreadable');
-  const changed = sha256(candidate.description) !== prior.contentHash || semanticMatching && (
-    candidate.title !== prior.title || candidate.employer !== prior.employer
-    || JSON.stringify(normalizeOfficialLocation(candidate.location)) !== JSON.stringify(normalizeOfficialLocation(prior.location))
-    || JSON.stringify(normalizeOfficialSalary(candidate.salary)) !== JSON.stringify(normalizeOfficialSalary(prior.salary))
-    || verifiedOfficialPostingApplyUrl(candidate) !== prior.officialApplyUrl
-    || officialPostingSemanticSourceHash(verified, { now }) !== prior.semanticMatch?.sourceHash);
-  if (semanticMatching && changed) invalidateCachedProof();
-  const evidence = evidenceFromHtml(page.body, { board: 'official', ruleKey: 'generic',
-    requestedUrl: url, finalUrl: fetchedUrl, httpStatus: page.statusCode || 200,
-    expectedTitle: job.title, expectedCompany: prior.employer, expectedLocation: job.location });
-  const outsideClosedNotice = evidence.closedHits.some(hit => hit.insideDescription === false);
-  if (pastValidThrough || outsideClosedNotice) {
-    const unconfirmed = async () => {
-      if (semanticMatching && changed) return resolveFresh({ candidateUrls: [url], bypassCache: true });
-      const result = await preserve('closed');
-      result.officialPosting = withTrail(result.officialPosting, 'official-liveness-unconfirmed');
-      return result;
-    };
-    const classification = classifyListingLiveness(evidence, LISTING_LIVENESS_RULES.generic);
-    const remaining = deadline - now();
-    if (classification.verdict !== 'needs-ai' || remaining < 90_000 || typeof callText !== 'function') return unconfirmed();
-    const members = [{ row: job, evidence }];
-    const request = buildListingLivenessRequest(members);
-    const stats = { handoffs: 0, handoffMs: 0 };
-    try {
-      const raw = await cappedHandoff(request, { call: callText, signal, timeoutMs: Math.min(5 * 60_000, remaining),
-        manualAiRunId, nodeId, now, stats });
-      active(signal);
-      const answer = validateListingLivenessResponse(typeof raw === 'string' ? JSON.parse(raw) : raw, members).rows[0];
-      const quoteKey = flatPostingText(answer.quote).replace(/\p{Cf}/gu, '').toLocaleLowerCase();
-      const visibleKey = flatPostingText(stripHtmlToText(page.body).slice(0, 200_000)).replace(/\p{Cf}/gu, '').toLocaleLowerCase();
-      if (answer.verdict === 'closed' && quoteKey && visibleKey.includes(quoteKey)) return closed();
-    } catch { active(signal); }
-    return unconfirmed();
-  }
-  if (!changed) {
-    return { postedBy, officialPosting: reverifiedPosting(), ...(textLevels.has(prior.level) ? { description: candidate.description } : {}) };
-  }
-  if (semanticMatching) return resolveFresh({ candidateUrls: [url], bypassCache: true });
-  const employer = frozenOfficialEmployer(job, candidate.employer);
-  const readable = employer && readableOfficialPostingDescription(candidate, job);
-  if (!readable) return preserve('stub-text');
-  const posting = normalizeOfficialPosting({ ...reverifiedPosting(), employer, level: prior.level === 'L4' ? route ? 'L3' : 'L1' : prior.level,
-    outcome: 'found', title: candidate.title,
-    location: normalizeOfficialLocation(candidate.location) || prior.location,
-    salary: normalizeOfficialSalary(candidate.salary) || { text: '', provenance: 'unknown' },
-    sourceUrl: url, officialApplyUrl: verifiedOfficialPostingApplyUrl(candidate), fetchedAt: new Date(now()).toISOString(),
-    contentHash: sha256(candidate.description) });
-  if (!posting) return preserve('invalid-text');
-  active(signal);
-  return { officialPosting: posting, postedBy: strictEmployerEqual(job.company, employer) ? '' : job.company,
-    description: candidate.description };
 }
 
 /** Whole-budget prepare includes the semaphore wait. Every non-cancellation
@@ -319,7 +141,6 @@ export async function prepareOfficialPostingForGeneration(args, {
   projectJob = value => value, signal, store, fetch = fetchOfficialPosting, resolve = resolveOfficialPostings,
   now = Date.now, timeoutMs = OFFICIAL_POSTING_PREPARE_TIMEOUT_MS,
   slots = semaphore, callRaw, callMatch, callText = callLLMText, telemetry = { failed: 0 }, listingProbe, calibrationStore,
-  semanticMatching = true,
 } = {}) {
   const failed = error => {
     telemetry.failed = (Number(telemetry.failed) || 0) + 1;
@@ -331,7 +152,7 @@ export async function prepareOfficialPostingForGeneration(args, {
   });
   const guardOfficialLookup = (posting, listing) => {
     const lookup = officialPostingLookupStatus(posting);
-    if (!semanticMatching || !['incomplete', 'unchecked'].includes(lookup.state)
+    if (!['incomplete', 'unchecked'].includes(lookup.state)
       || listing.listingCheck?.action === 'refuse-final') return listing;
     return { ...listing, listingCheck: { ...listing.listingCheck,
       action: 'refuse-retry', basis: 'official-lookup', override: false },
@@ -417,15 +238,13 @@ export async function prepareOfficialPostingForGeneration(args, {
     signal?.removeEventListener('abort', abort);
     controller.signal.removeEventListener('abort', onAbort);
   };
-  let release; let finalPosting; let verifiedFallback; let resolvedTelemetry = null;
+  let release; let finalPosting; let resolvedTelemetry = null;
   try {
     finalPosting = await Promise.race([(async () => {
-      active(controller.signal);
       active(controller.signal); release = await slots.acquire(controller.signal); active(controller.signal);
       store = trackedStore(store || getOfficialPostingStore());
       const record = await store.find(scrapedJob); active(controller.signal);
       const resolveFresh = async ({ candidateUrls = [], bypassCache = false, priorOfficialRecord } = {}) => {
-        if (semanticMatching && bypassCache) verifiedFallback = undefined;
         const resolved = await resolve([scrapedJob], { store, snapshotFetch: fetch, signal: controller.signal,
           manualAiRunId: args.manualAiRunId, nodeId: args.nodeId, callRaw, callMatch, now,
           timeoutMs, candidateUrls, bypassCache,
@@ -433,54 +252,27 @@ export async function prepareOfficialPostingForGeneration(args, {
         resolvedTelemetry = mergeOfficialPostingTelemetry(resolvedTelemetry, resolved.telemetry);
         active(controller.signal);
         const posting = normalizeOfficialPosting(resolved.jobs[0]?.officialPosting);
-        if (!posting || semanticMatching && officialLevels.has(posting.level) && (!officialPostingSemanticProofMatches(scrapedJob, posting)
+        if (!posting || officialLevels.has(posting.level) && (!officialPostingSemanticProofMatches(scrapedJob, posting)
           || !/^[a-f0-9]{64}$/u.test(posting.semanticMatch?.sourceHash))) {
           return unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: ['comparative-invalid'] });
         }
         return { officialPosting: posting, postedBy: resolved.jobs[0].postedBy, resolvedFresh: true,
           description: textLevels.has(posting.level) && posting.contentHash ? await store.readText(posting.contentHash) : undefined };
       };
-      if (semanticMatching) {
-        const boundRecord = record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record) ? record : null;
-        const cachedPosting = normalizeOfficialPosting(boundRecord?.officialPosting);
-        const candidateUrls = [...new Set([cachedPosting?.sourceUrl, cachedPosting?.officialApplyUrl,
-          cardPosting?.sourceUrl, cardPosting?.officialApplyUrl, ...officialPostingCitedLeadUrls(cardPosting)].map(officialHttpsUrl).filter(Boolean))];
-        // Every generation uses the current shared discovery and comparison
-        // process. Old URLs are leads; neither cached facts nor a weak fresh
-        // recheck may authorize this application's official posting.
-        return resolveFresh({ candidateUrls, bypassCache: true, priorOfficialRecord: boundRecord });
-      }
-      if (record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record)) {
-        const storedPosting = normalizeOfficialPosting(record.officialPosting);
-        const reusableProof = !semanticMatching || officialPostingSemanticProofMatches(scrapedJob, storedPosting)
-          && (!officialLevels.has(storedPosting?.level) || /^[a-f0-9]{64}$/u.test(storedPosting.semanticMatch?.sourceHash));
-        if (reusableProof && officialLevels.has(storedPosting?.level) && shouldPersistOfficialPostingResult(record, { signal: controller.signal })) {
-          verifiedFallback = { officialPosting: storedPosting,
-            postedBy: strictEmployerEqual(scrapedJob.company, storedPosting.employer) ? '' : scrapedJob.company };
-          if (textLevels.has(storedPosting.level) && storedPosting.contentHash) try {
-            const cachedText = await store.readText(storedPosting.contentHash);
-            if (typeof cachedText === 'string') verifiedFallback.description = cachedText;
-          } catch { /* Keep proof metadata when the stored text cannot be read. */ }
-          active(controller.signal);
-          const verified = await reverify(scrapedJob, record, { fetch, signal: controller.signal, now, store,
-            callText, deadline, manualAiRunId: args.manualAiRunId, nodeId: args.nodeId,
-            semanticMatching, resolveFresh, invalidateCachedProof: () => { verifiedFallback = undefined; } }); active(controller.signal);
-          if (!verified.resolvedFresh) await store.save(scrapedJob, { officialPosting: verified.officialPosting, description: verified.description, expectedRecord: record }); active(controller.signal);
-          return verified;
-        }
-        if (reusableProof && shouldPersistOfficialPostingResult(record, { signal: controller.signal })) return unresolvedOfficialPosting(scrapedJob, { outcome: record.officialPosting.outcome,
-          trail: [...(record.officialPosting.trail || []), 'recent-miss'], alternatives: record.officialPosting.alternatives || [] });
-        if (semanticMatching) return resolveFresh({ candidateUrls: storedPosting?.sourceUrl ? [storedPosting.sourceUrl] : [], bypassCache: true });
-      }
-      return resolveFresh();
+      const boundRecord = record && officialPostingRecordMatchesScrapedIdentity(scrapedJob, record) ? record : null;
+      const cachedPosting = normalizeOfficialPosting(boundRecord?.officialPosting);
+      const candidateUrls = [...new Set([cachedPosting?.sourceUrl, cachedPosting?.officialApplyUrl,
+        cardPosting?.sourceUrl, cardPosting?.officialApplyUrl, ...officialPostingCitedLeadUrls(cardPosting)].map(officialHttpsUrl).filter(Boolean))];
+      // Every generation uses the current shared discovery and comparison
+      // process. Old URLs are leads; neither cached facts nor a weak fresh
+      // recheck may authorize this application's official posting.
+      return resolveFresh({ candidateUrls, bypassCache: true, priorOfficialRecord: boundRecord });
     })(), cancelled]);
   } catch (error) {
     if (signal?.aborted) { cleanup(); throw signal.reason || error; }
     failed(error);
     const code = controller.signal.reason?.code === 'worker-timeout' ? 'worker-timeout' : error?.code || 'failed';
-    finalPosting = code === 'worker-timeout' && controller.signal.aborted && verifiedFallback
-      ? { ...verifiedFallback, officialPosting: withTrail(verifiedFallback.officialPosting, 'worker-timeout', 'reverify-failed') }
-      : unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
+    finalPosting = unresolvedOfficialPosting(scrapedJob, { outcome: 'failed', trail: [code] });
   } finally {
     // Cancellation must finish owned filesystem work before cancel-and-wait
     // releases this preparation. Research may ignore its signal, so only the
@@ -525,7 +317,7 @@ export async function prepareOfficialPostingForGeneration(args, {
       // Variant availability cannot change the primary listing decision.
     }
     if (signal?.aborted) throw signal.reason || errorWithCode('worker-aborted');
-    return { ...remember(scrapedJob, { ...finalPosting, ...listing, postingVariants }, now(), semanticMatching),
+    return { ...remember(scrapedJob, { ...finalPosting, ...listing, postingVariants }, now()),
       telemetry: { failed: telemetry.failed, ...(resolvedTelemetry ? { officialPosting: resolvedTelemetry } : {}) } };
   } catch (error) {
     if (signal?.aborted) throw signal.reason || error;

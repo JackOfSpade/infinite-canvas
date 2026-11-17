@@ -27,7 +27,7 @@ const isNumber = value => typeof value === 'number' && Number.isFinite(value);
 function candidates(relative, thresholds) {
   const found = [];
   const push = (key, salience, measure) => {
-    if (isNumber(salience) && Number.isFinite(salience)) found.push({ key, salience, measure });
+    if (isNumber(salience)) found.push({ key, salience, measure });
   };
   const { rateRatio, pauseRatio, pitchRangeDeltaSt, dominanceDelta, arousalDelta, restarts } = relative ?? {};
   if (isNumber(rateRatio)) {

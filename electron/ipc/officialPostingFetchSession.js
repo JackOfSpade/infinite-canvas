@@ -3,11 +3,11 @@ import { createHash } from 'node:crypto';
 import { officialPostingResourceHeaders } from './officialPostingResourceHeaders.js';
 import { normalizeOfficialPostingPublicSearchHeaders } from './officialPostingReadOnlySearch.js';
 
-export const OFFICIAL_FETCH_NEGATIVE_CACHE_MS = 10 * 60 * 1_000;
-export const OFFICIAL_FETCH_GLOBAL_LIMIT = 8;
-export const OFFICIAL_FETCH_HOST_LIMIT = 2;
-export const OFFICIAL_FETCH_HOST_SPACING_MS = 250;
-export const OFFICIAL_FETCH_RETRY_AFTER_CAP_MS = 30_000;
+const OFFICIAL_FETCH_NEGATIVE_CACHE_MS = 10 * 60 * 1_000;
+const OFFICIAL_FETCH_GLOBAL_LIMIT = 8;
+const OFFICIAL_FETCH_HOST_LIMIT = 2;
+const OFFICIAL_FETCH_HOST_SPACING_MS = 250;
+const OFFICIAL_FETCH_RETRY_AFTER_CAP_MS = 30_000;
 
 function aborted(signal) {
   return signal?.reason instanceof OfficialPostingFetchError ? signal.reason
@@ -151,8 +151,7 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
     seen.add(entry);
     return [...entry.waitsFor].some(next => reaches(next, target, seen));
   };
-  const runFetch = (key, owner, resource, resourceHeaders, publicSearchHeaders, resourcePrefix) => {
-    const cacheKey = url => resource ? `${resourcePrefix}|${url}` : url;
+  const runFetch = (key, owner, resource, resourceHeaders, publicSearchHeaders, cacheKey) => {
     const hooks = { beforeRequest: async (url, { signal: hopSignal }) => {
       const alias = officialPostingFetchUrl(url).href; const existing = cached(cacheKey(alias));
       if (existing && existing !== owner) {
@@ -191,7 +190,7 @@ export function createOfficialPostingFetchSession({ fetch = fetchOfficialPosting
     let entry = cached(cacheKey(key));
     if (entry) { stats.cacheHits += 1; return waitFor(entry.promise, callerSignal).then(asked); }
     entry = { expiresAt: Infinity, waitsFor: new Set(), promise: null };
-    entry.promise = Promise.resolve().then(() => runFetch(key, entry, resource, resourceHeaders, publicSearchHeaders, resourcePrefix)).then(result => {
+    entry.promise = Promise.resolve().then(() => runFetch(key, entry, resource, resourceHeaders, publicSearchHeaders, cacheKey)).then(result => {
       const recorded = result && typeof result === 'object' ? { ...result, requestedUrl: result.requestedUrl || key } : result;
       const final = result?.url || result?.sourceUrl;
       if (final) { try { const alias = cacheKey(officialPostingFetchUrl(final).href); if (!cached(alias)) cache.set(alias, entry); } catch { /* The transport owns result validation. */ } }

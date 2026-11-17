@@ -8,7 +8,7 @@ import { logger } from '../logger.js';
 import { recordWorkspaceWriteOutcome } from './workspaceIoDiagnostics.js';
 import { recordMainPerf } from './perfDiagnostics.js';
 import { createCanvasDeltaStore } from './workspaceSaveDelta.js';
-import { formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
+import { WORKSPACE_FORMAT_UNSUPPORTED, formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
 import path from 'path';
 import fs from 'fs';
 import { Worker } from 'node:worker_threads';
@@ -268,7 +268,7 @@ function isLexicallyRendererPrivateDeleteProtectionPath(filePath) {
  * itself deliberately has an installation-specific name, so protect its
  * lexical and real locations plus every private store rooted beneath it.
  */
-export async function assertRendererDeletePathDoesNotContainPrivateRoots(filePath, {
+async function assertRendererDeletePathDoesNotContainPrivateRoots(filePath, {
   userDataPath = app?.getPath?.('userData'),
   realpath = fs.promises.realpath,
 } = {}) {
@@ -400,6 +400,14 @@ export async function assertDeleteTargetNotRepresented(filePath, protectedPaths 
     }
   }
   return safePath;
+}
+
+function watchedStatChanged(current, previous) {
+  return current.mtimeMs !== previous.mtimeMs
+    || current.ctimeMs !== previous.ctimeMs
+    || current.size !== previous.size
+    || current.ino !== previous.ino
+    || current.nlink !== previous.nlink;
 }
 
 /**
@@ -671,11 +679,7 @@ export function createFileWatchRegistry({
     stopVerificationPolling(filePath, entry);
     const pollListener = (current, previous) => {
       if (activeWatchers.get(filePath) !== entry || entry.pollListener !== pollListener) return;
-      if (current.mtimeMs !== previous.mtimeMs
-          || current.ctimeMs !== previous.ctimeMs
-          || current.size !== previous.size
-          || current.ino !== previous.ino
-          || current.nlink !== previous.nlink) {
+      if (watchedStatChanged(current, previous)) {
         // A native watcher can be unavailable while a regular lexical file is
         // replaced by a symlink. Re-resolve before future events follow an old
         // directory as though it were still the target.
@@ -703,11 +707,7 @@ export function createFileWatchRegistry({
     const pollListener = (current, previous) => {
       if (activeWatchers.get(filePath) !== entry
           || entry.verificationPollListener !== pollListener) return;
-      if (current.mtimeMs !== previous.mtimeMs
-          || current.ctimeMs !== previous.ctimeMs
-          || current.size !== previous.size
-          || current.ino !== previous.ino
-          || current.nlink !== previous.nlink) {
+      if (watchedStatChanged(current, previous)) {
         // fs.watch may silently lose events on network/virtual filesystems.
         // Keep a deliberately low-frequency stat check even while its native
         // directory watcher remains live, so an otherwise invisible change
@@ -737,11 +737,7 @@ export function createFileWatchRegistry({
     if (entry.aliasPollListener || activeWatchers.get(filePath) !== entry || entry.clients.size === 0) return;
     const pollListener = (current, previous) => {
       if (activeWatchers.get(filePath) !== entry || entry.aliasPollListener !== pollListener) return;
-      if (current.mtimeMs !== previous.mtimeMs
-          || current.ctimeMs !== previous.ctimeMs
-          || current.size !== previous.size
-          || current.ino !== previous.ino
-          || current.nlink !== previous.nlink) {
+      if (watchedStatChanged(current, previous)) {
         void rebindLexicalTarget(filePath, entry);
       }
     };
@@ -1163,7 +1159,7 @@ export async function atomicWriteFile(targetPath, data) {
 const WORKSPACE_SYNC_LINK_WAIT_MS = 15_000;
 const WORKSPACE_SYNC_LINK_POLL_MS = 250;
 
-export function isWorkspaceSyncLinkRefusal(error) {
+function isWorkspaceSyncLinkRefusal(error) {
   return error?.code === 'RENDERER_WORKSPACE_PATH_CHANGED' && error.workspacePathCheck === 'target-hardlink';
 }
 
@@ -1614,13 +1610,7 @@ async function writeWorkspaceHandle(handle, payload) {
 }
 
 async function writeWorkspaceFirstSaveMarker(handle, creationNonce) {
-  const marker = workspaceFirstSaveMarker(creationNonce);
-  await handle.truncate(0);
-  await writeHandleBufferAt(handle, marker);
-  await handle.truncate(marker.length);
-  await handle.sync();
-  const after = await handle.stat();
-  if (!after.isFile() || after.size !== marker.length) throw rendererWorkspacePathChangedError();
+  await writeWorkspaceHandle(handle, workspaceFirstSaveMarker(creationNonce));
 }
 
 async function hasWorkspaceFirstSaveMarker(handle, creationNonce) {
@@ -1634,12 +1624,7 @@ async function hasWorkspaceFirstSaveMarker(handle, creationNonce) {
     if (!bytesRead) return false;
     offset += bytesRead;
   }
-  const after = await handle.stat();
-  return hasSameIdentity(after, stat)
-    && after.size === stat.size
-    && after.mtimeMs === stat.mtimeMs
-    && after.ctimeMs === stat.ctimeMs
-    && actual.equals(marker);
+  return handleStatUnchanged(await handle.stat(), stat) && actual.equals(marker);
 }
 
 async function assertWorkspaceHandlePayload(handle, payload, canonicalPath = '') {
@@ -2035,12 +2020,7 @@ export async function readRendererWorkspaceFile(filePath, {
         // was replaced immediately after its handle opened. No bytes are
         // returned here, but callers still use this result to report the path.
         const after = await opened.handle.stat();
-        if (!hasSameIdentity(after, stat)
-            || after.size !== stat.size
-            || after.mtimeMs !== stat.mtimeMs
-            || after.ctimeMs !== stat.ctimeMs) {
-          throw rendererWorkspacePathChangedError();
-        }
+        if (!handleStatUnchanged(after, stat)) throw rendererWorkspacePathChangedError();
         await assertRendererWorkspaceHandleBinding(opened.target, after);
         return { target: opened.target, stat: after, content: null, tooLarge: true };
       }
@@ -2052,12 +2032,7 @@ export async function readRendererWorkspaceFile(filePath, {
       // An external replacement after the read must not be represented as a
       // successful load of the renderer's requested path.
       const after = await opened.handle.stat();
-      if (!hasSameIdentity(after, stat)
-          || after.size !== stat.size
-          || after.mtimeMs !== stat.mtimeMs
-          || after.ctimeMs !== stat.ctimeMs) {
-        throw rendererWorkspacePathChangedError();
-      }
+      if (!handleStatUnchanged(after, stat)) throw rendererWorkspacePathChangedError();
       await assertRendererWorkspaceHandleBinding(opened.target, after);
       return { target: opened.target, stat, content, tooLarge: false };
     } finally {
@@ -2174,13 +2149,12 @@ async function writeRendererWorkspaceFile(filePath, data, {
       // limitation; renderer code has no mutation primitive in this lease.
       await assertRendererWorkspaceHandleBinding(opened.target, await opened.handle.stat());
       await writeWorkspaceHandle(opened.handle, payload);
-      const contentDigest = createHash('sha256').update(payload).digest('hex');
       const verification = beforeFinalVerification || beforePublishedVerification;
       if (verification) {
         await verification({
           target: opened.target,
           handle: opened.handle,
-          contentDigest,
+          contentDigest: createHash('sha256').update(payload).digest('hex'),
           created: opened.created,
           // Compatibility for focused callers that used the former
           // post-rename seam. This is now the pinned public entry, not a temp.
@@ -2470,6 +2444,14 @@ function hasSameIdentity(stat, identity) {
   return stat.dev === identity.dev && stat.ino === identity.ino;
 }
 
+/** True when two stats of one open handle show the same file, untouched in between. */
+function handleStatUnchanged(after, before) {
+  return hasSameIdentity(after, before)
+    && after.size === before.size
+    && after.mtimeMs === before.mtimeMs
+    && after.ctimeMs === before.ctimeMs;
+}
+
 const TEXT_TARGET_REPLACEMENT_CODES = new Set(['ENOENT', 'ENOTDIR', 'ELOOP', 'ESTALE']);
 const TEXT_TARGET_REVALIDATION_MESSAGE = 'The text file path changed while it was being validated.';
 const TEXT_FILE_HARDLINK_UNSUPPORTED = 'TEXT_FILE_HARDLINK_UNSUPPORTED';
@@ -2665,12 +2647,7 @@ export async function readValidatedTextFile(filePath, {
         () => handle.readFile({ encoding: 'utf8' }),
       );
       const after = await withTextTargetMutationConflict(() => handle.stat());
-      if (!hasSameIdentity(after, before)
-          || after.size !== before.size
-          || after.mtimeMs !== before.mtimeMs
-          || after.ctimeMs !== before.ctimeMs) {
-        throw textFileConflictError();
-      }
+      if (!handleStatUnchanged(after, before)) throw textFileConflictError();
       // Do not hand the renderer a baseline from a target that was replaced
       // while it was being read. The resulting conflict/read error is safer
       // than a misleading expected-content value for a different inode.
@@ -3146,7 +3123,7 @@ async function ensureCanvasWatcher(sender, filePath) {
   }
   watcher.on('error', (err) => {
     logger.warn(`[FileSystem] Canvas watcher error for ${dir}:`, err);
-    stopCanvasWatcher(sender);
+    if (canvasWatchers.get(sender)?.watcher === watcher) stopCanvasWatcher(sender);
   });
   canvasWatchers.set(sender, { watcher, dir, timer: null });
 
@@ -3228,7 +3205,7 @@ function relativePortablePath(canvasPath, filePath) {
   if (!canvasPath || !filePath || typeof filePath !== 'string') return null;
   if (!path.isAbsolute(filePath)) return filePath;
   const rel = path.relative(path.dirname(canvasPath), filePath);
-  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  if (!rel || rel === '..' || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) return null;
   return rel.includes(path.sep) ? rel : `.${path.sep}${rel}`;
 }
 
@@ -3642,34 +3619,25 @@ export function registerFilesystemHandlers() {
       && trackedInode?.dev === newTarget.targetIdentity?.dev
       ? { dev: newTarget.targetIdentity.dev, ino: newTarget.targetIdentity.ino }
       : null;
-    if (journalPaths) {
-      await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
-        version: RECOVERY_REBIND_JOURNAL_VERSION,
-        oldCanvasPath: normalizeRecoveryRebindPath(priorCanvasPath),
-        newCanvasPath: normalizeRecoveryRebindPath(targetPath),
-        phase: 'prepared',
-        canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
-        previousTargetDigest,
-        ...(renameAttestation ? { renameAttestation } : {}),
-      })));
-    }
+    const rebindJournalBase = journalPaths ? {
+      version: RECOVERY_REBIND_JOURNAL_VERSION,
+      oldCanvasPath: normalizeRecoveryRebindPath(priorCanvasPath),
+      newCanvasPath: normalizeRecoveryRebindPath(targetPath),
+      canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
+      previousTargetDigest,
+      ...(renameAttestation ? { renameAttestation } : {}),
+    } : null;
+    const writeRebindJournals = phase => Promise.all(journalPaths.map(
+      journalPath => writeRecoveryRebindJournal(journalPath, { ...rebindJournalBase, phase }),
+    ));
+    if (journalPaths) await writeRebindJournals('prepared');
 
     // The handle-pinned writer records its complete payload in a host-private
     // write-ahead journal before truncating the canvas. A crash after this
     // point is recovered by finishing that exact payload on next save/load;
     // the prepared rebind journal then completes ownership migration.
     const workspaceWrite = await writeWorkspaceAwaitingSyncLink(targetPath, serializedCanvas);
-    if (journalPaths) {
-      await Promise.all(journalPaths.map(journalPath => writeRecoveryRebindJournal(journalPath, {
-        version: RECOVERY_REBIND_JOURNAL_VERSION,
-        oldCanvasPath: normalizeRecoveryRebindPath(priorCanvasPath),
-        newCanvasPath: normalizeRecoveryRebindPath(targetPath),
-        phase: 'canvas-written',
-        canvasDigest: createHash('sha256').update(serializedCanvas).digest('hex'),
-        previousTargetDigest,
-        ...(renameAttestation ? { renameAttestation } : {}),
-      })));
-    }
+    if (journalPaths) await writeRebindJournals('canvas-written');
 
     const recoveryRebind = await rebindJobRecoveryOwnersForCanvasPath(priorCanvasPath, targetPath);
     if (!recoveryRebind.success) {
@@ -3816,6 +3784,7 @@ export function registerFilesystemHandlers() {
       return { data, filePath: targetPath };
     } catch (jsonErr) {
       logger.error(`[FileSystem] Failed to parse workspace JSON at ${targetPath}:`, jsonErr);
+      if (jsonErr?.code === WORKSPACE_FORMAT_UNSUPPORTED) throw jsonErr;
       throw new Error('Invalid workspace file format. File may be corrupted or malformed.');
     }
   });

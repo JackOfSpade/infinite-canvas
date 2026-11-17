@@ -515,74 +515,16 @@ export const POSHMARK_SOLD_EXTRACTOR = `
 `;
 
 
-// ── Swappa Electronics Extractor ────────────────────────────────────────────
-// Swappa is a server-rendered HTMX site — NOT a Redux/Next SPA — so there is no
-// __PRELOADED_STATE__ / __NEXT_DATA__ to read, and there is no JSON-LD. Critically,
-// the scrape URL `/search?q=<query>` is a PRODUCT DISAMBIGUATION page (it lists
-// matching MODELS, each linking to `/listings/<model-slug>`), NOT a page of priced
-// listings. The actual sold/active comps live one navigation away on the model's
-// listings page, where every card is standardized schema.org Offer microdata
-// (`itemprop="offers"` → `itemprop="price"` / `itemprop="description"`).
-//
-// So this extractor is two-step and site-agnostic by design (microdata, not CSS
-// class names that rot):
-//   1. If the current document already carries Offer microdata (e.g. the user
-//      navigated straight to a listings page in the Solve window), extract it.
-//   2. Otherwise we're on /search — resolve the `/listings/<slug>` link whose
-//      label best matches the `?q=` query, fetch that page SAME-ORIGIN (carries
-//      the session cookies that already passed the bot check), parse it, and read
-//      its Offer microdata.
-// The fetch is memoized on `window` so the readiness poll loop (which calls this
-// repeatedly until the count settles) only hits the network once. Returns a
-// Promise — both the headless pool and the inline-resolve window await it.
-export const SWAPPA_EXTRACTOR = `
-(function() {
-  var ORIGIN = location.origin || 'https://swappa.com';
-  var __money = ${MONEY_PARSE_FN};
-
+// Model-link resolver shared by SWAPPA_EXTRACTOR and SWAPPA_SOLD_EXTRACTOR (abs, tokens, pickListingsLink).
+const SWAPPA_PICKER_FNS = `
   function abs(href) {
     if (!href) return '';
     try { return new URL(href, ORIGIN).href; } catch (e) { return href.charAt(0) === '/' ? ORIGIN + href : href; }
   }
 
-  // Read comps from any document carrying schema.org Offer microdata.
-  // Deduped by url — a featured offer can also appear in the main grid on
-  // the same page (see SWAPPA_SOLD_EXTRACTOR below, which guards the same
-  // failure mode); without it a duplicate silently doubles that listing's
-  // weight in the price the AI recommends.
-  function extractOffers(doc) {
-    var out = [];
-    var seenUrls = {};
-    var cards = doc.querySelectorAll('[itemprop="offers"][itemscope], [itemtype*="schema.org/Offer"]');
-    cards.forEach(function(card) {
-      try {
-        var priceEl = card.querySelector('[itemprop="price"]');
-        if (!priceEl) return;
-        var raw = priceEl.getAttribute('content') || priceEl.textContent || '';
-        var price = __money(raw);
-        if (price <= 0) return;
-        var descEl = card.querySelector('[itemprop="description"]') || card.querySelector('[itemprop="name"]');
-        var title = (descEl && (descEl.getAttribute('content') || descEl.textContent) || '').trim();
-        if (!title) return;
-        var linkEl = card.querySelector('a[href*="/listing/"]');
-        var url = linkEl ? abs(linkEl.getAttribute('href')) : '';
-        if (url) { if (seenUrls[url]) return; seenUrls[url] = 1; }
-        out.push({
-          title: title,
-          price: price,
-          priceText: '$' + price,
-          url: url,
-          source: 'swappa',
-        });
-      } catch (e) {}
-    });
-    return out;
-  }
-
   function tokens(s) {
     return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   }
-
   // From the /search disambiguation page, pick the bare /listings/<slug> link
   // whose label best matches the query. Token overlap wins; extra tokens are
   // lightly penalized so "iPhone XS" prefers .../apple-iphone-xs over the
@@ -630,6 +572,69 @@ export const SWAPPA_EXTRACTOR = `
     if (!best || bestHits < minHits || bestHits < matchable) return '';
     return abs(best.href);
   }
+`;
+
+// ── Swappa Electronics Extractor ────────────────────────────────────────────
+// Swappa is a server-rendered HTMX site — NOT a Redux/Next SPA — so there is no
+// __PRELOADED_STATE__ / __NEXT_DATA__ to read, and there is no JSON-LD. Critically,
+// the scrape URL `/search?q=<query>` is a PRODUCT DISAMBIGUATION page (it lists
+// matching MODELS, each linking to `/listings/<model-slug>`), NOT a page of priced
+// listings. The actual sold/active comps live one navigation away on the model's
+// listings page, where every card is standardized schema.org Offer microdata
+// (`itemprop="offers"` → `itemprop="price"` / `itemprop="description"`).
+//
+// So this extractor is two-step and site-agnostic by design (microdata, not CSS
+// class names that rot):
+//   1. If the current document already carries Offer microdata (e.g. the user
+//      navigated straight to a listings page in the Solve window), extract it.
+//   2. Otherwise we're on /search — resolve the `/listings/<slug>` link whose
+//      label best matches the `?q=` query, fetch that page SAME-ORIGIN (carries
+//      the session cookies that already passed the bot check), parse it, and read
+//      its Offer microdata.
+// The fetch is memoized on `window` so the readiness poll loop (which calls this
+// repeatedly until the count settles) only hits the network once. Returns a
+// Promise — both the headless pool and the inline-resolve window await it.
+export const SWAPPA_EXTRACTOR = `
+(function() {
+  var ORIGIN = location.origin || 'https://swappa.com';
+  var __money = ${MONEY_PARSE_FN};
+
+  ${SWAPPA_PICKER_FNS}
+
+  // Read comps from any document carrying schema.org Offer microdata.
+  // Deduped by url — a featured offer can also appear in the main grid on
+  // the same page (see SWAPPA_SOLD_EXTRACTOR below, which guards the same
+  // failure mode); without it a duplicate silently doubles that listing's
+  // weight in the price the AI recommends.
+  function extractOffers(doc) {
+    var out = [];
+    var seenUrls = {};
+    var cards = doc.querySelectorAll('[itemprop="offers"][itemscope], [itemtype*="schema.org/Offer"]');
+    cards.forEach(function(card) {
+      try {
+        var priceEl = card.querySelector('[itemprop="price"]');
+        if (!priceEl) return;
+        var raw = priceEl.getAttribute('content') || priceEl.textContent || '';
+        var price = __money(raw);
+        if (price <= 0) return;
+        var descEl = card.querySelector('[itemprop="description"]') || card.querySelector('[itemprop="name"]');
+        var title = (descEl && (descEl.getAttribute('content') || descEl.textContent) || '').trim();
+        if (!title) return;
+        var linkEl = card.querySelector('a[href*="/listing/"]');
+        var url = linkEl ? abs(linkEl.getAttribute('href')) : '';
+        if (url) { if (seenUrls[url]) return; seenUrls[url] = 1; }
+        out.push({
+          title: title,
+          price: price,
+          priceText: '$' + price,
+          url: url,
+          source: 'swappa',
+        });
+      } catch (e) {}
+    });
+    return out;
+  }
+
 
   // Step 1 — already on a listings page? Extract directly.
   var direct = extractOffers(document);
@@ -672,54 +677,13 @@ export const SWAPPA_EXTRACTOR = `
 // (no login) but is an HTMX fragment, so the fetch must carry HX-Request. Two-step
 // like the active extractor: resolve the model slug from /search, then fetch the
 // sales fragment same-origin (carries any session cookies, same bot-check pass).
-// The resolver helpers (abs/tokens/pickListingsLink) are intentionally duplicated
-// from SWAPPA_EXTRACTOR so that working extractor is left byte-for-byte untouched.
+// The model resolver (abs/tokens/pickListingsLink) is SWAPPA_PICKER_FNS, shared with SWAPPA_EXTRACTOR.
 export const SWAPPA_SOLD_EXTRACTOR = `
 (function() {
   var ORIGIN = location.origin || 'https://swappa.com';
   var __money = ${MONEY_PARSE_FN};
 
-  function abs(href) {
-    if (!href) return '';
-    try { return new URL(href, ORIGIN).href; } catch (e) { return href.charAt(0) === '/' ? ORIGIN + href : href; }
-  }
-  function tokens(s) {
-    return String(s || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-  }
-  // Pick the bare /listings/<slug> link best matching the query (same model
-  // picker + match-quality gate as the active extractor — keeps wrong-model risk
-  // identical between the two Swappa sources).
-  function pickListingsLink(doc, query) {
-    var scope = doc.querySelector('#main_search_product_results') || doc;
-    var anchors = Array.prototype.slice.call(scope.querySelectorAll('a[href*="/listings/"]'));
-    var seen = {};
-    var cands = [];
-    anchors.forEach(function(a) {
-      var href = a.getAttribute('href') || '';
-      if (!/\\/listings\\/[a-z0-9-]+$/i.test(href)) return;
-      if (seen[href]) return; seen[href] = 1;
-      var label = (a.getAttribute('title') || a.textContent || '').trim() || href.split('/').pop().replace(/-/g, ' ');
-      cands.push({ href: href, label: label });
-    });
-    if (!cands.length) return '';
-    var qt = tokens(query);
-    var pool = {};
-    cands.forEach(function(c) { tokens(c.label + ' ' + c.href).forEach(function(t) { pool[t] = 1; }); });
-    var matchable = 0;
-    qt.forEach(function(t) { if (pool[t]) matchable++; });
-    var best = null, bestScore = -Infinity, bestHits = 0;
-    cands.forEach(function(c, idx) {
-      var ct = tokens(c.label + ' ' + c.href);
-      var hits = 0;
-      qt.forEach(function(t) { if (ct.indexOf(t) !== -1) hits++; });
-      var extra = Math.max(0, ct.length - hits);
-      var score = hits * 100 - extra - idx * 0.01;
-      if (score > bestScore) { bestScore = score; best = c; bestHits = hits; }
-    });
-    var minHits = Math.min(2, qt.length);
-    if (!best || bestHits < minHits || bestHits < matchable) return '';
-    return abs(best.href);
-  }
+  ${SWAPPA_PICKER_FNS}
 
   // 'apple-iphone-x' -> 'Apple Iphone X' — the sales fragment has no model name,
   // only the row's spec columns, so the comp title is built from the slug + specs.

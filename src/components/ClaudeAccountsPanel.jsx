@@ -33,9 +33,9 @@ export function ClaudeAccountsPanel({ className = '' }) {
 
   const refresh = useCallback(async () => { setLoaded(await listClaudeAccounts()); }, []);
   useEffect(() => {
-    let live = true;
-    listClaudeAccounts().then((list) => { if (live) setLoaded(list); });
-    return () => { live = false; };
+    let active = true;
+    listClaudeAccounts().then((list) => { if (active) setLoaded(list); });
+    return () => { active = false; };
   }, []);
 
   const { pending, message, addAccount, cancelLogin } = useClaudeAccountAddFlow({ onAdded: refresh });

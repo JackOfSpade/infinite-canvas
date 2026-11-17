@@ -245,7 +245,7 @@ export async function runApiTransportRetry(operation, {
 }
 
 /**
- * A tiny bespoke HTML stripper for snippets (no heavy external dom parser).
+ * HTML to plain text for snippets, via html-to-text.
  * Only a plain-text snippet is needed here; nothing downstream renders markdown.
  */
 function stripHtml(html) {
@@ -630,25 +630,6 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
 }
 
 /**
- * Browser-based second-pass enrichment for LinkedIn job descriptions.
- *
- * LinkedIn returns HTTP 999 to plain Node.js fetch(), so plain HTTP is a dead
- * end. This function reuses the already-running shared stealth browser
- * (getStealthBrowser), opens ONE new page (tab), navigates it sequentially
- * through each job URL, extracts the JobPosting JSON-LD description, and
- * closes the tab when done. No browser launch/close overhead per job.
- *
- * Stops immediately if a login wall is detected (LinkedIn starts requiring
- * auth after N rapid navigations). Logs how many succeeded before the wall.
- *
- * @param {Array}       jobs   — deduped job objects from fetchLinkedInJobs
- * @param {AbortSignal} signal — propagated abort signal
- * @returns {Promise<{ jobs: Array, loginWall: boolean, loginWallUrl: string|null }>}
- *   jobs       — same jobs array with description + snippet where extractable
- *   loginWall  — true if enrichment was stopped by a LinkedIn auth redirect
- *   loginWallUrl — the redirect URL that triggered the wall (for error surfacing)
- */
-/**
  * Is the current egress (the system network / VPN) actually online? Node fetch
  * rides the same uplink as the stealth browser, so this reflects what the browser
  * can reach. Returns true if ANY HTTP response comes back (DNS+TCP+TLS worked) —
@@ -673,7 +654,9 @@ async function probeInternet(signal, timeoutMs = 5000) {
     try {
       timer = setTimeout(() => ctrl.abort(), timeoutMs);
       signal?.addEventListener?.('abort', onAbort, { once: true });
-      await fetch(url, { signal: ctrl.signal });
+      const response = await fetch(url, { signal: ctrl.signal });
+      // Only liveness matters; release the unread body so the socket is freed.
+      Promise.resolve(response?.body?.cancel?.()).catch(() => {});
       return true; // a response of any status means the uplink is alive
     } catch {
       if (signal?.aborted) return true; // aborted, not offline
@@ -727,27 +710,6 @@ export function linkedInDescriptionPacing({ mode = 'guest', requestsIssued = 0 }
 /** Exact auth routes only; a job slug containing these words is not a wall. */
 export const LINKEDIN_LOGIN_WALL_RE = /^https?:\/\/(?:[a-z0-9-]+\.)*linkedin\.com\/(?:login|uas|checkpoint|authwall|signup|join|session)(?:\/|[?#]|$)/i;
 
-/**
- * Runs INSIDE the LinkedIn job page (no closures; Puppeteer serializes it). LinkedIn
- * prints "No longer accepting applications" in the top card of a closed posting.
- * The phrase can also appear in a posting's own description, so count it on the
- * whole page and inside the description container separately: only an occurrence
- * outside the description is the board talking.
- */
-export function linkedInClosedMarkerProbe() {
-  const phrase = /no\s+longer\s+accepting\s+applications/gi;
-  const hits = value => (String(value || '').match(phrase) || []).length;
-  let description = 0;
-  for (const selector of ['#job-details', '.jobs-description-content__text', '.jobs-description__content',
-    '.jobs-box__html-content', '.description__text', '.show-more-less-html__markup']) {
-    const element = document.querySelector(selector);
-    if (element) { description = hits(element.textContent); break; }
-  }
-  return { page: hits(document.body ? document.body.innerText : ''), description };
-}
-export function linkedInPostingClosed(probe) {
-  return Number.isFinite(probe?.page) && Number.isFinite(probe?.description) && probe.page > probe.description;
-}
 /** A rendered wall at the original detail URL is still an unknown visit. */
 export function linkedInCapturedVisitWall(result, probed) {
   if (result?.ok || result?.evalFailed || result?.ldCount !== 0) return null;
@@ -790,6 +752,25 @@ export function linkedInUndescribedRow(job, decision, evidence = null) {
   return rowWithListingDecision(job, decision, 'linkedin', evidence);
 }
 
+/**
+ * Browser-based second-pass enrichment for LinkedIn job descriptions.
+ *
+ * LinkedIn returns HTTP 999 to plain Node.js fetch(), so plain HTTP is a dead
+ * end. This function reuses the already-running shared stealth browser
+ * (getStealthBrowser), opens ONE new page (tab), navigates it sequentially
+ * through each job URL, extracts the JobPosting JSON-LD description, and
+ * closes the tab when done. No browser launch/close overhead per job.
+ *
+ * Stops immediately if a login wall is detected (LinkedIn starts requiring
+ * auth after N rapid navigations). Logs how many succeeded before the wall.
+ *
+ * @param {Array}       jobs   — deduped job objects from fetchLinkedInJobs
+ * @param {AbortSignal} signal — propagated abort signal
+ * @returns {Promise<{ jobs: Array, loginWall: boolean, loginWallUrl: string|null }>}
+ *   jobs       — same jobs array with description + snippet where extractable
+ *   loginWall  — true if enrichment was stopped by a LinkedIn auth redirect
+ *   loginWallUrl — the redirect URL that triggered the wall (for error surfacing)
+ */
 export async function enrichLinkedInDescriptionsBrowser(jobs, signal, { preferAuthenticated = false, onProgress = null, runtime = null } = {}) {
   if (!jobs?.length) return { jobs, loginWall: false, loginWallUrl: null };
   const cancelledResult = () => ({
@@ -1699,8 +1680,7 @@ function computeJobRelevanceDecision(roleText, query, geoTerms = EMPTY_GEO) {
  * Compact evidence for a keyword-less remote-feed match. This is kept out of
  * the job object itself: it is report telemetry, not prompt/card payload.
  */
-export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
-  const decision = computeJobRelevanceDecision(roleText, query, geoTerms);
+function relevanceEvidenceFromDecision(decision, query) {
   if (!decision.ok) return null;
   return {
     query: String(query || '').slice(0, 120),
@@ -1714,6 +1694,10 @@ export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
     requiredMatches: decision.requiredMatches,
     fallbackTerms: decision.fallbackTerms,
   };
+}
+
+export function jobRelevanceEvidence(roleText, query, geoTerms = EMPTY_GEO) {
+  return relevanceEvidenceFromDecision(computeJobRelevanceDecision(roleText, query, geoTerms), query);
 }
 
 /**
@@ -1785,18 +1769,17 @@ export function filterWholeFeedJobsByTitleRelevance(jobs, queries, geoTerms = EM
     // UTF-8 mojibake (for example "MACAÃ"), and this boundary otherwise runs
     // before the final kept-job cleanup where that text is normally repaired.
     const title = decodeHtmlEntities(repairMojibake(String(job?.title || '')));
-    const matched = roleQueries.length === 0
-      ? []
-      : roleQueries
-        .map(query => jobRelevanceEvidence(title, query, geoTerms))
-        .filter(Boolean);
+    const decisions = roleQueries.map(query => computeJobRelevanceDecision(title, query, geoTerms));
+    const matched = decisions
+      .map((decision, index) => relevanceEvidenceFromDecision(decision, roleQueries[index]))
+      .filter(Boolean);
     if (roleQueries.length > 0 && matched.length === 0) {
       // Keep the bounded diagnostic sample useful: a title sharing one role
       // concept is more valuable when debugging a zero than an arbitrary
       // first-feed-row miss. Sorting only the report sample never changes
       // provider ordering or admission. Original feed order resolves ties.
-      const closestMatchedConcepts = roleQueries.reduce((best, query) =>
-        Math.max(best, computeJobRelevanceDecision(title, query, geoTerms).matchedConcepts.length), 0);
+      const closestMatchedConcepts = decisions.reduce((best, decision) =>
+        Math.max(best, decision.matchedConcepts.length), 0);
       if (title) rejectedCandidates.push({ title, closestMatchedConcepts, order });
       continue;
     }
@@ -2461,6 +2444,7 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       : '';
     const tags = Array.isArray(job.tags) ? job.tags.map(remoteOkScalarText).filter(Boolean).join(', ') : '';
     const url = remoteOkPostingUrl(job.url);
+    const salary = formatRemoteOkSalary(job.salary_min, job.salary_max);
     return {
       title: typeof job.position === 'string' ? job.position : '',
       company: typeof job.company === 'string' ? job.company : '',
@@ -2472,8 +2456,8 @@ export async function fetchRemoteOKJobs(queries, signal = null, geoTerms = EMPTY
       // rendered the literal "$120000 - $undefined" on the card and in the
       // scoring prompt. Never invent a cadence — parseSalaryToNumeric's range
       // path annualizes correctly from this shape.
-      salary: formatRemoteOkSalary(job.salary_min, job.salary_max),
-      salaryProvenance: formatRemoteOkSalary(job.salary_min, job.salary_max) ? 'posted' : 'unknown',
+      salary,
+      salaryProvenance: salary ? 'posted' : 'unknown',
       // Pipeline convention: the FULL JD lives in `snippet` — that's the field the
       // scorer reads (jobs.js slimBatch + "Description: ${job.snippet}") and the
       // bug-report field-quality check measures. RemoteOK's API hands us the full
@@ -2580,9 +2564,6 @@ function contextAround(s, index, length, pad = 70) {
 }
 
 /**
- * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
- */
-/**
  * WeWorkRemotely category feeds, keyed by the query words that imply them.
  *
  * The main feed is ~90 postings and has NO keyword parameter (`?search=` is a
@@ -2634,6 +2615,9 @@ async function fetchWwrFeed(url, signal) {
   }, 'weworkremotely');
 }
 
+/**
+ * Fetch jobs from WeWorkRemotely's RSS feed (bypasses Puppeteer entirely).
+ */
 export async function fetchWeWorkRemotelyJobs(queries, signal = null, geoTerms = EMPTY_GEO) {
   const r = await fetchWwrFeed('https://weworkremotely.com/remote-jobs.rss', signal);
 
@@ -3133,7 +3117,8 @@ function extractJobKeyFromUrl(rawUrl) {
     return url.searchParams.get('jk') || '';
   } catch {
     const m = String(rawUrl).match(/[?&]jk=([^&]+)/i);
-    return m ? decodeURIComponent(m[1]) : '';
+    if (!m) return '';
+    try { return decodeURIComponent(m[1]); } catch { return m[1]; }
   }
 }
 
@@ -3567,15 +3552,6 @@ export function extractIndeedJobsFromHtml(html, windowMosaicResults = null) {
   return merged;
 }
 
-/**
- * Fetch job listings from Dice via their public API (Tier 1).
- * @param {string} query — job search query
- * @param {string} [location] — optional location filter
- * @param {number} [maxAgeDays] — keep only postings within this window (server-side
- *   when it matches a Dice bucket, else client-side — see dicePostedBucket)
- * @returns {Promise<{items: Array, warning: object|null, providerTotal: number|null, truncated: boolean}>}
- *   Standardized jobs plus corpus-coverage diagnostics.
- */
 // Dice exposes a SERVER-SIDE date filter (`filters.postedDate`) but only in coarse
 // 1/3/7-day buckets. Verified against the live API: the accepted enum is the
 // uppercase words ONE/THREE/SEVEN (SEVEN bounds to ≤6d, i.e. a 7-day window);
@@ -4004,14 +3980,6 @@ export async function warmDiceApiKey(signal = null) {
   }
 }
 
-/**
- * Extract JobPosting.description from a page's JSON-LD (handles @graph wrappers
- * and array `@type`). Node-side analogue of the browser scrapers' JSON-LD
- * harvest. Returns '' when no JobPosting description is present, and never throws
- * on malformed JSON-LD. Exported for unit testing.
- * @param {string} html — raw page HTML
- * @returns {string} — the description HTML (caller strips tags), or ''
- */
 // A related ItemList may precede the main posting in another script block.
 // Dice knows the fetched page URL, so bind both fields to one posting rather
 // than independently borrowing the first available field from another job.
@@ -4034,6 +4002,14 @@ function pageJobPostingField(html, pageUrl, read) {
   return selected ? read(selected) : undefined;
 }
 
+/**
+ * Extract JobPosting.description from a page's JSON-LD (handles @graph wrappers
+ * and array `@type`). Node-side analogue of the browser scrapers' JSON-LD
+ * harvest. Returns '' when no JobPosting description is present, and never throws
+ * on malformed JSON-LD. Exported for unit testing.
+ * @param {string} html — raw page HTML
+ * @returns {string} — the description HTML (caller strips tags), or ''
+ */
 export function extractJobPostingDescription(html, pageUrl = '') {
   const desc = pageJobPostingField(html, pageUrl, (node) => {
     if (typeof node.description === 'string' && node.description.trim()) return node.description;
@@ -4181,6 +4157,7 @@ export async function enrichDiceDescriptions(jobs, signal) {
     if (!sampleFail) sampleFail = `${reason} @ ${ref || '?'}`;
   };
 
+  const structurallyDropped = new Set();
   let nextIndex = 0;
   await runRollingWorkers({
     workerCount: BATCH,
@@ -4225,6 +4202,7 @@ export async function enrichDiceDescriptions(jobs, signal) {
             if (decision.verdict !== 'closed' || evidence.finalHostClass === 'other') return job;
             if (evidence.finalHostClass === 'ats') {
               recordListingEvidence(job, evidence);
+              structurallyDropped.add(job.url);
               return null;
             }
             const closed = rowWithListingDecision(job, decision, 'dice');
@@ -4279,6 +4257,7 @@ export async function enrichDiceDescriptions(jobs, signal) {
           const decision = classifyListingLiveness(evidence, rules);
           if (decision.verdict === 'closed' && evidence.finalHostClass === 'ats') {
             recordListingEvidence(job, evidence);
+            structurallyDropped.add(job.url);
             return null;
           }
           const settled = rowWithListingDecision(rest, decision, 'dice');
@@ -4303,5 +4282,8 @@ export async function enrichDiceDescriptions(jobs, signal) {
   const reasonStr = Object.entries(fallbackReasons).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}:${v}`).join(', ');
   const fellBack = cleaned.length - lengthened;
   logger.info(`[Dice API] Enriched ${cleaned.length} jobs — ${lengthened} genuinely lengthened from detail endpoint, ${salaryUpgraded} salaries cadence-upgraded from the detail page${fellBack > 0 ? `; ${fellBack} kept list summary [${reasonStr}${sampleFail ? ` — e.g. ${sampleFail}` : ''}]` : ''}`);
+  // Rows dropped as confirmed closed on an ATS host. An aborted run also omits
+  // rows, so a caller cannot tell the two apart from absence alone.
+  Object.defineProperty(cleaned, 'structurallyDroppedUrls', { value: [...structurallyDropped] });
   return cleaned;
 }

@@ -240,7 +240,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
           className="flex items-center gap-1 rounded-md border border-white/10 bg-black/25 px-2 py-1 text-[11px] text-violet-100 hover:bg-white/5 disabled:opacity-40">
           {playing ? <Pause size={12} aria-hidden="true" /> : <Play size={12} aria-hidden="true" />}{playing ? 'Pause' : 'Play'}
         </button>
-        <button type="button" aria-label="Delete recording" onClick={() => setConfirmingDelete(true)} disabled={!replay?.audioUrl && !deleted}
+        <button type="button" aria-label="Delete recording" onClick={() => setConfirmingDelete(true)} disabled={!audioUrl}
           className="flex items-center gap-1 rounded-md border border-red-400/30 bg-red-500/15 px-2 py-1 text-[11px] text-red-100 hover:bg-red-500/25 disabled:opacity-40">
           <Trash2 size={12} aria-hidden="true" />Delete recording
         </button>

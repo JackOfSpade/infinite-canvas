@@ -957,7 +957,7 @@ function corpusStatementsContaining(corpus, bodies) {
  * contained in another is an excerpt and is not read: the one it was cut from
  * says how the candidate stood to the work.
  */
-export function roleStrengthStatements(quotes, { statements = [], corpus = '' } = {}) {
+function roleStrengthStatements(quotes, { statements = [], corpus = '' } = {}) {
   const bodies = [];
   const seen = new Set();
   const add = value => {

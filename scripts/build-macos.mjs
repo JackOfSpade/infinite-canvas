@@ -48,12 +48,17 @@ export function buildTargetFromArgv(argv = process.argv.slice(2)) {
   return index === -1 ? 'canvas' : String(argv[index + 1] || '');
 }
 
-function commandFailure(label, result) {
-  const detail = [result?.stdout, result?.stderr]
+function commandOutput(result) {
+  return [result?.stdout, result?.stderr]
     .filter(Boolean)
     .map(value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value))
-    .join('\n')
-    .trim();
+    .join('\n');
+}
+
+function commandFailure(label, result) {
+  // A command that never started (or a failed file write) has no output; its
+  // cause is only on result.error.
+  const detail = [commandOutput(result), result?.error?.message].filter(Boolean).join('\n').trim();
   return new Error(`${label}${detail ? `\n${detail}` : ''}`);
 }
 
@@ -269,7 +274,7 @@ export function acquirePackagingLock(projectDir = process.cwd(), {
       if (error?.code !== 'EEXIST') throw error;
       onMainLockContention?.();
       const reclaim = reclaimCurrentStalePackagingLock(projectDir, { now, pid, token, pidAlive, onReclaimGuardRecoveryClaim });
-      if (reclaim.state === 'reclaiming' || reclaim.state === 'guard-reclaiming') {
+      if (reclaim.state === 'guard-reclaiming') {
         throw new Error(`Another process is reclaiming a stale workspace package lock; retry npm run build shortly.`);
       }
       if (reclaim.state === 'guard-live') {
@@ -308,10 +313,6 @@ export function readConfiguredMacSigningConfig(projectDir = process.cwd()) {
   return { identity: identity.trim() };
 }
 
-export function readConfiguredSigningIdentity(projectDir = process.cwd()) {
-  return readConfiguredMacSigningConfig(projectDir).identity;
-}
-
 function hasIdentity(securityOutput, identity) {
   return securityOutput.split(/\r?\n/).some((line) => {
     const match = line.match(/^\s*\d+\)\s+([0-9A-F]+)\s+"([^"]+)"/i);
@@ -341,11 +342,7 @@ export function assertMacSigningPrerequisites({
   if (result?.error || result?.status !== 0) {
     throw commandFailure('Could not inspect macOS code-signing identities.', result);
   }
-  const output = [result.stdout, result.stderr]
-    .filter(Boolean)
-    .map(value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value))
-    .join('\n');
-  if (!hasIdentity(output, identity)) {
+  if (!hasIdentity(commandOutput(result), identity)) {
     throw new Error(`No valid macOS code-signing identity matching "${identity}" is available. Import or configure that certificate, then retry; npm run build intentionally stops before emitting an unsigned or partially signed app.`);
   }
 }
@@ -370,20 +367,22 @@ export function findMacApplications(releaseDir) {
   return apps.sort();
 }
 
+function macApplicationFingerprint(appPath) {
+  const stat = fs.statSync(appPath);
+  // A builder can update an existing bundle in place, leaving the outer
+  // directory metadata unchanged. CodeResources is written by codesign
+  // after nested resources are sealed, so its content identifies a fresh
+  // signed bundle without scanning the app's many gigabytes of resources.
+  const resources = path.join(appPath, 'Contents', '_CodeSignature', 'CodeResources');
+  const resourceHash = fs.existsSync(resources)
+    ? crypto.createHash('sha256').update(fs.readFileSync(resources)).digest('hex')
+    : 'missing';
+  return `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${resourceHash}`;
+}
+
 export function snapshotMacApplications(releaseDir) {
   try {
-    return new Map(findMacApplications(releaseDir).map((appPath) => {
-      const stat = fs.statSync(appPath);
-      // A builder can update an existing bundle in place, leaving the outer
-      // directory metadata unchanged. CodeResources is written by codesign
-      // after nested resources are sealed, so its content identifies a fresh
-      // signed bundle without scanning the app's many gigabytes of resources.
-      const resources = path.join(appPath, 'Contents', '_CodeSignature', 'CodeResources');
-      const resourceHash = fs.existsSync(resources)
-        ? crypto.createHash('sha256').update(fs.readFileSync(resources)).digest('hex')
-        : 'missing';
-      return [appPath, `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${resourceHash}`];
-    }));
+    return new Map(findMacApplications(releaseDir).map(appPath => [appPath, macApplicationFingerprint(appPath)]));
   } catch (error) {
     if (/did not create its release directory|did not emit a macOS .app/.test(String(error?.message || error))) return new Map();
     throw error;
@@ -391,15 +390,8 @@ export function snapshotMacApplications(releaseDir) {
 }
 
 export function findCurrentMacApplications(releaseDir, before) {
-  const current = findMacApplications(releaseDir).filter((appPath) => {
-    const stat = fs.statSync(appPath);
-    const resources = path.join(appPath, 'Contents', '_CodeSignature', 'CodeResources');
-    const resourceHash = fs.existsSync(resources)
-      ? crypto.createHash('sha256').update(fs.readFileSync(resources)).digest('hex')
-      : 'missing';
-    const fingerprint = `${stat.dev}:${stat.ino}:${stat.mtimeMs}:${stat.ctimeMs}:${resourceHash}`;
-    return before.get(appPath) !== fingerprint;
-  });
+  const current = findMacApplications(releaseDir)
+    .filter(appPath => before.get(appPath) !== macApplicationFingerprint(appPath));
   if (!current.length) {
     throw new Error('electron-builder reported success but did not emit a fresh macOS .app; refusing to verify a stale bundle.');
   }
@@ -427,10 +419,7 @@ export function verifyMacApplications({
     if (details?.error || details?.status !== 0) {
       throw commandFailure(`Could not inspect the macOS signing identity for ${appPath}.`, details);
     }
-    const output = [details.stdout, details.stderr]
-      .filter(Boolean)
-      .map(value => Buffer.isBuffer(value) ? value.toString('utf8') : String(value))
-      .join('\n');
+    const output = commandOutput(details);
     const authorities = [...output.matchAll(/^Authority=(.+)$/gm)].map(match => match[1].trim());
     if (/^Signature=adhoc$/mi.test(output) || !authorities.length || !authorities.includes(identity)) {
       throw new Error(`macOS package signing identity verification failed for ${appPath}: expected Authority=${identity}, found ${authorities.length ? authorities.join(' | ') : 'no Authority'}${/^Signature=adhoc$/mi.test(output) ? ' (Signature=adhoc)' : ''}.`);

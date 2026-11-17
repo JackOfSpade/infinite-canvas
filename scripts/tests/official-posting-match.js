@@ -4,9 +4,8 @@ import {
   proveEmployerDomain, strictEmployerEqual,
 } from '../../electron/ipc/officialSourceHosts.js';
 import {
-  coreTitle, descriptionOverlap, evaluateOfficialPostingMatch, frozenOfficialEmployer,
+  consolidatedSinglePlace, coreTitle, descriptionOverlap, frozenOfficialEmployer, isSingleStatedPlace,
   locationsCompatible, posterEmployerSignals, resolveScrapedEmployer,
-  selectOfficialPostingMatch, buildOfficialPostingComparisonSet,
 } from '../../electron/ipc/officialPostingMatch.js';
 
 const EMPLOYER = 'Northwind Labs';
@@ -23,7 +22,6 @@ const candidate = extra => ({ title: 'Senior Software Engineer', employer: EMPLO
   sourceUrl: 'https://jobs.ashbyhq.com/northwind/posting-one', tenant: 'northwind', ats: 'ashby', tenantProven: true,
   statusCode: 200, live: true, ...extra });
 const NOW = Date.parse('2026-10-24T00:00:00Z');
-const evaluate = (scraped = row(), official = candidate(), options = {}) => evaluateOfficialPostingMatch(scraped, official, { now: NOW, ...options });
 
 export default [
   {
@@ -151,7 +149,6 @@ export default [
       assert.equal(locationsCompatible(row({ location: 'Canada' }), candidate({ location: { display: 'Lakeview, Ontario, Canada' } })), false);
       assert.equal(locationsCompatible(row({ location: 'Ontario, Canada' }), candidate({ location: { display: 'Canada' } })), false);
       assert.equal(locationsCompatible(row({ location: 'Lakeview' }), candidate({ location: { display: 'Lakeview, Ontario, Canada' } })), true);
-      assert.equal(evaluate(row({ location: 'Lakeview, Ontario, Canada' }), candidate({ location: { display: 'Canada' } })).reason, 'location-mismatch', 'posted salary cannot anchor away a missing city');
       assert.equal(locationsCompatible(row({ location: 'Remote - Canada', remote: true }), candidate({ location: { display: '', remote: true, remoteCountry: 'Canada' } })), true);
       assert.equal(locationsCompatible(row({ location: 'Remote - Canada', remote: true }), candidate({ location: { display: '', remote: true, remoteCountry: 'United States' } })), false);
       assert.equal(locationsCompatible(row({ location: 'Remote' }), candidate({ location: { display: '', remote: true, remoteCountry: 'Canada' } })), false);
@@ -159,75 +156,9 @@ export default [
     },
   },
   {
-    name: 'Official posting matching: same-band siblings, city twins, wrong employers, poster tenants and closed jobs fail hard gates',
-    run() {
-      assert.equal(evaluate().passed, true);
-      for (const [overrides, reason] of [
-        [{ title: 'Forward Deployed Engineer' }, 'title-mismatch'],
-        [{ location: { display: 'Vancouver, BC, Canada' } }, 'location-mismatch'],
-        [{ employer: 'Northwind Labs Consulting' }, 'employer-mismatch'],
-        [{ tenantProven: false }, 'tenant-unproven'],
-        [{ posterTenant: true }, 'poster-tenant'],
-        [{ validThrough: '2026-10-23T23:59:59Z' }, 'closed'],
-        [{ live: false, statusCode: 404 }, 'closed'],
-      ]) assert.equal(evaluate(row(), candidate(overrides)).reason, reason);
-      assert.equal(evaluate(row(), candidate({ sourceUrl: 'https://jobs.linkedin.com/123' })).reason, 'unsafe-url');
-    },
-  },
-  {
-    name: 'Official posting matching: official government portal proof is exact to host, job route and agency',
-    run() {
-      const agency = 'Federal Research Agency';
-      const scraped = row({ company: agency });
-      const portal = candidate({ employer: agency, sourceUrl: 'https://www.usajobs.gov/job/12345678',
-        ats: '', tenant: '', tenantProven: false, employerDomainProven: false, officialPortalProven: true });
-      assert.equal(evaluate(scraped, portal).anchor, 'salary-anchor');
-      for (const overrides of [
-        { sourceUrl: 'https://usajobs.gov.example/job/12345678' },
-        { sourceUrl: 'https://agency.usajobs.gov/job/12345678' },
-        { sourceUrl: 'https://www.usajobs.gov/job/not-an-id' },
-        { sourceUrl: 'https://www.usajobs.gov/jobs/12345678' },
-        { officialPortalProven: false },
-      ]) assert.equal(evaluate(scraped, { ...portal, ...overrides }).reason, 'tenant-unproven');
-      assert.equal(evaluate(scraped, { ...portal, employer: 'Different Federal Agency' }, { employerHypotheses: ['Different Federal Agency'] }).reason, 'tenant-unproven');
-      assert.equal(evaluate(scraped, { ...portal, title: 'Staff Software Engineer' }).reason, 'title-mismatch');
-      assert.equal(evaluate(scraped, { ...portal, salary: { text: 'CAD 130k-160k', provenance: 'posted' } }).reason, 'salary-mismatch');
-    },
-  },
-  {
     name: 'Official posting matching: only posted salary anchors or vetoes and units and currencies stay exact',
     run() {
-      const noOverlap = { description: 'This separate posting contains a wholly different set of responsibilities and requirements.' };
-      assert.equal(evaluate(row(), candidate(noOverlap)).anchor, 'salary-anchor');
-      assert.equal(evaluate(row({ salary: 'USD 120k-150k' }), candidate({ ...noOverlap, salary: { text: 'USD 120000-150000', provenance: 'posted' } })).anchor, 'salary-anchor');
-      assert.equal(evaluate(row({ salary: '$120000-150000' }), candidate(noOverlap)).reason, 'no-anchor', 'a Canadian city cannot establish the currency of a bare dollar sign');
-      assert.equal(evaluate(row(), candidate({ ...noOverlap, salary: { text: '$120000-150000', provenance: 'posted' } })).reason, 'no-anchor', 'the official offer also needs an explicit currency');
-      assert.equal(evaluate(row({ salary: '$90000-100000', identifier: 'REQ-42' }), candidate({ ...noOverlap, identifier: 'REQ-42' })).anchor, 'identifier-anchor', 'unknown currency cannot veto an independent identifier anchor');
-      assert.equal(evaluate(row({ identifier: 'REQ-42' }), candidate({ ...noOverlap, identifier: 'REQ-42', salary: { text: '$90000-100000', provenance: 'posted' } })).anchor, 'identifier-anchor');
-      assert.equal(evaluate(row({ salary: '$90000-100000' }), candidate()).anchor, 'description-anchor', 'unknown currency cannot veto independently anchored text');
-      assert.equal(evaluate(row({ salaryProvenance: 'estimated' }), candidate(noOverlap)).reason, 'no-anchor');
-      assert.equal(evaluate(row({ salaryProvenance: undefined }), candidate({ ...noOverlap, salary: { text: 'CAD 10k-20k', provenance: 'posted' } })).reason, 'no-anchor');
-      assert.equal(evaluate(row(), candidate({ salary: { text: 'CAD 130k-160k', provenance: 'posted' } })).reason, 'salary-mismatch');
-      assert.equal(evaluate(row(), candidate({ salary: { text: 'USD 120k-150k', provenance: 'posted' } })).reason, 'salary-mismatch');
-      assert.equal(evaluate(row({ salary: 'CAD 104000', snippet: 'Full time', salaryProvenance: 'posted' }), candidate({ ...noOverlap, salary: { text: 'CAD 50 per hour', provenance: 'posted' }, snippet: 'Full time' })).reason, 'salary-mismatch');
-      assert.equal(evaluate(row({ salaryProvenance: 'estimated', identifier: 'REQ-42' }), candidate({ ...noOverlap, identifier: { value: 'REQ-42' } })).anchor, 'identifier-anchor');
-      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), candidate({ salary: { text: '', provenance: 'unknown' } })).anchor, 'description-anchor');
       assert.equal(descriptionOverlap('We seek qualified applicants.', 'We seek qualified applicants.').anchored, false);
-    },
-  },
-  {
-    name: 'Official posting matching: unique decisions preserve ambiguity and refuse unanchored evergreen postings',
-    run() {
-      assert.equal(selectOfficialPostingMatch(row(), [candidate()], { now: NOW }).outcome, 'found');
-      const twins = [candidate({ sourceUrl: 'https://jobs.ashbyhq.com/northwind/alpha', team: 'Ledger' }), candidate({ sourceUrl: 'https://jobs.ashbyhq.com/northwind/beta', team: 'Intake' })];
-      assert.equal(selectOfficialPostingMatch(row(), twins, { now: NOW }).outcome, 'ambiguous');
-      const noAnchor = { salary: { text: '', provenance: 'unknown' }, description: 'Evergreen expression of interest for future openings.' };
-      assert.equal(selectOfficialPostingMatch(row({ salaryProvenance: 'unknown' }), [candidate(noAnchor)], { now: NOW }).outcome, 'not-found');
-      const unanchoredTwins = twins.map(item => ({ ...item, ...noAnchor }));
-      const ambiguity = selectOfficialPostingMatch(row({ salaryProvenance: 'unknown' }), unanchoredTwins, { now: NOW });
-      assert.equal(ambiguity.outcome, 'ambiguous');
-      assert.equal(ambiguity.candidate, null);
-      assert.equal(ambiguity.alternatives.length, 2);
     },
   },
   {
@@ -246,13 +177,6 @@ export default [
       assert.equal(resolveScrapedEmployer({ ...recruiter, snippet: 'We are hiring for our client.' }).level, 'L6');
       assert.equal(resolveScrapedEmployer({ ...recruiter, title: 'Senior Software Engineer', url: 'https://board.example/job/1' }).level, 'L6');
       assert.equal(resolveScrapedEmployer(row({ snippet: 'Build reliable services for the dispatch team.' })).employer, EMPLOYER);
-      assert.equal(evaluate(recruiter, candidate()).passed, true, 'an official strict hypothesis match can verify a recruiter posting');
-      assert.equal(evaluate(recruiter, candidate({ employer: 'Acme Talent Partners', sourceUrl: 'https://jobs.ashbyhq.com/acme-talent/123', tenant: 'acme-talent' })).reason, 'poster-tenant');
-      const unnamedClient = { ...recruiter, title: 'Senior Software Engineer', url: 'https://board.example/job/1', snippet: 'We are hiring for our client.' };
-      assert.equal(evaluate(unnamedClient, candidate()).reason, 'employer-mismatch');
-      assert.equal(evaluate(unnamedClient, candidate(), { employerHypotheses: [EMPLOYER] }).passed, true);
-      assert.equal(evaluate(unnamedClient, candidate({ tenantProven: false }), { employerHypotheses: [EMPLOYER] }).reason, 'tenant-unproven');
-      assert.equal(evaluate(unnamedClient, candidate({ employer: 'Acme Talent Partners', sourceUrl: 'https://jobs.ashbyhq.com/acme-talent/123', tenant: 'acme-talent' })).reason, 'poster-tenant');
       const school = { title: 'Teacher at Birch Elementary School', company: 'Birch School District',
         snippet: 'Birch Elementary School is part of Birch School District. Teach classroom lessons.' };
       assert.equal(posterEmployerSignals(school).pointsAway, false);
@@ -268,7 +192,6 @@ export default [
         assert.deepEqual(posterEmployerSignals(own).S4, []);
         assert.equal(posterEmployerSignals(own).pointsAway, false);
         assert.equal(resolveScrapedEmployer(own).employer, EMPLOYER);
-        assert.equal(evaluate(own, candidate()).passed, true);
         const other = row({ company: 'Acme Talent Partners',
           snippet: `Acme Talent Partners${separator}${EMPLOYER} is a technology company. Build reliable services.` });
         assert.deepEqual(posterEmployerSignals(other).S4, [EMPLOYER]);
@@ -294,114 +217,8 @@ export default [
       assert.equal(overlap.anchored, false);
       assert.equal(overlap.weak, true);
       assert.ok(overlap.coverageRight > overlap.coverageLeft);
-      const scraped = row({ snippet: longer, salaryProvenance: 'unknown' });
-      const official = candidate({ description: DESCRIPTION, salary: { text: '', provenance: 'unknown' } });
-      assert.equal(evaluate(scraped, official).reason, 'no-anchor');
-      assert.equal(evaluate({ ...scraped, identifier: 'REQ-42' }, { ...official, identifier: 'REQ-42' }).anchor, 'identifier-anchor');
-      assert.equal(evaluate(row({ snippet: longer }), candidate({ description: DESCRIPTION })).anchor, 'salary-anchor');
       assert.equal(descriptionOverlap('ledger route queue audit export '.repeat(10), 'ledger route queue audit export '.repeat(10)).anchored, false, 'repetition cannot supply twelve distinctive grams');
       assert.equal(descriptionOverlap(DESCRIPTION, DESCRIPTION).anchored, true);
-    },
-  },
-  {
-    name: 'Official posting matching: benefits, company copy and closed peer postings cannot identify a live sibling or stub',
-    run() {
-      const about = 'About Northwind Labs. Northwind Labs develops workflow products for regional businesses across the country. '
-        + 'We value kind colleagues and measured progress in every office. We offer health coverage, flexible hours and paid parental leave. '
-        + 'Northwind Labs is an equal opportunity employer and welcomes applicants from every background.';
-      const other = 'Maintain embedded camera calibration firmware for industrial inspection stations and diagnose faulty exposure timing. '
-        + 'Develop sensor readout scheduling, validate image capture latency and document mechanical alignment procedures for production technicians. '
-        + 'Requirements include expertise in optical measurements, low power processors, physical tolerances and repeatable laboratory experiments.';
-      const scraped = row({ snippet: `${DESCRIPTION} ${about}`, salaryProvenance: 'unknown' });
-      for (const body of [about, `${other} ${about}`, `${other.split('. ')[0]}. ${about}`]) {
-        const official = candidate({ description: body, salary: { text: '', provenance: 'unknown' } });
-        assert.equal(evaluate(scraped, official).reason, 'no-anchor');
-        assert.equal(selectOfficialPostingMatch(scraped, [official], { now: NOW }).candidate, null);
-      }
-      const shared = candidate({ identifier: 'CLOSED-ROLE', sourceUrl: 'https://jobs.ashbyhq.com/northwind/closed-role', live: false, isListed: false, statusCode: 410 });
-      const sibling = candidate({ identifier: 'LIVE-SIBLING', salary: { text: '', provenance: 'unknown' } });
-      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), sibling, { peerCandidates: [shared] }).reason, 'no-anchor', 'even unlabelled role-looking copy shared with a closed peer is not distinctive');
-      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), sibling, { peerCandidates: [{ ...shared, sourceUrl: 'https://jobs.ashbyhq.com/another-company/closed-role', tenant: 'another-company' }] }).anchor, 'description-anchor', 'another tenant does not erase role evidence');
-      assert.equal(evaluate(row({ salaryProvenance: 'unknown' }), { ...sibling, identifier: 'SAME-ROLE' }, { peerCandidates: [{ ...shared, identifier: 'SAME-ROLE' }] }).anchor, 'description-anchor', 'a duplicate representation of one requisition is not a sibling');
-    },
-  },
-  {
-    name: 'Official posting comparison set excludes identity failures includes closed postings and caps by containment before stable URL ids',
-    run() {
-      const job = row({ salaryProvenance: 'unknown' });
-      const closed = candidate({ sourceUrl: 'https://jobs.ashbyhq.com/northwind/closed', live: false, statusCode: 410 });
-      assert.equal(evaluate(job, closed).identityPass, true); assert.equal(evaluate(job, closed).reason, 'closed');
-      const wrongPayClosed = { ...closed, salary: { text: 'CAD 90000-100000', provenance: 'posted' } };
-      assert.equal(evaluate(row(), wrongPayClosed).reason, 'closed');
-      assert.equal(evaluate(row(), wrongPayClosed).salaryMismatch, true, 'a comparative closed choice retains the posted-pay veto');
-      const rejected = [candidate({ employer: 'Cedar Works' }), candidate({ title: 'Product Designer' }),
-        candidate({ location: { display: 'Riverton, Ontario, Canada' } }), candidate({ tenantProven: false }), candidate({ posterTenant: true })];
-      for (const value of rejected) assert.equal(evaluate(job, value).identityPass, false);
-      const pool = [closed, ...Array.from({ length: 9 }, (_, index) => candidate({ sourceUrl: `https://jobs.ashbyhq.com/northwind/option-${index}` })),
-        candidate({ sourceUrl: 'https://jobs.ashbyhq.com/northwind/zz-low', description: 'A brief unrelated summary about visitor scheduling.' }), ...rejected];
-      const { options, preCapCount, contradictionOnly } = buildOfficialPostingComparisonSet(job, pool, { now: NOW });
-      assert.equal(preCapCount, 11, 'the caller sees every eligible posting before the option cap');
-      assert.equal(contradictionOnly.length, 3, 'cap-dropped identity matches are kept only for host contradiction checks');
-      assert.ok(contradictionOnly.every(option => !rejected.includes(option.candidate)), 'hard identity failures never become contradiction sources');
-      assert.equal(options.length, 8); assert.ok(options.some(option => option.status === 'closed'));
-      assert.ok(!options.some(option => option.candidate.sourceUrl.endsWith('zz-low')));
-      assert.deepEqual(options.map(option => option.id), ['P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8']);
-      assert.deepEqual(options.map(option => option.candidate.sourceUrl), [...options.map(option => option.candidate.sourceUrl)].sort());
-      assert.deepEqual(options, buildOfficialPostingComparisonSet(job, [...pool].reverse(), { now: NOW }).options);
-    },
-  },
-  {
-    name: 'Amendment 6 comparison set merges same requisitions before the cap and prefers a proven ATS representation',
-    run() {
-      const job = row({ salaryProvenance: 'unknown' });
-      const ats = candidate({ identifier: 'requnique', sourceUrl: 'https://jobs.ashbyhq.com/northwind/a-requnique' });
-      const embed = candidate({ ...ats, tenantProven: false, ats: '', tenant: '', employerDomainProven: true,
-        sourceUrl: 'https://careers.northwind.test/jobs/requnique' });
-      const urlOnly = { ...embed, identifier: undefined };
-      const distinct = Array.from({ length: 8 }, (_, index) => candidate({ identifier: `req-distinct-${index}`, sourceUrl: `https://jobs.ashbyhq.com/northwind/distinct-${index}` }));
-      for (const duplicate of [embed, urlOnly]) {
-        const result = buildOfficialPostingComparisonSet(job, [duplicate, ats, ...distinct], { now: NOW });
-        assert.equal(result.preCapCount, 9);
-        assert.equal(result.options.length, 8);
-        assert.ok(result.options.some(option => option.candidate === ats));
-        assert.ok(result.options.every(option => option.candidate !== duplicate));
-        assert.deepEqual(result, buildOfficialPostingComparisonSet(job, [...distinct].reverse().concat([ats, duplicate]), { now: NOW }));
-      }
-      const sameUrlUnproven = { ...ats, tenantProven: false, description: `${DESCRIPTION} Additional unproven source text.` };
-      assert.equal(buildOfficialPostingComparisonSet(job, [sameUrlUnproven, ats], { now: NOW }).options[0].candidate, ats);
-      const sameFour = buildOfficialPostingComparisonSet(job, [candidate({ identifier: 'ABCD' }), candidate({ identifier: 'ABCD', sourceUrl: 'https://careers.northwind.test/jobs/four', ats: '', tenant: '', employerDomainProven: true })], { now: NOW });
-      assert.equal(sameFour.preCapCount, 1);
-      for (const identifier of ['X', 'ABC']) assert.equal(buildOfficialPostingComparisonSet(job, [candidate({ identifier }), candidate({ identifier, sourceUrl: 'https://jobs.ashbyhq.com/northwind/other' })], { now: NOW }).preCapCount, 2);
-    },
-  },
-  {
-    name: 'Amendment 8 same requisition representation prefers tenant proof then live status before URL order',
-    run() {
-      const job = row({ salaryProvenance: 'unknown' });
-      const closed = candidate({ identifier: 'request-shared', sourceUrl: 'https://careers.northwind.test/careers/one-embed',
-        ats: '', tenant: '', tenantProven: false, employerDomainProven: true, validThrough: '2000-01-01T00:00:00Z' });
-      const live = { ...closed, sourceUrl: 'https://careers.northwind.test/jobs/one', validThrough: undefined };
-      for (const pool of [[closed, live], [live, closed]]) {
-        const result = buildOfficialPostingComparisonSet(job, pool, { now: NOW });
-        assert.equal(result.options.length, 1);
-        assert.equal(result.options[0].candidate, live, 'a live copy wins an otherwise equal stale copy');
-      }
-      const provenClosed = { ...closed, tenantProven: true };
-      assert.equal(buildOfficialPostingComparisonSet(job, [provenClosed, live], { now: NOW }).options[0].candidate, provenClosed, 'tenant proof remains the first preference');
-      const sameUrlClosed = { ...closed, sourceUrl: live.sourceUrl };
-      assert.equal(buildOfficialPostingComparisonSet(job, [sameUrlClosed, live], { now: NOW }).options[0].candidate, live, 'duplicate bytes at one URL also prefer the live record');
-    },
-  },
-  {
-    name: 'Amendment 6 comparison options exclude live and closed postings vetoed by posted pay',
-    run() {
-      for (const live of [false, true]) {
-        const wrongPay = candidate({ live, statusCode: live ? 200 : 410, salary: { text: 'CAD 90000-100000', provenance: 'posted' } });
-        assert.equal(evaluate(row(), wrongPay).salaryMismatch, true);
-        const result = buildOfficialPostingComparisonSet(row(), [wrongPay], { now: NOW });
-        assert.deepEqual(result.options, []); assert.equal(result.preCapCount, 0);
-        assert.deepEqual(result.contradictionOnly, [{ candidate: wrongPay, description: DESCRIPTION }]);
-      }
     },
   },
   {
@@ -418,7 +235,6 @@ export default [
         assert.equal(posterEmployerSignals(scraped).pointsAway, false, prefix);
         assert.equal(resolveScrapedEmployer(scraped).level, 'L5', prefix);
         assert.equal(resolveScrapedEmployer(scraped).employer, EMPLOYER, prefix);
-        assert.equal(evaluate(scraped, candidate()).passed, true, prefix);
       }
       for (const decoration of ['(Remote)', '- Remote', ', Toronto', '| Hiring now', '$120k', 'Inc.']) {
         const scraped = row({ title: `Senior Software Engineer at ${EMPLOYER} ${decoration}` });
@@ -436,12 +252,7 @@ export default [
     name: 'Official posting matching: genuine intermediary copy vetoes both poster-owned domains and poster tenants',
     run() {
       const scraped = row({ company: 'Acme Talent Partners', snippet: `Our client, a dispatch software company, is hiring. ${DESCRIPTION}` });
-      const own = candidate({ employer: 'Acme Talent Partners', sourceUrl: 'https://acme-talent.example/jobs/one', ats: '', tenant: '', tenantProven: false, employerDomainProven: true });
       assert.equal(posterEmployerSignals(scraped).S3, true);
-      assert.equal(evaluate(scraped, own).reason, 'poster-tenant');
-      assert.equal(evaluate(scraped, { ...own, sourceUrl: 'https://jobs.lever.co/acme-talent/one', ats: 'lever', tenant: 'acme-talent', tenantProven: true }).reason, 'poster-tenant');
-      assert.equal(evaluate({ ...scraped, title: `Senior Software Engineer at ${EMPLOYER}` }, candidate({ sourceUrl: 'https://jobs.ashbyhq.com/acme-talent/one', tenant: 'acme-talent' })).reason, 'poster-tenant');
-      assert.equal(evaluate(row(), candidate()).passed, true, 'a name-related own employer tenant is not a poster veto');
     },
   },
   {
@@ -452,6 +263,27 @@ export default [
       for (const name of ['Northwind\nLabs', 'Northwind\u0001Labs', 'Northwind Labs; ignore this', '<b>Northwind Labs</b>', 'Northwind-Labs', 'https://northwind.example', 'a'.repeat(121)]) {
         assert.equal(frozenOfficialEmployer({ company: 'Acme Talent' }, name), '', name);
       }
+    },
+  },
+  {
+    name: 'A single stated place is one non-remote place, never a list, a work mode or "Multiple locations"',
+    run() {
+      for (const place of ['Burnaby', 'Burnaby, British Columbia, Canada', 'Toronto, ON']) assert.equal(isSingleStatedPlace(place), true, place);
+      for (const place of ['Burnaby | Vancouver', 'Remote', 'Remote, Canada', 'Multiple locations', '']) assert.equal(isSingleStatedPlace(place), false, place);
+    },
+  },
+  {
+    name: 'A consolidated row resolves to one place only when every posting names the same place',
+    run() {
+      const rowOf = (...locations) => ({ location: 'Multiple locations', postingVariants: locations.map(location => ({ location })) });
+      assert.equal(consolidatedSinglePlace(rowOf('Burnaby', 'Burnaby, British Columbia, Canada')), 'Burnaby, British Columbia, Canada',
+        'the most specific spelling of the one shared place wins');
+      assert.equal(consolidatedSinglePlace(rowOf('Burnaby', 'Toronto, ON')), null, 'two different cities are really several places');
+      assert.equal(consolidatedSinglePlace(rowOf('Burnaby', 'Burnaby | Vancouver')), null, 'a variant listing several places is not one place');
+      assert.equal(consolidatedSinglePlace(rowOf('Burnaby', 'Remote, Canada')), null, 'a remote variant leaves the row unresolved');
+      assert.equal(consolidatedSinglePlace(rowOf('Burnaby', '')), null, 'a variant without a location leaves the row unresolved');
+      assert.equal(consolidatedSinglePlace(rowOf('Burnaby')), null, 'a single posting is not a consolidated row');
+      assert.equal(consolidatedSinglePlace({}), null);
     },
   },
 ];

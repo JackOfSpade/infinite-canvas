@@ -92,34 +92,24 @@ async function acquireRead(key, owner = null, joinCapability = null) {
     if (controlRead) gate.controlReaders += 1;
     if (owner) gate.readerOwners.set(owner, (gate.readerOwners.get(owner) || 0) + 1);
     if (issuedCapability) gate.joinCapabilities.add(issuedCapability);
+    const release = () => {
+      gate.readers -= 1;
+      if (controlRead) gate.controlReaders -= 1;
+      if (issuedCapability) gate.joinCapabilities.delete(issuedCapability);
+      if (owner) {
+        const remaining = (gate.readerOwners.get(owner) || 1) - 1;
+        if (remaining > 0) gate.readerOwners.set(owner, remaining);
+        else gate.readerOwners.delete(owner);
+      }
+      if (gate.readers === 0) gate.releaseDrained?.();
+    };
     // Re-check after incrementing. Existing owners and a still-valid exact
     // cancellation capability are deliberately allowed through; any other
     // reader undoes its tentative ref and waits.
     if (!gate.writerBarrier || ownsRead || controlRead) {
-      return {
-        joinCapability: issuedCapability,
-        release: () => {
-          gate.readers -= 1;
-          if (controlRead) gate.controlReaders -= 1;
-          if (issuedCapability) gate.joinCapabilities.delete(issuedCapability);
-          if (owner) {
-            const remaining = (gate.readerOwners.get(owner) || 1) - 1;
-            if (remaining > 0) gate.readerOwners.set(owner, remaining);
-            else gate.readerOwners.delete(owner);
-          }
-          if (gate.readers === 0) gate.releaseDrained?.();
-        },
-      };
+      return { joinCapability: issuedCapability, release };
     }
-    gate.readers -= 1;
-    if (controlRead) gate.controlReaders -= 1;
-    if (issuedCapability) gate.joinCapabilities.delete(issuedCapability);
-    if (owner) {
-      const remaining = (gate.readerOwners.get(owner) || 1) - 1;
-      if (remaining > 0) gate.readerOwners.set(owner, remaining);
-      else gate.readerOwners.delete(owner);
-    }
-    if (gate.readers === 0) gate.releaseDrained?.();
+    release();
   }
 }
 

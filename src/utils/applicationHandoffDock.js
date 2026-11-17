@@ -208,6 +208,35 @@ export function applicationStageLabel(stage) {
   return STAGE_LABELS[stage] || 'Application handoff';
 }
 
+// The fields every dock item for one application job shares, plus the company
+// and title its label and subject are built from.
+function applicationDockIdentity(node, local, canvasFilePath) {
+  const display = officialPostingDisplay(node.data);
+  return {
+    kind: 'application',
+    requestId: applicationRequestId(local.id),
+    jobId: local.id,
+    canvasFilePath: local.canvasFilePath || canvasFilePath || null,
+    nodeId: node.id,
+    runId: local.id,
+    company: display.unnamedOfficial ? display.label : display.employer || display.postedBy,
+    title: display.title,
+  };
+}
+
+// Items with no prompt to paste against (broken and working bundles).
+const emptyPromptFields = () => ({
+  revision: null,
+  handoffCode: '',
+  prompt: '',
+  initialResponse: '',
+  corrections: [],
+  correctionPrompt: '',
+  isCorrection: false,
+  rejectionEscalation: null,
+  correctionsRecovered: null,
+});
+
 /**
  * Adapt one job's durable handoff record into a dock item.
  *
@@ -252,16 +281,9 @@ export function applicationDockRequest({ node, handoff, canvasFilePath = null })
   const local = node?.data?.localApplication;
   if (!node?.id || !local?.id || !handoff?.handoffCode || typeof handoff.prompt !== 'string') return null;
   const corrections = Array.isArray(handoff.corrections) ? handoff.corrections.filter(Boolean) : [];
-  const display = officialPostingDisplay(node.data);
-  const company = display.unnamedOfficial ? display.label : display.employer || display.postedBy;
-  const title = display.title;
+  const { company, title, ...base } = applicationDockIdentity(node, local, canvasFilePath);
   return {
-    kind: 'application',
-    requestId: applicationRequestId(local.id),
-    jobId: local.id,
-    canvasFilePath: local.canvasFilePath || canvasFilePath || null,
-    nodeId: node.id,
-    runId: local.id,
+    ...base,
     task: handoff.stage || local.stage || 'application',
     stage: handoff.stage || '',
     progress: normalizeApplicationProgress(handoff.progress),
@@ -298,27 +320,12 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
   const local = node?.data?.localApplication;
   const text = typeof message === 'string' ? message.trim() : '';
   if (!node?.id || !local?.id || !text) return null;
-  const display = officialPostingDisplay(node.data);
-  const company = display.unnamedOfficial ? display.label : display.employer || display.postedBy;
-  const title = display.title;
+  const { company, title, ...base } = applicationDockIdentity(node, local, canvasFilePath);
   return {
-    kind: 'application',
-    requestId: applicationRequestId(local.id),
-    jobId: local.id,
-    canvasFilePath: local.canvasFilePath || canvasFilePath || null,
-    nodeId: node.id,
-    runId: local.id,
+    ...base,
+    ...emptyPromptFields(),
     task: local.stage || 'application',
     stage: local.stage || '',
-    revision: null,
-    handoffCode: '',
-    prompt: '',
-    initialResponse: '',
-    corrections: [],
-    correctionPrompt: '',
-    isCorrection: false,
-    rejectionEscalation: null,
-    correctionsRecovered: null,
     integrityMessage: text,
     label: company || title || 'Application',
     subject: [title, company].filter(Boolean).join(' · '),
@@ -341,27 +348,12 @@ export function brokenApplicationDockRequest({ node, message, canvasFilePath = n
 export function workingApplicationDockRequest({ node, canvasFilePath = null, status, retryReproducesFailure = false }) {
   const local = node?.data?.localApplication;
   if (!node?.id || !local?.id) return null;
-  const display = officialPostingDisplay(node.data);
-  const company = display.unnamedOfficial ? display.label : display.employer || display.postedBy;
-  const title = display.title;
+  const { company, title, ...base } = applicationDockIdentity(node, local, canvasFilePath);
   return {
-    kind: 'application',
-    requestId: applicationRequestId(local.id),
-    jobId: local.id,
-    canvasFilePath: local.canvasFilePath || canvasFilePath || null,
-    nodeId: node.id,
-    runId: local.id,
+    ...base,
+    ...emptyPromptFields(),
     task: local.stage || 'application',
     stage: local.stage || '',
-    revision: null,
-    handoffCode: '',
-    prompt: '',
-    initialResponse: '',
-    corrections: [],
-    correctionPrompt: '',
-    isCorrection: false,
-    rejectionEscalation: null,
-    correctionsRecovered: null,
     working: true,
     workingState: applicationDockItemState(status),
     retryReproducesFailure: retryReproducesFailure === true,

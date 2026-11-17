@@ -1,5 +1,6 @@
 import { interviewClaimFailures } from './interviewSpokenClaims.js';
 
+const SENTENCES = new Intl.Segmenter('en', { granularity: 'sentence' });
 const BULLET = /^\s*(?:[-*•‣▪◦]|\d+[.)])\s+/u;
 // These labels carry structure only. In particular, Observed:, Planned: and
 // Did not perform: must stay attached to the sentence they qualify.
@@ -26,7 +27,7 @@ function units(value) {
   for (const cleaned of blocks) {
     // Blocks (bullets, paragraphs) are already separate; only join within one.
     const start = result.length;
-    for (const { segment } of new Intl.Segmenter('en', { granularity: 'sentence' }).segment(cleaned)) {
+    for (const { segment } of SENTENCES.segment(cleaned)) {
       const next = spaces(segment);
       if (!next) continue;
       const previous = result.length > start ? result.at(-1) : undefined;

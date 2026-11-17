@@ -70,12 +70,11 @@ function careerEvidenceIdsOf(evidenceIds, acceptedEvidence) {
 }
 
 // The single approved entity every career-data citation of one unit resolves
-// to, as { entityId }, or null when the citations are empty, include anything
+// to, as its entityId, or null when the citations are empty, include anything
 // the authority does not know, or span more than one entity or kind.
 function singleAuthorityEntity(authority, evidenceIds, acceptedEvidence, kind) {
   if (!authority) return null;
-  const sourceById = new Map((Array.isArray(acceptedEvidence) ? acceptedEvidence : []).map(item => [item?.id, item?.sourceId]));
-  const careerIds = (Array.isArray(evidenceIds) ? evidenceIds : []).filter(id => sourceById.get(id) === 'career-data');
+  const careerIds = careerEvidenceIdsOf(evidenceIds, acceptedEvidence);
   if (!careerIds.length) return null;
   let entityId = null;
   for (const id of careerIds) {
@@ -213,7 +212,8 @@ export function hostOwnedResumeRecordFields(resume, { authority, acceptedEvidenc
   const fields = [];
   for (const [section, kind, keys, resolve] of [['education', 'education', EDUCATION_FIELDS, resolveAuthorityEducation],
     ['credentials', 'certification', CERTIFICATION_FIELDS, resolveAuthorityCertification]]) {
-    for (const unit of resume?.[section] || []) {
+    for (const unit of Array.isArray(resume?.[section]) ? resume[section] : []) {
+      if (!isObject(unit)) continue;
       const id = singleAuthorityEntity(authority, unit.evidenceIds, acceptedEvidence, kind);
       if (id === null) continue;
       let record; try { record = resolve(authority, id); } catch { continue; }

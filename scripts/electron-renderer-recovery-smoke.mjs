@@ -1,17 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { closeDisposableElectron } from './close-disposable-electron.mjs';
+import { makeSmokeDir, smokeEnv } from './lib/electron-smoke.mjs';
 
 // A disposable hidden app tests an actual native renderer death. Never attach
 // to, crash, reload or write the person's running application/profile.
-const root = await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-renderer-recovery-'));
+const root = await makeSmokeDir('ic-renderer-recovery-');
 const canvas = path.join(root, 'recovery.json');
 const profile = path.join(root, 'profile');
-const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-delete env.ELECTRON_RUN_AS_NODE;
+const env = smokeEnv();
 let application;
 try {
   await fs.writeFile(canvas, JSON.stringify({ schemaVersion: 1,

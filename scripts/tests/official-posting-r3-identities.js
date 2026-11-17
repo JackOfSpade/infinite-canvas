@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { coreTitle, evaluateOfficialPostingMatch, posterEmployerSignals } from '../../electron/ipc/officialPostingMatch.js';
+import { coreTitle, posterEmployerSignals } from '../../electron/ipc/officialPostingMatch.js';
 import { extractAshbyPostings, extractLeverPostings } from '../../electron/ipc/officialPostingExtractors.js';
 import { extractJobPostingBaseSalary, extractJobPostingDescription } from '../../electron/extractors/apiExtractors.js';
 import { parseGuaranteedCashOffer } from '../../electron/ipc/jobCompensation.js';
@@ -20,14 +20,6 @@ export default [
       assert.equal(coreTitle('Software Engineer at Cedar Works', { company: 'Elm Talent', employerHypotheses: ['Cedar Works'] }), 'software engineer');
       assert.equal(coreTitle(`Software Engineer at ${company} | Hiring now`, { company }), 'software engineer');
       assert.equal(coreTitle('Engineer at Scale | Hiring now', { company }), 'engineer at scale');
-      const result = evaluateOfficialPostingMatch({ title: 'Engineer at Scale', company, location,
-        salary: 'USD 90000 - 110000/yr', salaryProvenance: 'posted', snippet: description }, {
-        title: 'Engineer', employer: company, location: { display: location },
-        salary: { text: 'USD 90000 - 110000/yr', provenance: 'posted' }, description,
-        sourceUrl: 'https://jobs.ashbyhq.com/northwind/one', ats: 'ashby', tenant: 'northwind', tenantProven: true, live: true, statusCode: 200,
-      });
-      assert.equal(result.passed, false);
-      assert.equal(result.reason, 'title-mismatch');
     },
   },
   {

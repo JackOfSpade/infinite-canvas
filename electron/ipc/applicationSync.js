@@ -140,7 +140,7 @@ function normalizeWorkspaceIdentity(raw) {
 }
 
 function normalizeWorkspace(raw) {
-  const token = typeof raw?.token === 'string' && /^[a-f0-9]{64}$/i.test(raw.token) ? raw.token : '';
+  const token = typeof raw?.token === 'string' && APPLICATION_SYNC_TOKEN_RE.test(raw.token) ? raw.token : '';
   const workspaceDir = typeof raw?.workspaceDir === 'string' ? path.resolve(raw.workspaceDir) : '';
   if (!token || !workspaceDir || !path.isAbsolute(workspaceDir)) return null;
   const applicationPath = path.resolve(workspaceDir, 'Application.html');
@@ -210,7 +210,7 @@ function sameFileIdentity(left, right) {
   return left?.dev === right?.dev && left?.ino === right?.ino;
 }
 
-async function readFileHandleBounded(handle, maxBytes) {
+async function readFileHandleBounded(handle, maxBytes, tooLargeMessage) {
   const chunks = [];
   let offset = 0;
   while (offset <= maxBytes) {
@@ -220,25 +220,14 @@ async function readFileHandleBounded(handle, maxBytes) {
     chunks.push(buffer.subarray(0, bytesRead));
     offset += bytesRead;
   }
-  if (offset > maxBytes) throw new Error('The saved application workspace exceeds the safe Sync size limit.');
-  return Buffer.concat(chunks, offset).toString('utf8');
-}
-
-async function readBinaryFileHandleBounded(handle, maxBytes) {
-  const chunks = [];
-  let offset = 0;
-  while (offset <= maxBytes) {
-    const buffer = Buffer.allocUnsafe(Math.min(1024 * 1024, maxBytes + 1 - offset));
-    const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
-    if (!bytesRead) break;
-    chunks.push(buffer.subarray(0, bytesRead));
-    offset += bytesRead;
-  }
-  if (offset > maxBytes) throw new Error('The application PDF exceeds the safe Sync size limit.');
+  if (offset > maxBytes) throw new Error(tooLargeMessage);
   return Buffer.concat(chunks, offset);
 }
 
-async function readRegisteredWorkspaceText(workspace, filePath, label, { withMetadata = false } = {}) {
+// Descriptor-bound read of one fixed sibling file: O_NOFOLLOW open, identity
+// and workspace re-checks around the read, bounded size. Returns the bytes and
+// the stat captured after the read.
+async function readRegisteredWorkspaceBytes(workspace, filePath, label, tooLargeMessage) {
   const noFollow = fs.constants.O_NOFOLLOW || 0;
   let preOpenStat = null;
   let handle;
@@ -278,7 +267,7 @@ async function readRegisteredWorkspaceText(workspace, filePath, label, { withMet
       || !sameFileIdentity(currentPathStat, openedStat)) {
       throw new Error(`Application Sync ${label} changed while it was being opened.`);
     }
-    const html = await readFileHandleBounded(handle, MAX_HTML_BYTES);
+    const bytes = await readFileHandleBounded(handle, MAX_HTML_BYTES, tooLargeMessage);
     const finalStat = await handle.stat();
     if (!sameFileIdentity(finalStat, openedStat)
       || finalStat.size !== openedStat.size
@@ -286,19 +275,27 @@ async function readRegisteredWorkspaceText(workspace, filePath, label, { withMet
       || finalStat.ctimeMs !== openedStat.ctimeMs) {
       throw new Error(`Application Sync ${label} changed while it was being read.`);
     }
-    if (!withMetadata) return html;
-    return {
-      text: html,
-      bytes: finalStat.size,
-      mtimeMs: finalStat.mtimeMs,
-      // The bounded handle above is the file that was identity-checked before
-      // and after reading. This digest therefore describes the verified
-      // readback, rather than a later path-based re-read that could race it.
-      sha256: sha256(Buffer.from(html, 'utf8')).slice(0, 16),
-    };
+    return { bytes, finalStat };
   } finally {
     await handle.close();
   }
+}
+
+async function readRegisteredWorkspaceText(workspace, filePath, label, { withMetadata = false } = {}) {
+  const { bytes, finalStat } = await readRegisteredWorkspaceBytes(
+    workspace, filePath, label, 'The saved application workspace exceeds the safe Sync size limit.',
+  );
+  const html = bytes.toString('utf8');
+  if (!withMetadata) return html;
+  return {
+    text: html,
+    bytes: finalStat.size,
+    mtimeMs: finalStat.mtimeMs,
+    // The bounded handle above is the file that was identity-checked before
+    // and after reading. This digest therefore describes the verified
+    // readback, rather than a later path-based re-read that could race it.
+    sha256: sha256(Buffer.from(html, 'utf8')).slice(0, 16),
+  };
 }
 
 async function readRegisteredWorkspaceHtml(workspace) {
@@ -315,52 +312,13 @@ async function readRegisteredWorkspacePdf(workspace, documentKind) {
   if (!pdfPath || !isInside(workspace.workspaceDir, pdfPath)) {
     throw new Error('Application Sync received an invalid PDF document kind.');
   }
-  const noFollow = fs.constants.O_NOFOLLOW || 0;
-  let preOpenStat = null;
-  let handle;
-  if (!noFollow) {
-    preOpenStat = await fs.promises.lstat(pdfPath);
-    if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
-      throw new Error('Application Sync PDF must be a regular file.');
-    }
+  const { bytes } = await readRegisteredWorkspaceBytes(
+    workspace, pdfPath, 'PDF', 'The application PDF exceeds the safe Sync size limit.',
+  );
+  if (bytes.subarray(0, 5).toString('ascii') !== '%PDF-') {
+    throw new Error('Application Sync sibling is not a valid PDF.');
   }
-  try {
-    handle = await fs.promises.open(pdfPath, fs.constants.O_RDONLY | noFollow);
-  } catch (error) {
-    if (!noFollow || !['EINVAL', 'ENOTSUP', 'EOPNOTSUPP'].includes(error?.code)) throw error;
-    preOpenStat = await fs.promises.lstat(pdfPath);
-    if (!preOpenStat.isFile() || preOpenStat.isSymbolicLink()) {
-      throw new Error('Application Sync PDF must be a regular file.');
-    }
-    handle = await fs.promises.open(pdfPath, fs.constants.O_RDONLY);
-  }
-  try {
-    const openedStat = await handle.stat();
-    if (!openedStat.isFile() || openedStat.size > MAX_HTML_BYTES
-      || (preOpenStat && !sameFileIdentity(openedStat, preOpenStat))) {
-      throw new Error('Application Sync PDF changed or is not a safe regular file.');
-    }
-    await captureOrVerifyWorkspaceIdentity(workspace);
-    const currentPathStat = await fs.promises.lstat(pdfPath);
-    if (!currentPathStat.isFile() || currentPathStat.isSymbolicLink()
-      || !sameFileIdentity(currentPathStat, openedStat)) {
-      throw new Error('Application Sync PDF changed while it was being opened.');
-    }
-    const bytes = await readBinaryFileHandleBounded(handle, MAX_HTML_BYTES);
-    const finalStat = await handle.stat();
-    if (!sameFileIdentity(finalStat, openedStat)
-      || finalStat.size !== openedStat.size
-      || finalStat.mtimeMs !== openedStat.mtimeMs
-      || finalStat.ctimeMs !== openedStat.ctimeMs) {
-      throw new Error('Application Sync PDF changed while it was being read.');
-    }
-    if (bytes.subarray(0, 5).toString('ascii') !== '%PDF-') {
-      throw new Error('Application Sync sibling is not a valid PDF.');
-    }
-    return bytes;
-  } finally {
-    await handle.close();
-  }
+  return bytes;
 }
 
 // Rendering can take long enough for a user to save another edit in the
@@ -1419,7 +1377,7 @@ export async function registerApplicationSyncWorkspace(workspaceDir, requestedTo
   if (!workspaceDir || typeof workspaceDir !== 'string') throw new Error('A workspace directory is required for application sync.');
   const normalizedDir = path.resolve(workspaceDir);
   if (!normalizedDir || !path.isAbsolute(normalizedDir)) throw new Error('A workspace directory is required for application sync.');
-  const token = requestedToken && /^[a-f0-9]{64}$/i.test(requestedToken)
+  const token = requestedToken && APPLICATION_SYNC_TOKEN_RE.test(requestedToken)
     ? requestedToken
     : crypto.randomBytes(32).toString('hex');
   const normalized = normalizeWorkspace({ token, workspaceDir: normalizedDir });

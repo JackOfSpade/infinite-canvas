@@ -182,11 +182,11 @@ export function extractJsonLdPostings(html, options = {}) {
 function preferCompleteCurrentJob(html, jsonLd, options) {
   const native = extractOfficialPostingCurrentJobData({ body: html, ...options });
   if (native.length !== 1 || jsonLd.length !== 1) return jsonLd;
-  const current = native[0]; const structured = jsonLd[0];
+  const current = native[0]; const fromJsonLd = jsonLd[0];
   const sameText = (a, b) => plain(a).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase()
     === plain(b).normalize('NFKC').replace(/\s+/gu, ' ').toLowerCase();
-  if (!current.identifier || current.identifier !== structured.identifier
-    || !sameText(current.title, structured.title) || !strictEmployerEqual(current.employer, structured.employer)) return jsonLd;
+  if (!current.identifier || current.identifier !== fromJsonLd.identifier
+    || !sameText(current.title, fromJsonLd.title) || !strictEmployerEqual(current.employer, fromJsonLd.employer)) return jsonLd;
   const canonical = value => {
     const valid = httpsUrl(value, options.sourceUrl); if (!valid) return '';
     const url = new URL(valid); url.pathname = url.pathname.replace(/\/+$/u, '') || '/'; return url.href;
@@ -214,10 +214,10 @@ function preferCompleteCurrentJob(html, jsonLd, options) {
   if (!bound) return jsonLd;
   // Choose one whole representation. Only conservative status/expiry cues from
   // that same role survive the choice; salary/location/identity are not merged.
-  const preferred = current.description.length > structured.description.length ? current : structured;
-  return [{ ...preferred, validThrough: structured.validThrough || '',
-    isListed: current.isListed !== false && structured.isListed !== false && !explicitlyClosed,
-    live: current.live !== false && structured.live !== false && !explicitlyClosed }];
+  const preferred = current.description.length > fromJsonLd.description.length ? current : fromJsonLd;
+  return [{ ...preferred, validThrough: fromJsonLd.validThrough || '',
+    isListed: current.isListed !== false && fromJsonLd.isListed !== false && !explicitlyClosed,
+    live: current.live !== false && fromJsonLd.live !== false && !explicitlyClosed }];
 }
 
 function ashbySalary(job) {

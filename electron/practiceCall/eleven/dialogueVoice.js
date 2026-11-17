@@ -81,10 +81,8 @@ function statusError(response, prefix, key) {
   const status = Number(response?.status) || 0;
   const code = classifyFailure({ status, message: '' });
   const detail = status ? ` (HTTP ${status})` : '';
-  return voiceError(code, `${prefix}${detail}`.replace(key ? new RegExp(escapeRegExp(key), 'g') : /$^/, '[redacted]'), { status });
+  return voiceError(code, redact(`${prefix}${detail}`, key), { status });
 }
-
-export const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** Never let the API key reach an error message. */
 export function redact(value, key) {
@@ -278,6 +276,10 @@ export function createDialogueVoiceFactory({
     };
     const fallback = () => {
       attemptedFallback = true;
+      // Events from the refused socket must never fail the retry.
+      const refused = socket;
+      socket = null;
+      try { refused?.close(); } catch { /* already gone */ }
       onFallback();
       currentRate = FALLBACK_RATE;
       audioMs = 0;
@@ -298,15 +300,15 @@ export function createDialogueVoiceFactory({
       socket = next;
       bindSocket(next, {
         open: () => {
-          if (cancelled || settled) return;
+          if (socket !== next || cancelled || settled) return;
           status = 'ready';
           send({ voices: [voiceId], xi_api_key: key });
           drain();
           scheduleKeepAlive();
         },
-        message: event => onMessage(event?.data ?? event),
-        error: event => { socketError = String(event?.message ?? event?.error?.message ?? ''); },
-        close: event => onClose(event),
+        message: event => { if (socket === next) onMessage(event?.data ?? event); },
+        error: event => { if (socket === next) socketError = String(event?.message ?? event?.error?.message ?? ''); },
+        close: event => { if (socket === next) onClose(event); },
       });
     }
     function onMessage(data) {

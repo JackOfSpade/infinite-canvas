@@ -371,8 +371,7 @@ function findBullet(resume, id) {
 }
 
 function findByIdIndex(list, id) {
-  const index = (list || []).findIndex(item => item.id === id);
-  return index === -1 ? -1 : index;
+  return (list || []).findIndex(item => item.id === id);
 }
 
 // --- validation + resolution ------------------------------------------------

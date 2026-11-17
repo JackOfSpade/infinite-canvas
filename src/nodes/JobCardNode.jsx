@@ -101,8 +101,15 @@ function normalizedStatus(row) {
   return ['direct', 'adjacent', 'not_documented', 'contradicted', 'unclear'].includes(status) ? status : '';
 }
 
-function compactRows(rows, limit) {
-  return compactAuditLabels(rows, limit);
+// Host and path of a candidate link. A saved link that is not a parseable URL
+// is shown as stored: throwing here would take the whole card down.
+function candidateLinkLabel(link) {
+  try {
+    const url = new URL(link);
+    return `${url.host}${url.pathname}`;
+  } catch {
+    return String(link || '');
+  }
 }
 
 function auditCountLabel(count, singular, plural = `${singular}s`) {
@@ -143,19 +150,19 @@ function compactHiringFitAudit(assessment) {
   const groundedScoredRows = rows.filter((row) => (
     row?.grounding?.requirementGrounded === true && row?.scoreImpact !== 'informational'
   ));
-  const directStrengths = compactRows(groundedScoredRows.filter((row) => (
+  const directStrengths = compactAuditLabels(groundedScoredRows.filter((row) => (
     normalizedStatus(row) === 'direct' && row?.grounding?.candidateClaimGrounded === true
   )), 3);
-  const adjacentMatches = compactRows(groundedScoredRows.filter((row) => (
+  const adjacentMatches = compactAuditLabels(groundedScoredRows.filter((row) => (
     normalizedStatus(row) === 'adjacent' && row?.grounding?.candidateClaimGrounded === true
   )), 3);
   const verifiedGapRows = groundedScoredRows.filter((row) => (
     row?.materialGap === true && ['not_documented', 'contradicted', 'unclear'].includes(normalizedStatus(row))
   ));
   const verifiedGaps = {
-    notDocumented: compactRows(verifiedGapRows.filter((row) => normalizedStatus(row) === 'not_documented'), 3),
-    contradicted: compactRows(verifiedGapRows.filter((row) => normalizedStatus(row) === 'contradicted'), 3),
-    unclear: compactRows(verifiedGapRows.filter((row) => normalizedStatus(row) === 'unclear'), 3),
+    notDocumented: compactAuditLabels(verifiedGapRows.filter((row) => normalizedStatus(row) === 'not_documented'), 3),
+    contradicted: compactAuditLabels(verifiedGapRows.filter((row) => normalizedStatus(row) === 'contradicted'), 3),
+    unclear: compactAuditLabels(verifiedGapRows.filter((row) => normalizedStatus(row) === 'unclear'), 3),
   };
 
   // Rejected rows are intentionally limited to their normalized requirement
@@ -166,7 +173,7 @@ function compactHiringFitAudit(assessment) {
       || (Array.isArray(row?.grounding?.rejectedJobEvidence) && row.grounding.rejectedJobEvidence.length > 0)
       || (Array.isArray(row?.grounding?.rejectedCandidateEvidence) && row.grounding.rejectedCandidateEvidence.length > 0)),
   ];
-  const unverifiedItems = compactRows(rejectedRows, 3);
+  const unverifiedItems = compactAuditLabels(rejectedRows, 3);
   const confidenceValue = String(assessment.confidence?.effective || '').trim().toLowerCase();
   const confidence = ['high', 'medium', 'low', 'unknown'].includes(confidenceValue) ? confidenceValue : '';
   const groundedRequirementCount = Number(assessment.confidence?.groundedRequirementCount);
@@ -1950,17 +1957,16 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
           {postingDisplay.candidateLinks.length > 0 && (
             <div className="mt-1 min-w-0" onPointerDown={(e) => e.stopPropagation()}>
               <div className="text-white/50 text-[10px]">Not confirmed · candidate links (most official first)</div>
-              {postingDisplay.candidateLinks.map((link) => {
-                const url = new URL(link.url);
-                return <button
+              {postingDisplay.candidateLinks.map((link) => (
+                <button
                   key={link.url}
                   type="button"
                   title={link.title}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => { e.stopPropagation(); openCardExternalUrl(link.url); }}
                   className="block max-w-full truncate rounded text-left text-[10px] text-amber-200 hover:text-white"
-                >{link.rank}. {url.host}{url.pathname}</button>;
-              })}
+                >{link.rank}. {candidateLinkLabel(link.url)}</button>
+              ))}
             </div>
           )}
           {(postingDisplay.lookupNeedsRefresh || officialPostingLookup) && (
@@ -2367,8 +2373,9 @@ export const JobCardNode = React.memo(function JobCardNode({ id, data }) {
               {localApplication.status === 'saved' && (Array.isArray(localApplication.receipt?.selectedModelEffort)
                 || (savedSelection?.jobId === localApplication.id && Array.isArray(savedSelection.rows))) && (
                 <div className="mt-1 text-white/55">
-                  Model and effort observed at chat launch: {(localApplication.receipt?.selectedModelEffort
-                    || savedSelection.rows).map(row => `${row.model} · ${row.fallback ? `Pro unavailable → ${row.effort}` : row.effort}`).join('; ')}
+                  Model and effort observed at chat launch: {(Array.isArray(localApplication.receipt?.selectedModelEffort)
+                    ? localApplication.receipt.selectedModelEffort
+                    : savedSelection.rows).map(row => `${row.model} · ${row.fallback ? `Pro unavailable → ${row.effort}` : row.effort}`).join('; ')}
                 </div>
               )}
             </div>

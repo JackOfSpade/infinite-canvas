@@ -576,12 +576,11 @@ export default [
           'retirement follows the adopted alias and cannot deadlock or leave an orphan');
 
         const sourceCard = fs.readFileSync(path.resolve('src/nodes/JobSourceCardNode.jsx'), 'utf8');
-        const jobSearch = fs.readFileSync(path.resolve('src/nodes/JobSearchNode.jsx'), 'utf8');
-        for (const [label, source] of [['JobSource', sourceCard], ['JobSearch', jobSearch]]) {
-          const releaseAt = source.indexOf('await window.electronAPI?.releaseJobContinuation?.');
-          const retireAt = source.indexOf('if (shouldRetireSupersededContinuation)', releaseAt);
+        {
+          const releaseAt = sourceCard.indexOf('await window.electronAPI?.releaseJobContinuation?.');
+          const retireAt = sourceCard.indexOf('if (shouldRetireSupersededContinuation)', releaseAt);
           assert(releaseAt >= 0 && retireAt > releaseAt,
-            `${label} must release its long read before a superseded sidecar mutation`);
+            'JobSource must release its long read before a superseded sidecar mutation');
         }
         return {
           exactOwnerReentrant: true,

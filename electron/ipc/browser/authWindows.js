@@ -1,5 +1,5 @@
 import { logger } from '../../logger.js';
-import { closeOwnedBrowserProcess, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile, prepareSharedBrowserProfileForLaunch } from '../stealthBrowser.js';
+import { closeOwnedBrowserProcess, isBrowserProcessExited, waitForBrowserProcessExit, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile, prepareSharedBrowserProfileForLaunch } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
@@ -166,6 +166,17 @@ export async function navigateVisibleWindow(page, requestedUrl) {
   }
   actualUrl = await waitForVisibleWindowNavigation(page, 250);
   return classifyVisibleWindowNavigation({ requestedUrl: valid.url, actualUrl, assignmentError, fallbackAttempted: true, fallbackError });
+}
+
+function navigationDiagnosticPatch(navigation) {
+  return {
+    requestedUrl: navigation.requestedUrl,
+    currentUrl: navigation.actualUrl,
+    navigationResult: navigation.result,
+    navigationFallbackAttempted: navigation.fallbackAttempted,
+    navigationAssignmentError: navigation.assignmentError || null,
+    navigationFallbackError: navigation.fallbackError || null,
+  };
 }
 
 // Shared by the visible captcha resolver and deterministic regression tests.
@@ -1177,6 +1188,9 @@ export async function readPlatformAuthCookieState(platformId) {
   }
 }
 
+// Shared with the Puppeteer close path; re-exported for this module's callers.
+export { isBrowserProcessExited, waitForBrowserProcessExit };
+
 /**
  * Close a visible login browser robustly. Two failure modes this guards against,
  * both reported as "the browser goes into the wheel of death and won't close
@@ -1192,32 +1206,6 @@ export async function readPlatformAuthCookieState(platformId) {
  *      (so a stuck close is visible in the bug report instead of looking clean)
  *      and SIGKILL it so the window can never linger forever.
  */
-export function isBrowserProcessExited(proc) {
-  return !proc || proc.exitCode != null || proc.signalCode != null;
-}
-
-export function waitForBrowserProcessExit(proc, timeoutMs) {
-  if (isBrowserProcessExited(proc)) return Promise.resolve(true);
-  return new Promise(resolve => {
-    let timer;
-    const done = () => {
-      if (timer) clearTimeout(timer);
-      proc.removeListener?.('exit', done);
-      resolve(true);
-    };
-    proc.once('exit', done);
-    // Close the tiny race between the pre-check and listener registration.
-    if (isBrowserProcessExited(proc)) {
-      done();
-      return;
-    }
-    timer = setTimeout(() => {
-      proc.removeListener?.('exit', done);
-      resolve(isBrowserProcessExited(proc));
-    }, timeoutMs);
-  });
-}
-
 async function closeLoginBrowserSafely(browser, label, { loginConfirmed = false } = {}) {
   // null, not 0, when no login was confirmed: 0 reads as "we waited and measured
   // zero", which is a claim about a wait that never happened. The bug report
@@ -1385,14 +1373,7 @@ export async function openLoginWindow(platformId, sender = null, signal = null) 
     // the assignment executes; page-context destruction mid-navigate is expected
     // and caught below.
     const navigation = await navigateVisibleWindow(page, validUrl.url);
-    updateAuthWindowDiagnostic(platformId, {
-      requestedUrl: navigation.requestedUrl,
-      currentUrl: navigation.actualUrl,
-      navigationResult: navigation.result,
-      navigationFallbackAttempted: navigation.fallbackAttempted,
-      navigationAssignmentError: navigation.assignmentError || null,
-      navigationFallbackError: navigation.fallbackError || null,
-    });
+    updateAuthWindowDiagnostic(platformId, navigationDiagnosticPatch(navigation));
     if (!navigation.ok) {
       const error = new Error(`Login window could not navigate to ${validUrl.url}: ${navigation.error}`);
       error.code = 'VISIBLE_WINDOW_NAVIGATION_FAILED';
@@ -1404,14 +1385,7 @@ export async function openLoginWindow(platformId, sender = null, signal = null) 
     finishAuthWindowDiagnostic(platformId, {
       result: err?.code === 'VISIBLE_WINDOW_NAVIGATION_FAILED' ? 'navigation-error' : 'setup-error',
       error: err?.message || String(err),
-      ...(navigation ? {
-        requestedUrl: navigation.requestedUrl,
-        currentUrl: navigation.actualUrl,
-        navigationResult: navigation.result,
-        navigationFallbackAttempted: navigation.fallbackAttempted,
-        navigationAssignmentError: navigation.assignmentError || null,
-        navigationFallbackError: navigation.fallbackError || null,
-      } : {}),
+      ...(navigation ? navigationDiagnosticPatch(navigation) : {}),
     });
     if (loginBrowser) await closeLoginBrowserSafely(loginBrowser, platformId).catch(() => {});
     throw err;
@@ -2658,14 +2632,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     // resolves immediately after the assignment; the probe poll handles about:blank
     // gracefully by skipping it until the navigation completes.
     const navigation = await navigateVisibleWindow(page, url);
-    updateAuthWindowDiagnostic(diagKey, {
-      requestedUrl: navigation.requestedUrl,
-      currentUrl: navigation.actualUrl,
-      navigationResult: navigation.result,
-      navigationFallbackAttempted: navigation.fallbackAttempted,
-      navigationAssignmentError: navigation.assignmentError || null,
-      navigationFallbackError: navigation.fallbackError || null,
-    });
+    updateAuthWindowDiagnostic(diagKey, navigationDiagnosticPatch(navigation));
     if (!navigation.ok) {
       const error = new Error(`Captcha-resolve window could not navigate to ${url}: ${navigation.error}`);
       error.code = 'VISIBLE_WINDOW_NAVIGATION_FAILED';
@@ -2692,7 +2659,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
       // Helper: inject once on every new document load in a tab.
       // evaluateOnNewDocument args are serialized, so text/bg must be primitives.
       const injectBanner = async (p, text, bg) => {
-        await p.evaluateOnNewDocument((t, b) => {
+        const paintBanner = (t, b) => {
           const inject = () => {
             if (document.getElementById('__ic-tab-banner__')) return;
             const el = document.createElement('div');
@@ -2703,16 +2670,10 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
           };
           if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', inject);
           else inject();
-        }, text, bg).catch(() => {});
+        };
+        await p.evaluateOnNewDocument(paintBanner, text, bg).catch(() => {});
         // Also inject immediately into the already-loaded page.
-        await p.evaluate((t, b) => {
-          if (document.getElementById('__ic-tab-banner__')) return;
-          const el = document.createElement('div');
-          el.id = '__ic-tab-banner__';
-          el.style.cssText = `position:fixed;top:0;left:0;right:0;z-index:2147483647;background:${b};color:#fff;padding:9px 16px;font:500 13px/1.4 system-ui,sans-serif;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.35);pointer-events:none`;
-          el.textContent = t;
-          if (document.body) document.body.prepend(el);
-        }, text, bg).catch(() => {});
+        await p.evaluate(paintBanner, text, bg).catch(() => {});
       };
 
       await injectBanner(
@@ -2745,14 +2706,7 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
     finishAuthWindowDiagnostic(diagKey, {
       result: err?.code === 'VISIBLE_WINDOW_NAVIGATION_FAILED' ? 'navigation-error' : 'setup-error',
       error: err?.message || String(err),
-      ...(navigation ? {
-        requestedUrl: navigation.requestedUrl,
-        currentUrl: navigation.actualUrl,
-        navigationResult: navigation.result,
-        navigationFallbackAttempted: navigation.fallbackAttempted,
-        navigationAssignmentError: navigation.assignmentError || null,
-        navigationFallbackError: navigation.fallbackError || null,
-      } : {}),
+      ...(navigation ? navigationDiagnosticPatch(navigation) : {}),
     });
     // Same robust close as openLoginWindow — a beforeunload prompt or hung
     // renderer on this early failure path shouldn't leave a stuck visible

@@ -169,6 +169,25 @@ function failureFor(result) {
 
 export { failureFor as offloadFailure };
 
+/** The error for a successful call whose answer text is blank. */
+export function offloadEmptyAnswer(result) {
+  return new ClaudeRunnerError('OFFLOAD_EMPTY', 'The offload provider returned an empty answer.', {
+    offloadCode: 'empty', latencyMs: Number.isFinite(result?.latencyMs) ? result.latencyMs : null,
+    costUsd: typeof result?.costUsd === 'number' ? result.costUsd : null });
+}
+
+/** The CLI's usage counters in the Claude usage shape. */
+export function offloadUsage(result) {
+  const raw = result?.usage && typeof result.usage === 'object' ? result.usage : {};
+  return {
+    input_tokens: raw.cacheMissTokens ?? 0,
+    cache_read_input_tokens: raw.cacheHitTokens ?? 0,
+    output_tokens: raw.outputTokens ?? 0,
+    reasoning_tokens: raw.reasoningTokens ?? 0,
+    provider_usage: raw,
+  };
+}
+
 export function createOffloadCompleteStage({ binPath, nodePath = null, spawnImpl = childProcess.spawn, transcriptDir, fsImpl = fs, route = 'deepseek-flash' } = {}) {
   const files = promisesOf(fsImpl);
   return async function runOffloadStage({ text, pageImages = [], signal, stage, sessionId, resume = false, route: callRoute, reasoning } = {}) {
@@ -203,24 +222,15 @@ export function createOffloadCompleteStage({ binPath, nodePath = null, spawnImpl
     if (result.ok !== true) throw failureFor(result);
     const answer = typeof result.text === 'string' ? result.text : '';
     if (!answer.trim()) {
-      throw new ClaudeRunnerError('OFFLOAD_EMPTY', 'The offload provider returned an empty answer.', {
-        offloadCode: 'empty', latencyMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
-        costUsd: typeof result.costUsd === 'number' ? result.costUsd : null });
+      throw offloadEmptyAnswer(result);
     }
     // Only a successful turn extends the stored conversation.
     await saveSession(files, transcriptDir, file, [...messages, { role: 'assistant', content: answer }]);
-    const raw = result.usage && typeof result.usage === 'object' ? result.usage : {};
     return {
       text: answer,
       model: typeof result.model === 'string' ? result.model : useRoute,
       durationMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
-      usage: {
-        input_tokens: raw.cacheMissTokens ?? 0,
-        cache_read_input_tokens: raw.cacheHitTokens ?? 0,
-        output_tokens: raw.outputTokens ?? 0,
-        reasoning_tokens: raw.reasoningTokens ?? 0,
-        provider_usage: raw,
-      },
+      usage: offloadUsage(result),
       costUsd: typeof result.costUsd === 'number' ? result.costUsd : undefined,
       summaryCount: 0,
       summaryChars: 0,

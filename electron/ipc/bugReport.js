@@ -545,6 +545,49 @@ ${rows}
 }
 
 
+// Scans every `<root>/<subdir>` tree (root = app path and cwd) and reports the
+// newest matching mtime AND whether the top-level `<root>/<subdir>` directory
+// itself was ever readable (as opposed to a nested dir found mid-walk) — that's
+// the "was this tree even here to look at" signal callers need.
+function newestMtimeUnder(subdir, extTest) {
+  const roots = [];
+  try { if (app?.getAppPath) roots.push(app.getAppPath()); } catch { /* ignore */ }
+  try { roots.push(process.cwd()); } catch { /* ignore */ }
+
+  let newest = 0;
+  let dirFound = false;
+  const seen = new Set();
+  const walk = (dir, isCandidateRoot) => {
+    const resolved = path.resolve(dir);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(resolved, { withFileTypes: true });
+      if (isCandidateRoot) dirFound = true;
+    } catch { return; }
+    for (const entry of entries) {
+      // Defensive: these dirs shouldn't contain node_modules, but never recurse
+      // into it (or dotfiles) if a candidate root ever broadens.
+      if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
+      const fullPath = path.join(resolved, entry.name);
+      if (entry.isDirectory()) { walk(fullPath, false); continue; }
+      if (!entry.isFile() || !extTest.test(entry.name)) continue;
+      try {
+        const stat = fs.statSync(fullPath);
+        if (stat.mtimeMs > newest) newest = stat.mtimeMs;
+      } catch { /* skip */ }
+    }
+  };
+
+  for (const root of roots) {
+    if (!root) continue;
+    walk(path.join(root, subdir), true);
+  }
+  return { newest: newest || null, dirFound };
+}
+
 /**
  * Returns `{ src, srcDirFound, bundle, bundleDirFound }` describing the newest
  * main-process code file the running build depends on. Comparing `src`/`bundle`
@@ -569,52 +612,8 @@ ${rows}
  * and its absence, which the verdict text must not blur.
  */
 function getNewestMainProcessMtimes() {
-  const CODE_EXT = /\.(c|m)?js$/; // .js, .cjs, .mjs
-  const roots = [];
-  try { if (app?.getAppPath) roots.push(app.getAppPath()); } catch { /* ignore */ }
-  try { roots.push(process.cwd()); } catch { /* ignore */ }
-
-  // Scans every `<root>/<subdir>` tree and reports both the newest matching
-  // mtime AND whether the top-level `<root>/<subdir>` directory itself was
-  // ever readable (as opposed to a nested dir found mid-walk) — that's the
-  // "was this tree even here to look at" signal callers need.
-  const scanSubdir = (subdir) => {
-    let newest = 0;
-    let dirFound = false;
-    const seen = new Set();
-    const walk = (dir, isCandidateRoot) => {
-      const resolved = path.resolve(dir);
-      if (seen.has(resolved)) return;
-      seen.add(resolved);
-
-      let entries = [];
-      try {
-        entries = fs.readdirSync(resolved, { withFileTypes: true });
-        if (isCandidateRoot) dirFound = true;
-      } catch { return; }
-      for (const entry of entries) {
-        // Defensive: these dirs shouldn't contain node_modules, but never recurse
-        // into it (or dotfiles) if a candidate root ever broadens.
-        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-        const fullPath = path.join(resolved, entry.name);
-        if (entry.isDirectory()) { walk(fullPath, false); continue; }
-        if (!entry.isFile() || !CODE_EXT.test(entry.name)) continue;
-        try {
-          const stat = fs.statSync(fullPath);
-          if (stat.mtimeMs > newest) newest = stat.mtimeMs;
-        } catch { /* skip */ }
-      }
-    };
-
-    for (const root of roots) {
-      if (!root) continue;
-      walk(path.join(root, subdir), true);
-    }
-    return { newest: newest || null, dirFound };
-  };
-
-  const src = scanSubdir('electron');
-  const bundle = scanSubdir('dist-electron');
+  const src = newestMtimeUnder('electron', /\.(c|m)?js$/); // .js, .cjs, .mjs
+  const bundle = newestMtimeUnder('dist-electron', /\.(c|m)?js$/);
   return {
     src: src.newest,
     srcDirFound: src.dirFound,
@@ -637,35 +636,9 @@ function getNewestMainProcessMtimes() {
  * renderer bundle the app actually loads), or null for whichever can't be read.
  */
 function getNewestRendererMtimes() {
-  const roots = [];
-  try { if (app?.getAppPath) roots.push(app.getAppPath()); } catch { /* ignore */ }
-  try { roots.push(process.cwd()); } catch { /* ignore */ }
-
-  const newestUnder = (subdir, extTest) => {
-    let newest = 0;
-    const seen = new Set();
-    const walk = (dir) => {
-      const resolved = path.resolve(dir);
-      if (seen.has(resolved)) return;
-      seen.add(resolved);
-      let entries = [];
-      try { entries = fs.readdirSync(resolved, { withFileTypes: true }); } catch { return; }
-      for (const entry of entries) {
-        if (entry.name === 'node_modules' || entry.name.startsWith('.')) continue;
-        const fullPath = path.join(resolved, entry.name);
-        if (entry.isDirectory()) { walk(fullPath); continue; }
-        if (!entry.isFile() || !extTest.test(entry.name)) continue;
-        try { const stat = fs.statSync(fullPath); if (stat.mtimeMs > newest) newest = stat.mtimeMs; }
-        catch { /* skip */ }
-      }
-    };
-    for (const root of roots) if (root) walk(path.join(root, subdir));
-    return newest || null;
-  };
-
   return {
-    src: newestUnder('src', /\.(jsx?|tsx?|css|html)$/),  // renderer sources
-    bundle: newestUnder('dist', /./),                    // any file — a rebuild touches them all
+    src: newestMtimeUnder('src', /\.(jsx?|tsx?|css|html)$/).newest,  // renderer sources
+    bundle: newestMtimeUnder('dist', /./).newest,                      // any file — a rebuild touches them all
   };
 }
 
@@ -1529,6 +1502,23 @@ function buildJobSourceWarningReconciliationMarkdown(nodes, sourceCardsByHub) {
 
 ${lines.join('\n')}
 `;
+}
+
+function liveJobBoardState(node, renderedCardCounts, clearProvenance) {
+  return {
+    id: node.id,
+    hubState: node.data?.hubState,
+    resultCount: node.data?.resultCount,
+    renderedCardCount: renderedCardCounts.get(node.id) || 0,
+    stale: node.data?.stale,
+    staleReason: node.data?.staleReason,
+    combineSignature: node.data?.combineSignature,
+    combineSourceRuns: node.data?.combineSourceRuns,
+    mergeUnique: node.data?.mergeStats?.unique,
+    locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
+    researchRemoved: node.data?.mergeStats?.researchRemoved,
+    clearProvenance,
+  };
 }
 
 function buildMediaPlayerStateMarkdown(mediaState) {
@@ -2446,7 +2436,6 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
   let mainProcessLogLines = [];
   try { mainProcessLogLines = buildRecentMainProcessLogLines({ filter: mainProcessLogFilter }); }
   catch { /* never break the report on diagnostic failure */ }
-  const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
 
   // ── AI configuration snapshot ─────────────────────────────────────────────
   // The local non-api-ai registry owns every task; its normal dock route and
@@ -2674,6 +2663,12 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     catch { officialPostingDiscoveryMarkdown = diagnosticRenderFailureMarkdown('Official Posting Discovery Diagnostics (OFFDISC)', new Error('could not inspect lookup discovery observations')); }
   }
   if (hasJobNodes || isFullReport || reportCodes.has('JOBS') || reportCodes.has('RECOVERY')) {
+    const renderedCardCounts = new Map();
+    for (const candidate of (nodes || [])) {
+      if (candidate?.type !== 'jobcard') continue;
+      const hubId = candidate?.data?.hubId;
+      renderedCardCounts.set(hubId, (renderedCardCounts.get(hubId) || 0) + 1);
+    }
     const rawJobBoardStates = Array.isArray(payload.filterStats?.jobBoardStates)
       ? payload.filterStats.jobBoardStates
       : (nodes || []).filter(node => node?.type === 'jobboard').map(node => {
@@ -2703,20 +2698,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
                   .filter(Boolean)).values()].slice(0, 25),
               }
             : null;
-          return {
-            id: node.id,
-            hubState: node.data?.hubState,
-            resultCount: node.data?.resultCount,
-            renderedCardCount: (nodes || []).filter(candidate => candidate?.type === 'jobcard' && candidate?.data?.hubId === node.id).length,
-            stale: node.data?.stale,
-            staleReason: node.data?.staleReason,
-            combineSignature: node.data?.combineSignature,
-            combineSourceRuns: node.data?.combineSourceRuns,
-            mergeUnique: node.data?.mergeStats?.unique,
-            locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
-            researchRemoved: node.data?.mergeStats?.researchRemoved,
-            clearProvenance,
-          };
+          return liveJobBoardState(node, renderedCardCounts, clearProvenance);
         });
     // filterStats can be assembled before edge state is refreshed. The live
     // canvas graph is authoritative for direct Board↔Job Search admission, so
@@ -2753,20 +2735,7 @@ export function generateMarkdown(payload, reportWindowId = null, options = {}) {
     // is meaningful evidence of an admitted-but-not-yet-consumed source.
     const suppliedBoardIds = new Set(rawJobBoardStates.map(board => board?.id).filter(Boolean));
     const liveOnlyBoards = (nodes || []).filter(node => node?.type === 'jobboard' && node?.id && !suppliedBoardIds.has(node.id))
-      .map((node) => ({
-        id: node.id,
-        hubState: node.data?.hubState,
-        resultCount: node.data?.resultCount,
-        renderedCardCount: (nodes || []).filter(candidate => candidate?.type === 'jobcard' && candidate?.data?.hubId === node.id).length,
-        stale: node.data?.stale,
-        staleReason: node.data?.staleReason,
-        combineSignature: node.data?.combineSignature,
-        combineSourceRuns: node.data?.combineSourceRuns,
-        mergeUnique: node.data?.mergeStats?.unique,
-        locationPostingsCollapsed: node.data?.mergeStats?.locationVariantPostingsCollapsed,
-        researchRemoved: node.data?.mergeStats?.researchRemoved,
-        clearProvenance: node.data?.clearProvenance,
-      }));
+      .map(node => liveJobBoardState(node, renderedCardCounts, node.data?.clearProvenance));
     const jobBoardStates = [...rawJobBoardStates, ...liveOnlyBoards].map((board) => {
       const id = board?.id;
       const supplied = Array.isArray(board?.connectedSourceHubIds) ? board.connectedSourceHubIds : [];
@@ -2906,16 +2875,16 @@ ${buildRendererCrashMarkdown(app.getPath('userData'))}${(isFullReport || reportC
   const chronologicalEventLines = Array.isArray(events)
     ? events.map(redactReportEventHistoryLine)
     : [];
-  const eventsMarkdown = buildReverseChronologicalLogBlock(chronologicalEventLines, '*(No events recorded)*', { basis: 'local' });
-  const eventHeading = eventHistoryHeading(payload.eventHistoryMetadata);
-
-  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${eventHeading}` + eventsMarkdown;
   // Logs and the Event History heading live outside baseMarkdown so the
   // clipboard path (enforceClipboardMarkdownCap) can trim them independently of
   // the curated static sections above.
   if (options?.maxChars) {
     return enforceClipboardMarkdownCap(baseMarkdown, chronologicalEventLines, mainProcessLogLines, options.maxChars, payload.eventHistoryMetadata);
   }
+  const eventsMarkdown = buildReverseChronologicalLogBlock(chronologicalEventLines, '*(No events recorded)*', { basis: 'local' });
+  const eventHeading = eventHistoryHeading(payload.eventHistoryMetadata);
+  const mainProcessLogsMarkdown = buildMainProcessLogsMarkdown(mainProcessLogLines);
+  const fullMarkdown = baseMarkdown + mainProcessLogsMarkdown + `\n${eventHeading}` + eventsMarkdown;
   return { markdown: fullMarkdown, truncated: false, trimmedEventCount: 0, trimmedLogCount: 0, hardTruncated: false };
 }
 

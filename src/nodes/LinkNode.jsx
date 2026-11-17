@@ -123,7 +123,7 @@ export const LinkNode = React.memo(function LinkNode({ id, data }) {
   }, [data.locked, setIsEditingLabel]);
 
   const applyUrl = useCallback(() => {
-    const urlChanged = urlInput !== data.url;
+    const urlChanged = urlInput !== (data.url || '');
     // Clear label on URL change so the title auto-fetcher repopulates it.
     updateNodeData(id, { url: urlInput, ...(urlChanged && { label: '' }) });
     setShowDialog(null);

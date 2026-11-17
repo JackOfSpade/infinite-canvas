@@ -4863,7 +4863,7 @@ export default [
         && main.includes('Keep Editing')
         && main.includes('showUnverifiedSaveStateDialog(win, actionType)')
         && main.includes('Could Not Verify Unsaved Changes')
-        && main.includes('finish({ timeout: true });'),
+        && main.includes("reason === 'destroyed' ? { destroyed: true } : { timeout: true }"),
       'main must require an explicit document-discard choice after a text-file failure instead of opening canvas Save As');
       assert(persistence.includes('if (!hasUnsavedChangesRef.current && !forceCanvasSave)')
         && persistence.includes('success = true;')
@@ -4894,8 +4894,9 @@ export default [
         && clearCommit > clearTextSettle,
       'last-reference deletion and Clear Canvas must settle only their orphan text paths before acknowledged workflow cleanup; an OS-dialog Abort or failed draft rejects the pending deletion without retiring recovery');
       assert(main.includes('let rendererHandshakeRequestId = 0;')
-        && main.includes("safeMenuSend(win, 'quit-request', { requestId })")
-        && main.includes('responseRequestId !== requestId')
+        && main.includes("requestChannel: 'quit-request'")
+        && main.includes('safeMenuSend(win, requestChannel, { ...payload, requestId })')
+        && main.includes('reply?.requestId !== requestId')
         && preload.includes('sendQuitResponse: (state, requestId)')
         && persistence.includes('sendQuitResponse(response, requestId);'),
       'quit responses must echo a monotonic request ID so a late timed-out response cannot satisfy a later close');
@@ -4906,8 +4907,9 @@ export default [
         && persistence.includes("console.error('Could not prepare save response:'")
         && persistence.includes('sendSaveResponse(success, requestId);'),
       'unexpected async renderer callback failures must return correlated fail-closed quit/save responses instead of leaving main waiting');
-      assert((main.match(/responseRequestId !== requestId/g) || []).length >= 3
-        && main.includes("safeMenuSend(win, 'request-save-and-respond', {")
+      assert(main.includes('reply?.requestId !== requestId')
+        && (main.match(/return awaitRendererReply\(win, \{|= await awaitRendererReply\(win, \{/g) || []).length >= 4
+        && main.includes("requestChannel: 'request-save-and-respond'")
         && main.includes('forceCanvasSave,')
         && main.includes("return { action: 'save', skipDocumentSessions, forceCanvasSave: true };")
         && persistence.includes('skipDocumentSessions = false')
@@ -4916,12 +4918,11 @@ export default [
       'both quit and save handlers must reject stale/mismatched response IDs; a document discard bypasses only its correlated save while a pending manual handoff still forces the canvas checkpoint');
       assert(main.includes('function safeMenuSend(win, channel, payload)')
         && main.includes('try {\n    if (payload === undefined) win.webContents.send(channel);')
-        && main.includes('if (!safeMenuSend(win, \'quit-request\', { requestId }))')
-        && main.includes('if (!safeMenuSend(win, \'request-save-and-respond\', {')
-        && main.includes("expectedSender.removeListener('did-start-navigation', onMainFrameNavigation);")
-        && (main.match(/expectedSender\.on\('did-start-navigation', onMainFrameNavigation\);/g) || []).length >= 2
-        && (main.match(/if \(isMainFrame && !isInPlace\) finish/g) || []).length >= 2
-        && main.includes("expectedSender.removeListener('render-process-gone', onRenderProcessGone);")
+        && main.includes("if (!safeMenuSend(win, requestChannel, { ...payload, requestId })) finish(onUnavailable('unreachable'));")
+        && main.includes("expectedSender.removeListener('did-start-navigation', onNavigation);")
+        && main.includes("expectedSender.on('did-start-navigation', onNavigation);")
+        && main.includes("if (isMainFrame && !isInPlace) finish(onUnavailable('navigation'));")
+        && main.includes("expectedSender.removeListener('render-process-gone', onGone);")
         && main.includes('if ([...canvasWindows].some(win => win.__closeHandshakeInFlight)) {\n    pendingGlobalQuit.defer();')
         && main.includes('if (quitHandshakeInFlight) return;')
         && main.includes('if (isQuitting) {\n    event.preventDefault();\n    return;\n  }'),
@@ -4936,7 +4937,7 @@ export default [
       assert(main.includes('Could not destroy canvas window after close'),
         'a per-window destroy race must be caught inside its async close handler rather than becoming an unhandled rejection');
       assert(main.includes('function requestQuitCommitAndWait(win)')
-        && main.includes("safeMenuSend(win, 'quit-commit-request', { requestId })")
+        && main.includes("requestChannel: 'quit-commit-request'")
         && main.includes('function releaseQuitCommit(windows)')
         && main.includes('const commitWindows = [...canvasWindows].filter(win => !win.isDestroyed());')
         && main.includes('freezeRenderer: requestQuitCommitAndWait,')
@@ -5951,8 +5952,7 @@ export default [
         && finalAuthorityCheckAt > finalAbortCheckAt
         && gatheredTimestampAt > finalAuthorityCheckAt
         && jobsSource.includes("collectionDisposition === 'user-finished-partial'")
-        && jobsSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt")
-        && jobsSource.includes('if (hasExactResumeToken && gatheredStageAdvanced !== true)'),
+        && jobsSource.includes("setJobRunStage(canvasFilePath, 'gathered', gatheredStageUpdatedAt"),
       'a Reset or exact-token replacement during scrape cannot mark a cancelled/superseded manifest gathered, including the partial saved-listings completion branch');
       return { rerunReachable: true, initialCancellationUnlocks: true, staleOwnerRejected: true };
   },
@@ -5964,26 +5964,23 @@ export default [
       const pipelineStart = source.indexOf('const runPipeline = useCallback');
       const pipelineEnd = source.indexOf('const startProcessing = useCallback', pipelineStart);
       const pipeline = source.slice(pipelineStart, pipelineEnd);
-      const autoStartStart = source.indexOf('// Auto-start legacy drop-created hubs once per mounted node/path');
-      const autoStartEnd = source.indexOf('// Handle file drops directly onto this node.', autoStartStart);
+      const autoStartEnd = source.indexOf('const continueSavedJobsRescore = useCallback');
+      const autoStartStart = source.lastIndexOf('useEffect(() => {', source.indexOf('Legacy file auto-start suppressed — searches run only from a Job Board'));
       const autoStart = source.slice(autoStartStart, autoStartEnd);
 
       assert(pipelineStart >= 0 && pipelineEnd > pipelineStart,
         'the pipeline boundary was not found; this test must inspect the catch that resolves a failed job search');
       assert(!pipeline.includes('filePath: null'),
         'a pipeline failure must retain a legacy resume path so Try Again can re-parse it before a profile exists');
-      assert(source.includes('const autoStartedFilePathRef = useRef(null);'),
-        'legacy auto-start needs a mounted-session latch instead of clearing the retry input on failure');
-      assert(autoStart.includes("const autoStartPath = typeof data.filePath === 'string' ? data.filePath.trim() : '';")
-        && autoStart.includes('autoStartedFilePathRef.current === autoStartPath')
+      assert(!source.includes('autoStartedFilePathRef'),
+        'the retired legacy auto-start must not keep a launch latch');
+      assert(autoStart.includes("const legacyFilePath = typeof data.filePath === 'string' ? data.filePath.trim() : '';")
         && autoStart.includes('if (!recoveryPeekResolved) return;')
         && autoStart.includes('if (recoveryPeekHasProtectedCheckpoint) {')
         && autoStart.includes('saved checkpoint is available for Resume')
-        && autoStart.includes('autoStartedFilePathRef.current = autoStartPath')
-        && autoStart.includes('Promise.resolve(startProcessing(autoStartPath))')
-        && autoStart.includes('blockedByDeletion')
-        && autoStart.includes('claimedByBoard'),
-      'auto-start must wait for the exact recovery peek, then launch each clear persisted path once while allowing a genuinely changed path to launch');
+        && !autoStart.includes('startProcessing(')
+        && !autoStart.includes('runPipeline('),
+      'the legacy file effect must wait for the exact recovery peek and never launch a search from a persisted path');
 
       const freshAdmissionAt = pipeline.indexOf('Every fresh admission gets its own exact, hub-scoped inspection');
       const freshAdmissionProbeAt = pipeline.indexOf('await window.electronAPI.peekJobRun({ canvasFilePath, nodeId: currentId })', freshAdmissionAt);

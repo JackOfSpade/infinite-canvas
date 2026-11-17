@@ -7,10 +7,8 @@ import { JOB_SEARCH_TEST_MODE } from '../../src/utils/jobSourceScope.js';
  * The LLM-input cap (jobScoringBatchSize) is the adaptive part: it scales to
  * how many quality results actually exist and stays bounded by the downstream
  * output-token budget. Pricing uses the versioned batch formula below, sized
- * against BATCH_OUTPUT_TOKEN_BUDGET. Job scoring follows the same contract: its fresh batch count and
- * prompt seed come from the one 1,600 + 600/job estimate below, while its
- * retired 15-row contract remains available only to replay an exact durable
- * handoff.
+ * against BATCH_OUTPUT_TOKEN_BUDGET. Job scoring follows the same contract: its batch count and
+ * prompt seed come from the one 1,600 + 2,800/job estimate below.
  *
  * Job collection breadth is deliberately NOT configured here. It is a persisted
  * per-hub user setting (`collectionLimits`) so a run can be reproduced and does
@@ -119,8 +117,6 @@ export const JOB_SCORE_CAP = JOB_SEARCH_TEST_MODE.skipAI ? 0 : Infinity;
 // holds as many jobs as fit BATCH_OUTPUT_TOKEN_BUDGET.
 const JOB_SCORING_BASE_TOKENS = 1600;
 const JOB_SCORING_TOKENS_PER_JOB = 2800;
-const LEGACY_JOB_SCORING_TOKENS_PER_JOB = 600;
-export const LEGACY_JOB_SCORING_BATCH_SIZE = 15;
 
 export function jobScoringEstimatedTokens(itemCount = 1) {
   const items = Math.max(1, Math.floor(Number(itemCount) || 1));
@@ -133,13 +129,6 @@ export function jobScoringMaxTokens(itemCount = 1) {
 
 export function jobScoringBatchFits(itemCount = 1) {
   return jobScoringEstimatedTokens(itemCount) <= BATCH_OUTPUT_TOKEN_BUDGET;
-}
-
-// The pre-v2 formula and grouping are deliberately retained for an exact
-// accepted/pending durable scoring step. Fresh work never uses this cap.
-export function legacyJobScoringMaxTokens(itemCount = 1) {
-  const items = Math.max(1, Math.floor(Number(itemCount) || 1));
-  return Math.min(12000, JOB_SCORING_BASE_TOKENS + items * LEGACY_JOB_SCORING_TOKENS_PER_JOB);
 }
 
 /**

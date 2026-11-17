@@ -1,4 +1,4 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPage, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterHistoryForResume, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterHistoryForResume, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 import { isMarketplaceSourceLifecycleAbort, packBatchPriceSynthesisItems, validateBatchPriceSynthesisSubmission, validateMarketplaceBatchExecution } from '../../electron/ipc/marketplace.js';
 import { BATCH_OUTPUT_TOKEN_BUDGET, priceSynthesisBatchFits, priceSynthesisBatchMaxComps } from '../../electron/ipc/resultCaps.js';
 import { collectMarketplaceRecoveryOwners } from '../../src/utils/canvasInteractions.js';
@@ -1734,22 +1734,8 @@ export default [
     // queries only — a query that crashed before flushing its first page had no
     // ledger entry, and since buildJobTasks applies ONE start page to EVERY
     // query of the source, that query's early pages were silently skipped.
-    name: 'computeResumeStartPage: fast-forwards only when EVERY query recorded a page',
+    name: 'computeResumeStartPagesByQuery: only an unrecorded query restarts at page 1',
     run: () => {
-      // Both queries recorded → min(lastPage)+1.
-      assert(computeResumeStartPage({ queries: { qa: { lastPage: 3 }, qb: { lastPage: 1 } } }, 2) === 2,
-        'all queries recorded → min(1)+1 = 2');
-      // Query B never flushed → restart at 1 so its pages 1..N are not skipped.
-      assert(computeResumeStartPage({ queries: { qa: { lastPage: 3 } } }, 2) === 1,
-        'unrecorded query → start page 1');
-      // Nothing recorded at all → 1.
-      assert(computeResumeStartPage({ queries: {} }, 3) === 1, 'no ledger → 1');
-      assert(computeResumeStartPage(undefined, 3) === 1, 'no source entry → 1');
-      // Single-query run fully recorded → resumes past its last page.
-      assert(computeResumeStartPage({ queries: { only: { lastPage: 0 } } }, 1) === 1 + 0,
-        'single query at page 0 → resume at 1 (0-based ledger, 1-based start)');
-      assert(computeResumeStartPage({ queries: { only: { lastPage: 4 } } }, 1) === 5,
-        'single query at page 4 → resume at 5');
       const perQuery = computeResumeStartPagesByQuery({
         queries: { qa: { lastPage: 3 }, qb: { lastPage: 1 } },
       }, ['qa', 'qb', 'qc']);

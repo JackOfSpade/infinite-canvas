@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { canonicalAuthorityValue as stable } from './applicationAuthorityWorkflow.js';
 
 // The store intentionally has no application-schema knowledge.  It is the
 // durable append-only substrate for requirements now and match/review receipts
@@ -35,11 +36,6 @@ export function __setAuthorityLedgerProcessIdentityHookForTests(hook) {
 async function step(name) { if (faultHook) await faultHook(name); }
 const execFileAsync = promisify(execFile);
 let linuxBootIdentity = null;
-function stable(value) {
-  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(',')}}`;
-  return JSON.stringify(value);
-}
 function assert(condition, message) { if (!condition) throw new Error(`Authority ledger store: ${message}`); }
 // `stable` is deliberately a tiny canonical JSON encoder, rather than a
 // general JavaScript serializer. Reject values it could stringify
@@ -176,6 +172,12 @@ async function readJsonSnapshot(root, target, max) {
 }
 function rootDigest(root) { const { digest: _digest, ...unsigned } = root; return hash(unsigned); }
 
+function recordIndexKeys(record) {
+  return [
+    ...(typeof record?.id === 'string' ? [`id:${record.id}`] : []),
+    ...(Array.isArray(record?.indexKeys) ? record.indexKeys.filter(key => typeof key === 'string' && key.length <= 512).map(key => `key:${key}`) : []),
+  ];
+}
 function isCurrentStore(state) { return state?.version === AUTHORITY_LEDGER_STORE_VERSION; }
 function indexReference(stream, start, span, digest) {
   return { start, span, file: indexFile(stream, start, span), digest };
@@ -530,7 +532,7 @@ async function removeHeldTransactionOrphans(store, previous, next, assertTransac
       // Remove index nodes bottom-up. Larger parent nodes remain available to
       // locate and authenticate every smaller node after a restart.
       for (let span = 1; span <= to; span *= 2) for (let start = 0; start + span <= to; start += span) {
-        if (start + span <= from || !isPowerOfTwo(span) || start % span) continue;
+        if (start + span <= from) continue;
         const file = indexFile(stream, start, span);
         if (!await orphanExists(store, file)) continue;
         const reference = await indexedReferenceForRange(store, next, stream, start, span);
@@ -686,10 +688,7 @@ export class AuthorityLedgerStore {
       lastWritten = { stream, file, digest: page.digest, number }; writtenCount += 1;
       if (written) written.push(lastWritten);
       const buckets = next.idBuckets || {}; next.idBuckets = buckets;
-      for (const record of records) for (const key of [
-        ...(typeof record?.id === 'string' ? [`id:${record.id}`] : []),
-        ...(Array.isArray(record?.indexKeys) ? record.indexKeys.filter(key => typeof key === 'string' && key.length <= 512).map(key => `key:${key}`) : []),
-      ]) {
+      for (const record of records) for (const key of recordIndexKeys(record)) {
         const bucket = hash(key).slice(0, 2); const priorBucket = buckets[bucket] || { count: 0, head: null, digest: hash([]) };
         const bucketPage = { version: 1, bucket, number: priorBucket.count, previous: priorBucket.head, previousDigest: priorBucket.head ? priorBucket.digest : null, ids: [key] }; bucketPage.digest = hash(bucketPage);
         const bucketFile = `ids-${bucket}-${String(priorBucket.count).padStart(12, '0')}.json`; await writeSafe(this.root, path.join(pages, bucketFile), bucketPage, { immutable: true }); await step('transaction:bucket');
@@ -721,11 +720,7 @@ export class AuthorityLedgerStore {
     const next = structuredClone(this.state); next.revision += 1; next.streams[stream] = { count: number + 1, head: file, digest: page.digest,
       ...(next.version === AUTHORITY_LEDGER_STORE_VERSION ? { index: await appendIndexedPage(this, prior, { stream, number, file, digest: page.digest }) } : {}) };
     const buckets = next.idBuckets || {}; for (const record of records) {
-      const keys = [
-        ...(typeof record?.id === 'string' ? [`id:${record.id}`] : []),
-        ...(Array.isArray(record?.indexKeys) ? record.indexKeys.filter(key => typeof key === 'string' && key.length <= 512).map(key => `key:${key}`) : []),
-      ];
-      for (const key of keys) {
+      for (const key of recordIndexKeys(record)) {
       const bucket = hash(key).slice(0, 2); const priorBucket = buckets[bucket] || { count: 0, head: null, digest: hash([]) };
       const bucketFile = `ids-${bucket}-${String(priorBucket.count).padStart(12, '0')}.json`;
       const bucketPage = { version: 1, bucket, number: priorBucket.count, previous: priorBucket.head, previousDigest: priorBucket.head ? priorBucket.digest : null, ids: [key] }; bucketPage.digest = hash(bucketPage);

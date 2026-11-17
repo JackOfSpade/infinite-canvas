@@ -423,6 +423,17 @@ export async function runBoundedJobTaxonomy(jobs, {
   const classifyChunk = async (chunk, batchIndex) => {
     abortIfNeeded(classifySignal);
     const batchMeta = {};
+    const assertChunkShape = (roleIndexes) => {
+      const shape = inspectJobTaxonomyRoleIndexes(roleIndexes, chunk.length, plan.value.roleFamilies.length);
+      if (!(shape.missingCount || shape.nonIntegerCount || shape.outOfRangeCount || shape.extraCount)) return;
+      const issues = collector();
+      if (shape.rawEntryCount !== chunk.length) issues.add('taxonomy.chunk-count', '', { raw: shape.rawEntryCount });
+      for (const i of shape.missingIndices) issues.add('taxonomy.chunk-missing', i);
+      for (const i of shape.nonIntegerIndices) issues.add('taxonomy.chunk-non-integer', i);
+      for (const i of shape.outOfRangeIndices) issues.add('taxonomy.chunk-out-of-range', i);
+      if (shape.extraCount) issues.add('taxonomy.chunk-extra', '', { raw: shape.extraCount });
+      issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${batchIndex + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
+    };
     const classified = await callText(buildJobTaxonomyChunkPrompt(chunk.map(entry => entry.job), plan.value.roleFamilies), {
       signal: classifySignal,
       task: 'job-taxonomy-classify-batch',
@@ -437,30 +448,10 @@ export async function runBoundedJobTaxonomy(jobs, {
         progressUnits: chunk.length,
       },
       responseSchema: JOB_TAXONOMY_CLASSIFY_SCHEMA, meta: batchMeta,
-      responseValidator: (value) => {
-        const shape = inspectJobTaxonomyRoleIndexes(value?.roleByIndex, chunk.length, plan.value.roleFamilies.length);
-        if (shape.missingCount || shape.nonIntegerCount || shape.outOfRangeCount || shape.extraCount) {
-          const issues = collector();
-          if (shape.rawEntryCount !== chunk.length) issues.add('taxonomy.chunk-count', '', { raw: shape.rawEntryCount });
-          for (const i of shape.missingIndices) issues.add('taxonomy.chunk-missing', i);
-          for (const i of shape.nonIntegerIndices) issues.add('taxonomy.chunk-non-integer', i);
-          for (const i of shape.outOfRangeIndices) issues.add('taxonomy.chunk-out-of-range', i);
-          if (shape.extraCount) issues.add('taxonomy.chunk-extra', '', { raw: shape.extraCount });
-          issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${batchIndex + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
-        }
-      },
+      responseValidator: value => assertChunkShape(value?.roleByIndex),
     });
     abortIfNeeded(classifySignal);
-    const shape = inspectJobTaxonomyRoleIndexes(classified?.roleByIndex, chunk.length, plan.value.roleFamilies.length);
-    if (shape.missingCount || shape.nonIntegerCount || shape.outOfRangeCount || shape.extraCount) {
-      const issues = collector();
-          if (shape.rawEntryCount !== chunk.length) issues.add('taxonomy.chunk-count', '', { raw: shape.rawEntryCount });
-          for (const i of shape.missingIndices) issues.add('taxonomy.chunk-missing', i);
-          for (const i of shape.nonIntegerIndices) issues.add('taxonomy.chunk-non-integer', i);
-          for (const i of shape.outOfRangeIndices) issues.add('taxonomy.chunk-out-of-range', i);
-          if (shape.extraCount) issues.add('taxonomy.chunk-extra', '', { raw: shape.extraCount });
-          issues.fail({ templates: TAXONOMY_CORRECTION_TEMPLATES, vars: { total: chunk.length, max: chunk.length - 1, families: plan.value.roleFamilies.length }, message: `Invalid taxonomy chunk ${batchIndex + 1}/${batchCount}: received ${shape.rawEntryCount} entries; exactly ${chunk.length} required (${shape.missingCount} missing, ${shape.nonIntegerCount} non-integer, ${shape.outOfRangeCount} out-of-range, ${shape.extraCount} extra).` });
-    }
+    assertChunkShape(classified?.roleByIndex);
     completedBatches += 1;
     processed += chunk.length;
     onProgress?.({ stage: 'classifying', completedBatches, batchCount, processed, total: list.length,

@@ -28,6 +28,9 @@
  *   logSlice       — number, keep only the last N log lines (applied after filtering)
  *   excludeSections — string[], payload sections to omit from the report
  */
+// Canvas, layout and media dumps a telemetry-focused code can drop.
+const HEAVY_DUMP_SECTIONS = Object.freeze(['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState']);
+
 export const CODE_DEFINITIONS = {
 
   // ── Log Content Filters ───────────────────────────────────────────────────
@@ -50,28 +53,28 @@ export const CODE_DEFINITIONS = {
     label: 'Workspace Save Checks',
     description: 'Bounded workspace save outcomes and exact host path-check refusal reasons. Included automatically in FULL. No paths, file contents, inode values or exception text are retained.',
     logFilter: line => /save-workspace|auto-save|FileSystem/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   PERF: {
     label: 'Performance',
     description: 'For lag, freezes and slowness: how long the window and the app process were blocked, and how long undo steps and auto-saves took. Included automatically in FULL. Timings only; no canvas content, ids or paths.',
     logFilter: line => /viewport changed|node resized|save|undo|redo|canvas load|expanded|collapsed/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   BTABS: {
     label: 'Browser Tab Restore',
     description: 'App-owned Chrome tab-restore cleanup outcomes and file counts before launch. Included automatically in FULL. No paths, URLs, cookies or file contents are retained.',
     logFilter: line => /BrowserScraper|StealthBrowser|NativeRead|browser|launch/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   CLAUDEPAUSE: {
     label: 'Claude Usage Pauses',
     description: 'Claude usage-limit pauses, resumes and system sleep/wake events with reset times. Included automatically in FULL. No prompts, answers, paths or error text are retained.',
     logFilter: line => /\[Claude tasks\]|usage limit|CLAUDE_USAGE_LIMIT/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   CRASH: {
@@ -85,7 +88,7 @@ export const CODE_DEFINITIONS = {
     label: 'Renderer Crash Recovery',
     description: 'Durable renderer-crash reasons, exit codes and saved-workspace sizes, plus renderer/recovery event logs. Included automatically in FULL. Use for a white or blank app window or a renderer that stopped unexpectedly.',
     logFilter: line => /renderer|RendererRecovery|crash|JS-ERROR|UNHANDLED-PROMISE|CONSOLE-ERROR/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   UI: {
@@ -179,28 +182,28 @@ export const CODE_DEFINITIONS = {
     description: 'Job-board likelihood/salary/role bucketing diagnostics, including taxonomy validation repairs and raw salary → annualized-pay placement audits. Use for malformed salary bands, unexpected job buckets, or role grouping questions. Keeps the compact Job Search Pipeline section while omitting heavy canvas/media dumps.',
     logFilter: line =>
       /taxonomy|bucket(?:ing)?|salary|\[JobTree\]|\[JobBoard\]/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   JOBPAY: {
     label: 'Job Card Salary Analysis',
     description: 'All current job cards: salary verdict, advertised-pay presence, missing-pay and research-skip reasons, market-evidence counts, verdict consistency, and personal-guidance status, saved-range checks, career-pin presence and citation counts. Includes collapsed cards and nested canvases after a restart. Included automatically in FULL; omits prose and salary amounts.',
     logFilter: line => /compensation|salary|\[JobCard\]|\[JobBoard\]/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   OFFICIAL: {
     label: 'Official Posting Lookups',
     description: 'Current job cards: official-posting level, outcome, retryability, bounded failure/trail codes and semantic-proof presence, including collapsed cards and nested canvases restored after a restart. Included automatically in FULL. Omits listing identities, URLs, prose and proof hashes; does not prove a disk save.',
     logFilter: line => /official[- ]?posting|job-official-posting|employer.*(?:verification|site)/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   OFFDISC: {
     label: 'Official Posting Discovery',
     description: 'Process-local latest lookup per source input: discovered candidates, eligible sources, fixed source-rejection reasons and comparison counts; AI finder and judge calls, final unsettled reason codes and snapshot read/failure/truncation counts. Distinguishes no research leads from candidates rejected before comparison. Included automatically in FULL; no listing text, URLs or source/proof hashes.',
     logFilter: line => /official[- ]?posting|job-official-posting|OfficialPosting/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   SCORE: {
@@ -208,7 +211,7 @@ export const CODE_DEFINITIONS = {
     description: 'Job-scoring audit — batch outcomes plus bounded per-job score/direction/reason evidence and cross-batch drift flags for effectively identical postings. Use when similar jobs received inconsistent scores. Included automatically in FULL; keeps the compact Job Search Pipeline section while dropping heavy canvas/media dumps.',
     logFilter: line =>
       /scor(?:e|ed|ing)|batch|job|taxonomy|bucket/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   RELEVANCE: {
@@ -216,7 +219,7 @@ export const CODE_DEFINITIONS = {
     description: 'All-source role relevance diagnostics — exact title-match evidence where available, post-hoc title audits for board-ranked sources, and bounded rejected-title samples. Use when unrelated jobs appear or expected roles are missing. Included automatically in FULL.',
     logFilter: line =>
       /relevance|rejected|query|job|dice|usajobs|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed|linkedin|google/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   QUALITY: {
@@ -224,7 +227,7 @@ export const CODE_DEFINITIONS = {
     description: 'Per-source listing quality diagnostics — missing/short descriptions with bounded title/URL samples, salary/date/URL selector health, encoding issues, and LinkedIn telemetry-vs-snapshot completion checks. Use when jobs were scored with incomplete or malformed source data. Included automatically in FULL.',
     logFilter: line =>
       /field.?quality|description|snippet|salary|posted|selector|mojibake|enrich|linkedin|job/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   JOBLINK: {
@@ -249,7 +252,7 @@ export const CODE_DEFINITIONS = {
     description: 'Browser job-card traversal diagnostics — compact per-card recovery/miss evidence plus the Job Search Pipeline’s extracted-versus-expanded counts. Use when a visible browser appears to skip, jump over, or select the wrong job cards. Included automatically in FULL; drops heavy canvas/media dumps.',
     logFilter: line =>
       /\[JobSearch\]|\[JobBoard\]|\[JobCard\]|\[JobTree\]|browser.*(?:scrape|card)|(?:google|indeed|glassdoor|ziprecruiter).*?(?:scrape|card|description)|(?:scrape|description).*?(?:google|indeed|glassdoor|ziprecruiter)/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   // ── Exclusion Modifiers ───────────────────────────────────────────────────
@@ -328,7 +331,7 @@ export const CODE_DEFINITIONS = {
     description: 'Job-search pipeline audit — the search→score→bucket funnel, per-source gather counts, and AI/scraper telemetry that confirm no jobs were silently dropped or not gathered. Drops the heavy node/edge/media dumps and narrows the event log to job-pipeline events (the pipeline / AI / scraper sections are built main-process-side and are always kept).',
     logFilter: line =>
       /\bjob|career|resume|scrape|bucket|scoring|funnel|dice|linkedin|usajobs|lever|greenhouse|remoteok|weworkremotely|glassdoor|ziprecruiter|indeed/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   JOBHANDOFF: {
@@ -336,7 +339,7 @@ export const CODE_DEFINITIONS = {
     description: 'Manual Non-API job-AI lifecycle — issued prompts, validation rejections, dialog-remount replays, acceptance, cancellation, and terminal timing. Use when a copy/paste job-analysis step appears stuck or when a submitted response was not applied. The compact redacted lifecycle receipt is also included in FULL.',
     logFilter: line =>
       /non-api ai|non-api-ai|manual ai|manual handoff|taxonomy|scor(?:e|ing)|compensation|career-file/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   AIHANDOFF: {
@@ -344,7 +347,7 @@ export const CODE_DEFINITIONS = {
     description: 'Manual Non-API AI prompt-queue navigation, validation, and lifecycle receipts for every copy/paste AI task, including safe per-attempt rejection code/reason/count/size/hash metadata. Use when Next prompt returns to an earlier correction, a chat reply was rejected, a correction loop repeats, or a manual AI request appears stuck. JOBHANDOFF remains available for job-focused reports; FULL remains unfiltered.',
     logFilter: line =>
       /non-api ai|non-api-ai|manual ai|manual handoff|handoff code|validation/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   APPLICATION: {
@@ -352,14 +355,14 @@ export const CODE_DEFINITIONS = {
     description: 'Local application handoff audit — queued-job lifecycle, pasted JSON acceptance/rejection metadata, content-free chronology validation receipt, result validation/import, PDF render outcome, and final application-save events. Use when Generate fails, a pasted AI response is rejected, a role-date/current-employment check is disputed, no document/PDF is produced, or artifacts cannot save. Included automatically in FULL.',
     logFilter: line =>
       /\[LocalAI(?:-Fallback)?\]|queue-local-application|get-local-application-status|import-local-application|save-application|ApplicationSync|JobApplication.*(?:Saved|import)|fit-feedback|result\.json|résumé|resume|cover.?letter|PDF|render.?fit/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   APPVALIDATION: {
     label: 'Application Validation',
     description: 'Application outcomes (saved versus stopped), closed review-stop codes, response rejection checks, fixed envelope-field mismatch codes, correction stages, durable rejection history and final save verification. Included automatically in FULL; no prompts, answers or checksum values are exported.',
     logFilter: line => /LocalAI|validation|handoff|JobApplication|ApplicationSync/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   APPOUTPUT: {
@@ -371,21 +374,21 @@ export const CODE_DEFINITIONS = {
     label: 'Application Citation Flow',
     description: 'Bounded counts of career-cited paragraphs at draft and completion checks, exposing lost citation bindings without prose, quotes, IDs or paths. Included automatically in FULL.',
     logFilter: line => /LocalAI|validation|handoff/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   APPCORRECT: {
     label: 'Application Correction Causes',
     description: 'Bounded document-check outcomes with fixed closing, citation, grounding, figure and overflow cause counts, closing rejection subcauses and duplicate findings suppressed. No validation text, prose, quotes or paths. Included automatically in FULL.',
     logFilter: line => /LocalAI|validation|handoff/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   APPREJECT: {
     label: 'Application Rejection Text',
     description: 'The wording of each host check that rejected a résumé or cover-letter draft in this app process, so a rejection can be judged as a real defect or a false alarm. Messages may quote the rejected sentence; they are redacted again on export. Included automatically in FULL; this narrow code selects it directly. APPCORRECT gives the same checks as counts only.',
     logFilter: line => /LocalAI|validation|handoff/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   HANDOFF: {
@@ -393,7 +396,7 @@ export const CODE_DEFINITIONS = {
     description: 'Local AI application handoff audit — app-authored result-hash and page-measurement trace, result.json / fit-feedback lifecycle, import, render, and final-save events. Use when a local coding agent reports an iteration that the app did not appear to observe, a result is imported too early, or a measured revision loop is disputed. Included automatically in FULL.',
     logFilter: line =>
       /\[LocalAI(?:-Fallback)?\]|get-local-application-status|queue-local-application|import-local-application|fit-feedback|result\.json|JobApplication.*(?:Saved|import)|ApplicationSync|save-application/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   AUTH: {
@@ -401,7 +404,7 @@ export const CODE_DEFINITIONS = {
     description: 'Login/session diagnostics — auth-window launch mode, current login URL/title, session verifier traces, account-related main-process logs, and (since AUTH now implies PERSIST) the close-lifecycle table with each window’s Chrome executable, profile directory, and whether the cookie store was checkpointed before close. Use for Google/Indeed/marketplace login loops, “browser may not be secure” errors, or a login that reports success but still reads logged out.',
     logFilter: line =>
       /auth|login|log.?in|logged|sign.?in|session|account|cookie|verify|verified|not connected|connected|StealthBrowser|Accounts|google|indeed|glassdoor|ziprecruiter|facebook|ebay|poshmark|mercari|swappa/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   PERSIST: {
@@ -409,7 +412,7 @@ export const CODE_DEFINITIONS = {
     description: 'Cross-restart login durability diagnostics — browser-profile file checkpoints, restored cache provenance, per-platform auth-cookie-on-disk presence (never values), the close-lifecycle table (including which Chrome executable and profile directory each login window used), and startup verification. Use when login works until the app closes/reopens, OR when a login window and a later scrape/read used a different Chrome binary or profile within the SAME session (they cannot share cookies — e.g. a native login window vs. a Puppeteer-launched scrape). Included automatically in FULL.',
     logFilter: line =>
       /auth|login|log.?in|session|cookie|profile|checkpoint|persist|restor|startup verify|browser.*(?:close|exit|kill)|SIGTERM|SIGKILL|StealthBrowser|Accounts/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   RECOVERY: {
@@ -417,7 +420,7 @@ export const CODE_DEFINITIONS = {
     description: 'Job Search restart/completion audit — durable last-run terminal receipt plus saved run manifest/staging-ledger health, redacted mounted recovery-peek/banner/actionability state, and current/last-successful scrape snapshot metadata. Use after closing/crashing during search or manual AI copy/paste, or when a saved checkpoint did not visibly offer Resume; never includes job contents or AI prompt/response text. Included automatically in FULL.',
     logFilter: line =>
       /\[JobSearch\]|\[Jobs\]|job.?run|jobs?.(?:staging|run)|saved (?:AI prompt|scrape)|resume(?:d|ing)? (?:job|saved|search)|manual ai|non-api-ai|copy\/?paste|cancel.?node.?task/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   JOBRECOVERY: {
@@ -466,7 +469,7 @@ export const CODE_DEFINITIONS = {
     description: 'Sell-hub pricing audit — photo analysis, multi-source comp scrape (per-source counts, warnings, blocks), captcha resolve outcomes, AI synthesis (FMV, match quality), and platform-fit results. Drops heavy node/edge/media dumps and narrows the event log to marketplace pipeline events (the marketplaceTelemetry section is always kept).',
     logFilter: line =>
       /price|pric|sell.?hub|marketplace|comp.?source|scrape|captcha|resolve|block|throttle|stale.?selector|fmv|synthesis|platform.?fit|ebay|poshmark|mercari|swappa|stockx|reverb/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   RESOLVE: {
@@ -474,7 +477,7 @@ export const CODE_DEFINITIONS = {
     description: 'SellHub source-resolve/retry diagnostics — captcha Solve windows, resolved-source drains, rescrape-source IPC tasks, source card progress, and marketplace browser-queue waits. Use for “source retries stuck/in progress after solving” reports. Keeps the compact SellHub Source Resolve Queue section but drops heavy node payloads/diagnostics.',
     logFilter: line =>
       /resolved source|source resolve|resolve\/rescrape|queued .*resolve|applying queued source resolve|source retr|rescrape-source|Rescrap(?:e|ing)|captcha-resolve|price-source-progress|BrowserPool|marketplace browser|queued behind/i.test(line),
-    excludeSections: ['nodes', 'edges', 'drawings', 'nodeInternals', 'nodeComponentStates', 'imageState', 'mediaState'],
+    excludeSections: HEAVY_DUMP_SECTIONS,
   },
 
   SELL: {

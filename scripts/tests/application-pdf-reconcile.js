@@ -21,7 +21,6 @@ import {
 } from '../test-dependencies.js';
 import {
   extractPdfTextBlocks,
-  normalizePdfText,
   reconcileApplicationHtmlFromPdf,
   reconcileApplicationHtmlFromPdfBlocks,
 } from '../../electron/ipc/applicationPdfReconcile.js';
@@ -381,16 +380,6 @@ export default [
         && result.html === source,
       `an added PDF paragraph must remain an unmapped conflict, got ${JSON.stringify(result)}`);
       return { extraParagraphConflict: true };
-    },
-  },
-  {
-    name: 'Application PDF reconcile: wrapped hyphenated words preserve DOM token identity',
-    run: () => {
-      assert(normalizePdfText('full- scale adoption') === 'full-scale adoption',
-        'a visual line wrap after an attached hyphen must not become a PDF-authored text edit');
-      assert(normalizePdfText('word - next') === 'word - next',
-        'a true spaced dash must not be collapsed into a hyphenated word');
-      return { wrappedHyphenNormalized: true, spacedDashPreserved: true };
     },
   },
   {

@@ -1,6 +1,7 @@
 import { __getJobsTelemetryForReportForTests, __queryFanOutForTests, __resetJobsTelemetryForTests, __runWithIpcRequestContextForTests, activateRunForResume, assert, appendJobsHistory, blankJobPreferencePlan, buildJobAnalysisSnapshot, buildJobRunCompletionReceipt, careerInputFingerprint, careerProfileFingerprint, clearRun, clearRunWithResult, completeRunWithReceipt, createModuleRunQueue, evaluateJobPreferences, fs, getJobsTelemetry, ipcMain, isJobRunAutomaticRecoveryEligible, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, markProviderGathered, markSourceStatus, normalizeJobPreferencePlan, normalizeJobRunProfileFingerprint, os, path, pauseRunForManualResume, readLastRunReceipt, readRunState, readStagedJobs, recordLinkedinResolveAttempt, recordResolveMergeOutcome, recordSourcePage, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, setStage, startRun, validateExactResumeRun, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, writeLastRunReceipt } from '../test-dependencies.js';
 import { createDurableBoardPauseControl, pauseBoardOwnedSearch, jobBoardSavedPauseOutcome } from '../../src/utils/jobBoardSavedPause.js';
 import { runInNewContext } from 'node:vm';
+import { TRANSIENT_PROCESSING_HUB_STATES } from '../../src/utils/persistenceTransientState.js';
 // The bug-report builders under test. test-dependencies.js already re-exports
 // all three; they are imported on their own line so the shared bundle import
 // above stays untouched while other sessions edit it.
@@ -185,6 +186,7 @@ export default [
         jobRunIdRef: ref('provider-run'), pendingJobsRef: ref([]), gatheredCountRef: ref(0),
         scrapeWarningsRef: ref([]), terminalSourceWarningProjectionRef: ref(new Map()),
         sourceWarningOverridesDuringSearchRef: ref(new Map()), hubStateRef: ref('evaluating-preferences'),
+        TRANSIENT_PROCESSING_HUB_STATES,
         setActiveResumeCheckpoint: noop, cancelCleanSourceCardDismiss: noop, resetSourceProgress: noop,
         cleanupAllJobChildren: noop, removeManualAiCleanupReceipt: () => [],
         retireManualAiRunDurably: async () => { retired++; }, setResumeOffer: value => { offer = value; },
@@ -1996,10 +1998,8 @@ export default [
         && renderer.includes("emptyResultDisposition: 'preference-filtered',")
         && renderer.includes("? (getNode(currentId)?.data?.resultDisposition || null)")
         && renderer.includes('canCommit: appendCanCommit,')
-        && renderer.includes('gatheredCount: (Number(refreshData.gatheredCount) || 0) + freshJobs.length')
-        && renderer.includes('Failed to save preference-filtered USAJobs snapshot')
         && renderer.includes("'preference-filtered'"),
-      'append scoring must merge into and generation-fence an explicit live base (never report a dropped no-base append), while all-filtered late sources retain preference recovery state, disposition, and funnel volume');
+      'append scoring must merge into and generation-fence an explicit live base (never report a dropped no-base append), while all-filtered late sources retain preference recovery state and disposition');
       assert(preferences.includes('const identity = identityJob(job);')
         && preferences.includes('listingIdentity: listingIdentityForAudit(identity)'),
       'each emitted audit carries a bounded listing identity');

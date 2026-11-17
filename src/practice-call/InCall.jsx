@@ -20,7 +20,14 @@ export default function InCall({ state, api }) {
     streamRef.current = null;
     if (videoRef.current) { try { videoRef.current.srcObject = null; } catch { /* element detached */ } }
   }, []);
-  useEffect(() => stopCamera, [stopCamera]);
+  // A camera permission prompt can outlast this screen (the call ends while it
+  // is open) or a second click; a stream that arrives then must be released.
+  const mountedRef = useRef(true);
+  const cameraRequestRef = useRef(0);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; cameraRequestRef.current += 1; stopCamera(); };
+  }, [stopCamera]);
   // The <video> only exists while the camera is on, so attach the stream once
   // the element mounts rather than before the re-render.
   useEffect(() => {
@@ -32,12 +39,20 @@ export default function InCall({ state, api }) {
     if (cameraOn) { stopCamera(); setCameraOn(false); return; }
     const getUserMedia = typeof navigator !== 'undefined' ? navigator.mediaDevices?.getUserMedia : null;
     if (typeof getUserMedia !== 'function') { setCameraError('Camera is unavailable in this window.'); return; }
+    const request = cameraRequestRef.current + 1;
+    cameraRequestRef.current = request;
+    const current = () => mountedRef.current && cameraRequestRef.current === request;
     try {
       // Video only: the call microphone never goes through getUserMedia.
       const stream = await getUserMedia.call(navigator.mediaDevices, { video: true });
+      if (!current()) {
+        try { stream?.getTracks?.().forEach(track => track.stop?.()); } catch { /* tracks already ended */ }
+        return;
+      }
+      stopCamera();
       streamRef.current = stream;
       setCameraOn(true); setCameraError(null);
-    } catch { setCameraError('Camera permission was denied. The call continues without video.'); }
+    } catch { if (current()) setCameraError('Camera permission was denied. The call continues without video.'); }
   };
   const toggleCards = async () => {
     if (cardsOpen) { setCardsOpen(false); return; }

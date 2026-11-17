@@ -6,9 +6,7 @@ import {
   getOfficialPostingDiscoveryDiagnosticsSnapshot,
   officialPostingHandoffFailureCause,
   officialPostingHandoffFailureCode,
-  recordOfficialPostingAvailabilityDecision,
   recordOfficialPostingDiscovery,
-  recordOfficialPostingPlannerTransition,
 } from '../../electron/ipc/officialPostingDiscoveryDiagnostics.js';
 import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { generateMarkdown } from '../../electron/ipc/bugReport.js';
@@ -207,10 +205,6 @@ export default [
     run() {
       isolated(() => {
         recordOfficialPostingDiscovery(job(), observation());
-        recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: 0,
-          launchPending: false, autoLaunchAvailable: false, reason: 'pool-ended' });
-        recordOfficialPostingPlannerTransition({ reason: 'maximum_parallelism', recommended: 10,
-          queued: 20, materialized: 5, expandBy: 4 });
         const logs = Array.from({ length: 20 }, (_, index) => `Synthetic unrelated renderer event ${index}`);
         logs[10] = 'Synthetic official-posting discovery marker';
         const filter = applyBugReportCode(logs, {}, 'OFFDISC');
@@ -226,47 +220,12 @@ export default [
           const report = generateMarkdown({ ...base, filterCode }).markdown;
           assert.ok(report.includes('Official Posting Discovery Diagnostics (OFFDISC)'));
           assert.ok(report.includes('candidates 3 · validated comparison runs 2'));
-          assert.ok(report.includes('Worker availability') && report.includes('closed reason pool-ended'));
-          assert.ok(report.includes('Worker planner transition') && report.includes('recommended 10 · queued 20'));
           assert.ok(report.includes('Synthetic official-posting main discovery marker'));
           assert.equal(report.includes('Synthetic unrelated main discovery marker'), filterCode !== 'OFFDISC');
         }
         assert.equal(generateMarkdown({ ...base, filterCode: 'JOBPAY' }).markdown.includes('Official Posting Discovery Diagnostics (OFFDISC)'), false);
         const full = applyBugReportCode(logs, {}, 'FULL+OFFDISC');
         assert.deepEqual(full.filteredLogs, logs, 'the focused lens never narrows FULL');
-      });
-    },
-  },
-  {
-    name: 'Official discovery retains bounded worker availability refusals and planner transitions',
-    run() {
-      isolated(() => {
-        assert.equal(recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: 0,
-          launchPending: false, autoLaunchAvailable: false, reason: 'pool-ended' }), true);
-        assert.equal(recordOfficialPostingAvailabilityDecision({ stage: 'launch-refused', liveWorkers: 0,
-          launchPending: true, autoLaunchAvailable: true, reason: 'ready', launchReason: 'chat_mode_unavailable' }), true);
-        for (let index = 0; index < 60; index += 1) {
-          recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: index + 1,
-            launchPending: index % 2 === 0, autoLaunchAvailable: index % 3 === 0, reason: 'pool-ended' });
-        }
-        for (let index = 0; index < 55; index += 1) {
-          recordOfficialPostingPlannerTransition({ reason: 'one_work_item', recommended: index,
-            queued: index + 1, materialized: index, expandBy: 1 });
-        }
-        recordOfficialPostingAvailabilityDecision({ stage: 'absence-abort', liveWorkers: 0,
-          launchPending: false, autoLaunchAvailable: false, reason: 'pool-ended' });
-        recordOfficialPostingAvailabilityDecision({ stage: 'launch-refused', liveWorkers: 0,
-          launchPending: true, autoLaunchAvailable: true, reason: 'ready', launchReason: 'chat_mode_unavailable' });
-        const snapshot = getOfficialPostingDiscoveryDiagnosticsSnapshot();
-        const markdown = buildOfficialPostingDiscoveryMarkdown();
-        assert.equal(snapshot.availabilityDecisionLimit, 50);
-        assert.equal(snapshot.availabilityDecisions.length, 50);
-        assert.equal(snapshot.availabilityDecisions[0].liveWorkers, 13);
-        assert.equal(snapshot.plannerTransitions.length, 50);
-        assert.equal(snapshot.plannerTransitions[0].recommended, 5);
-        assert.match(markdown, /Worker availability .*absence-abort · live workers 0 · launch pending no · auto launch available no · closed reason pool-ended/u);
-        assert.match(markdown, /launch refusal chat_mode_unavailable/u);
-        assert.match(markdown, /Worker planner transition .*one_work_item · recommended 54 · queued 55/u);
       });
     },
   },

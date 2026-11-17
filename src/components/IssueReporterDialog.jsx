@@ -46,9 +46,10 @@ export function IssueReporterDialog({ isOpen, onClose, onSubmit }) {
   // ── Live code preview ──────────────────────────────────────────────────────
   // Recomputes whenever the filter code changes, showing count of matching log lines.
   const codePreview = useMemo(() => {
-    const rawLogs = EventLogger.getLogs();
+    // The dialog stays mounted while closed, so the log is re-read on each open.
+    const rawLogs = isOpen ? EventLogger.getLogs() : [];
     return previewBugReportCode(rawLogs, filterCode);
-  }, [filterCode]);
+  }, [filterCode, isOpen]);
 
   const hasValidCode  = filterCode.trim().length > 0;
   const hasUnknown    = (codePreview.unknownCodes?.length ?? 0) > 0;

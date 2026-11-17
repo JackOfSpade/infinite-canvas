@@ -4,76 +4,20 @@ import crypto from 'crypto';
 // least two snapshot builders (jobs, marketplace, persisted-workspace), so
 // they live here rather than being duplicated or buried in one module.
 
-// Connector setup lives in the main process while reports may be assembled long
-// after a particular connector runtime stopped. Keep the hostname list here,
-// rather than teaching each report builder about connector configuration.
-let reportRedactedHosts = new Set();
-let reportRedactedHostPatterns = [];
-
-function escapeReportRedactedHostForRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
+// Providers use several path families for listing/product slugs. Those
+// slugs routinely contain a role, employer, item title, or location even
+// when the query string has already been removed.
+const LISTING_PATH_SEGMENTS = new Set([
+  'job', 'jobs', 'job-search', 'search', 'career', 'careers',
+  'position', 'positions', 'listing', 'listings', 'item', 'items', 'product', 'products',
+]);
 
 function reportUrlPath(parsed) {
   const pathname = parsed.pathname || '/';
   const parts = pathname.split('/').filter(Boolean);
-  // Providers use several path families for listing/product slugs. Those
-  // slugs routinely contain a role, employer, item title, or location even
-  // when the query string has already been removed.
-  const listingSegments = new Set([
-    'job', 'jobs', 'job-search', 'search', 'career', 'careers',
-    'position', 'positions', 'listing', 'listings', 'item', 'items', 'product', 'products',
-  ]);
-  const listingIndex = parts.findIndex(part => listingSegments.has(part.toLowerCase()));
+  const listingIndex = parts.findIndex(part => LISTING_PATH_SEGMENTS.has(part.toLowerCase()));
   if (listingIndex >= 0 && parts.length > listingIndex + 1) return '/<listing-path>';
   return pathname;
-}
-
-/**
- * Set the configured hostnames that must not be exposed in a bug report.
- * Calling without hosts intentionally restores the historical no-op behavior.
- */
-export function setReportRedactedHosts(hosts) {
-  const values = typeof hosts === 'string'
-    ? [hosts]
-    : Array.isArray(hosts)
-      ? hosts
-      : hosts instanceof Set
-        ? [...hosts]
-        : [];
-  const normalized = new Set();
-  for (const value of values) {
-    if (typeof value !== 'string') continue;
-    const hostname = value.trim().toLowerCase();
-    if (hostname) normalized.add(hostname);
-  }
-  reportRedactedHosts = normalized;
-  // Keep hostname boundaries explicit: a configured host must not redact a
-  // longer hostname or an identifier that merely contains it as a substring.
-  // A final dot is the DNS root marker (and ordinary prose punctuation), not
-  // the beginning of another label, so it is intentionally a safe boundary.
-  reportRedactedHostPatterns = [...normalized].map(hostname => new RegExp(
-    `(^|[^a-z0-9_.-])${escapeReportRedactedHostForRegExp(hostname)}(?=$|[^a-z0-9_.-]|\\.(?=$|[^a-z0-9_-]))`,
-    'gi',
-  ));
-}
-
-function redactConfiguredReportHosts(value) {
-  if (reportRedactedHostPatterns.length === 0) return value;
-  let redacted = value;
-  for (const pattern of reportRedactedHostPatterns) {
-    redacted = redacted.replace(pattern, (_match, prefix) => `${prefix}<connector-host>`);
-  }
-  return redacted;
-}
-
-function redactedReportOrigin(parsed) {
-  // A terminal root dot is equivalent to the configured DNS hostname. URL
-  // parsers retain it, so compare the canonical spelling before deciding
-  // whether a report may show the origin.
-  const hostname = parsed.hostname.toLowerCase().replace(/\.+$/, '');
-  if (!reportRedactedHosts.has(hostname)) return parsed.origin;
-  return `${parsed.protocol}//<connector-host>${parsed.port ? `:${parsed.port}` : ''}`;
 }
 
 /**
@@ -93,7 +37,7 @@ export function redactReportUrl(value) {
   try {
     const parsed = new URL(raw);
     if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-      return redactConfiguredReportHosts(`${redactedReportOrigin(parsed)}${reportUrlPath(parsed)}`);
+      return `${parsed.origin}${reportUrlPath(parsed)}`;
     }
     return '<redacted-url>';
   } catch {
@@ -103,7 +47,7 @@ export function redactReportUrl(value) {
 
 /** Remove query/hash data from every absolute HTTP(S) URL embedded in prose. */
 export function redactReportUrlsInText(value) {
-  const text = String(value || '').replace(/https?:\/\/[^\s`<>"|]+/gi, (match) => {
+  return String(value || '').replace(/https?:\/\/[^\s`<>"|]+/gi, (match) => {
     // Sentence/table punctuation is not part of the URL. Preserve it after the
     // redacted identity so prose remains readable.
     const suffixMatch = match.match(/[)\]}.,;:]+$/);
@@ -111,7 +55,6 @@ export function redactReportUrlsInText(value) {
     const url = suffix ? match.slice(0, -suffix.length) : match;
     return `${redactReportUrl(url)}${suffix}`;
   });
-  return redactConfiguredReportHosts(text);
 }
 
 // Reports can be copied outside the app, so a local path is identifying data

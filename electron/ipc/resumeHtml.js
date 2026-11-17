@@ -152,9 +152,12 @@ function safeDocumentHref(value) {
     : '';
 }
 
+const RESUME_CLASSES_WITH_HOST_STATE = new Set([...RESUME_MODEL_CLASSES, ...HOST_EDITABLE_CLASSES]);
+const COVER_CLASSES_WITH_HOST_STATE = new Set([...COVER_DOCUMENT_CLASSES, ...HOST_EDITABLE_CLASSES]);
+
 function allowedDocumentClasses(documentKind, allowHostState) {
-  const allowed = documentKind === 'cover' ? COVER_DOCUMENT_CLASSES : RESUME_MODEL_CLASSES;
-  return allowHostState ? new Set([...allowed, ...HOST_EDITABLE_CLASSES]) : allowed;
+  if (documentKind === 'cover') return allowHostState ? COVER_CLASSES_WITH_HOST_STATE : COVER_DOCUMENT_CLASSES;
+  return allowHostState ? RESUME_CLASSES_WITH_HOST_STATE : RESUME_MODEL_CLASSES;
 }
 
 function sanitizeDocumentElementAttributes(element, { documentKind, allowHostState, allowTrustedDerivations }) {
@@ -356,8 +359,7 @@ export function extractVariantAttrs(sourceHtml, { density } = {}) {
   // Read only the root opening tag. Subtree attributes have no visual effect
   // under the design system's canonical root-only contract.
   const tagFor = (name) => new RegExp(`<${name}\\b[^>]*>`, 'i').exec(html)?.[0] || '';
-  const rootTag = tagFor('html');
-  const sourceTag = rootTag;
+  const sourceTag = tagFor('html');
   const attrValue = (name) => {
     const match = new RegExp(`\\s${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>"'=]+))`, 'i').exec(sourceTag);
     return match ? (match[1] ?? match[2] ?? match[3] ?? '') : null;
@@ -1692,7 +1694,7 @@ function injectInferredSkills(mainHtml, insights, showAllVerifySkills = false) {
   // created <dt>/<dd> pair inside a synthesized section.
   const allCreated = groups.map(createdEntry).join('\n  ');
   const fallback = `\n<section class="section ic-inferred-skills-section" data-ic-inferred-section${hiddenAttr}>\n  <div class="section-head"><h2>Skills</h2><span class="rule" aria-hidden="true"></span></div>\n  <dl class="skills">\n  ${allCreated}\n  </dl>\n</section>\n`;
-  return mainHtml.replace(/<\/main>\s*$/i, `${fallback}</main>`);
+  return mainHtml.replace(/<\/main>\s*$/i, () => `${fallback}</main>`);
 }
 
 function buildSkillWorkspace({ skillInsights, skillHistogram, jobContext, jobUrl, listingLinkUrl, officialPosting, postingVariants, skillOpportunityError, coverLetterCheckSummary }) {
@@ -2807,7 +2809,7 @@ ${APPLICATION_EDIT_NOTES_RESTORE}
       // browsers cap its body near 64 KB; a larger page is sent as an ordinary
       // request. If neither lands, the browser draft written just before this
       // is saved the next time the file is opened.
-      if (request.body.length < 60000) request.keepalive = true;
+      if (new Blob([request.body]).size < 60000) request.keepalive = true;
       try { fetch(sync.endpoint, request).catch(function () {}); } catch (e) {}
       return;
     }
@@ -3011,9 +3013,9 @@ export function buildResumeDocument({ documentScope = null, resumeMainHtml, vari
   // begin inside JavaScript and accidentally embed a second toolbar + stale
   // bundle payload in the combined workspace. The actual document main is the
   // final literal <main> in the generated cover HTML.
-  const coverStart = suppliedCoverText.toLowerCase().lastIndexOf('<main');
-  const coverEnd = coverStart >= 0 ? suppliedCoverText.toLowerCase().indexOf('</main>', coverStart) : -1;
-  let coverMain = coverStart >= 0 && coverEnd >= 0
+  const coverStart = suppliedCoverText.lastIndexOf('<main');
+  const coverEnd = coverStart >= 0 ? suppliedCoverText.indexOf('</main>', coverStart) : -1;
+  const coverMain = coverStart >= 0 && coverEnd >= 0
     ? suppliedCoverText.slice(coverStart, coverEnd + '</main>'.length)
     : '<main class="page" role="document"><p>Cover letter was unavailable when this application was generated.</p></main>';
   const css = inlineStylesheets(CSS_FILES);

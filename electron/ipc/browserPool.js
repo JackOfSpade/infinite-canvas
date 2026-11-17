@@ -199,13 +199,18 @@ function processQueue() {
  */
 export async function readPageContentBounded(page, maxMs) {
   const bound = Math.max(1000, maxMs);
+  let timer = null;
   try {
     return await Promise.race([
       page.content(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')), bound)),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('page.content() timed out — page may be stuck in an anti-bot reload loop')), bound);
+      }),
     ]);
   } catch {
     return '';
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -235,14 +240,15 @@ export async function enrichTimeoutError(page, error) {
   if (/\[timeout-state /.test(error.message || '')) return error;
   try {
     const failUrl = (typeof page.url === 'function' ? page.url() : '') || 'unknown';
+    let diagTimer = null;
     const diag = await Promise.race([
       page.evaluate(() => ({
         bodyLen: document.body?.innerText?.length ?? 0,
         bodyHead: (document.body?.innerText ?? '').substring(0, 300),
         title: document.title ?? '',
       })),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('diag-timeout')), 3000)),
-    ]).catch(() => null);
+      new Promise((_, reject) => { diagTimer = setTimeout(() => reject(new Error('diag-timeout')), 3000); }),
+    ]).catch(() => null).finally(() => clearTimeout(diagTimer));
     const clean = (s, n) => String(s ?? '').replace(/\s+/g, ' ').replace(/"/g, "'").trim().slice(0, n);
     const state = `[timeout-state finalUrl=${failUrl} bodyLen=${diag?.bodyLen ?? 0}`
       + ` title="${clean(diag?.title, 60)}" bodyHead="${clean(diag?.bodyHead, 200)}"]`;
@@ -578,7 +584,7 @@ async function executeScrape(url, extractorJS, options = {}) {
           pageResponse,
           itemsExtracted: itemCount,
           expectedMinItems: options.expectedMinItems,
-          sourceKey: options.sourceLabel || domain,
+          sourceKey,
           yieldStats,
         });
 

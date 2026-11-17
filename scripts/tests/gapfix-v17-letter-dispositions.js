@@ -13,12 +13,6 @@ const careers = [
   { work: 'supported coastal surveys for harbour planning', need: 'harbour planning', other: 'restaurant inventory' },
 ];
 
-const deadIds = new Set([
-  'need-grounding', 'plan-mappings', 'plan-need-references', 'plan-redundancy',
-  'all-needs-disposition', 'top-need-disposition', 'eligibility-need-disposition',
-  'needs-portfolio', 'work-sample-link',
-]);
-
 export default [
   {
     name: 'Letter disposition table covers every emitted id, has no stray active key, and fails closed',
@@ -38,7 +32,7 @@ export default [
       }
       for (const id of emitted) assert(Object.hasOwn(CHECK_DISPOSITIONS, id), `${id}: emitted but unclassified`);
       for (const [id, disposition] of Object.entries(CHECK_DISPOSITIONS)) {
-        assert(emitted.has(id) || deadIds.has(id), `${id}: classified but never emitted`);
+        assert(emitted.has(id), `${id}: classified but never emitted`);
         assert(CHECK_DISPOSITION_VALUES.includes(disposition), `${id}: invalid disposition`);
         if (CHECK_CLASSES[id] === 'TRUTH') assert(disposition === 'gate', `${id}: truth remains a gate`);
         if (CHECK_CLASSES[id] === 'TASTE') assert(disposition !== 'gate', `${id}: taste never rejects`);

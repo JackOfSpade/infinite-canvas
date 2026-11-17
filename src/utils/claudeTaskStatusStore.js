@@ -51,7 +51,10 @@ export function subscribeClaudeTaskStatusPolling(listener) {
   const stop = subscribeClaudeTaskStatus(listener);
   pollers += 1;
   if (pollers === 1) timer = setInterval(refresh, POLL_MS);
+  let stopped = false;
   return () => {
+    if (stopped) return;
+    stopped = true;
     stop();
     pollers -= 1;
     if (pollers === 0 && timer) { clearInterval(timer); timer = null; }

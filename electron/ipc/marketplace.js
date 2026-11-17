@@ -1,4 +1,4 @@
-export const BUNDLE_FACTOR_SUFFIX = "--- FACTOR CHECK ---\nEvery factor needs a percent above 0 (omit a factor rather than listing 0) and a non-empty reason. A premium factor reason must not use discount wording, and a discount factor reason must not use premium wording. One invalid factor makes the application discard the whole answer and show the plain sum, so omit any factor you cannot state precisely.";
+const BUNDLE_FACTOR_SUFFIX = "--- FACTOR CHECK ---\nEvery factor needs a percent above 0 (omit a factor rather than listing 0) and a non-empty reason. A premium factor reason must not use discount wording, and a discount factor reason must not use premium wording. One invalid factor makes the application discard the whole answer and show the plain sum, so omit any factor you cannot state precisely.";
 import { collector, templatesFor } from './validationLines.js';
 export const PRICE_SYNTHESIS_CORRECTION_TEMPLATES = templatesFor('price.');
 /**
@@ -489,7 +489,7 @@ export function validateMarketplaceBatchExecution(recovery, items) {
 }
 
 /** Bind bundle reasoning to the exact pending items + durable batch output. */
-export function validateMarketplaceBundleExecution(recovery, items) {
+function validateMarketplaceBundleExecution(recovery, items) {
   const pending = Array.isArray(recovery?.pendingItems) ? recovery.pendingItems : [];
   const supplied = Array.isArray(items) ? items : [];
   if (pending.length !== supplied.length) throw new Error('Bundle items do not match the durable pricing snapshot.');
@@ -2333,7 +2333,9 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     if (aheadInQueue > 0 && !event.sender.isDestroyed()) {
       event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: aheadInQueue });
     }
-    const resolvedResult = await withMarketplaceBrowserLock(async () => {
+    let resolvedResult;
+    try {
+    resolvedResult = await withMarketplaceBrowserLock(async () => {
     if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
     // Multi-item bundle: re-scrape this source once per item's query so a Solve
     // recovers comps for EVERY item, not just the primary. Returns per-item
@@ -2421,6 +2423,10 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     };
     return normalizedResult;
     }, signal, `marketplace source rescrape:${sourceId || 'unknown'}`);   // end withMarketplaceBrowserLock
+    } finally {
+      // An abort while still queued never reaches the in-callback queuedBehind:0.
+      if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
+    }
     if (canvasFilePath && effectiveRecovery) {
       throwIfMarketplaceLifecycleAborted(signal);
       const completedRecovery = {
@@ -2515,7 +2521,9 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     if (aheadInQueue > 0 && !event.sender.isDestroyed()) {
       event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: aheadInQueue });
     }
-    const resolvedResult = await withMarketplaceBrowserLock(async () => {
+    let resolvedResult;
+    try {
+    resolvedResult = await withMarketplaceBrowserLock(async () => {
     if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
     logger.info(`[Marketplace][${nodeId}] User opening captcha-resolve window for ${sourceId}: ${url}`);
     // Look up the source's extractor + category (browser-pool sources only —
@@ -2597,6 +2605,10 @@ Return ONLY a single JSON object with EXACTLY this shape. No prose outside the J
     };
     return { ...result, category, warning: inlineWarning };
     }, signal, `marketplace captcha resolve:${sourceId || 'unknown'}`);   // end withMarketplaceBrowserLock
+    } finally {
+      // An abort while still queued never reaches the in-callback queuedBehind:0.
+      if (!event.sender.isDestroyed()) event.sender.send('price-queue-status', { nodeId, sourceId, queuedBehind: 0 });
+    }
     if (canvasFilePath && effectiveRecovery) {
       throwIfMarketplaceLifecycleAborted(signal);
       const resolvedRecovery = {

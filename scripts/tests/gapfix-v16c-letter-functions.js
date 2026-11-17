@@ -29,7 +29,6 @@ import { assert } from './testHelpers.js';
 import {
   HOST_REQUIRED_LETTER_FUNCTIONS, HOST_REQUIRED_LETTER_FUNCTION_CHECKS, checkParagraphArgumentLinks, evaluateCoverLetterChecks, paragraphHasCandidatePastProof, sentences,
 } from '../../electron/ipc/coverLetterChecks.js';
-import { BLIND_REPAIR_RAISED_CYCLES_RULE } from '../../electron/ipc/applicationRepairConvergence.js';
 
 // A letter is a list of paragraphs; a paragraph has its sentences and, when it states an action of the candidate, the mapping the review would record (exact
 // spans of the paragraph). citations: whether the letter cites career quotes (they license a closing noun; without them only the letter's own sentences do).
@@ -236,21 +235,15 @@ export default [
     },
   },
   {
-    name: 'Host functions, rule: the repair rule prints the list from the constant and does not claim it is the whole of what the host requires, every function the map points at has its phrase in the list, and the written doc says the same (A/B/C)',
+    name: 'Host functions, list: every function the map points at has its phrase in the list, and the written doc says the same (A/B/C)',
     run() {
-      const raised = BLIND_REPAIR_RAISED_CYCLES_RULE;
-      // A: the rule.
-      assert(raised.includes(`Among the functions the host requires of a cover-letter paragraph are these: ${HOST_REQUIRED_LETTER_FUNCTIONS}.`), 'the rule prints the list from the constant, as a part of what the host requires');
-      assert(!/requires only|all of these|the only functions/iu.test(raised), 'and does not claim the list is complete');
-      assert(raised.includes('unless a function the host requires of that paragraph would be lost'), 'and keeps the exception that the list explains');
       // B: the map and the list agree: every function name the map points at has its phrase in the printed list, and no phrase is printed for a name the map does not use.
       const used = new Set(Object.values(HOST_REQUIRED_LETTER_FUNCTION_CHECKS).flat());
       assert([...used].sort().join() === Object.keys(PHRASE_OF).sort().join(), `the map points at exactly the functions this test knows (${[...used].join(', ')})`);
       for (const name of used) assert(HOST_REQUIRED_LETTER_FUNCTIONS.includes(PHRASE_OF[name]), `the list says the ${name} function: ${PHRASE_OF[name]}`);
       for (const [id, names] of Object.entries(HOST_REQUIRED_LETTER_FUNCTION_CHECKS)) assert(Array.isArray(names) && names.length >= 1 && Object.isFrozen(names), `${id} names at least one function, immutably`);
-      // The closing is the writer's choice: no function names it, and neither the list nor the rule prescribes its parts.
+      // The closing is the writer's choice: no function names it, and the list does not prescribe its parts.
       assert(!used.has('closing') && !/\bclosing\b/iu.test(HOST_REQUIRED_LETTER_FUNCTIONS), `the list names no closing function: ${HOST_REQUIRED_LETTER_FUNCTIONS}`);
-      assert(!raised.includes('the closing’s asset, action and target parts'), 'and the rule no longer prints the closing’s parts');
       // The list stays one grammatical series, "A, B, C, and D".
       assert(/^a claim phrase and a sentence relating its proof to the job need in [^,]+, a proof sentence/u.test(HOST_REQUIRED_LETTER_FUNCTIONS)
         && HOST_REQUIRED_LETTER_FUNCTIONS.endsWith(', a proof sentence in every proof-bearing paragraph, an opening that leads with the target work, with the candidate’s role stated wherever a prior employer or named project is first named, and paragraphs long enough to stay within the letter’s proportion limits'),

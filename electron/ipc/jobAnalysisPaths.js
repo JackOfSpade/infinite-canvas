@@ -61,6 +61,11 @@ function normalizedUnsavedScope(scope) {
     : null;
 }
 
+function unsavedScopeDigest(scope) {
+  const normalized = normalizedUnsavedScope(scope);
+  return normalized ? crypto.createHash('sha256').update(normalized).digest('hex').slice(0, 16) : null;
+}
+
 /**
  * A non-sensitive, deterministic namespace for one Job Search hub within a
  * canvas. `null` deliberately means "use the historical canvas bundle" so
@@ -91,9 +96,7 @@ export function getJobAnalysisPaths(canvasFilePath, fallbackDir, ownerId = null,
   const ownerNamespace = jobAnalysisOwnerNamespace(canvasPath, ownerId, unsavedScope);
   const requestScopedUnsaved = !canvasPath && !!normalizedUnsavedScope(unsavedScope);
   const canvasPrefix = namespace ? `job-search-${namespace}` : 'job-search';
-  const unsavedScopeHash = !namespace && normalizedUnsavedScope(unsavedScope)
-    ? crypto.createHash('sha256').update(normalizedUnsavedScope(unsavedScope)).digest('hex').slice(0, 16)
-    : null;
+  const unsavedScopeHash = namespace ? null : unsavedScopeDigest(unsavedScope);
   const primaryPrefix = ownerNamespace
     ? (namespace
       ? `${canvasPrefix}-${ownerNamespace}`
@@ -145,9 +148,7 @@ export function getJobAnalysisPaths(canvasFilePath, fallbackDir, ownerId = null,
 /** Prefix shared by checkpoint writers and discovery, including unsaved scopes. */
 export function getJobDescriptionRecoveryCheckpointPrefix(canvasFilePath, fallbackDir, unsavedScope = null) {
   const paths = getJobAnalysisPaths(canvasFilePath, fallbackDir, null, unsavedScope);
-  const scopeHash = !paths.namespace && normalizedUnsavedScope(unsavedScope)
-    ? crypto.createHash('sha256').update(normalizedUnsavedScope(unsavedScope)).digest('hex').slice(0, 16)
-    : null;
+  const scopeHash = paths.namespace ? null : unsavedScopeDigest(unsavedScope);
   const bundlePrefix = paths.namespace
     ? `job-search-${paths.namespace}`
     : (scopeHash ? `job-search-unsaved-${scopeHash}` : 'job-search');

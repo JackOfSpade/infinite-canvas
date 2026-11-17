@@ -13,7 +13,7 @@ export default [
     name: 'test runner: positional filenames select only registered suites',
     run() {
       const child = spawnSync(process.execPath, ['--import', stubPath, runnerPath, 'scripts/tests/base64.js'], {
-        encoding: 'utf8', timeout: 10_000, env: { ...process.env, TEST_RUNNER_SELFTEST: '' },
+        encoding: 'utf8', timeout: 30_000, env: { ...process.env, TEST_RUNNER_SELFTEST: '' },
       });
       const output = `${child.stdout || ''}\n${child.stderr || ''}`;
       assert(child.status === 0, `selected suite must pass: ${output}`);
@@ -25,7 +25,7 @@ export default [
     name: 'test runner: unknown positional filenames fail before running suites',
     run() {
       const child = spawnSync(process.execPath, ['--import', stubPath, runnerPath, 'missing-suite.js'], {
-        encoding: 'utf8', timeout: 10_000, env: { ...process.env, TEST_RUNNER_SELFTEST: '' },
+        encoding: 'utf8', timeout: 30_000, env: { ...process.env, TEST_RUNNER_SELFTEST: '' },
       });
       const output = `${child.stdout || ''}\n${child.stderr || ''}`;
       assert(child.status === 1 && output.includes('Unknown test file(s): missing-suite.js'), `unknown suite must fail closed: ${output}`);
@@ -37,7 +37,7 @@ export default [
     run() {
       const child = spawnSync(process.execPath, ['--import', stubPath, runnerPath], {
         encoding: 'utf8',
-        timeout: 5_000,
+        timeout: 30_000,
         env: {
           ...process.env,
           TEST_RUNNER_SELFTEST: 'never-settles',

@@ -353,14 +353,14 @@ function updateScrapePace(sourceId, meta = {}, mutate = () => {}) {
   }
 }
 
-// Wall time spent on verification checks, INCLUDING the one on screen right now:
-// an open check is ongoing, not completed — a report written mid-challenge must
-// still show where the time went.
 function formatWaitDuration(ms) {
   const sec = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
   return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
 }
 
+// Wall time spent on verification checks, INCLUDING the one on screen right now:
+// an open check is ongoing, not completed — a report written mid-challenge must
+// still show where the time went.
 function paceChallengeWaitMs(pace, now = Date.now()) {
   const completed = Math.max(0, Number(pace?.challengeWaitMs) || 0);
   const open = pace?.openChallengeSince ? Math.max(0, Number(now) - Number(pace.openChallengeSince)) : 0;
@@ -457,10 +457,7 @@ export function notePacePanelInterrupt(sourceId, meta = {}) {
 export function formatScrapePaceLine(pace, now = Date.now()) {
   if (!pace || typeof pace !== 'object') return '';
   const at = Number(now) || Date.now();
-  const duration = (ms) => {
-    const sec = Math.floor(Math.max(0, Number(ms) || 0) / 1000);
-    return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s`;
-  };
+  const duration = formatWaitDuration;
   const detailChecks = Math.max(0, Number(pace.challenges?.detail) || 0);
   const listChecks = Math.max(0, Number(pace.challenges?.list) || 0);
   const checks = detailChecks + listChecks;
@@ -532,12 +529,6 @@ const ORIGIN_PHASES = new Set([
   'location-not-applied', 'location-proof-unavailable', 'location-host-redirected',
 ]);
 
-// Browser job boards routinely emit failed ad/analytics requests and CSP/ORB
-// console errors that have no bearing on whether the listing scraper worked.
-// These buffers are deliberately small, so allowing a burst of that traffic to
-// consume them can evict the first-party failure that actually explains a bad
-// scrape. Keep the allowlist URL-shaped and narrow: unfamiliar third parties and
-// every ordinary first-party URL remain reportable.
 /** Sleep that returns early if the run is cancelled. Never rejects. */
 function sleepUnlessAborted(ms, signal) {
   const wait = Math.max(0, Math.round(Number(ms) || 0));
@@ -554,6 +545,12 @@ function safeUrlHost(rawUrl) {
   try { return new URL(String(rawUrl || '')).hostname.toLowerCase(); } catch { return ''; }
 }
 
+// Browser job boards routinely emit failed ad/analytics requests and CSP/ORB
+// console errors that have no bearing on whether the listing scraper worked.
+// These buffers are deliberately small, so allowing a burst of that traffic to
+// consume them can evict the first-party failure that actually explains a bad
+// scrape. Keep the allowlist URL-shaped and narrow: unfamiliar third parties and
+// every ordinary first-party URL remain reportable.
 function isKnownTelemetryNoiseUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return false;
   try {
@@ -650,6 +647,11 @@ function collapseRepeatedCardWalk(events, entry) {
   return true;
 }
 
+const FIELD_ANOMALY_PHASES = new Set([
+  'desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'panel-walk-interrupt',
+]);
+const ACTIVE_CONTEXT_RESET_PHASES = new Set(['source-start', 'query-start', 'page-extract', 'source-finished', 'recovery-start']);
+
 // `updateActive: false` records an event into the trail WITHOUT advancing the
 // "current phase". Per-job outcomes (desc-miss / date-miss / detail-unavailable)
 // are not scrape phases: `active` is a merge that never deletes fields, so
@@ -679,7 +681,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // the single `detail-panel-rate-limit` event that explained the whole run.
   // The rate-limit / panel-HTTP phases are the CAUSE rows — keep them in the
   // longer-lived anomaly ring so a report written an hour later still has them.
-  if (['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-appcast-restriction', 'detail-panel-rate-limit', 'detail-panel-http-error', 'google-apply-links-rate-limited', 'detail-block-reprobe', 'detail-block-reprobe-partial', 'detail-block-reprobe-failed', 'detail-block-cleared', 'challenge-text-suppressed', 'challenge-resolved', 'panel-walk-interrupt'].includes(entry.phase)) {
+  if (FIELD_ANOMALY_PHASES.has(entry.phase)) {
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > 20) manualScraperTelemetry.fieldAnomalies.shift();
   }
@@ -695,8 +697,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   // expandDescriptions), so without a reset here `active` stays pinned to
   // whatever the main run last recorded — naming the WRONG source while a
   // different one silently recovers.
-  const resetsContext = new Set(['source-start', 'query-start', 'page-extract', 'source-finished', 'recovery-start']);
-  manualScraperTelemetry.active = resetsContext.has(entry.phase)
+  manualScraperTelemetry.active = ACTIVE_CONTEXT_RESET_PHASES.has(entry.phase)
     ? entry
     : { ...(manualScraperTelemetry.active || {}), ...entry };
 }
@@ -6097,17 +6098,6 @@ export async function clickLoadMore(page, sel) {
   }
 }
 
-// Wait for an in-page append to actually add rows. Unlike a pager there is no
-// navigation to await, and the click resolves long before the XHR lands. A
-// count that never grows means the board had nothing more to give — a real
-// end-of-results, not a failure.
-//
-// Measures the RAW row count, deliberately not countDistinctJobs: the caller's
-// baseline is `extracted.length`, and that same raw length is what its
-// `extracted.slice(prevCount)` index is expressed in. Mixing a de-duplicated
-// count against a raw-length baseline would under-report growth on a list
-// carrying duplicate DOM rows and end the walk early. Duplicates are already
-// absorbed downstream by the providerSeen/seen key sets.
 /**
  * page.url() that cannot throw. A page torn down mid-walk (navigation, crash,
  * abort) makes url() throw, and a page-turn assertion must never be the thing
@@ -6137,6 +6127,17 @@ async function waitForUrlChange(page, beforeUrl, signal, timeoutMs = CONTENT_TIM
   return false;
 }
 
+// Wait for an in-page append to actually add rows. Unlike a pager there is no
+// navigation to await, and the click resolves long before the XHR lands. A
+// count that never grows means the board had nothing more to give — a real
+// end-of-results, not a failure.
+//
+// Measures the RAW row count, deliberately not countDistinctJobs: the caller's
+// baseline is `extracted.length`, and that same raw length is what its
+// `extracted.slice(prevCount)` index is expressed in. Mixing a de-duplicated
+// count against a raw-length baseline would under-report growth on a list
+// carrying duplicate DOM rows and end the walk early. Duplicates are already
+// absorbed downstream by the providerSeen/seen key sets.
 async function waitForListGrowth(page, extractorJS, previousCount, signal, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -6149,18 +6150,6 @@ async function waitForListGrowth(page, extractorJS, previousCount, signal, timeo
   return previousCount;
 }
 
-// ── Pre-loader for scroll sources ─────────────────────────────────────────────
-// Scrolls until the source reaches its remaining per-platform job allowance, or
-// its configured reveal/page ceiling. Used for sources without traditional
-// pagination and called before extraction sees the fully loaded set.
-//
-// A parallel "click a Load More button" strategy existed here as dead code:
-// it was gated on a LOAD_MORE_SELECTORS map that was always `{}` (no source
-// was ever configured), meaning any source actually needing that strategy
-// silently got NO preload at all rather than a working fallback — worse than
-// having no such feature, since it looked supported. Removed rather than
-// guessing a selector for a source we can't verify; add it back with a real,
-// verified selector if a specific source needs it.
 /**
  * Read a board's own advertised result total, where that number is known to be
  * trustworthy.
@@ -6497,6 +6486,18 @@ async function revealEndOfListReached(page, sourceId) {
   }
 }
 
+// ── Pre-loader for scroll sources ─────────────────────────────────────────────
+// Scrolls until the source reaches its remaining per-platform job allowance, or
+// its configured reveal/page ceiling. Used for sources without traditional
+// pagination and called before extraction sees the fully loaded set.
+//
+// A parallel "click a Load More button" strategy existed here as dead code:
+// it was gated on a LOAD_MORE_SELECTORS map that was always `{}` (no source
+// was ever configured), meaning any source actually needing that strategy
+// silently got NO preload at all rather than a working fallback — worse than
+// having no such feature, since it looked supported. Removed rather than
+// guessing a selector for a source we can't verify; add it back with a real,
+// verified selector if a specific source needs it.
 async function preloadContent(page, sourceId, extractorJS, overlayBase, signal, { maxPages, jobsPerPlatform, existingJobs = 0 }) {
   const isScroll = SCROLL_SOURCES.has(sourceId);
   if (!isScroll) return null;
@@ -7211,7 +7212,7 @@ async function resolveGlassdoorLocId(page, location, signal, runCache = null, ov
   }
   logger.warn(`[BrowserScraper] Glassdoor locId lookup rejected for "${location}": ${validationFailure}`);
   return {
-    failure: validationFailure || 'autocomplete returned no usable location',
+    failure: validationFailure,
     failureKind: 'rejected',
     attempts,
   };
@@ -8306,9 +8307,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
             if (!incompleteZipShortfall && onPageJobs) {
               await onPageJobs({ sourceId, query: task.query || '', queryIndex: task.queryIndex ?? qi, page: pageNum, jobs: [], terminal: true });
             }
-            if (sourceId === 'ziprecruiter'
-              && Number.isFinite(Number(sourceClaimedTotal))
-              && providerSeen.size < Number(sourceClaimedTotal)) {
+            if (incompleteZipShortfall) {
               const shortfall = Number(sourceClaimedTotal) - providerSeen.size;
               const currentPage = zipRecruiterSearchPageNumber(safePageUrl(page));
               const retryOutcome = zipRecruiterProviderShortfallRecoveryOutcome({

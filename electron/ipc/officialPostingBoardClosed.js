@@ -7,8 +7,8 @@
 // Pure helpers only: no Electron, no network, no store. The caller injects the
 // scraped-evidence test and the stored-view reader so this stays unit-testable.
 import { sourceJobKey } from '../../src/utils/jobIdentity.js';
-import { isAggregatorHost, listingSourceTier } from './officialSourceHosts.js';
-import { listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
+import { listingSourceTier } from './officialSourceHosts.js';
+import { BOARD_ID_RE, listingStateRank, normalizeBoardClosed, normalizeListingLiveness, normalizeOfficialPosting, officialResearchSettled } from './officialPostingFields.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
 import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 
@@ -16,7 +16,6 @@ const TEXT_LEVELS = new Set(['L1', 'L2', 'L3']);
 const OFFICIAL_LINK_LEVELS = new Set(['L1', 'L2', 'L3', 'L4']);
 const MAX_TELEMETRY_BOARDS = 24;
 const COUNT_FIELDS = Object.freeze(['detected', 'keptOfficial', 'keptUnchecked', 'dropped']);
-const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
 
 export const BOARD_CLOSED_DISPOSITIONS = Object.freeze({
   keptOfficial: 'kept-official',
@@ -30,13 +29,6 @@ export const BOARD_CLOSED_DISPOSITIONS = Object.freeze({
 
 export function boardClosedOf(job) { return normalizeBoardClosed(job?.boardClosed); }
 export function isBoardClosedRow(job) { return boardClosedOf(job) !== null; }
-
-/** Returns a copy carrying the marker, or the row unchanged when the board/reason is not valid. */
-export function withBoardClosed(job, { board, reason, now = new Date() } = {}) {
-  const at = now instanceof Date ? now : new Date(now);
-  const boardClosed = Number.isFinite(at.getTime()) ? normalizeBoardClosed({ board, reason, at: at.toISOString() }) : null;
-  return boardClosed ? { ...job, boardClosed } : job;
-}
 
 /** The two liveness fields are replaced together so an old close cannot survive a fresh visit. */
 export function withListingLiveness(job, { verdict, basis, board, now = new Date() } = {}) {
@@ -57,19 +49,6 @@ export function withListingClosed(job, { board, reason, basis = 'structural', no
   if (!boardClosed || !listingLiveness || !['structural', 'ai'].includes(basis)) return job;
   const { boardClosed: _oldClosed, listingLiveness: _oldLiveness, ...rest } = job || {};
   return { ...rest, boardClosed, listingLiveness };
-}
-
-function hostnameOf(value) {
-  try { return new URL(String(value ?? '')).hostname.toLowerCase().replace(/\.$/u, ''); } catch { return ''; }
-}
-
-/**
- * The final host owns the detail-page verdict. The expected URL is used only
- * when navigation did not reveal a final URL.
- */
-export function boardClosedDetailAllowed({ expectedUrl = '', finalUrl = '' } = {}) {
-  const host = hostnameOf(finalUrl) || hostnameOf(expectedUrl);
-  return Boolean(host) && isAggregatorHost(host);
 }
 
 /**

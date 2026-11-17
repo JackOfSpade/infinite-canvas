@@ -164,7 +164,6 @@ function unwrapEmphasis(line) {
 // The plain text of a Markdown document, or null when it holds something this
 // reader will not guess at.
 function plainTextFromMarkdown(text) {
-  if (CODE_FENCE_RE.test(text)) return null;
   const lines = text
     .replace(ATX_HEADING_RE, (_line, content) => atxHeadingText(content))
     .replace(THEMATIC_BREAK_CANDIDATE_RE, line => (isThematicBreak(line) ? '---' : line))

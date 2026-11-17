@@ -38,7 +38,7 @@ for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.jsonl'))) {
     const postingText = prompt.slice(postingAt + 15, postingEnd);
     const company = (postingText.match(/\*\*Company:\*\* (.*)/u) || [])[1] || '';
     const title = (postingText.match(/^# (.*)/mu) || [])[1] || '';
-    let trusted = {}; try { const t = prompt.slice(prompt.indexOf('TRUSTED IDENTITY AND ROLE FIELDS:') + 33, prompt.indexOf('TRUSTED EDUCATION AND CREDENTIAL FIELDS')); trusted = JSON.parse(t); } catch {}
+    let trusted = {}; try { const t = prompt.slice(prompt.indexOf('TRUSTED IDENTITY AND ROLE FIELDS:') + 33, prompt.indexOf('TRUSTED EDUCATION AND CREDENTIAL FIELDS')); trusted = JSON.parse(t); } catch { /* no trusted block in this prompt */ }
     const recorded = (submission.submit?.validationErrors || []).filter(e => /^unit-source-grounding: Cover-letter paragraph/u.test(e));
     const replayed = [];
     paragraphs.forEach((p, index) => {

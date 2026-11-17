@@ -408,6 +408,8 @@ export function backgroundJobResumeRequest(node, offer, canvasFilePath) {
   };
 }
 
+const sha256HexOrNull = (value) => (typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null);
+
 function exactContinuationReceiptState(node, intent) {
   if (!intent?.terminalResultAvailable) return null;
   const data = node?.data || {};
@@ -417,13 +419,8 @@ function exactContinuationReceiptState(node, intent) {
   // terminal acknowledgement. The hidden worker may claim a one-hop successor
   // later, but it must begin from these exact persisted values.
   const operationAuthority = intent.operationAuthority || null;
-  const careerSnapshotId = typeof intent.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(intent.careerSnapshotId)
-    ? intent.careerSnapshotId
-    : null;
-  const parentArtifactFingerprint = typeof intent.parentArtifactFingerprint === 'string'
-    && /^[a-f0-9]{64}$/.test(intent.parentArtifactFingerprint)
-    ? intent.parentArtifactFingerprint
-    : null;
+  const careerSnapshotId = sha256HexOrNull(intent.careerSnapshotId);
+  const parentArtifactFingerprint = sha256HexOrNull(intent.parentArtifactFingerprint);
   // A terminal acknowledgement mutates durable continuation state. It must
   // retain the same pin/evidence boundary as its provider action, not infer a
   // new authority merely because startup discovered an applied UI receipt.
@@ -487,10 +484,8 @@ function lateSourceContinuationEntry(node, intent, canvasFilePath, boardIds) {
     preferencePlan: data.jobPreferencePlan ?? data.jobPreferencesInterpretation ?? null,
   };
   const operationAuthority = intent.operationAuthority || null;
-  const careerSnapshotId = typeof intent.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(intent.careerSnapshotId)
-    ? intent.careerSnapshotId
-    : null;
-  if (!operationAuthority || !careerSnapshotId || typeof intent.parentArtifactFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(intent.parentArtifactFingerprint)) return {
+  const careerSnapshotId = sha256HexOrNull(intent.careerSnapshotId);
+  if (!operationAuthority || !careerSnapshotId || !sha256HexOrNull(intent.parentArtifactFingerprint)) return {
     kind: 'jobcontinuation', nodeId: node.id, runId: intent.parentRunId,
     intent, state: 'awaiting-mounted-recovery',
   };
@@ -595,10 +590,8 @@ function sourceRecoveryContinuationEntry(node, nodes, edges, intent, canvasFileP
     preferredLocation,
   };
   const operationAuthority = intent.operationAuthority || null;
-  const careerSnapshotId = typeof intent.careerSnapshotId === 'string' && /^[a-f0-9]{64}$/.test(intent.careerSnapshotId)
-    ? intent.careerSnapshotId
-    : null;
-  if (!operationAuthority || !careerSnapshotId || typeof intent.parentArtifactFingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(intent.parentArtifactFingerprint)) return {
+  const careerSnapshotId = sha256HexOrNull(intent.careerSnapshotId);
+  if (!operationAuthority || !careerSnapshotId || !sha256HexOrNull(intent.parentArtifactFingerprint)) return {
     kind: 'jobcontinuation', nodeId: node.id, runId: intent.parentRunId,
     intent, boardOwner, state: 'awaiting-mounted-recovery',
   };
@@ -736,6 +729,10 @@ export function createWorkspaceStartupRecoveryCoordinator({
 
   async function discover({ canvasFilePath, rootNodes }) {
     if (!canvasFilePath) return [];
+    // Claims taken by this pass, so a caller that drops the result (its effect
+    // was cancelled before acting) can hand them back for the next pass.
+    const taken = [];
+    const claim = (key) => { claimed.add(key); taken.push(key); };
     const { nodes, edges } = collectNestedStartupRecoveryGraph(rootNodes);
     const planned = [];
     const boardNodes = [];
@@ -778,7 +775,7 @@ export function createWorkspaceStartupRecoveryCoordinator({
               exactContinuationOwned = true;
               const continuationClaimKey = `${canvasFilePath}:jobcontinuation:${node.id}:${intent.intentId}:${entry.state}`;
               if (claimed.has(continuationClaimKey)) continue;
-              claimed.add(continuationClaimKey);
+              claim(continuationClaimKey);
               planned.push(entry);
             }
             // A source continuation owns the same exact generation as the
@@ -823,7 +820,7 @@ export function createWorkspaceStartupRecoveryCoordinator({
         }
         const claimKey = `${canvasFilePath}:jobhub:${node.id}:${offer.runId}`;
         if (claimed.has(claimKey)) continue;
-        claimed.add(claimKey);
+        claim(claimKey);
         planned.push({
           kind: 'jobhub',
           nodeId: node.id,
@@ -855,7 +852,7 @@ export function createWorkspaceStartupRecoveryCoordinator({
         const runId = recovery.runId;
         const claimKey = `${canvasFilePath}:sellhub:${node.id}:${runId}`;
         if (claimed.has(claimKey)) continue;
-        claimed.add(claimKey);
+        claim(claimKey);
         // Exact headless source-rescrape intents are provider-safe and resume
         // once. Native CAPTCHA/login work and the general comps-ready pricing
         // decision remain explicit human pauses.
@@ -895,7 +892,7 @@ export function createWorkspaceStartupRecoveryCoordinator({
         const runId = recovery.runId;
         const claimKey = `${canvasFilePath}:marketplacestatus:${node.id}:${runId}`;
         if (claimed.has(claimKey)) continue;
-        claimed.add(claimKey);
+        claim(claimKey);
         planned.push({
           kind: 'marketplacestatus',
           nodeId: node.id,
@@ -919,7 +916,7 @@ export function createWorkspaceStartupRecoveryCoordinator({
       if (!runId) continue;
       const claimKey = `${canvasFilePath}:jobboard:${node.id}:${runId}`;
       if (claimed.has(claimKey)) continue;
-      claimed.add(claimKey);
+      claim(claimKey);
       const bootstrap = hiddenBoardChildBootstrapEntry(
         node,
         nodes,
@@ -934,8 +931,14 @@ export function createWorkspaceStartupRecoveryCoordinator({
         state: 'awaiting-board-hydration',
       });
     }
+    Object.defineProperty(planned, 'claims', { value: taken });
     return planned;
   }
 
-  return { discover };
+  /** Return a discarded plan's claims so a later discover can offer them again. */
+  function release(plan) {
+    for (const key of plan?.claims || []) claimed.delete(key);
+  }
+
+  return { discover, release };
 }

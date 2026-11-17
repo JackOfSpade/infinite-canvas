@@ -56,7 +56,7 @@ export function PreparedAnswer({ card: rawCard }) {
   const approach = approachOf(card).slice(0, CUE_CARD_MAX_LINES);
   if (approach.length) {
     // One real example at most: the first reminder that has one.
-    const instanceOf = item => (item.example ? lines.find(line => line.text.trim() === item.example.trim()) : null);
+    const instanceOf = item => (typeof item.example === 'string' && item.example ? lines.find(line => line.text.trim() === item.example.trim()) : null);
     const withInstance = approach.find(instanceOf);
     return <section className="spoken-answer" aria-label="Cues">
       <ul className="spoken-bullets">{approach.map((item, index) => {

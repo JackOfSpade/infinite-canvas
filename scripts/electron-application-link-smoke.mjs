@@ -1,17 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { closeDisposableElectron } from './close-disposable-electron.mjs';
+import { makeSmokeDir, smokeEnv, reportSmokeFailure } from './lib/electron-smoke.mjs';
 
 // Exercise only a disposable canvas/profile. No real generation or user files.
-const root = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-bundle-link-')));
+const root = await makeSmokeDir('ic-bundle-link-', { real: true });
 const canvasFilePath = path.join(root, 'canvas.json');
 const outputDir = path.join(root, 'Applied Jobs', 'Synthetic');
 const jobId = '123e4567-e89b-42d3-a456-426614174777';
-const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-delete env.ELECTRON_RUN_AS_NODE;
+const env = smokeEnv();
 let application;
 try {
   await fs.mkdir(outputDir, { recursive: true });
@@ -121,11 +120,7 @@ try {
     'a missing-output check must preserve the prior receipt');
   console.log('PASS: incomplete and closed official postings offer fresh lookup without bypass; saved bundles restore and external folder deletion unlocks retry without deleting the receipt.');
 } catch (error) {
-  const page = application?.windows()[0];
-  if (page) {
-    console.error((await page.locator('body').innerText()).slice(0, 5000));
-    await page.screenshot({ path: '/tmp/ic-bundle-link-smoke-error.png' });
-  }
+  await reportSmokeFailure(application, '/tmp/ic-bundle-link-smoke-error.png');
   throw error;
 } finally {
   try { await closeDisposableElectron(application); }

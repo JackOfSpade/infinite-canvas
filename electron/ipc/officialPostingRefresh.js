@@ -2,8 +2,7 @@ import { handleSafe } from './ipcUtils.js';
 import { getOfficialPostingStore, resolveOfficialPostings } from './officialPostingService.js';
 import { officialPostingRecordMatchesScrapedIdentity } from './officialPostingStore.js';
 import { RESEARCH_UNSETTLED_TRAIL, boundedOfficialPostingTrail, normalizeOfficialPosting, officialHttpsUrl, officialPostingAfterRepeatAttempt, officialPostingLookupStatus, officialPostingCitedLeadUrls } from './officialPostingFields.js';
-import { officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
-import { officialPostingSemanticInputHash } from './officialPostingSemantic.js';
+import { officialPostingSemanticInputHash, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
 import { projectOfficialPostingSourceFields } from './officialPostingSourceProjection.js';
 import { canonicalLeadUrl } from './officialPostingMatch.js';
@@ -17,7 +16,7 @@ export function retainedRecheckTrail(prior, posting) {
   return trail;
 }
 
-export const OFFICIAL_POSTING_REFRESH_MAX_ENTRIES = 128;
+const OFFICIAL_POSTING_REFRESH_MAX_ENTRIES = 128;
 const MAX_JOB_BYTES = 512 * 1024;
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const ID = /^[a-zA-Z0-9_.:-]{1,300}$/u;

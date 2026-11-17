@@ -404,29 +404,11 @@ function validStoredPayload(payload) {
   return true;
 }
 
-async function artifactStoreRoot(userDataPath) {
-  if (typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) throw new Error('artifact store unavailable');
-  const userData = path.resolve(userDataPath);
-  // `userData` is app-owned, but do not let a pre-existing symlink make the
-  // first `mkdir({ recursive: true })` create artifacts outside it before a
-  // later realpath check can reject the result. Resolve the verified parent
-  // first, then create precisely one child component.
-  const userDataStat = await fs.promises.lstat(userData);
-  if (!userDataStat.isDirectory() || userDataStat.isSymbolicLink()) throw new Error('unsafe artifact store');
-  const realUserData = await fs.promises.realpath(userData);
-  const requestedRoot = path.join(realUserData, ARTIFACT_DIR);
-  try {
-    await fs.promises.mkdir(requestedRoot, { mode: 0o700 });
-  } catch (error) {
-    if (error?.code !== 'EEXIST') throw error;
-  }
-  const stat = await fs.promises.lstat(requestedRoot);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('unsafe artifact store');
-  const real = await fs.promises.realpath(requestedRoot);
-  // `requestedRoot` was formed from the canonical user-data parent, so a
-  // different final spelling necessarily means a substituted child.
-  if (real !== path.join(realUserData, ARTIFACT_DIR)) throw new Error('unsafe artifact store');
-  return real;
+function artifactStoreRoot(userDataPath) {
+  // `userData` is app-owned, but a pre-existing symlink must not make the first
+  // mkdir create artifacts outside it: privateStoreRoot resolves the verified
+  // parent first and creates precisely one child component.
+  return privateStoreRoot(userDataPath, ARTIFACT_DIR, 'artifact store');
 }
 
 /** Capture an allowed fixed-file bundle, never returning its selected path. */
@@ -511,6 +493,28 @@ export async function captureInterviewPreparationBundle({ directory, userDataPat
   }
 }
 
+/** Parsed JSON of one private store file, or null when it is not a plain file within `limit`. */
+async function readBoundedStoreJson(file, limit) {
+  const before = await fs.promises.lstat(file);
+  if (!before.isFile() || before.isSymbolicLink() || before.size > limit) return null;
+  const handle = await fs.promises.open(file, fs.constants.O_RDONLY | noFollowFlag());
+  let boundedReadStarted = false;
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || !sameIdentity(before, opened) || opened.size > limit) return null;
+    // Do not use FileHandle.readFile after a size stat: an in-place writer
+    // can grow the same inode before or during that read. readOpened reads
+    // at most limit + 1 bytes and re-stats both descriptor and pathname.
+    boundedReadStarted = true;
+    const { text } = await readOpened({ handle, opened, filePath: file, limit }, 'utf8');
+    return JSON.parse(text);
+  } finally {
+    // readOpened owns and closes the handle once a bounded read begins. Its
+    // early descriptor validation leaves this finally to close it instead.
+    if (!boundedReadStarted) await handle.close().catch(() => {});
+  }
+}
+
 /** Load and re-validate a private artifact. Source folders are never reopened. */
 async function loadPrivateInterviewPreparationBundle({ artifactId, userDataPath } = {}) {
   if (typeof artifactId !== 'string' || !ID_RE.test(artifactId) || typeof userDataPath !== 'string' || !path.isAbsolute(userDataPath)) return null;
@@ -519,28 +523,11 @@ async function loadPrivateInterviewPreparationBundle({ artifactId, userDataPath 
   const file = path.join(root, `${artifactId}.json`);
   if (!isInside(root, file)) return null;
   try {
-    const before = await fs.promises.lstat(file);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_ARTIFACT_BYTES) return null;
-    const handle = await fs.promises.open(file, fs.constants.O_RDONLY | noFollowFlag());
-    let boundedReadStarted = false;
-    try {
-      const opened = await handle.stat();
-      if (!opened.isFile() || !sameIdentity(before, opened) || opened.size > MAX_ARTIFACT_BYTES) return null;
-      // Do not use FileHandle.readFile after a size stat: an in-place writer
-      // can grow the same inode before or during that read. readOpened reads
-      // at most limit + 1 bytes and re-stats both descriptor and pathname.
-      boundedReadStarted = true;
-      const { text } = await readOpened({ handle, opened, filePath: file, limit: MAX_ARTIFACT_BYTES }, 'utf8');
-      const data = JSON.parse(text);
-      if (!plainObject(data) || data.artifactId !== artifactId) return null;
-      const { artifactId: ARTIFACT_ID, ...payload } = data;
-      if (!validStoredPayload(payload) || sha256(stable(payload)) !== artifactId) return null;
-      return privateBundle(data);
-    } finally {
-      // readOpened owns and closes the handle once a bounded read begins. Its
-      // early descriptor validation leaves this finally to close it instead.
-      if (!boundedReadStarted) await handle.close().catch(() => {});
-    }
+    const data = await readBoundedStoreJson(file, MAX_ARTIFACT_BYTES);
+    if (!plainObject(data) || data.artifactId !== artifactId) return null;
+    const { artifactId: ARTIFACT_ID, ...payload } = data;
+    if (!validStoredPayload(payload) || sha256(stable(payload)) !== artifactId) return null;
+    return privateBundle(data);
   } catch { return null; }
 }
 
@@ -656,23 +643,11 @@ async function loadPreparedBriefByRecordId({ recordId, userDataPath } = {}) {
   const file = path.join(root, `${recordId}.json`);
   if (!isInside(root, file)) return null;
   try {
-    const before = await fs.promises.lstat(file);
-    if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_PREPARED_BRIEF_BYTES) return null;
-    const handle = await fs.promises.open(file, fs.constants.O_RDONLY | noFollowFlag());
-    let boundedReadStarted = false;
-    try {
-      const opened = await handle.stat();
-      if (!opened.isFile() || !sameIdentity(before, opened) || opened.size > MAX_PREPARED_BRIEF_BYTES) return null;
-      boundedReadStarted = true;
-      const { text } = await readOpened({ handle, opened, filePath: file, limit: MAX_PREPARED_BRIEF_BYTES }, 'utf8');
-      const record = JSON.parse(text);
-      if (!exactObject(record, ['schemaVersion', 'recordId', 'brief'])
-        || record.schemaVersion !== PREPARED_BRIEF_SCHEMA_VERSION || record.recordId !== recordId
-        || !isPublishedInterviewBrief(record.brief) || interviewPreparedBriefRecordId(record.brief) !== recordId) return null;
-      return record.brief;
-    } finally {
-      if (!boundedReadStarted) await handle.close().catch(() => {});
-    }
+    const record = await readBoundedStoreJson(file, MAX_PREPARED_BRIEF_BYTES);
+    if (!exactObject(record, ['schemaVersion', 'recordId', 'brief'])
+      || record.schemaVersion !== PREPARED_BRIEF_SCHEMA_VERSION || record.recordId !== recordId
+      || !isPublishedInterviewBrief(record.brief) || interviewPreparedBriefRecordId(record.brief) !== recordId) return null;
+    return record.brief;
   } catch { return null; }
 }
 
@@ -835,6 +810,11 @@ function exactQuote(value) {
   // this exact returned string must be findable in the captured source.
   return typeof value === 'string' && value.length > 0 && value.length <= MAX_BRIEF_TEXT ? value : '';
 }
+// Names the failing item and field; with no collector the first failure throws.
+function provenanceFailure(issues, rule, at, message) {
+  if (!issues) throw validationFailure({ message, code: null });
+  issues.add(rule, at.replace(/\[(\d+)\]/g, '.$1'), { message });
+}
 function evidenceList(value, raw, label = 'evidence', issues = null) {
   if (!Array.isArray(value)) return [];
   const out = [];
@@ -848,10 +828,10 @@ function evidenceList(value, raw, label = 'evidence', issues = null) {
     // and never a URL, whose query would bypass sourceUrl canonicalization.
     const sourceDate = providedDate === 'unknown' ? 'unknown' : (providedDate.trim() && providedDate.length <= 80 && !hasControl(providedDate) && !/:\/\//u.test(providedDate) && raw.includes(providedDate) ? providedDate : '');
     // Name the failing item and field only; never echo the worker's content.
-    if (!fact || !raw.includes(rawFact)) { const message = `invalid research provenance: ${at}.fact must be text copied exactly from RAW RESEARCH`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.fact', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
-    if (!evidenceQuote || !raw.includes(evidenceQuote)) { const message = `invalid research provenance: ${at}.evidenceQuote must be text copied exactly from RAW RESEARCH`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.quote', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
-    if (typeof providedUrl !== 'string' || !sourceUrl || !raw.includes(providedUrl)) { const message = `invalid research provenance: ${at}.sourceUrl must be an http(s) URL copied exactly from RAW RESEARCH`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.url', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
-    if (!sourceDate) { const message = `invalid research provenance: ${at}.sourceDate must be exactly "unknown" or short date text copied exactly from RAW RESEARCH, never a URL`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.date', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (!fact || !raw.includes(rawFact)) { provenanceFailure(issues, 'interview.fact', at, `invalid research provenance: ${at}.fact must be text copied exactly from RAW RESEARCH`); continue; }
+    if (!evidenceQuote || !raw.includes(evidenceQuote)) { provenanceFailure(issues, 'interview.quote', at, `invalid research provenance: ${at}.evidenceQuote must be text copied exactly from RAW RESEARCH`); continue; }
+    if (typeof providedUrl !== 'string' || !sourceUrl || !raw.includes(providedUrl)) { provenanceFailure(issues, 'interview.url', at, `invalid research provenance: ${at}.sourceUrl must be an http(s) URL copied exactly from RAW RESEARCH`); continue; }
+    if (!sourceDate) { provenanceFailure(issues, 'interview.date', at, `invalid research provenance: ${at}.sourceDate must be exactly "unknown" or short date text copied exactly from RAW RESEARCH, never a URL`); continue; }
     out.push({ fact: boundedScrubbedText(fact), sourceId: sha256(sourceUrl).slice(0, 16), sourceUrl, sourceDate });
   }
   return out;
@@ -862,9 +842,9 @@ function quoteList(value, source, issues = null) {
   for (const [index, item] of value.slice(0, MAX_BRIEF_ITEMS).entries()) {
     const point = safeString(item?.point); const evidenceQuote = exactQuote(item?.evidenceQuote); const documentKind = item?.documentKind === 'coverLetter' ? 'coverLetter' : item?.documentKind === 'resume' ? 'resume' : '';
     const at = `applicationPositioning[${index}]`;
-    if (!documentKind) { const message = `invalid source quote: ${at}.documentKind must be "resume" or "coverLetter"`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.positioning-kind', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
-    if (!point || !source?.[documentKind]?.includes(point)) { const message = `invalid source quote: ${at}.point must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.positioning-point', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
-    if (!evidenceQuote || !source?.[documentKind]?.includes(evidenceQuote)) { const message = `invalid source quote: ${at}.evidenceQuote must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`; if (!issues) throw validationFailure({ message: message, code: null }); issues.add('interview.positioning-quote', at.replace(/\[(\d+)\]/g, '.$1'), { message }); continue; }
+    if (!documentKind) { provenanceFailure(issues, 'interview.positioning-kind', at, `invalid source quote: ${at}.documentKind must be "resume" or "coverLetter"`); continue; }
+    if (!point || !source?.[documentKind]?.includes(point)) { provenanceFailure(issues, 'interview.positioning-point', at, `invalid source quote: ${at}.point must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`); continue; }
+    if (!evidenceQuote || !source?.[documentKind]?.includes(evidenceQuote)) { provenanceFailure(issues, 'interview.positioning-quote', at, `invalid source quote: ${at}.evidenceQuote must be text copied exactly from the ${documentKind} APPLICATION POSITIONING`); continue; }
     out.push({ documentKind, point: boundedScrubbedText(point) });
   }
   return out;
@@ -1447,73 +1427,54 @@ export function registerInterviewPreparationHandlers({ appInstance = app, regist
       // fill-only: answers that already exist are never replaced.
       let qaWarning = null;
       let disclosureMapping = [];
-      try {
+      const userDataPath = appInstance.getPath('userData');
+      const company = published.brief.role?.company || '';
+      // Every step after the seal is optional: a failure leaves a warning and the
+      // prepared answers stay usable; only a cancellation ends the run.
+      const optionalStep = async (name, warning, run) => {
+        try { await run(); } catch (error) {
+          if (signal?.aborted) throw error;
+          qaWarning = qaWarning || warning;
+          logWarning(`[Interview Q&A] ${name} skipped: ${String(error?.message || error).slice(0, 300)}`);
+        }
+        throwIfAborted(signal);
+      };
+      await optionalStep('disclosure mapping', 'Past interview questions could not be checked this time; prepared answers are ready.', async () => {
         const bankQuestions = (answers?.bank?.cards || []).map(card => card.question);
         disclosureMapping = await mapDisclosures({ rawResearch: result?.rawResearch, signal, callText,
           foundationQuestions: INTERVIEW_FOUNDATION_QUESTIONS.map(item => item.question),
           companyQuestions: bankQuestions.filter(question => !isFoundationQuestion(question)) });
-      } catch (error) {
-        if (signal?.aborted) throw error;
-        qaWarning = 'Past interview questions could not be checked this time; prepared answers are ready.';
-        logWarning(`[Interview Q&A] disclosure mapping skipped: ${String(error?.message || error).slice(0, 300)}`);
-      }
-      throwIfAborted(signal);
+      });
       // Final gate shared with application generation: the same fact-check
       // contract and model profile. Flagged claims are removed, never rewritten.
       let checkedBank = answers?.bank;
       if (checkedBank?.cards?.length) {
-        try {
-          const checked = await factCheckInterviewCards({ cards: checkedBank.cards, evidence: checkedBank.evidence, company: published.brief.role?.company || '', callText, signal });
+        await optionalStep('final fact-check', 'The final fact-check could not run this time; answers passed the standard checks.', async () => {
+          const checked = await factCheckInterviewCards({ cards: checkedBank.cards, evidence: checkedBank.evidence, company, callText, signal });
           checkedBank = { ...checkedBank, cards: checked.cards };
-        } catch (error) {
-          if (signal?.aborted) throw error;
-          qaWarning = qaWarning || 'The final fact-check could not run this time; answers passed the standard checks.';
-          logWarning(`[Interview Q&A] final fact-check skipped: ${String(error?.message || error).slice(0, 300)}`);
-        }
+        });
       }
+      // Foundation (global) and company Q&A are filled from the sealed bank,
+      // fill-only: answers that already exist are never replaced.
+      const qa = await fillQa({ userDataPath, nodeId: args.nodeId, bank: checkedBank, company, disclosureMapping });
       throwIfAborted(signal);
-      const qa = await fillQa({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, bank: checkedBank,
-        company: published.brief.role?.company || '', disclosureMapping });
-      throwIfAborted(signal);
-      // Live-card reminders: every stored answer line without a short cue
-      // gets one, including answers kept from an earlier Prepare.
       if (qa) {
-        try {
-          await fillCues({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, wants: needsGlanceCue,
-            generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) });
-        } catch (error) {
-          if (signal?.aborted) throw error;
-          qaWarning = qaWarning || 'Short reminders could not be written this time; the live card shows trimmed answer lines.';
-          logWarning(`[Interview Q&A] glance cues skipped: ${String(error?.message || error).slice(0, 300)}`);
-        }
+        // Live-card reminders: every stored answer line without a short cue
+        // gets one, including answers kept from an earlier Prepare.
+        await optionalStep('glance cues', 'Short reminders could not be written this time; the live card shows trimmed answer lines.', () => fillCues({
+          userDataPath, nodeId: args.nodeId, wants: needsGlanceCue,
+          generate: units => generateInterviewGlanceCues({ units, callText, signal, logWarning }) }));
+        // Approach reminders: for "how do you work" questions the live card
+        // shows general good practice to illustrate, not a past-work claim.
+        await optionalStep('approach reminders', 'Approach reminders could not be written this time; those cards show their prepared lines.', () => fillApproaches({
+          userDataPath, nodeId: args.nodeId,
+          generate: units => generateInterviewApproaches({ units, callText, signal, logWarning }) }));
+        // Practice mode: an AI-planned interview order over every Foundation and
+        // company question, each recorded once with an on-device voice.
+        await optionalStep('practice preparation', 'Practice recordings could not be prepared this time.', () => preparePractice({
+          userDataPath, nodeId: args.nodeId, signal, callText, company,
+          questions: [...qa.foundation.cards, ...qa.company.cards].map(card => card.question) }));
       }
-      throwIfAborted(signal);
-      // Approach reminders: for "how do you work" questions the live card
-      // shows general good practice to illustrate, not a past-work claim.
-      if (qa) {
-        try {
-          await fillApproaches({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId,
-            generate: units => generateInterviewApproaches({ units, callText, signal, logWarning }) });
-        } catch (error) {
-          if (signal?.aborted) throw error;
-          qaWarning = qaWarning || 'Approach reminders could not be written this time; those cards show their prepared lines.';
-          logWarning(`[Interview Q&A] approach reminders skipped: ${String(error?.message || error).slice(0, 300)}`);
-        }
-      }
-      throwIfAborted(signal);
-      // Practice mode: an AI-planned interview order over every Foundation and
-      // company question, each recorded once with an on-device voice.
-      if (qa) {
-        try {
-          await preparePractice({ userDataPath: appInstance.getPath('userData'), nodeId: args.nodeId, signal, callText,
-            company: published.brief.role?.company || '', questions: [...qa.foundation.cards, ...qa.company.cards].map(card => card.question) });
-        } catch (error) {
-          if (signal?.aborted) throw error;
-          qaWarning = qaWarning || 'Practice recordings could not be prepared this time.';
-          logWarning(`[Interview Q&A] practice preparation skipped: ${String(error?.message || error).slice(0, 300)}`);
-        }
-      }
-      throwIfAborted(signal);
       return { brief: published.brief, briefRecordId: published.briefRecordId, ...answerSummary, ...(qaWarning ? { qaWarning } : {}) };
     }
     catch (error) { if (signal?.aborted) throw error; throw new Error('The interview brief could not be prepared safely.'); }

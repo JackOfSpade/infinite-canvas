@@ -38,6 +38,9 @@ import { salaryRecommendationBounds } from '../../utils/salaryRecommendationBoun
 export const COL_X = { likelihood: 400, salary: 700, role: 1000, job: 1400 };
 const ROW_H = { group: 70, job: 280 }; // module-local: only used within this file
 
+// A salary heading shows what the card shows: the official posting's pay when one is confirmed, never the listing's beneath it.
+const shownSalary = job => (mostOfficialSource(job).kind === 'official' ? normalizeOfficialPosting(job?.officialPosting)?.salary?.text || '' : job?.salary);
+
 // A workspace restore can mount an already-expanded tree whose cards were
 // deliberately arranged by the user. This renderer-only flag prevents a
 // post-hydration ResizeObserver measurement from immediately replacing that
@@ -46,9 +49,6 @@ const ROW_H = { group: 70, job: 280 }; // module-local: only used within this fi
 // allowed to organize the tree again. A manual card drag also sets the flag
 // (see markJobTreeLayoutUserArranged) so a bundle banner growing the card keeps
 // the user's dropped positions until the next explicit hierarchy action.
-// A salary heading shows what the card shows: the official posting's pay when one is confirmed, never the listing's beneath it.
-const shownSalary = job => (mostOfficialSource(job).kind === 'official' ? normalizeOfficialPosting(job?.officialPosting)?.salary?.text || '' : job?.salary);
-
 export const JOB_TREE_LAYOUT_RESTORE_KEY = '_preserveTreeLayoutOnRestore';
 
 /**
@@ -329,14 +329,12 @@ function normalizedRange(value, fallback = {}) {
   // A missing endpoint is incomplete evidence. A genuine fixed amount is
   // stored with equal explicit endpoints; filling one from the other would
   // turn a minimum-only offer or partial market band into a complete result.
-  const resolvedMin = min;
-  const resolvedMax = max;
   // Do not silently reorder a malformed offer or research range. A reversed
   // range is incomplete evidence, not a safe basis for a coloured card.
-  const isOrdered = resolvedMin === null || resolvedMax === null || resolvedMin <= resolvedMax;
+  const isOrdered = min === null || max === null || min <= max;
   return {
-    min: isOrdered ? resolvedMin : null,
-    max: isOrdered ? resolvedMax : null,
+    min: isOrdered ? min : null,
+    max: isOrdered ? max : null,
     currency,
     period,
   };

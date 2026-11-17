@@ -3,21 +3,22 @@
 // without mounting a JobSearchNode.
 const MAX_JAVASCRIPT_DATE_MS = 8_640_000_000_000_000;
 
+function validTimestampMs(timestamp) {
+  return Number.isSafeInteger(timestamp)
+    && timestamp > 0
+    && Number.isFinite(new Date(timestamp).getTime())
+    ? timestamp
+    : null;
+}
+
 export function normalizeJobAnalysisClearWatermark(value) {
-  const normalize = (timestamp) => (
-    Number.isSafeInteger(timestamp)
-      && timestamp > 0
-      && Number.isFinite(new Date(timestamp).getTime())
-      ? timestamp
-      : null
-  );
   if (typeof value === 'number') {
-    return normalize(value);
+    return validTimestampMs(value);
   }
   // Persisted older canvases can contain JSON's decimal representation, but
   // never coerce booleans, whitespace, fractions, or Date.parse-like strings.
   if (typeof value === 'string' && /^[1-9]\d*$/.test(value)) {
-    return normalize(Number(value));
+    return validTimestampMs(Number(value));
   }
   return null;
 }
@@ -50,16 +51,9 @@ export function normalizeJobAnalysisClearRunId(value) {
 }
 
 function snapshotCreatedAtMs(value) {
-  const normalize = (timestamp) => (
-    Number.isSafeInteger(timestamp)
-      && timestamp > 0
-      && Number.isFinite(new Date(timestamp).getTime())
-      ? timestamp
-      : null
-  );
-  if (typeof value === 'number') return normalize(value);
+  if (typeof value === 'number') return validTimestampMs(value);
   if (typeof value !== 'string') return null;
-  return normalize(Date.parse(value));
+  return validTimestampMs(Date.parse(value));
 }
 
 export function isJobAnalysisSnapshotAfterClear(snapshot, meta, jobAnalysisClearedAt, jobAnalysisClearedRunId = null) {

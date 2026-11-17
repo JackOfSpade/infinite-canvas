@@ -5,7 +5,7 @@ import { validationFailure } from './validationFailure.js';
 
 export const OFFICIAL_POSTING_RESEARCH_TASK = 'job-official-posting-research';
 export const OFFICIAL_POSTING_MATCH_TASK = 'job-official-posting-match';
-export const MAX_RESEARCH_POSTINGS = 12;
+const MAX_RESEARCH_POSTINGS = 12;
 export const MAX_RESEARCH_DESCRIPTION_CHARS = 24_000;
 export const MAX_RESEARCH_RESPONSE_CHARS = 120_000;
 export const OFFICIAL_POSTING_CORRECTION_TEMPLATES = templatesFor('text.official-research-', 'sections.');
@@ -23,7 +23,7 @@ const bounded = (value, max, blank = true) => typeof value === 'string' && value
 
 // Escaped JSON is deterministic across restart, and external newlines/tags
 // cannot synthesize a host delimiter. Do not use random prompt fence nonces.
-function untrustedJson(label, value) {
+export function untrustedJson(label, value) {
   const body = JSON.stringify(value).replace(/[<>&]/gu, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
   return `BEGIN UNTRUSTED ${label} JSON\n${body}\nEND UNTRUSTED ${label} JSON`;
 }

@@ -1591,6 +1591,18 @@ async function resolveCompanyResearchRawBatch(entries, index, batches, options, 
   return { start, researched };
 }
 
+// An assessment receives only its own exact raw section, never a neighbour's
+// response or an out-of-order transient buffer.
+function assessmentEntriesFor(start, researched) {
+  return researched.batch.map((request, index) => ({
+    start: start + index,
+    request,
+    rawRequest: researched.rawRequests[index],
+    groundedResearch: researched.sections.get(request.researchId),
+    rawResearch: `BEGIN RESEARCH ${request.researchId}\n${researched.sections.get(request.researchId)}\nEND RESEARCH ${request.researchId}`,
+  }));
+}
+
 // One dependency-aware scheduler for the company research pipeline.  Raw
 // batches retain their original durable membership and are committed in ordinal
 // order, even when the transport completes them out of order.  As soon as that
@@ -1631,15 +1643,7 @@ async function runCompanyResearchPipeline({ rawWave, executeRawDescriptor, order
       result.values.forEach((value, index) => { freshResults[result.start + index] = value; });
       return;
     }
-    result.researched.batch.forEach((request, index) => appendAssessmentEntry({
-      start: result.start + index,
-      request,
-      rawRequest: result.researched.rawRequests[index],
-      groundedResearch: result.researched.sections.get(request.researchId),
-      // An assessment receives only its own exact raw section, never a
-      // neighbour's response or an out-of-order transient buffer.
-      rawResearch: `BEGIN RESEARCH ${request.researchId}\n${result.researched.sections.get(request.researchId)}\nEND RESEARCH ${request.researchId}`,
-    }));
+    assessmentEntriesFor(result.start, result.researched).forEach(appendAssessmentEntry);
   };
   const recordRawResult = (ordinal, result) => {
     resultsByOrdinal.set(ordinal, result);
@@ -1703,13 +1707,7 @@ async function assessCompletedCompanyResearch({ completed, ordered, options, sig
       values.forEach((value, index) => { results[start + index] = value; });
       return;
     }
-    researched.batch.forEach((request, index) => assessmentEntries.push({
-      start: start + index,
-      request,
-      rawRequest: researched.rawRequests[index],
-      groundedResearch: researched.sections.get(request.researchId),
-      rawResearch: `BEGIN RESEARCH ${request.researchId}\n${researched.sections.get(request.researchId)}\nEND RESEARCH ${request.researchId}`,
-    }));
+    assessmentEntries.push(...assessmentEntriesFor(start, researched));
   });
   const assessmentProgressScopeId = crypto.randomUUID();
   const assessmentBatches = [];
@@ -1877,11 +1875,6 @@ async function researchCompanyCriteria({ pool, rows, preferenceFingerprint, sign
   }));
   return requests.length;
 }
-/**
- * Runs the company research deferred by evaluate-job-preferences, for the jobs
- * the caller already gated on fit. Criteria travel on each row's own matches,
- * because a Board combines modules with different briefs.
- */
 /** Re-decides saved jobs from their stored rule-by-rule results with no AI. Null when a job has none. */
 export function reapplyStoredJobPreferences({ jobs, preferencePlan } = {}) {
   const pool = Array.isArray(jobs) ? jobs : [];
@@ -1891,6 +1884,11 @@ export function reapplyStoredJobPreferences({ jobs, preferencePlan } = {}) {
   const assessed = attachAssessments(pool, rows, job => job, { deferCompanyResearch: true });
   return evaluationEnvelope({ aiSkipped: true, preferencePlan: plan, jobPreferencesInterpretation: plan, ...assessed }, assessed.candidatePool);
 }
+/**
+ * Runs the company research deferred by evaluate-job-preferences, for the jobs
+ * the caller already gated on fit. Criteria travel on each row's own matches,
+ * because a Board combines modules with different briefs.
+ */
 export async function researchDeferredJobPreferences({ jobs, signal, callText, callRaw, companyResearchPipelineEligible = true } = {}) {
   const pool = Array.isArray(jobs) ? jobs : [];
   const rows = pool.map(job => (Array.isArray(job?.preferenceAssessment?.matches) ? job.preferenceAssessment.matches.map(match => ({ ...match })) : []));

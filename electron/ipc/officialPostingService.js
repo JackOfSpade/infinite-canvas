@@ -138,7 +138,6 @@ function materiallyDifferent(left, right) {
 }
 const REJECTION_CODES = Object.freeze(['title-mismatch', 'location-mismatch', 'employer-mismatch', 'tenant-unproven', 'source-unproven', 'poster-tenant', 'salary-mismatch', 'no-anchor', 'invalid-quotes', 'ambiguous', 'closed', 'unreadable', 'oversize', 'unsafe-url', 'unsafe-address', 'fetch-timeout', 'fetch-failed', 'unsupported-content-type', 'invalid-text', 'crawl-budget', 'crawl-partial', 'semantic-uncertain', 'semantic-overflow', ...OFFICIAL_POSTING_COMPARATIVE_CODES]);
 const FETCH_COUNTERS = Object.freeze(['fetches', 'uniqueUrls', 'cacheHits', 'breakerTrips']);
-const MISS_TTL_MS = 24 * 60 * 60 * 1_000;
 const ROW_CONCURRENCY = 6;
 function telemetryBlock() {
   return { total: 0, levels: Object.fromEntries(OFFICIAL_POSTING_LEVELS.map(level => [level, 0])),
@@ -205,39 +204,6 @@ async function parallelRows(members, operation) {
 }
 function abortTrail(signal) {
   return OFFICIAL_POSTING_TRAIL.includes(signal?.reason?.code) ? signal.reason.code : 'worker-aborted';
-}
-
-/** Only host records bound to this scraped identity can settle an inline row.
- * Unresolved indices preserve input order for the caller's exact merge. */
-export async function partitionOfficialPostingRows(jobs, { store, signal, now = Date.now, semanticMatching = true } = {}) {
-  const rows = Array.isArray(jobs) ? jobs : [];
-  const carried = rows.slice(); const settled = new Set(); const settledTelemetry = telemetryBlock();
-  const instant = typeof now === 'function' ? Number(now()) : Number(now);
-  try { store ||= getOfficialPostingStore(); } catch { store = null; }
-  await parallelRows(rows.map((job, index) => ({ job, index })), async ({ job, index }) => {
-    if (signal?.aborted || !store || !normalizeOfficialPosting(job?.officialPosting)) return;
-    let record;
-    try { record = await store.find(job); } catch { return; }
-    const posting = normalizeOfficialPosting(record?.officialPosting);
-    if (!posting || !officialPostingRecordMatchesScrapedIdentity(job, record)
-      || (semanticMatching && !officialPostingSemanticProofMatches(job, posting))
-      || !shouldPersistOfficialPostingResult(posting, { signal })) return;
-    if (posting.outcome === 'closed') return;
-    // Older closed-trail misses lack a candidate confirmation receipt. Revisit
-    // them rather than treating an expired validThrough as a proved closure.
-    if (['L5', 'L6'].includes(posting.level) && posting.trail?.includes('closed')) return;
-    if (!VERIFIED_LEVELS.has(posting.level)) {
-      const age = instant - record.savedAt;
-      if (!Number.isFinite(age) || age < 0 || age >= MISS_TTL_MS) return;
-    }
-    if (signal?.aborted) return;
-    const postedBy = VERIFIED_LEVELS.has(posting.level)
-      ? strictEmployerEqual(posting.employer, job?.company) ? undefined : job?.company
-      : unresolvedOfficialPosting(job).postedBy;
-    carried[index] = { ...job, postedBy, officialPosting: posting };
-    settled.add(index); countPosting(settledTelemetry, posting);
-  });
-  return { jobs: carried, unresolvedIndices: rows.flatMap((_, index) => settled.has(index) ? [] : [index]), settledTelemetry };
 }
 
 /** One generic Solve handler can checkpoint and publish the same inputs.
@@ -411,8 +377,10 @@ export async function resolveOfficialPostings(jobs, {
   const results = new Map(); const finished = new Set(); const found = new Map();
   const discovery = new Map(members.map(member => [member, { finderCalls: 0, judgeRounds: 0, judgeCalls: 0,
     comparisonRuns: 0, snapshotReads: 0, snapshotFailures: 0, truncatedSnapshots: 0, postingDataSnapshots: 0, renderedSnapshots: 0, renderFailures: 0, failureCodes: [] }]));
+  const rowIndex = new Map();
+  rows.forEach((job, index) => { if (!rowIndex.has(job)) rowIndex.set(job, index); });
   for (const member of members) {
-    const index = rows.indexOf(member.job);
+    const index = rowIndex.get(member.job);
     member.priorOfficialRecord = priorOfficialRecords[index] || null;
     member.bypassCache = bypassCache || bypassCacheByRow[index] === true;
     member.candidateUrls = [...candidateUrls, ...(Array.isArray(candidateUrlsByRow[index]) ? candidateUrlsByRow[index] : [])];

@@ -10,10 +10,10 @@ import { extractAtsTenant, normalizedSourceHost, registrableDomain } from './off
 // returned: their main input. This is transport only: no field here decides identity,
 // status or ownership. The judges read it as untrusted page content, like the listing.
 
-export const SNAPSHOT_DESCRIPTION_CHARS = 30_000;
+const SNAPSHOT_DESCRIPTION_CHARS = 30_000;
 export const SNAPSHOT_TOTAL_CHARS = 250_000;
 // The whole page as the browser shows it. Only the prompt's size bound can shorten it.
-export const SNAPSHOT_PAGE_TEXT_CHARS = 120_000;
+const SNAPSHOT_PAGE_TEXT_CHARS = 120_000;
 const MAX_BOARD_LINKS = 12;
 const MAX_MARKUP_URLS = 20_000;
 const MAX_MARKUP_URL_CHARS = 300;

@@ -277,7 +277,7 @@ export default [
         'safeJob must retain only shared-normalized postingVariants');
       assert(/buildResumeDocument\(\{[\s\S]{0,4000}postingVariants: input\.job\?\.postingVariants/.test(localAi),
         'the successful import must pass variants to buildResumeDocument');
-      assert(localAi.includes("import { EMPTY_JOB_LISTING_BODY_NOTE, formatOriginalJobListingMarkdown, normaliseJobPostingVariants"),
+      assert(/import \{[^}]*\bnormaliseJobPostingVariants\b[^}]*\} from '\.\/applicationBundle\.js';/.test(localAi),
         'local-AI must import the shared normalizer from applicationBundle');
 
       const resumeHtml = read('electron/ipc/resumeHtml.js');

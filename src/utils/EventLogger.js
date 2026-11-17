@@ -164,10 +164,7 @@ export class EventLoggerSingleton {
     this.currentBytes += utf8ByteLength(entry);
 
     // Trim oldest entries if we exceed the memory ceiling
-    while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
-      this.currentBytes -= utf8ByteLength(this.logs.shift());
-      this.evictedCount++;
-    }
+    this._trimToCeiling();
   }
 
   /**
@@ -238,6 +235,10 @@ export class EventLoggerSingleton {
 
     // A coalesced resize line grows as its frame count/span is updated. Keep
     // replacement writes subject to the same ring limit as appended entries.
+    this._trimToCeiling();
+  }
+
+  _trimToCeiling() {
     while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
       this.currentBytes -= utf8ByteLength(this.logs.shift());
       this.evictedCount++;
@@ -262,10 +263,7 @@ export class EventLoggerSingleton {
         this.logs[index] = entry;
         this.currentBytes += utf8ByteLength(entry);
         prior.line = entry;
-        while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
-          this.currentBytes -= utf8ByteLength(this.logs.shift());
-          this.evictedCount++;
-        }
+        this._trimToCeiling();
         if (!this.logs.includes(prior.line)) prior.line = null;
       } else prior.line = null;
     }
@@ -273,10 +271,11 @@ export class EventLoggerSingleton {
       prior.line = formatEventLogEntry(message);
       this.logs.push(prior.line);
       this.currentBytes += utf8ByteLength(prior.line);
-      while (this.currentBytes > MAX_BYTES && this.logs.length > 0) {
-        this.currentBytes -= utf8ByteLength(this.logs.shift());
-        this.evictedCount++;
-      }
+      // The new row is now the newest entry: a repeat of the previous message
+      // must append, not coalesce into (and overwrite) this row.
+      this._lastMsg = null;
+      this._resizeRun = null;
+      this._trimToCeiling();
       if (!this.logs.includes(prior.line)) prior.line = null;
     }
     this._cumulativeEvents.set(key, prior);

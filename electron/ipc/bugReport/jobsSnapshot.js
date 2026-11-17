@@ -106,10 +106,6 @@ export function formatDetailReprobeAttempt(event) {
   return parts.join(' ');
 }
 
-// Legacy/synthetic snapshots can still contain title-drop telemetry from older
-// builds. Keep the old decision helper only to explain those historical rejected
-// samples; current provider-trust runs do not execute a local title gate.
-
 // Report correlations must let a reader join rows from one export without
 // publishing a node, job, or run identifier that can be reused outside it.
 // A short one-way digest is stable within a report and deliberately reveals no
@@ -1318,41 +1314,45 @@ function validatedSnapshotReportMetadata(value) {
   };
 }
 
+function jsonStringEnd(text, start) {
+  if (text[start] !== '"') return -1;
+  for (let cursor = start + 1; cursor < text.length; cursor++) {
+    if (text[cursor] === '\\') { cursor++; continue; }
+    if (text[cursor] === '"') return cursor;
+  }
+  return -1;
+}
+
+function jsonObjectEnd(text, start) {
+  if (text[start] !== '{') return -1;
+  let depth = 0;
+  let quoted = false;
+  for (let cursor = start; cursor < text.length; cursor++) {
+    const char = text[cursor];
+    if (quoted) {
+      if (char === '\\') { cursor++; continue; }
+      if (char === '"') quoted = false;
+      continue;
+    }
+    if (char === '"') { quoted = true; continue; }
+    if (char === '{') depth++;
+    else if (char === '}') {
+      depth--;
+      if (depth === 0) return cursor + 1;
+      if (depth < 0) return -1;
+    }
+  }
+  return -1;
+}
+
 function firstTopLevelReportMetadata(text) {
   if (typeof text !== 'string') return { error: 'missing' };
   let index = 0;
   const skipWhitespace = () => {
     while (index < text.length && /[ \t\r\n]/.test(text[index])) index++;
   };
-  const stringEnd = (start) => {
-    if (text[start] !== '"') return -1;
-    for (let cursor = start + 1; cursor < text.length; cursor++) {
-      if (text[cursor] === '\\') { cursor++; continue; }
-      if (text[cursor] === '"') return cursor;
-    }
-    return -1;
-  };
-  const objectEnd = (start) => {
-    if (text[start] !== '{') return -1;
-    let depth = 0;
-    let quoted = false;
-    for (let cursor = start; cursor < text.length; cursor++) {
-      const char = text[cursor];
-      if (quoted) {
-        if (char === '\\') { cursor++; continue; }
-        if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') { quoted = true; continue; }
-      if (char === '{') depth++;
-      else if (char === '}') {
-        depth--;
-        if (depth === 0) return cursor + 1;
-        if (depth < 0) return -1;
-      }
-    }
-    return -1;
-  };
+  const stringEnd = start => jsonStringEnd(text, start);
+  const objectEnd = start => jsonObjectEnd(text, start);
   skipWhitespace();
   if (text[index++] !== '{') return { error: 'missing' };
   skipWhitespace();
@@ -1400,35 +1400,8 @@ function firstTopLevelLegacySavedReanalysisHeader(text) {
   const skipWhitespace = () => {
     while (index < text.length && /[ \t\r\n]/.test(text[index])) index++;
   };
-  const stringEnd = (start) => {
-    if (text[start] !== '"') return -1;
-    for (let cursor = start + 1; cursor < text.length; cursor++) {
-      if (text[cursor] === '\\') { cursor++; continue; }
-      if (text[cursor] === '"') return cursor;
-    }
-    return -1;
-  };
-  const objectEnd = (start) => {
-    if (text[start] !== '{') return -1;
-    let depth = 0;
-    let quoted = false;
-    for (let cursor = start; cursor < text.length; cursor++) {
-      const char = text[cursor];
-      if (quoted) {
-        if (char === '\\') { cursor++; continue; }
-        if (char === '"') quoted = false;
-        continue;
-      }
-      if (char === '"') { quoted = true; continue; }
-      if (char === '{') depth++;
-      else if (char === '}') {
-        depth--;
-        if (depth === 0) return cursor + 1;
-        if (depth < 0) return -1;
-      }
-    }
-    return -1;
-  };
+  const stringEnd = start => jsonStringEnd(text, start);
+  const objectEnd = start => jsonObjectEnd(text, start);
   const readString = () => {
     skipWhitespace();
     const start = index;
@@ -1672,14 +1645,6 @@ function recoveryCanvasCorrelation(recordedCanvasPath, canvasFilePath) {
   }
 }
 
-function recoveryHubCorrelation(nodeId, currentNodeIds) {
-  const safeId = receiptIdentifier(nodeId, '');
-  if (!safeId) return 'hub identifier omitted';
-  return currentNodeIds?.has?.(safeId)
-    ? `hub \`${reportOpaqueIdentifier(safeId)}\` is present in this canvas`
-    : `⚠️ hub \`${reportOpaqueIdentifier(safeId)}\` is not present in this canvas`;
-}
-
 function profileCountLabel(profile) {
   if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return 'profile absent';
   const fields = Object.keys(profile).length;
@@ -1895,7 +1860,7 @@ function snapshotRecoveryLine(label, record, canvasFilePath, currentNodeIds) {
     const reanalysis = metadata.schemaVersion === 2
       ? ` · mode \`${metadata.recoveryMode}\` · revision \`${reportCorrelationDigest(metadata.analysisRevisionId)}\``
       : '';
-    return `- ${label}: ownership-verified report metadata only (bounded prefix) · ${jobCountLabel} · ${metadata.descriptionRecoveryJobCount} recovery-pool job(s) · field audit omitted (metadata-only bounded prefix) · created ${recoveryTimestampLabel(metadata.createdAt)} · run \`${snapshotRunIdentifier(metadata.runId)}\`${reanalysis} · ${recoveryHubCorrelation(metadata.sourceHubId, currentNodeIds)} · ${recoveryCanvasCorrelation(metadata.canvasFilePath, canvasFilePath)}${integrityWarnings()}`;
+    return `- ${label}: ownership-verified report metadata only (bounded prefix) · ${jobCountLabel} · ${metadata.descriptionRecoveryJobCount} recovery-pool job(s) · field audit omitted (metadata-only bounded prefix) · created ${recoveryTimestampLabel(metadata.createdAt)} · run \`${snapshotRunIdentifier(metadata.runId)}\`${reanalysis} · ${receiptHubCorrelation(metadata.sourceHubId, currentNodeIds)} · ${recoveryCanvasCorrelation(metadata.canvasFilePath, canvasFilePath)}${integrityWarnings()}`;
   }
   if (parsed.parseError || !parsed.value || typeof parsed.value !== 'object' || Array.isArray(parsed.value)) {
     return `- ${label}: ⚠️ present but not parseable JSON${integrityWarnings()}`;
@@ -1925,7 +1890,7 @@ function snapshotRecoveryLine(label, record, canvasFilePath, currentNodeIds) {
   const recoveryJobs = Array.isArray(snapshot.descriptionRecoveryJobs) ? snapshot.descriptionRecoveryJobs.length : 0;
   const nodeId = snapshotOwnerId(snapshot);
   const recordedCanvas = snapshot.canvasFilePath || snapshot.snapshotContext?.canvasFilePath || null;
-  return `- ${label}: parseable${parsed.legacyOwned ? ' (legacy ownership verified)' : ''} · ${jobCountLabel} · ${recoveryJobs} recovery-pool job(s) · ${profileCountLabel(snapshot.profile)} · created ${recoveryTimestampLabel(snapshot.createdAt)} · run \`${snapshotRunIdentifier(snapshot.runId)}\` · ${recoveryHubCorrelation(nodeId, currentNodeIds)} · ${recoveryCanvasCorrelation(recordedCanvas, canvasFilePath)}${integrityWarnings()}`;
+  return `- ${label}: parseable${parsed.legacyOwned ? ' (legacy ownership verified)' : ''} · ${jobCountLabel} · ${recoveryJobs} recovery-pool job(s) · ${profileCountLabel(snapshot.profile)} · created ${recoveryTimestampLabel(snapshot.createdAt)} · run \`${snapshotRunIdentifier(snapshot.runId)}\` · ${receiptHubCorrelation(nodeId, currentNodeIds)} · ${recoveryCanvasCorrelation(recordedCanvas, canvasFilePath)}${integrityWarnings()}`;
 }
 
 function ownedSnapshotLines(label, canvasFilePath, currentNodeIds, currentJobHubIds, kind) {
@@ -2093,15 +2058,6 @@ function automaticDateWindowLine(value, endLabel = 'now') {
 // a zero-card/zero-result fact that could certify a cleared board.
 function boardNonnegativeCount(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : null;
-}
-
-function receiptCompletionTimestamp(value) {
-  return typeof value === 'number'
-    && Number.isSafeInteger(value)
-    && value > 0
-    && Number.isFinite(new Date(value).getTime())
     ? value
     : null;
 }
@@ -2713,7 +2669,7 @@ function formatRecoveryManifest(manifest, currentNodeIds, label, absentNote = ''
     ? 'explicit user Pause & Save; automatic restart is disabled until Resume'
     : 'eligible for automatic crash recovery unless a source requires human action';
   return [
-    `- ${label}: parseable · stage **${receiptIdentifier(run.stage, 'unknown')}** · run \`${reportOpaqueIdentifier(run.runId)}\` · updated ${recoveryTimestampLabel(run.lastUpdated)} · ${recoveryHubCorrelation(recordedOwner, currentNodeIds)} · canvas is this report`,
+    `- ${label}: parseable · stage **${receiptIdentifier(run.stage, 'unknown')}** · run \`${reportOpaqueIdentifier(run.runId)}\` · updated ${recoveryTimestampLabel(run.lastUpdated)} · ${receiptHubCorrelation(recordedOwner, currentNodeIds)} · canvas is this report`,
     `- Sources (${sourceEntries.length}): ${sourceSummary || '(none recorded)'}${extraSources}`,
     `- Provider collection boundary: providerGathered=\`${providerGathered ? 'true' : 'false'}\` · ${providerBoundary}.`,
     `- Recovery disposition: \`${recoveryDisposition}\` · ${recoveryDispositionDetail}.`,
@@ -3377,7 +3333,7 @@ export function buildJobCompletionAssessment(
   // board — reporting an unrelated, never-combined board as this run's gap
   // while the board that actually consumed the run went uninspected.
   const activeReceiptRunId = recordedRunToken(receipt?.runId);
-  const receiptCompletedAt = receiptCompletionTimestamp(receipt?.completedAt);
+  const receiptCompletedAt = jobSearchWindowTimestamp(receipt?.completedAt);
   // A clear receipt proves this board DID consume the active source, then the
   // user deliberately removed that cascade. Never infer this from an empty
   // board alone: a virgin board, old-run receipt, stale board, or a clear that
@@ -3421,7 +3377,7 @@ export function buildJobCompletionAssessment(
         .find(entry => entry.boardNodeId === boardStageOwners[0].id) || null;
     } catch { /* optional Board stage diagnostics */ }
   }
-  const runStartedAt = receiptCompletionTimestamp(receipt?.startedAt);
+  const runStartedAt = jobSearchWindowTimestamp(receipt?.startedAt);
   const boardStageBelongsToRun = stage => !!stage
     && Number.isFinite(Number(stage.ts))
     && (!Number.isFinite(runStartedAt) || Number(stage.ts) >= runStartedAt);
@@ -4326,11 +4282,12 @@ function redactedIdLabelMap(values, max = MAX_BOARD_DIAGNOSTIC_LABEL_CONTEXT_IDS
     length += 2;
     rendered = ids.map(id => `#${digest(id).slice(0, length)}`);
   }
+  const distinct = new Set(rendered).size === rendered.length;
   for (const [index, id] of ids.entries()) {
     // A cryptographic collision is fantastically unlikely, but labels are a
     // diagnostic relation, not a probabilistic one. Keep the display distinct
     // even in a mocked/adversarial collision without exposing full IDs.
-    labels.set(id, `${rendered[index]}${new Set(rendered).size === rendered.length ? '' : `-${index + 1}`}`);
+    labels.set(id, `${rendered[index]}${distinct ? '' : `-${index + 1}`}`);
   }
   return labels;
 }
@@ -6152,7 +6109,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     careerCompilationOwners = [{ nodeId: t.nodeId, cache: t.careerSnapshotCache }];
   }
   for (const { nodeId, cache } of careerCompilationOwners) {
-    // currentNodeIds is a Set (see receiptHubCorrelation/recoveryHubCorrelation
+    // currentNodeIds is a Set (see receiptHubCorrelation
     // above) — this used to test Array.isArray/.includes, which is never true
     // for a Set, so the scope check was a permanent no-op and every window's
     // snapshot-cache stamp leaked into every other window's report.
@@ -6368,7 +6325,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       : '';
     // Official lookups now follow scoring; only an older run has this stage.
     const officialStage = Number(s.officialPosting?.total) > 0 || Number(s.officialDedupDropped) > 0
-      ? ` → official-posting-resolved: ${Math.max(0, Number(s.officialPosting.total) || 0)} → official-posting-dedup-dropped: ${Math.max(0, Number(s.officialDedupDropped) || 0)}`
+      ? ` → official-posting-resolved: ${Math.max(0, Number(s.officialPosting?.total) || 0)} → official-posting-dedup-dropped: ${Math.max(0, Number(s.officialDedupDropped) || 0)}`
       : '';
     // Board-closed rows (an aggregator board reported the listing gone) are set
     // aside from the evidence gate and settled before scoring, then removed
@@ -7373,7 +7330,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
             urlMissing: 0,
             companyEmpty: 0,
             titleEmpty: 0,
-            descEmpty: 0, descShort: 0, descShortLens: [], descShortEx: [],
+            descEmpty: 0, descShort: 0, descShortLens: [],
             mojibake: 0, mojibakeEx: [],
           });
           q.total++;
@@ -7438,9 +7395,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           } else if (desc.length < SHORT_DESC_THRESHOLD) {
             q.descShort++;
             if (q.descShortLens.length < 3) q.descShortLens.push(desc.length);
-            if (q.descShortEx.length < 3) q.descShortEx.push({
-              length: desc.length,
-            });
           }
         }
 
@@ -7523,7 +7477,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
           }
           if (q.descShort > 0) {
             const lensStr = q.descShortLens.join(', ');
-            const samples = q.descShortEx.length ? ` · ${q.descShortEx.length} sample(s) recorded (details withheld)` : '';
+            const samples = q.descShortLens.length ? ` · ${q.descShortLens.length} sample(s) recorded (details withheld)` : '';
             issues.push(`⚠ description short (<${SHORT_DESC_THRESHOLD} chars): ${q.descShort}/${q.total} — likely got the listing snippet instead of the full JD (sample lengths: ${lensStr})${samples}`);
           }
           // Encoding corruption — UTF-8 read as Latin-1 ("'"→"â€™", em-dash→"â€"",
@@ -7824,15 +7778,16 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // progress trail can stay bounded without discarding recovery evidence.
     // New telemetry keeps these in a dedicated ring. Fall back to the legacy
     // phase ring for reports generated by an already-running older process.
+    const DETAIL_ANOMALY_PHASES = new Set(['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'panel-walk-interrupt']);
+    const isDetailAnomaly = e => DETAIL_ANOMALY_PHASES.has(e?.phase);
     const fieldAnomalies = Array.isArray(browserScrape.fieldAnomalies)
       ? browserScrape.fieldAnomalies
-      : allScrapeEvents.filter(e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'panel-walk-interrupt'].includes(e?.phase));
+      : allScrapeEvents.filter(isDetailAnomaly);
     // getManualScraperTelemetry deliberately returns defensive entry copies, so
     // object identity cannot distinguish the dedicated anomaly ring from the
     // ordinary event ring here. Classify by the retained phase contract instead
     // of rendering every detail anomaly twice (once bare in Recent phases and
     // once with its full diagnostic evidence below).
-    const isDetailAnomaly = e => ['desc-miss', 'date-miss', 'detail-unavailable', 'detail-challenge', 'detail-navigation-abort', 'detail-panel-rate-limit', 'detail-panel-http-error', 'detail-block-reprobe', 'detail-block-reprobe-failed', 'detail-block-cleared', 'panel-walk-interrupt'].includes(e?.phase);
     // Run-origin rows (source-start / query-start / the location resolution and
     // host-redirect trail) are emitted at most once per source, so on a long run
     // the 30-slot recency ring evicts them behind per-job chatter — taking the
@@ -7840,7 +7795,8 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     // retained separately now; render them so the reader keeps the run's
     // identity no matter how long the walk got.
     const origins = Array.isArray(browserScrape.origins) ? browserScrape.origins : [];
-    const originsNotInRecent = origins.filter(o => !allScrapeEvents.slice(-8).some(e => e.ts === o.ts && e.phase === o.phase));
+    const recent = allScrapeEvents.filter(e => !isDetailAnomaly(e)).slice(-8);
+    const originsNotInRecent = origins.filter(o => !recent.some(e => e.ts === o.ts && e.phase === o.phase));
     if (originsNotInRecent.length > 0) {
       lines.push('- Source/query origin phases (retained — these are emitted once per source and would otherwise age out of the ring below):');
       for (const e of originsNotInRecent) {
@@ -7855,7 +7811,6 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`  - ${bits} -${Math.max(0, Math.round(ageMs / 1000))}s`);
       }
     }
-    const recent = allScrapeEvents.filter(e => !isDetailAnomaly(e)).slice(-8);
     if (recent.length > 0) {
       lines.push('- Recent browser-scrape phases:');
       for (const e of recent) {
@@ -8434,6 +8389,13 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
     lines.push('> A cooldown can be bounded only by a re-attempt on the **same observed IP and browser process** after a wall. The "idle" column is the gap before each pass, not proof that an IP change recovered by waiting.');
     // Compact gap formatter: minutes once past 60s, else seconds.
     const fmtGap = (ms) => ms >= 60000 ? `${Math.round(ms / 60000)}m` : `${Math.round(ms / 1000)}s`;
+    // Reports are copied outside the app, so an egress address is shown only as
+    // a stable per-report label: equality across passes stays visible.
+    const ipLabels = new Map();
+    const ipLabel = ip => {
+      if (!ipLabels.has(ip)) ipLabels.set(ip, `egress ${ipLabels.size + 1}`);
+      return ipLabels.get(ip);
+    };
     let prevIp = null;
     let prevTs = null;
     for (const e of enrichTrail) {
@@ -8447,7 +8409,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       if (e.ipOk === false) ipStr = '**IP lookup FAILED** (null)';
       else if (e.ip) {
         const changed = prevIp == null ? '' : (e.ip === prevIp ? ' **(unchanged ⚠)**' : ' (changed ✓)');
-        ipStr = `IP ${e.ip}${changed}`;
+        ipStr = `${ipLabel(e.ip)}${changed}`;
       } else ipStr = 'IP not looked up (clean pass)';
       // Per-pass no-desc, split soft-block (recoverable) vs genuine (permanent).
       // Surfacing it here is what makes cross-pass transience visible — e.g. a pass
@@ -8512,7 +8474,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         : '';
       lines.push(`- 🔬 **Same browser process (gen #${[...gens][0]}) was observed across changing egress IPs.** This trail cannot identify whether the ceiling is IP- or browser/session-scoped:${poolNote} A controlled reset/retry on the same observed IP with a fixed test batch is required.`);
     } else if (solves.length >= 1 && seenIps.length >= 2 && distinctIps.size === 1) {
-      lines.push(`- 🔥 **Observed egress IP never changed across ${seenIps.length} recorded pass(es) (${[...distinctIps][0]}).** A VPN switch may not have taken effect; retrying it would not test a different IP.`);
+      lines.push(`- 🔥 **Observed egress IP never changed across ${seenIps.length} recorded pass(es) (${ipLabel([...distinctIps][0])}).** A VPN switch may not have taken effect; retrying it would not test a different IP.`);
     } else if (solves.length >= 2 && distinctIps.size > 1 && solves.every(e => e.walled || e.skippedSameIp)) {
       lines.push(`- ℹ️ **${distinctIps.size} observed IPs and every Solve walled.** This is inconclusive: exits can be shared/pre-warmed, and the same browser process was reused. It does not establish either quota scope.`);
     }
@@ -8544,7 +8506,7 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
       for (const sample of boundedCooldowns) {
         const minClean = Math.min(...sample.clean);
         const walledBelow = sample.walled.filter(wait => wait < minClean);
-        const identity = `IP ${sample.ip}, browser#${sample.browserGen}`;
+        const identity = `${ipLabel(sample.ip)}, browser#${sample.browserGen}`;
         if (walledBelow.length > 0) {
           const loStr = fmtGap(Math.max(...walledBelow));
           const hiStr = fmtGap(minClean);
@@ -8566,10 +8528,10 @@ export function buildJobsPipelineSnapshot(currentNodeIds, reportWindowId, canvas
         lines.push(`- ✅ **Cooldown confirmed: ~${fmtGap(cd.foundMs)}** — initial probe + confirmations all clean after ${fmtGap(cd.foundMs)} idle on the same IP/browser (${cd.attempts} attempt(s) total). Wait ≥ that between enrichment batches to keep going without switching anything.`);
       } else if (cd.identityChanged || cd.identityUnverified) {
         const expected = cd.expectedIdentity?.ip
-          ? `expected IP ${cd.expectedIdentity.ip}, browser#${cd.expectedIdentity.browserGen ?? '?'}`
+          ? `expected ${ipLabel(cd.expectedIdentity.ip)}, browser#${cd.expectedIdentity.browserGen ?? '?'}`
           : 'the original wall identity was not fully recorded';
         const observed = (cd.observedIdentity?.ip || cd.observedIdentity?.browserGen != null)
-          ? `; observed IP ${cd.observedIdentity?.ip || '?'}, browser#${cd.observedIdentity?.browserGen ?? '?'}`
+          ? `; observed ${cd.observedIdentity?.ip ? ipLabel(cd.observedIdentity.ip) : 'egress ?'}, browser#${cd.observedIdentity?.browserGen ?? '?'}`
           : '';
         lines.push(`- ⚠️ **Cooldown probe invalid — IP/browser identity ${cd.identityChanged ? 'changed' : 'could not be verified'}.** ${expected}${observed}; this does not measure a cooldown. Keep the same VPN egress and browser process, then retry.`);
       } else if (cd.browserUnavailable) {

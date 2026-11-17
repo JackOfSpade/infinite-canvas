@@ -70,13 +70,6 @@ const NATIVE_WINDOW_APPEAR_MS = 20000;
 const UNKNOWN_SETTLE_MS = 30000;
 
 /**
- * True when an osascript failure is the "Allow JavaScript from Apple Events"
- * Chrome toggle being OFF (the one manual prerequisite for this whole path).
- * Detected so the bug report can tell the user exactly what to flip instead of
- * showing an opaque AppleScript error.
- */
-
-/**
  * A page that, even via native Chrome on a logged-in profile, is actually the
  * platform's client-rendered LOGIN FORM served inline at an auth-gated, on-host URL
  * (HTTP 200, no /login redirect) — i.e. the session is logged OUT. Mercari does
@@ -429,9 +422,10 @@ export async function ensureAppleEventsJsEnabled(userDataDir) {
 function waitForChildExit(child, timeoutMs = 3000) {
   if (!child?.pid || child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve) => {
-    const done = () => resolve();
+    let timer = null;
+    const done = () => { clearTimeout(timer); resolve(); };
     child.once('exit', done);
-    setTimeout(() => { child.removeListener('exit', done); resolve(); }, timeoutMs);
+    timer = setTimeout(() => { child.removeListener('exit', done); resolve(); }, timeoutMs);
   });
 }
 

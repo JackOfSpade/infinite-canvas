@@ -9,8 +9,8 @@ export { OFFICIAL_FETCH_FAILURE_REASONS } from './officialPostingFields.js';
 
 export const OFFICIAL_FETCH_MAX_BYTES = 3 * 1024 * 1024;
 export const OFFICIAL_FETCH_SCRIPT_MAX_BYTES = 8 * 1024 * 1024;
-export const OFFICIAL_FETCH_TIMEOUT_MS = 15_000;
-export const OFFICIAL_FETCH_MAX_REDIRECTS = 5;
+const OFFICIAL_FETCH_TIMEOUT_MS = 15_000;
+const OFFICIAL_FETCH_MAX_REDIRECTS = 5;
 export const OFFICIAL_FETCH_HOP_CAPABILITY = Symbol.for('infinite-canvas.official-posting-fetch-hop-hooks');
 
 function httpFailureReason(statusCode) {

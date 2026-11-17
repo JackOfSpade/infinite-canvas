@@ -29,7 +29,7 @@ export function useCanvasKeyboardShortcuts({
       // these shortcuts. isTextEditingTarget checks the input's actual type.
       if (isTextEditingTarget(e.target)) return;
 
-      const k = e.key.toLowerCase();
+      const k = (e.key || '').toLowerCase();
       const s = shortcuts || {};
 
       const isMatch = (binding) => {

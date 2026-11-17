@@ -208,13 +208,13 @@ export function createPracticeCallEngine({
     generation += 1;
     return {
       id: generation, utteranceId: newId(), immediate, greeting, typed, candidates, respeculated, specTokens,
-      mainSentences: [], truncated: false, positionAt: null, startTimer: null, finishTimer: null, audioBytes: 0,
-      commitDue: immediate, committed: false, done: false, cancelling: false, silent: false, gotAudio: false,
+      mainSentences: [], positionAt: null, startTimer: null, finishTimer: null, audioBytes: 0,
+      commitDue: immediate, committed: false, done: false, silent: false, gotAudio: false,
       buffered: [], words: [], parts: [], chats: [], deliveredChats: 0, endCall: false,
       voiceDone: false, finishCalled: false, endSent: false,
       gateOpen: immediate, gateTimer: null, voiceQueue: [], voiceCharsSent: 0, finishDeferred: false,
       mainDone: false, mainListen: false, mainForwarded: 0,
-      openerSettled: greeting, openerSkipped: false,
+      openerSettled: greeting,
       ctl: { opener: new AbortController(), main: new AbortController(), voice: new AbortController() },
       stream: null, sampleRate: null, entry: null, heardText: undefined,
       positionMs: 0, playbackStarted: false, cancelTimer: null, cancelWait: null, afterCancel: null,
@@ -240,7 +240,6 @@ export function createPracticeCallEngine({
     const heldTurn = audioHint && !greeting; // Smart Turn hold: the voice gate is re-armed with the held schedule below
     const hint = heldTurn ? '[audio: sounds unfinished]' : null;
     audioHint = false;
-    reply.heldTurn = heldTurn;
     if (greeting) reply.messages = { main: `${prefix}[elapsed 00:00] [call connected]` };
     else {
       const base = {
@@ -347,7 +346,6 @@ export function createPracticeCallEngine({
   function forwardMain(reply, sentence) {
     if (reply.spec.mainFirstSentenceMs === null) reply.spec.mainFirstSentenceMs = now() - reply.spec.at;
     if (!reply.openerSettled) {
-      reply.openerSkipped = true;
       reply.openerSettled = true;
       attempt(() => reply.ctl.opener.abort());
     }
@@ -377,7 +375,7 @@ export function createPracticeCallEngine({
       } catch (error) {
         if (current !== reply || reply.openerSettled || isCancel(error)) return;
         if (tries >= 1) { reply.openerSettled = true; return settle(reply); }
-        const restarted = await restart('opener', reply);
+        const restarted = await restart('opener');
         if (current !== reply) return;
         if (!restarted) { reply.openerSettled = true; return settle(reply); }
       }
@@ -388,11 +386,10 @@ export function createPracticeCallEngine({
   function cutOffMain(reply) {
     const forwarded = reply.mainSentences.length ? reply.mainSentences.join(' ') : reply.chats.join(' ');
     cutOffNote = `[Your previous reply was cut off by a connection problem after: '${forwarded}'.] `;
-    reply.truncated = true;
     reply.mainDone = true;
     reply.mainListen = false;
     reply.endCall = false;
-    mainRestart = restart('main', null).then(() => { mainRestart = null; });
+    mainRestart = restart('main').then(() => { mainRestart = null; });
     settle(reply);
   }
 
@@ -423,7 +420,7 @@ export function createPracticeCallEngine({
         if (current !== reply || isCancel(error)) return;
         if (reply.mainForwarded > 0 || reply.chats.length > 0) return cutOffMain(reply);
         if (tries >= 1) return fail('session-error');
-        const restarted = await restart('main', reply);
+        const restarted = await restart('main');
         if (current !== reply) return;
         if (!restarted) return fail('session-error');
       }
@@ -642,7 +639,6 @@ export function createPracticeCallEngine({
     current = null;
     if (overlap) { endOverlapRecord(overlap); overlap = null; }
     cancelling = reply;
-    reply.cancelling = true;
     reply.afterCancel = afterCancel;
     abortReply(reply);
     attempt(() => audio.cancel(reply.utteranceId));
@@ -922,7 +918,7 @@ export function createPracticeCallEngine({
       error => {
         const wasSettled = settled;
         finish('acknowledgement');
-        if (!wasSettled && !isCancel(error) && phase !== 'ended') restart('classifier', null);
+        if (!wasSettled && !isCancel(error) && phase !== 'ended') restart('classifier');
       },
     );
   }
@@ -1109,13 +1105,13 @@ export function createPracticeCallEngine({
       unschedule(record.timer);
       evaluateOverlap(record, record.reply);
     }
-    const live = overlap?.speaking ? overlap : null;
-    if (live && current && current === live.reply) {
-      const count = tokens(overlapText(live)).length;
-      if (live.paused) {
-        if (count > th.interruptWords) stopFromOverlap(live); // a clear interruption while paused cancels as today
-      } else if (live.decision === 'continue' && (count > th.interruptWords || (live.durationElapsed && count >= 1))) {
-        immediateStop(live);
+    const speakingOverlap = overlap?.speaking ? overlap : null;
+    if (speakingOverlap && current && current === speakingOverlap.reply) {
+      const count = tokens(overlapText(speakingOverlap)).length;
+      if (speakingOverlap.paused) {
+        if (count > th.interruptWords) stopFromOverlap(speakingOverlap); // a clear interruption while paused cancels as today
+      } else if (speakingOverlap.decision === 'continue' && (count > th.interruptWords || (speakingOverlap.durationElapsed && count >= 1))) {
+        immediateStop(speakingOverlap);
       }
     }
   }

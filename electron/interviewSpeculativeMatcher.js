@@ -78,7 +78,7 @@ export function createInterviewSpeculativeMatcher({
     try { pending = select({ ...state.context, ...request, partial: true, signal: job.abort.signal }); }
     catch { pending = null; }
     job.promise = Promise.resolve(pending).then(result => job.abort.signal.aborted ? null : result, () => null);
-    job.promise.then(result => apply(state, request, result)).finally(() => { jobs.delete(job); pump(); });
+    job.promise.then(result => apply(state, request, result)).catch(() => {}).finally(() => { jobs.delete(job); pump(); });
   }
   const unsubscribe = matcher?.subscribeAvailability?.(pump);
   function partial({ turnId, text }, context = {}) {

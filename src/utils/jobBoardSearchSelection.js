@@ -236,11 +236,20 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
     if (left.startedAt != null && right.startedAt != null && left.startedAt !== right.startedAt) {
       return left.startedAt - right.startedAt;
     }
-    if (left.startedAt != null && right.startedAt == null) return -1;
-    if (left.startedAt == null && right.startedAt != null) return 1;
     return left.canvasIndex - right.canvasIndex;
   });
   return { search, candidates };
+}
+
+function publicRecoveryOwner(candidate) {
+  const {
+    canvasIndex: _canvasIndex,
+    startedAt: _startedAt,
+    admissionOrder: _admissionOrder,
+    ownsChildManualRecovery: _ownsChildManualRecovery,
+    ...owner
+  } = candidate;
+  return owner;
 }
 
 /**
@@ -251,14 +260,7 @@ function activeBoardRecoveryCandidates(searchId, nodes, edges) {
 export function findJobSearchBoardActiveRecoveryOwner(searchId, nodes, edges) {
   const { candidates } = activeBoardRecoveryCandidates(searchId, nodes, edges);
   if (candidates.length === 0) return null;
-  const {
-    canvasIndex: _canvasIndex,
-    startedAt: _startedAt,
-    admissionOrder: _admissionOrder,
-    ownsChildManualRecovery: _ownsChildManualRecovery,
-    ...owner
-  } = candidates[0];
-  return owner;
+  return publicRecoveryOwner(candidates[0]);
 }
 
 /**
@@ -472,14 +474,7 @@ export function findJobSearchBoardRecoveryOwner(searchId, manualAiRunId, nodes, 
     && (!marker.boardRunId || candidate.boardRunId === marker.boardRunId)
   ));
   if (exactMarkerOwner) {
-    const {
-      canvasIndex: _canvasIndex,
-      startedAt: _startedAt,
-      admissionOrder: _admissionOrder,
-      ownsChildManualRecovery: _ownsChildManualRecovery,
-      ...owner
-    } = exactMarkerOwner;
-    return owner;
+    return publicRecoveryOwner(exactMarkerOwner);
   }
   if (marker.orchestratorNodeId || marker.boardRunId) {
     // Explicit ownership is fail-closed. A surviving but mismatched plan must
@@ -490,14 +485,7 @@ export function findJobSearchBoardRecoveryOwner(searchId, manualAiRunId, nodes, 
       missingPlan: true,
     };
   }
-  const {
-    canvasIndex: _canvasIndex,
-    startedAt: _startedAt,
-    admissionOrder: _admissionOrder,
-    ownsChildManualRecovery: _ownsChildManualRecovery,
-    ...owner
-  } = childRecoveryCandidates[0];
-  return owner;
+  return publicRecoveryOwner(childRecoveryCandidates[0]);
 }
 
 /** Return connected Job Search ids in stable canvas-node order. */

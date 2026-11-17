@@ -77,7 +77,6 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ba
       typedAnswers.push({ startMs: entry.startMs, endMs: entry.endMs, wordCount: countWords(entry.text), text: String(entry.text ?? '') });
       return;
     }
-    if (entry?.speaker === 'interviewer') { group = null; return; }
     if (entry?.speaker !== 'candidate') { group = null; return; }
     if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0 }; groups.push(group); }
     group.turnIndexes.push(index);

@@ -7,20 +7,10 @@
  * profile field and carries the entity/segment ids that support it.
  */
 
-import { normalizeInterviewPublicUrl } from './interviewUrlPrivacy.js';
+import { hasControl as containsControlCharacters, normalizeInterviewPublicUrl } from './interviewUrlPrivacy.js';
 
 export const INTERVIEW_HELPER_MAX_STEPS = 6;
 export const INTERVIEW_HELPER_MATCH_THRESHOLD = 10;
-
-function containsControlCharacters(value) {
-  return [...value].some(character => {
-    const code = character.codePointAt(0);
-    // Besides C0/DEL and C1 controls, reject Unicode format characters. This
-    // includes invisible bidi overrides/isolates, which can make a persisted
-    // URL or display string appear to say something other than its value.
-    return code <= 0x1F || (code >= 0x7F && code <= 0x9F) || /\p{Cf}/u.test(character);
-  });
-}
 
 // Setup data is persisted with an Interview Helper node, so keep its URL
 // canonicalization deliberately small and deterministic.  In particular, do
@@ -776,8 +766,6 @@ export function interviewHelperSessionReducer(state = createInterviewHelperSessi
   const plan = buildInterviewPlan({ question: action.question, profile: action.profile, snapshotId: action.snapshotId });
   return freezeDeep({ activePlan: plan, locked: plan.status === 'supported' });
 }
-
-export const INTERVIEW_HELPER_UNSUPPORTED_MESSAGE = UNSUPPORTED_MESSAGE;
 
 const LAUNCH_FAILURE_GENERIC = 'The cue card could not be opened. Try again from the prepared brief.';
 // Main-process launch refusals the canvas may repeat. Electron wraps an IPC

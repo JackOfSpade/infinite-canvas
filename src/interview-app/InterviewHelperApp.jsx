@@ -86,8 +86,10 @@ export default function InterviewHelperApp() {
 
   const newInterview = () => commit(current => addInterview(current, { id: generateId() }));
   const chooseFolder = useCallback(async () => {
-    const folder = await window.interviewAppAPI.chooseAppliedJobsFolder();
-    if (folder) commit(current => ({ ...current, appliedJobsFolder: folder }));
+    try {
+      const folder = await window.interviewAppAPI.chooseAppliedJobsFolder();
+      if (folder) commit(current => ({ ...current, appliedJobsFolder: folder }));
+    } catch (error) { setNotice(error?.message || 'The Applied Jobs folder could not be chosen.'); }
   }, [commit]);
   const importFromCanvas = async () => {
     setNotice(null);

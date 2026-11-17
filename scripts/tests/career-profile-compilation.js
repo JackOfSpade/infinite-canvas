@@ -1215,6 +1215,15 @@ const w6ReproTests = [
     });
     assert(log.rejected.length === 1 && log.rejected[0].correctionDetails.some(line => line.includes('non-empty notes')), 'declines are checkable answers with their own correction');
   } },
+  { name: 'W6 deterministic repair prompts offer the decline', run: async () => {
+    const prompts = [];
+    await runEditProtocol({ files: pagedSourceFiles(['Synthetic page']), pageMaxSegments: 1,
+      compile: corpus => emptyPageShard(corpus.segments[0].id, { contacts: ['missing@example.test'] }),
+      repair: ({ prompt }) => { prompts.push(prompt); return [{ edits: [{ op: 'set', group: 'identity', entityId: 'identity', field: 'contacts', valueJson: '[]' }], notes: 'Remove unsupported contact' }]; },
+    });
+    assert(prompts.length && prompts.every(prompt => prompt.includes('return an empty edits array with notes')),
+      'a worker asked to fix a deterministic error it cannot fix on this page must be told it may decline');
+  } },
 
   { name: 'W6 R6: the shipped edit-receipt contract stays pin-readable after the bump', run: async () => {
     const shipped = '9c982a99cefee3f2d6e27416cbba76bb2b93c8d28f3e3ef170ac44e2eb34c85b';

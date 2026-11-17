@@ -4,9 +4,6 @@ import {
   officialPostingNegativeNeedsRecheck,
 } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { officialPostingDisplay, officialPostingNeedsRefresh } from '../../src/utils/officialPostingDisplay.js';
-import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
-import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
-import { partitionOfficialPostingRows } from '../../electron/ipc/officialPostingService.js';
 import { shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
 import { officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 
@@ -43,25 +40,6 @@ export default [
       for (const value of [null, undefined, [], {}, posting({ outcome: 'closed' }),
         posting({ outcome: 'unreadable' }), posting({ outcome: 'failed' })]) {
         assert.equal(officialPostingNegativeNeedsRecheck(value), false);
-      }
-    },
-  },
-  {
-    name: 'Ownership-discovery upgrade bypasses recent legacy negative cache despite a matching input proof',
-    async run() {
-      const source = { title: 'Synthetic role', company: 'Synthetic Employer', location: 'Synthetic City',
-        url: 'https://listing.example.test/cached-synthetic', snippet: 'Synthetic original source description.' };
-      const prior = posting({ semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(source) } });
-      const savedAt = Date.now();
-      for (const marker of ['', 'ownership-discovery-v2', 'ownership-discovery-v3', OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL]) {
-        const current = marker === OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL;
-        const officialPosting = { ...prior,
-          trail: [...prior.trail, ...(marker ? [marker] : [])] };
-        const record = { version: 1, aliases: officialPostingAliases(source), savedAt, officialPosting };
-        const result = await partitionOfficialPostingRows([{ ...source, officialPosting }], {
-          store: { find: async () => record }, now: () => savedAt,
-        });
-        assert.deepEqual(result.unresolvedIndices, current ? [] : [0]);
       }
     },
   },

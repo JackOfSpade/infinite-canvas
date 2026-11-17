@@ -7,6 +7,7 @@ import {
   buildClaudeInputMessage,
   classifyClaudeFailure,
   CLAUDE_HANDOFF_SYSTEM_PROMPT,
+  CLAUDE_SAFEGUARD_MESSAGE as SAFEGUARD_MESSAGE,
   CLAUDE_STAGE_TIMEOUT_MS,
   CLAUDE_ULTRACODE_SETTINGS,
   CLAUDE_WORKFLOW_TOOL,
@@ -24,7 +25,6 @@ import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLong
 export { describeClaudeSdkMessage };
 
 const OUTPUT_CAP_BYTES = 16 * 1024 * 1024;
-const SAFEGUARD_MESSAGE = 'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so retrying may pass. The provider message is in the private run log.';
 
 function clipped(value, max = 300) {
   return String(value ?? '').replace(/\s+/gu, ' ').trim().slice(0, max);

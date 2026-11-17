@@ -170,13 +170,8 @@ export function computeBundleTotal(itemPricings = []) {
   let total = 0;
   let any = false;
   for (const it of Array.isArray(itemPricings) ? itemPricings : []) {
-    const raw = it?.pricing?.recommended_price;
-    // Guard before Number(): Number(null) === 0 (finite), which would let a
-    // priceless item silently count as $0.
-    if (raw === null || raw === undefined || raw === '') continue;
-    const price = Number(raw);
-    const rounded = Number.isFinite(price) ? roundToCents(price) : null;
-    if (rounded != null && rounded > 0) { total += rounded; any = true; }
+    const rounded = finitePositiveBundlePrice(it?.pricing?.recommended_price);
+    if (rounded != null) { total += rounded; any = true; }
   }
   return any ? roundToCents(total) : null;
 }

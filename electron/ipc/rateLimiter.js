@@ -63,7 +63,7 @@ const MIN_CONCURRENT      = 1; // floor when pressure is high
 const MAX_PER_DOMAIN      = 1;
 
 // Global pressure → concurrency. Each block/throttle nudges pressure up; clean
-// successes bleed it off. effectiveConcurrency() = ceil(seed − pressure), floored.
+// successes bleed it off. effectiveConcurrency() = round(seed − pressure), floored.
 const PRESSURE_PER_BLOCK    = 1;
 const PRESSURE_PER_THROTTLE = 0.5;
 const PRESSURE_DECAY_PER_OK = 0.5;

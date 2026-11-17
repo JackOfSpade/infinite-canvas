@@ -24,10 +24,8 @@ function formatAppliedDate(appliedAt) {
 export function priorRoleIndicator(data) {
   if (!data || typeof data !== 'object') return null;
   if (data.localApplication?.status === 'saved') return null;
-  const prior = data.priorRoleApplication;
-  if (!prior || typeof prior !== 'object' || Array.isArray(prior)) return null;
-  if (typeof prior.id !== 'string' || prior.id.length === 0) return null;
-  if (typeof prior.savedDir !== 'string' || prior.savedDir.length === 0) return null;
+  const prior = validPriorPointer(data);
+  if (!prior) return null;
 
   const date = formatAppliedDate(prior.appliedAt);
   let detail = date ? `Applied ${date}` : 'Applied earlier';

@@ -1,18 +1,18 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
+import { closeDisposableElectron } from './close-disposable-electron.mjs';
+import { makeSmokeDir, smokeEnv, seedLastOpenedWorkspace } from './lib/electron-smoke.mjs';
 import { claimJobAnalysisOperationAuthority, withCurrentJobAnalysisOperationAuthority } from '../electron/ipc/jobAnalysisOperationAuthorityStore.js';
 import { startRun, completeRunWithReceipt } from '../electron/ipc/jobRunStaging.js';
 import { moduleFingerprint } from '../src/nodes/jobboard/mergeJobs.js';
 
 // Exercise the real built renderer in an isolated, invisible app. The Board
 // is locked so this presentation fixture cannot start providers or AI work.
-const directory = await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-job-recovery-display-'));
+const directory = await makeSmokeDir('ic-job-recovery-display-');
 const canvas = path.join(directory, 'recovery.json');
-const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-delete env.ELECTRON_RUN_AS_NODE;
+const env = smokeEnv();
 let application;
 try {
   const pin = 'a'.repeat(64);
@@ -47,12 +47,7 @@ try {
   await page.waitForFunction(() => typeof window.electronAPI?.loadWorkspace === 'function');
   const skip = page.getByText('Skip', { exact: true });
   if (await skip.isVisible()) await skip.click();
-  await page.evaluate(filePath => {
-    const key = 'infiniteCanvas.settings';
-    const settings = JSON.parse(localStorage.getItem(key) || '{}');
-    localStorage.setItem(key, JSON.stringify({ ...settings, lastOpenedWorkspace: filePath }));
-    window.addEventListener('beforeunload', event => { event.stopImmediatePropagation(); delete event.returnValue; }, { capture: true, once: true });
-  }, canvas);
+  await seedLastOpenedWorkspace(page, canvas);
   await page.reload();
   const canada = page.locator('.react-flow__node[data-id="ca"]');
   const usa = page.locator('.react-flow__node[data-id="us"]');
@@ -86,11 +81,7 @@ try {
   const completedBoard = { ...board, data: { locked: true, hubState: 'done', resultCount: 57 } };
   await fs.writeFile(completedCanvas, JSON.stringify({ schemaVersion: 1, nodes: [completedSource, completedBoard],
     edges: [{ id: 'ca-board', source: 'ca', target: 'board' }], drawings: [] }));
-  await page.evaluate(filePath => {
-    const key = 'infiniteCanvas.settings';
-    localStorage.setItem(key, JSON.stringify({ ...JSON.parse(localStorage.getItem(key) || '{}'), lastOpenedWorkspace: filePath }));
-    window.addEventListener('beforeunload', event => { event.stopImmediatePropagation(); delete event.returnValue; }, { capture: true, once: true });
-  }, completedCanvas);
+  await seedLastOpenedWorkspace(page, completedCanvas);
   await page.reload();
   await page.locator('.react-flow__node[data-id="ca"]').waitFor();
   let savedSource;
@@ -108,6 +99,6 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: built renderer displays saved scoring recovery and pending terminal cleanup, with Board-owned actions, verified automatic terminal reconciliation, and no runtime errors.');
 } finally {
-  try { await application?.close(); }
+  try { await closeDisposableElectron(application); }
   finally { await fs.rm(directory, { recursive: true, force: true }); }
 }

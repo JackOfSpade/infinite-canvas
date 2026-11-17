@@ -330,7 +330,7 @@ export const InterviewHelperPanel = React.memo(function InterviewHelperPanel({ i
       const merged = mergeManualAiRetirementReceipts(
         retirementReceipts,
         runIds,
-        cancellationSettled ? false : true,
+        !cancellationSettled,
       );
       if (merged.length > 0) persist({ interviewHelperManualAiRetirementReceipts: merged });
     } finally {

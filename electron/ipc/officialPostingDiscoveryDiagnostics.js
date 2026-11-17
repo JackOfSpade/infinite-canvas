@@ -7,19 +7,8 @@ import { RESEARCH_UNSETTLED_TRAIL } from './officialPostingFields.js';
 // enter this store. The source input and its semantic proof hash are discarded.
 export const OFFICIAL_POSTING_DISCOVERY_DIAGNOSTIC_LIMIT = 200;
 const MAX_COUNT = 1_000_000_000;
-const AVAILABILITY_DECISION_LIMIT = 50;
-const AVAILABILITY_STAGES = Object.freeze(['absence-abort', 'launch-refused']);
-const AVAILABILITY_REASONS = Object.freeze([
-  'ready', 'disposed', 'launcher-unavailable', 'auto-launch-disabled', 'pool-ended',
-]);
-const LAUNCH_REFUSAL_REASONS = Object.freeze([
-  'approval_required', 'plugin_missing', 'reconnect_required', 'usage_limit', 'safety_block',
-  'chat_mode_unavailable', 'chat_mode_mismatch', 'delivery_timeout', 'conversation_unavailable',
-  'starter_unavailable', 'bridge_not_presented', 'other',
-]);
-const PLANNER_REASONS = Object.freeze(['empty', 'one_work_item', 'maximum_parallelism', 'preserved_live_workers']);
 const OUTCOMES = new Set(['found', 'link-only', 'not-found', 'ambiguous', 'closed', 'unreadable', 'failed']);
-export const OFFICIAL_POSTING_HANDOFF_FAILURE_CODES = Object.freeze([
+const OFFICIAL_POSTING_HANDOFF_FAILURE_CODES = Object.freeze([
   'worker-timeout', 'worker-aborted', 'worker-unavailable', 'comparative-unavailable', 'comparative-invalid',
   'worker-lost', 'worker-replaced', 'comparison-contaminated', 'fresh-context-required', 'requeue-exhausted',
   'renderer-unavailable', 'sender-destroyed', 'renderer-stopped', 'renderer-navigated', 'request-timeout',
@@ -40,48 +29,8 @@ const HANDOFF_ERROR_CODES = new Map([
 const HANDOFF_ERROR_NAMES = new Map([['TypeError', 'type-error'], ['SyntaxError', 'syntax-error'],
   ['RangeError', 'range-error'], ['AbortError', 'abort-error']]);
 const observations = new Map();
-const availabilityDecisions = [];
-const plannerTransitions = [];
-let lastAvailabilitySignature = null;
-let lastAvailabilityAt = 0;
-let lastPlannerSignature = null;
-
 function count(value) {
   return Number.isSafeInteger(value) && value >= 0 ? Math.min(MAX_COUNT, value) : null;
-}
-
-function safeDecisionCount(value) {
-  return Number.isSafeInteger(value) && value >= 0 ? Math.min(MAX_COUNT, value) : 0;
-}
-
-export function recordOfficialPostingAvailabilityDecision({ stage, liveWorkers, launchPending, autoLaunchAvailable,
-  reason, launchReason = null } = {}) {
-  if (!AVAILABILITY_STAGES.includes(stage) || !AVAILABILITY_REASONS.includes(reason)) return false;
-  const row = Object.freeze({ at: new Date().toISOString(), stage,
-    liveWorkers: safeDecisionCount(liveWorkers), launchPending: launchPending === true,
-    autoLaunchAvailable: autoLaunchAvailable === true, reason,
-    launchReason: LAUNCH_REFUSAL_REASONS.includes(launchReason) ? launchReason : null });
-  const signature = JSON.stringify([row.stage, row.liveWorkers, row.launchPending, row.autoLaunchAvailable, row.reason, row.launchReason]);
-  const now = Date.now();
-  if (signature === lastAvailabilitySignature && now - lastAvailabilityAt < 30_000) return false;
-  lastAvailabilitySignature = signature;
-  lastAvailabilityAt = now;
-  availabilityDecisions.push(row);
-  if (availabilityDecisions.length > AVAILABILITY_DECISION_LIMIT) availabilityDecisions.shift();
-  return true;
-}
-
-export function recordOfficialPostingPlannerTransition({ reason, recommended, queued, materialized, expandBy } = {}) {
-  if (!PLANNER_REASONS.includes(reason)) return false;
-  const row = Object.freeze({ at: new Date().toISOString(), reason,
-    recommended: safeDecisionCount(recommended), queued: safeDecisionCount(queued),
-    materialized: safeDecisionCount(materialized), expandBy: safeDecisionCount(expandBy) });
-  const signature = JSON.stringify([row.reason, row.recommended, row.queued, row.materialized, row.expandBy]);
-  if (signature === lastPlannerSignature) return false;
-  lastPlannerSignature = signature;
-  plannerTransitions.push(row);
-  if (plannerTransitions.length > AVAILABILITY_DECISION_LIMIT) plannerTransitions.shift();
-  return true;
 }
 
 function chatCounts(value) {
@@ -145,11 +94,8 @@ export function recordOfficialPostingDiscovery(job, metadata = {}) {
 export function getOfficialPostingDiscoveryDiagnosticsSnapshot() {
   return {
     limit: OFFICIAL_POSTING_DISCOVERY_DIAGNOSTIC_LIMIT,
-    availabilityDecisionLimit: AVAILABILITY_DECISION_LIMIT,
     observations: [...observations.values()].map(row => ({ ...row,
       chatStats: row.chatStats ? { ...row.chatStats } : null, failureCodes: [...row.failureCodes], resolutionReasons: [...row.resolutionReasons] })),
-    availabilityDecisions: availabilityDecisions.map(row => ({ ...row })),
-    plannerTransitions: plannerTransitions.map(row => ({ ...row })),
   };
 }
 
@@ -163,7 +109,6 @@ export function buildOfficialPostingDiscoveryMarkdown() {
     '> Validated comparison runs count responses that passed host validation, not attempted calls, failed responses or research calls.',
     '> Chat lookups report supplied leads as candidates. Chat resolution reasons retain final unsettled trail codes only. Chat counts include service calls across all review rounds, not transport-owned correction attempts. Snapshot failures do not prove the judges could not read a page themselves. Cache reuse does not create or relabel an observation.',
     '> `worker-aborted` means the lookup was stopped from the app side (your Cancel, a removed card, or quitting the app), not that a worker failed; Non-API AI Handoff Lifecycle names the exact cancel cause.',
-    `> Official worker availability and planner transitions: at most ${snapshot.availabilityDecisionLimit} recent rows, fixed reasons and counts only.`,
     `- Captured: ${new Date().toISOString()} · ${rows.length} input observation(s) retained`,
   ];
   if (!rows.length) {
@@ -180,20 +125,9 @@ export function buildOfficialPostingDiscoveryMarkdown() {
       if (row.failureCodes.length) lines.push(`  - Handoff failure classes: ${row.failureCodes.join(', ')}`);
     }
   }
-  for (const row of snapshot.availabilityDecisions) {
-    lines.push(`- Worker availability ${row.at} · ${row.stage} · live workers ${row.liveWorkers} · launch pending ${row.launchPending ? 'yes' : 'no'} · auto launch available ${row.autoLaunchAvailable ? 'yes' : 'no'} · closed reason ${row.reason}${row.launchReason ? ` · launch refusal ${row.launchReason}` : ''}`);
-  }
-  for (const row of snapshot.plannerTransitions) {
-    lines.push(`- Worker planner transition ${row.at} · ${row.reason} · recommended ${row.recommended} · queued ${row.queued} · materialized ${row.materialized} · expand by ${row.expandBy}`);
-  }
   return `\n${lines.join('\n')}\n`;
 }
 
 export function _resetOfficialPostingDiscoveryDiagnosticsForTests() {
   observations.clear();
-  availabilityDecisions.length = 0;
-  plannerTransitions.length = 0;
-  lastAvailabilitySignature = null;
-  lastAvailabilityAt = 0;
-  lastPlannerSignature = null;
 }

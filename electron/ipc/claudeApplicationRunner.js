@@ -127,6 +127,7 @@ const MESSAGES = Object.freeze({
   cancelled: 'Claude run was cancelled.',
   tooMany: runs => `Stopped after ${runs} Claude runs without finishing this application.`,
 });
+export const CLAUDE_SAFEGUARD_MESSAGE = 'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so retrying may pass. The provider message is in the private run log.';
 
 /** The one resumed turn after the editorial plan failed schema validation. */
 export function buildEditorialPlanCorrectionPrompt(reason) {
@@ -408,7 +409,10 @@ export function readClaudeStream(stdoutText) {
 }
 
 export function parseClaudeStreamOutput(stdoutText) {
-  const { last: obj, provisional, pendingTasks } = readClaudeStream(stdoutText);
+  return parsedClaudeStream(readClaudeStream(stdoutText));
+}
+
+function parsedClaudeStream({ last: obj, provisional, pendingTasks }) {
   if (!obj) return null;
   const isError = obj.is_error === true || obj.subtype !== 'success';
   // The CLI reports the run's spend here; callers record it against the step.
@@ -468,8 +472,7 @@ export function classifyClaudeFailure({ parsed, stderr, exitCode } = {}) {
     const category = providerText.match(/\bDetails:\s*`\[([a-z][a-z_]{0,79})\]`/u)?.[1];
     const requestId = providerText.match(/\bRequest ID:\s*(req_[A-Za-z0-9]{8,120})\b/u)?.[1];
     const messageId = providerText.match(/\bMessage ID:\s*(msg_[A-Za-z0-9]{8,120})\b/u)?.[1];
-    return new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED',
-      'Claude\'s safeguards stopped this request. This can be a false alarm on a normal job posting, so retrying may pass. The provider message is in the private run log.',
+    return new ClaudeRunnerError('CLAUDE_SAFEGUARD_BLOCKED', CLAUDE_SAFEGUARD_MESSAGE,
       { ...detail, ...(category ? { refusalCategory: category } : {}), ...(requestId ? { requestId } : {}), ...(messageId ? { messageId } : {}) },
       resultText.trim() ? resultText : providerText);
   }
@@ -616,10 +619,11 @@ export function runClaudeStage({
       const stdout = Buffer.concat(stdoutChunks).toString('utf8');
       const stderr = Buffer.concat(stderrChunks).toString('utf8');
       const exitCode = code ?? (closeSignal ? closeSignal : null);
-      const parsed = parseClaudeStreamOutput(stdout);
+      const stream = readClaudeStream(stdout);
+      const parsed = parsedClaudeStream(stream);
       const unfinishedError = () => new ClaudeRunnerError(CLAUDE_WORKFLOW_UNFINISHED, CLAUDE_WORKFLOW_UNFINISHED_MESSAGE,
         { models: parsed?.models ?? [], subtype: parsed?.subtype ?? null, apiErrorStatus: parsed?.apiErrorStatus ?? null, exitCode, durationMs: parsed?.durationMs ?? null });
-      const pendingTasks = readClaudeStream(stdout).pendingTasks;
+      const { pendingTasks } = stream;
       if (parsed?.workflowUnfinished || (!parsed && pendingTasks > 0)) {
         finish(unfinishedError());
         return;
@@ -915,7 +919,7 @@ export function createClaudeApplicationRunner({
   // failure, credit exhaustion included, fails the stage like any other stage failure, so the bundle stops
   // loudly with its saved progress and Retry runs the stage on DeepSeek again. A rejected answer is corrected
   // by DeepSeek. State files written before this rule may carry `offloadFallbacks`; they are ignored.
-  function offloadRoute(jobId, stage) {
+  function offloadRoute(stage) {
     const entry = providers[stage];
     if (!offloadStage || entry?.provider !== 'offload') return null;
     return typeof entry.route === 'string' && entry.route ? entry.route : 'deepseek-flash';
@@ -1118,6 +1122,8 @@ export function createClaudeApplicationRunner({
   }
 
   function publishActiveAction(entry) {
+    // A discard already removed this job's state; a lane that ends after it must not bring it back.
+    if (entry.abortReason === 'discard') return;
     const actions = [...entry.actions.values()];
     const action = actions.find(row => row.activity === 'running') || actions[0];
     if (action) setState(entry.jobId, entry.canvasFilePath, { status: 'running', ...action });
@@ -1264,7 +1270,7 @@ export function createClaudeApplicationRunner({
     // One durable record per provider invocation, including the separate planning
     // call. Summaries are provider-authored readable output, never raw events.
     const invokeLoggedStage = async ({ stage, text, pageImages = [], sessionId, resume = false, handoff, matchTaskId, editorialPlan, provider = 'claude' }) => {
-      const route = provider === 'offload' ? offloadRoute(jobId, stage) ?? providers[stage]?.route ?? 'deepseek-flash' : null;
+      const route = provider === 'offload' ? offloadRoute(stage) ?? providers[stage]?.route ?? 'deepseek-flash' : null;
       const reasoning = route ? offloadReasoningLevel(stage) : null;
       if (entry.runs >= maxRunsPerJob) {
         throw new ClaudeRunnerError('CLAUDE_TOO_MANY_RUNS', MESSAGES.tooMany(maxRunsPerJob));
@@ -1276,12 +1282,19 @@ export function createClaudeApplicationRunner({
       // A held bundle starts no new stage. A slot can take a while, so a hold set
       // during that wait is honoured too, without keeping the slot from other jobs.
       const pauseKey = `application:${jobId}`;
-      let release;
-      for (;;) {
-        await waitForClaudeRelease(pauseKey, signal);
-        release = await semaphore.acquire(signal);
-        if (!isClaudeHeld(pauseKey) || signal.aborted) break;
-        release();
+      let release = null;
+      try {
+        for (;;) {
+          await waitForClaudeRelease(pauseKey, signal);
+          release = await semaphore.acquire(signal);
+          if (!isClaudeHeld(pauseKey) || signal.aborted) break;
+          release();
+          release = null;
+        }
+      } catch (error) {
+        // A cancelled wait never reaches the stage's own cleanup below.
+        entry.actions.delete(actionId);
+        throw error;
       }
       const acquiredAt = now();
       entry.actions.set(actionId, { stage, activity: 'running', progress: handoff?.progress || null, updatedAt: acquiredAt });
@@ -1378,7 +1391,7 @@ export function createClaudeApplicationRunner({
       const laneKey = matchTaskId || 'main';
       const key = freshContextKeyOf(handoff);
       const lane = laneFor(jobId, laneKey);
-      const provider = offloadRoute(jobId, stage) ? 'offload' : 'claude';
+      const provider = offloadRoute(stage) ?'offload' : 'claude';
       // A provider switch forces a fresh session, which has no earlier turns, so
       // the text must carry the whole task rather than only a correction prompt.
       const providerSwitch = lane.started && (lane.provider === 'offload' ? 'offload' : 'claude') !== provider;
@@ -1470,12 +1483,11 @@ export function createClaudeApplicationRunner({
       const pageImages = Array.isArray(handoff?.pageImages) ? handoff.pageImages : [];
       let result;
       let record;
-      let usedProvider = provider;
       try {
         ({ result, record } = await invokeLoggedStage({ stage, text, handoff, matchTaskId, pageImages,
           sessionId: lane.sessionId, resume: lane.started, editorialPlan: planReference, provider }));
         lane.started = true;
-        lane.provider = usedProvider;
+        lane.provider = provider;
       } finally {
         lane.contextKey = key;
         lane.stage = stage;

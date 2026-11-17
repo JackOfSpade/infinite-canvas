@@ -8,7 +8,7 @@ import { ipcMain } from 'electron';
 import {
   __freezeOfficialPostingJobForTests as freeze,
   __projectLocalApplicationJobForAcceptanceHarness as project,
-  LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, getLocalApplicationHandoff, queueLocalApplicationJob, registerLocalAiApplicationHandlers,
+  LOCAL_AI_APPLICATION_SNIPPET_MAX_CHARS, queueLocalApplicationJob, registerLocalAiApplicationHandlers,
 } from '../../electron/ipc/localAiApplication.js';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
@@ -186,68 +186,6 @@ export default [
       assert.equal(linkOnly.company, 'Northwind Labs'); assert.equal(linkOnly.snippet, row().snippet);
       const unsafeFallback = freeze(row(), prepared('', { level: 'L5', outcome: 'not-found', employer: 'Northwind; unsafe name', contentHash: '' }));
       assert.equal(unsafeFallback.officialPosting.level, 'L6'); assert.equal(unsafeFallback.company, '');
-    },
-  },
-  {
-    name: 'official-posting queue consumes the real bound prepare record and freezes official evidence before authority is created',
-    async run() {
-      const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'official-posting-bound-queue-'));
-      const canvasFilePath = path.join(directory, 'canvas.json');
-      try {
-        await fs.promises.writeFile(canvasFilePath, '{}');
-        const { snapshotId: careerSnapshotId } = await writeApprovedCareerSnapshotFixture();
-        const raw = row({ snippet: `${row().snippet} SCRAPED_AUDIT_ONLY_SENTINEL` }); const text = `${officialText} `.repeat(6).trim();
-        const store = createOfficialPostingStore(path.join(directory, 'official-postings'));
-        await store.save(project(raw), { officialPosting: prepared(text).officialPosting, description: text });
-        const node = { '@context': 'https://schema.org', '@type': 'JobPosting', title: 'Platform Engineer',
-          hiringOrganization: { name: 'Northwind Labs' }, url: prepared().officialPosting.sourceUrl,
-          jobLocationType: 'TELECOMMUTE', applicantLocationRequirements: { '@type': 'Country', name: 'Canada' },
-          description: text, validThrough: '2030-12-31', baseSalary: { currency: 'CAD', value: { value: 120000, unitText: 'YEAR' } } };
-        const preparedResult = await prepareOfficialPostingForGeneration({ job: raw, cardId: 'bound-card', nodeId: 'bound-board', manualAiRunId: 'bound-run' }, {
-          projectJob: project, store, semanticMatching: false, bridgeStatus: () => ({ enabled: false }),
-          fetch: async url => ({ body: `<script type="application/ld+json">${JSON.stringify(node)}</script>`, contentType: 'text/html', statusCode: 200, url }),
-        });
-        assert.ok(preparedResult.resolutionId); assert.equal(preparedResult.officialPosting.level, 'L2');
-        registerLocalAiApplicationHandlers();
-        const sender = { id: 71941, isDestroyed: () => false, once() {}, on() {}, removeListener() {} };
-        const response = await ipcMain.__getInvokeHandler('queue-local-application')({ sender }, { canvasFilePath, careerSnapshotId, transport: 'paste', nodeId: 'bound-card',
-          resolutionId: preparedResult.resolutionId, job: { ...raw, postedBy: 'Forged Poster', applyUrl: 'https://forged.example.test/apply',
-            officialPosting: { ...prepared().officialPosting, employer: 'Forged Employer' } } });
-        assert.equal(response.success, true, response.error);
-        assert.equal(response.officialPosting.level, 'L2'); assert.equal(response.postedBy, raw.company);
-        const queued = response.localJob;
-        const input = JSON.parse(await fs.promises.readFile(path.join(queued.folder, 'input.json'), 'utf8'));
-        assert.equal(input.job.company, 'Northwind Labs'); assert.equal(input.job.snippet, text);
-        assert.equal(input.job.postedBy, raw.company); assert.equal(input.job.officialPosting.contentHash, hash(text));
-        assert.equal(input.job.title, raw.title); assert.equal(input.job.url, raw.url);
-        assert.ok(input.job.applyUrl.startsWith('https://jobs.ashbyhq.com/northwind-synthetic/'));
-        const scrapedPath = path.join(queued.folder, 'context', 'scraped-listing.md');
-        const expectedScraped = formatOriginalJobListingMarkdown(project(raw));
-        assert.equal(await fs.promises.readFile(scrapedPath, 'utf8'), expectedScraped);
-        assert.equal(input.job.officialPosting.scrapedListingSha256, hash(expectedScraped));
-        if (process.platform !== 'win32') assert.equal((await fs.promises.stat(scrapedPath)).mode & 0o777, 0o600);
-        const beforeAuditEdit = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath });
-        assert.ok(!beforeAuditEdit.handoff.prompt.includes('SCRAPED_AUDIT_ONLY_SENTINEL'));
-        const inputBytes = await fs.promises.readFile(path.join(queued.folder, 'input.json'));
-        await fs.promises.writeFile(scrapedPath, 'This audit sidecar is not prompt or authority evidence.');
-        const open = fs.promises.open; const readFile = fs.promises.readFile; let auditReadAttempts = 0;
-        let afterAuditEdit;
-        try {
-          const refuseAuditRead = file => {
-            if (String(file) === scrapedPath) { auditReadAttempts++; throw new Error('The scraped audit is not a frozen authority source.'); }
-          };
-          fs.promises.open = async (file, ...args) => { refuseAuditRead(file); return open(file, ...args); };
-          fs.promises.readFile = async (file, ...args) => { refuseAuditRead(file); return readFile(file, ...args); };
-          afterAuditEdit = await getLocalApplicationHandoff({ jobId: queued.id, canvasFilePath });
-        } finally { fs.promises.open = open; fs.promises.readFile = readFile; }
-        assert.equal(auditReadAttempts, 0);
-        assert.equal(afterAuditEdit.handoff.prompt, beforeAuditEdit.handoff.prompt);
-        assert.deepEqual(await fs.promises.readFile(path.join(queued.folder, 'input.json')), inputBytes);
-        await fs.promises.writeFile(scrapedPath, expectedScraped, { mode: 0o600 });
-        await assert.rejects(queueLocalApplicationJob({ canvasFilePath, careerSnapshotId, transport: 'paste', nodeId: 'foreign-card',
-          resolutionId: preparedResult.resolutionId, job: { ...raw, title: 'Different Engineer at Northwind Labs' } }),
-        error => error.code === 'OFFICIAL_POSTING_LOOKUP_INCOMPLETE');
-      } finally { await fs.promises.rm(directory, { recursive: true, force: true }); }
     },
   },
   {

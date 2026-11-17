@@ -8,6 +8,7 @@ import { buildJobTreeNodes } from '../../src/nodes/jobsearch/buildJobTree.js';
 import { carryBoardDeadSourceUrls } from '../../src/utils/jobSourceLinks.js';
 import { replaceBoardDisplayChildren } from '../../src/nodes/jobboard/replaceBoardDisplayChildren.js';
 import { combineCommitMismatchReason } from '../../src/nodes/jobboard/boardRecoveryNotice.js';
+import { finalSourceCountsOf } from '../../src/nodes/jobboard/boardStageRerun.js';
 import { attachProtectedCards, isProtectedJobCard } from '../../src/utils/jobLocationConsolidation.js';
 import { getConnectedJobSearchIds, normalizeJobBoardRecoveryTimestamp } from '../../src/utils/jobBoardSearchSelection.js';
 import { JOB_COMPENSATION_METHOD_VERSION } from '../../src/utils/jobCompensationVersion.js';
@@ -128,7 +129,7 @@ async function startCombineCommitFixture({ unmatchedProtected = false } = {}) {
     combineInputsMatchExpected: (modules, expected) => modules.length === expected.length
       && expected.every(entry => jobSearchOutcomeReceiptMatches(modules.find(item => item.id === entry.sourceId), entry)),
     combineCommitMismatchReason, describeReceiptMismatch, boardHistoryAuthorityAvailable, isProtectedJobCard,
-    normalizeJobBoardRecoveryTimestamp, buildJobTreeNodes, replaceBoardDisplayChildren, carryBoardDeadSourceUrls,
+    normalizeJobBoardRecoveryTimestamp, buildJobTreeNodes, replaceBoardDisplayChildren, carryBoardDeadSourceUrls, finalSourceCountsOf,
     keepCompletedSnapshotDuringActiveSearch: () => true, hideBoardChildren() {},
     autoResumedManualAiRunRef: { current: 'board-manual-run' }, committedCombineRef: { current: null },
     committedCombineManualAiRunIdsRef: { current: new Set() }, rememberBoundedRunId: (set, runId) => set.add(runId),

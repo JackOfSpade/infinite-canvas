@@ -311,6 +311,17 @@ export async function createPrivateLocalFileOutputDirectory(workDirectory) {
   }
 }
 
+const REPLACED_PRIVATE_ENTRY_CODES = new Set([
+  'LOCAL_FILE_PATH_CHANGED',
+  'LOCAL_FILE_NOT_REGULAR',
+  'LOCAL_FILE_HARDLINK_UNSUPPORTED',
+]);
+
+/** A replaced entry inside the private workspace is an unsafe output, not a renderer path error. */
+function asPrivateOutputError(error) {
+  return REPLACED_PRIVATE_ENTRY_CODES.has(error?.code) ? localFilePrivateOutputError() : error;
+}
+
 /** Prove that an O_EXCL-created converter namespace marker is still intact. */
 export async function assertPrivateLocalFileReservation(workDirectory, reservation) {
   if (!reservation?.filePath || !reservation?.identity) throw localFilePrivateOutputError();
@@ -327,11 +338,7 @@ export async function assertPrivateLocalFileReservation(workDirectory, reservati
       throw localFilePrivateOutputError();
     }
   } catch (error) {
-    if (error?.code === 'LOCAL_FILE_PATH_CHANGED' || error?.code === 'LOCAL_FILE_NOT_REGULAR'
-        || error?.code === 'LOCAL_FILE_HARDLINK_UNSUPPORTED') {
-      throw localFilePrivateOutputError();
-    }
-    throw error;
+    throw asPrivateOutputError(error);
   } finally {
     await pinned?.close?.().catch(() => {});
   }
@@ -360,11 +367,7 @@ export async function readPrivateLocalFile(workDirectory, filePath) {
     if (!hasSameIdentity(before.identity, after.identity)) throw localFilePrivateOutputError();
     return bytes;
   } catch (error) {
-    if (error?.code === 'LOCAL_FILE_PATH_CHANGED' || error?.code === 'LOCAL_FILE_NOT_REGULAR'
-        || error?.code === 'LOCAL_FILE_HARDLINK_UNSUPPORTED') {
-      throw localFilePrivateOutputError();
-    }
-    throw error;
+    throw asPrivateOutputError(error);
   } finally {
     await pinned?.close?.().catch(() => {});
   }
@@ -588,13 +591,15 @@ export function createPinnedLocalReadStream(pinnedFile, { start, end, closeOnEnd
   return stream;
 }
 
+const LOCAL_FILE_SAFETY_ERROR_CODES = new Set([
+  'LOCAL_FILE_UNSAFE_PATH',
+  'LOCAL_FILE_HARDLINK_UNSUPPORTED',
+  'LOCAL_FILE_PATH_CHANGED',
+  'LOCAL_FILE_NOT_REGULAR',
+  'LOCAL_FILE_PRIVATE_STORAGE_UNSAFE',
+  'LOCAL_FILE_PRIVATE_OUTPUT_UNSAFE',
+]);
+
 export function isLocalFileSafetyError(error) {
-  return new Set([
-    'LOCAL_FILE_UNSAFE_PATH',
-    'LOCAL_FILE_HARDLINK_UNSUPPORTED',
-    'LOCAL_FILE_PATH_CHANGED',
-    'LOCAL_FILE_NOT_REGULAR',
-    'LOCAL_FILE_PRIVATE_STORAGE_UNSAFE',
-    'LOCAL_FILE_PRIVATE_OUTPUT_UNSAFE',
-  ]).has(error?.code);
+  return LOCAL_FILE_SAFETY_ERROR_CODES.has(error?.code);
 }

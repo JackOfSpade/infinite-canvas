@@ -344,15 +344,15 @@ const FIELD_LABELS = [
   ['REMOTE COUNTRY RESTRICTION', 'remoteCountry'],
   ['EVIDENCE QUOTE', 'evidenceQuote'],
   ['REASON', 'reason'],
-];
+].map(([label, key]) => [new RegExp(`^\\**\\s*${label}\\s*\\**\\s*:\\s*\\**\\s*(.*)$`, 'i'), key]);
 
 /** Chat apps decorate labels ("**RESULT:**", "- RESULT:"); accept that, nothing looser. */
 function parseLabeledFields(section) {
   const fields = {};
   for (const line of String(section || '').split('\n')) {
     const stripped = line.replace(/^[\s>*•\-–—]+/, '');
-    for (const [label, key] of FIELD_LABELS) {
-      const match = stripped.match(new RegExp(`^\\**\\s*${label}\\s*\\**\\s*:\\s*\\**\\s*(.*)$`, 'i'));
+    for (const [labelPattern, key] of FIELD_LABELS) {
+      const match = stripped.match(labelPattern);
       if (!match) continue;
       if (fields[key] === undefined) fields[key] = match[1].replace(/\*+\s*$/, '').replace(/^["“]|["”]$/g, '').trim();
       break;
@@ -680,6 +680,12 @@ function replyRows(raw) {
   return rows;
 }
 
+/** A reported location as a comparable set of places: case, punctuation and order do not matter. */
+function lookupPlaces(location) {
+  return String(location ?? '').split('|')
+    .map(place => place.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()).filter(Boolean).sort().join('|');
+}
+
 /**
  * Choose one reply's section per posting when built-in web search and Parallel Search
  * answered the same location lookup. `replies` is ordered (built-in first,
@@ -694,12 +700,6 @@ function replyRows(raw) {
  * order, so the result still parses as a normal batch answer. null when no
  * reply contributed any section.
  */
-/** A reported location as a comparable set of places: case, punctuation and order do not matter. */
-function lookupPlaces(location) {
-  return String(location ?? '').split('|')
-    .map(place => place.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim()).filter(Boolean).sort().join('|');
-}
-
 export function mergeJobLocationLookupReplies({ requests, replies }) {
   const list = Array.isArray(requests) ? requests : [];
   const arms = (Array.isArray(replies) ? replies : []).map(replyRows);

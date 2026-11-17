@@ -106,6 +106,9 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
   const [recoveryHydrated, setRecoveryHydrated] = useState(false);
   const recoveryPeekScopeRef = useRef(null);
   const autoResumedRunRef = useRef(null);
+  // True while runCheck awaits retiring a stale recovery, before the run is
+  // registered: a second click in that gap must not start a second run.
+  const runStartingRef = useRef(false);
   const recoveryRef = useRef(data.marketplaceStatusRunResume || null);
   const canvasFilePath = navigation?.getCurrentFile?.() || navigation?.currentFile || null;
 
@@ -143,6 +146,7 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
     recoveryPeekScopeRef.current = scope;
     setRecoveryHydrated(false);
     let disposed = false;
+    let hydrated = false;
     void (async () => {
       try {
         if (!canvasFilePath || !window.electronAPI?.peekMarketplaceRecovery) return;
@@ -187,10 +191,18 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
       } catch (error) {
         EventLogger.error(`[MarketplaceStatus][${id}] Recovery hydration failed:`, error);
       } finally {
-        if (!disposed) setRecoveryHydrated(true);
+        if (!disposed) {
+          hydrated = true;
+          setRecoveryHydrated(true);
+        }
       }
     })();
-    return () => { disposed = true; };
+    return () => {
+      disposed = true;
+      // The disposed pass never reports hydration, so the next pass must peek
+      // again rather than skip on the scope it left behind.
+      if (!hydrated && recoveryPeekScopeRef.current === scope) recoveryPeekScopeRef.current = null;
+    };
   }, [canvasFilePath, id, updateGlobal]);
 
   const platformStatus = useMemo(() => data.platformStatus || {}, [data.platformStatus]);
@@ -283,7 +295,7 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
   // abandon or overwrite row A's exact recovery marker.
   const runCheck = useCallback(async (platformIds, options = {}) => {
     const candidates = Array.isArray(platformIds) ? platformIds : [];
-    if (checkingIdsRef.current.size > 0 || activeCheckRuns.size > 0) return;
+    if (runStartingRef.current || checkingIdsRef.current.size > 0 || activeCheckRuns.size > 0) return;
     const ids = [...new Set(candidates)].filter(Boolean);
     if (ids.length === 0) return;
     const requestedRecovery = options.recovery || recoveryRef.current;
@@ -298,14 +310,22 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
       && marketplaceStatusInputMatches(requestedRecovery, recoveryInputIds, currentWatchSnapshot)
       && ids.every(platformId => requestedRecovery.remainingPlatformIds.includes(platformId));
     if (requestedRecovery && !canResume) {
-      const abandoned = await window.electronAPI?.abandonMarketplaceRecovery?.({
-        canvasFilePath,
-        nodeId: id,
-        kind: 'marketplace-status',
-        runId: requestedRecovery.runId,
-        inputKey: requestedRecovery.inputKey,
-        reason: 'input-changed',
-      });
+      runStartingRef.current = true;
+      let abandoned;
+      try {
+        abandoned = await window.electronAPI?.abandonMarketplaceRecovery?.({
+          canvasFilePath,
+          nodeId: id,
+          kind: 'marketplace-status',
+          runId: requestedRecovery.runId,
+          inputKey: requestedRecovery.inputKey,
+          reason: 'input-changed',
+        });
+      } catch (error) {
+        abandoned = { success: false, error: error?.message || String(error) };
+      } finally {
+        runStartingRef.current = false;
+      }
       const safeAbsent = ['missing', 'completed'].includes(abandoned?.reason);
       if (canvasFilePath && (!abandoned?.success || (!abandoned?.abandoned && !safeAbsent))) {
         addToast({

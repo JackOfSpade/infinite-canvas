@@ -89,6 +89,7 @@ export function normalizeClaudeTaskActivity(raw) {
 let snapshot = IDLE;
 const listeners = new Set();
 let detach = null;
+let appliedCount = 0;
 
 function api() {
   try { return globalThis.window?.electronAPI || null; } catch { return null; }
@@ -97,6 +98,7 @@ function api() {
 export function getClaudeTaskActivity() { return snapshot; }
 
 export function applyClaudeTaskActivity(raw) {
+  appliedCount += 1;
   snapshot = normalizeClaudeTaskActivity(raw);
   for (const listener of [...listeners]) { try { listener(); } catch { /* one subscriber cannot stop the rest */ } }
   return snapshot;
@@ -109,7 +111,9 @@ export function subscribeClaudeTaskActivity(listener) {
   if (listeners.size === 1) {
     const bridge = api();
     try { detach = bridge?.onClaudeTaskActivity?.(applyClaudeTaskActivity) || null; } catch { detach = null; }
-    try { Promise.resolve(bridge?.getClaudeTaskActivity?.()).then(raw => { if (raw) applyClaudeTaskActivity(raw); }).catch(() => {}); } catch { /* the next push fills it in */ }
+    // A push that lands while the first read is in flight is newer than that read.
+    const appliedBefore = appliedCount;
+    try { Promise.resolve(bridge?.getClaudeTaskActivity?.()).then(raw => { if (raw && appliedCount === appliedBefore) applyClaudeTaskActivity(raw); }).catch(() => {}); } catch { /* the next push fills it in */ }
   }
   return () => {
     listeners.delete(listener);

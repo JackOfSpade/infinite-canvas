@@ -95,16 +95,22 @@ export default [
     name: 'no standalone auto-start, USAJobs refresh, or stale re-scan copy survives on the card',
     run() {
       const search = readSource('../../src/nodes/JobSearchNode.jsx');
-      const retiredAt = search.indexOf('const standaloneAutoStartRetired = true;');
-      assert(retiredAt >= 0, 'the legacy file auto-start is suppressed unconditionally');
-      assert(search.indexOf('Legacy file auto-start suppressed — searches run only from a Job Board', retiredAt) > retiredAt,
-        'the unconditional suppression still logs why the persisted path did not start');
+      const autoStartAt = search.indexOf('Legacy file auto-start suppressed — searches run only from a Job Board');
+      assert(autoStartAt >= 0, 'the suppressed legacy file auto-start still logs why the persisted path did not start');
+      const autoStartEnd = search.indexOf('const continueSavedJobsRescore = useCallback', autoStartAt);
+      assert(autoStartEnd > autoStartAt, 'the legacy file auto-start effect must sit before continueSavedJobsRescore');
+      const autoStartEffect = search.slice(search.lastIndexOf('useEffect(() => {', autoStartAt), autoStartEnd);
+      assert(!autoStartEffect.includes('startProcessing(') && !autoStartEffect.includes('runPipeline('),
+        'the legacy file auto-start effect never launches a search');
       const usaStart = search.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
-      const leaseAt = search.indexOf('moduleRunQueue.acquireModuleRun', usaStart);
-      assert(usaStart >= 0 && leaseAt > usaStart, 'the USAJobs refresh and its run lane must both exist');
-      assert(search.slice(usaStart, leaseAt).includes(
+      const usaEnd = search.indexOf('const handleJobsSettingsChange = useCallback', usaStart);
+      assert(usaStart >= 0 && usaEnd > usaStart, 'the USAJobs refresh must exist before the settings handler');
+      const usaRefresh = search.slice(usaStart, usaEnd);
+      assert(usaRefresh.includes(
         'USAJobs background search dropped because searches run only from a Job Board.',
-      ), 'an unconnected card drops the USAJobs background refresh before it can acquire a run lane');
+      ), 'a card drops the USAJobs background refresh');
+      assert(!usaRefresh.includes('acquireModuleRun') && !usaRefresh.includes('searchJobsSingleSource'),
+        'the USAJobs background refresh never acquires a run lane or contacts the provider');
       assert(search.includes("? 'Career data and the last scan date were kept — search from the connected Job Board to continue from that date.'")
         && search.includes(": 'Career data was kept — search from the connected Job Board when you are ready.'"),
         'Clear Scrape copy points the user at the connected Job Board');

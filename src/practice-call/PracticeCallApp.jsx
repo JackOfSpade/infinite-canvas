@@ -63,7 +63,14 @@ export default function PracticeCallApp() {
     const api = readApi();
     const fn = api?.[name];
     if (typeof fn !== 'function') return undefined;
-    try { return fn(...args); } catch { return undefined; }
+    try {
+      const result = fn(...args);
+      // Most callers are click handlers that drop the promise. Marking it
+      // handled here keeps a failed IPC call from surfacing as an unhandled
+      // rejection; a caller that awaits the result still sees the failure.
+      if (typeof result?.catch === 'function') result.catch(() => {});
+      return result;
+    } catch { return undefined; }
   };
   const agree = async () => {
     setBusy(true);

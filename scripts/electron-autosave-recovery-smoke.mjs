@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { closeDisposableElectron } from './close-disposable-electron.mjs';
+import { makeSmokeDir, smokeEnv, seedLastOpenedWorkspace } from './lib/electron-smoke.mjs';
 
 // Real permission errors in a disposable app/profile. Never writes a user's canvas.
-const root = await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-autosave-recovery-'));
+const root = await makeSmokeDir('ic-autosave-recovery-');
 const canvas = path.join(root, 'canvas.json');
-const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-delete env.ELECTRON_RUN_AS_NODE;
+const env = smokeEnv();
 let application;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, label, timeoutMs = 30000) {
@@ -30,11 +29,7 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   await page.waitForFunction(() => typeof window.electronAPI?.loadWorkspace === 'function');
   await page.getByText('Skip', { exact: true }).click({ timeout: 1000 }).catch(() => {});
-  await page.evaluate(filePath => {
-    const key = 'infiniteCanvas.settings';
-    localStorage.setItem(key, JSON.stringify({ ...JSON.parse(localStorage.getItem(key) || '{}'), lastOpenedWorkspace: filePath }));
-    window.addEventListener('beforeunload', event => { event.stopImmediatePropagation(); delete event.returnValue; }, { capture: true, once: true });
-  }, canvas);
+  await seedLastOpenedWorkspace(page, canvas);
   await page.reload();
   await page.getByText('Skip', { exact: true }).click({ timeout: 1000 }).catch(() => {});
   const note = page.locator('.react-flow__node[data-id="autosave-note"]');
@@ -97,6 +92,6 @@ try {
   assert.deepEqual(errors, []);
   console.log('PASS: real read-only and hard-link autosave failures recover without another edit; persistent refusals preserve disk data and recover visibly; document notifications resume safely after a hard link disappears.');
 } finally {
-  await closeDisposableElectron(application);
-  await fs.rm(root, { recursive: true, force: true });
+  try { await closeDisposableElectron(application); }
+  finally { await fs.rm(root, { recursive: true, force: true }); }
 }

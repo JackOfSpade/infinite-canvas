@@ -36,11 +36,14 @@ export function createShadowMeasure({ env = process.env, offloadCall = offloadTe
   const waiting = [];
 
   async function slot(fn) {
+    // A released slot is handed straight to the next waiter, so a caller arriving
+    // before that waiter resumes cannot take it and push `active` past the limit.
     if (active >= CONCURRENCY) await new Promise(resolve => waiting.push(resolve));
-    active += 1;
+    else active += 1;
     try { return await fn(); } finally {
-      active -= 1;
-      waiting.shift()?.();
+      const next = waiting.shift();
+      if (next) next();
+      else active -= 1;
     }
   }
 

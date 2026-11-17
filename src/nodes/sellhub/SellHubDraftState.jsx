@@ -321,7 +321,9 @@ export function SellHubDraftState({
       </div>
 
       <button
-        onClick={locked ? undefined : handleConfirmDraft}
+        // Called with no arguments: the handler's first parameter is a saved
+        // recovery to resume, and a click event passed there would be read as one.
+        onClick={locked ? undefined : () => handleConfirmDraft()}
         disabled={locked}
         className={`w-full py-2 rounded-lg text-xs font-medium transition-colors mt-1 ${
           locked

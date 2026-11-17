@@ -1,17 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { closeDisposableElectron } from './close-disposable-electron.mjs';
+import { makeSmokeDir, smokeEnv, seedLastOpenedWorkspace } from './lib/electron-smoke.mjs';
 
 // A hidden disposable process exercises the production quit handshake. It
 // never attaches to the running app or calls a provider/model.
-const root = await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-quit-autosave-'));
+const root = await makeSmokeDir('ic-quit-autosave-');
 const canvas = path.join(root, 'quit.json');
 const profile = path.join(root, 'profile');
-const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1', INFINITE_CANVAS_E2E_QUIT_HANDSHAKE: '1' };
-delete env.ELECTRON_RUN_AS_NODE;
+const env = smokeEnv({ INFINITE_CANVAS_E2E_QUIT_HANDSHAKE: '1' });
 let application;
 try {
   const search = { id: 'hidden-search', type: 'jobhub', position: { x: 0, y: 0 }, data: {
@@ -42,11 +41,7 @@ try {
   await page.waitForFunction(() => typeof window.electronAPI?.loadWorkspace === 'function');
   const skip = page.getByText('Skip', { exact: true });
   await skip.click({ timeout: 5000 }).catch(() => {});
-  await page.evaluate(filePath => {
-    const key = 'infiniteCanvas.settings';
-    localStorage.setItem(key, JSON.stringify({ ...JSON.parse(localStorage.getItem(key) || '{}'), lastOpenedWorkspace: filePath }));
-    window.addEventListener('beforeunload', event => { event.stopImmediatePropagation(); delete event.returnValue; }, { capture: true, once: true });
-  }, canvas);
+  await seedLastOpenedWorkspace(page, canvas);
   await page.reload();
   await page.getByText('Skip', { exact: true }).click({ timeout: 1000 }).catch(() => {});
   const note = page.locator('.react-flow__node[data-id="quit-note"]');

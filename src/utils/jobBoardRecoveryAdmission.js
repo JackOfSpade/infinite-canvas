@@ -71,10 +71,6 @@ export function exactInterruptedRecoveryAdmission({
   };
 }
 
-export function canAdmitExactInterruptedRecovery(options) {
-  return exactInterruptedRecoveryAdmission(options).ok;
-}
-
 // `resumeRunId` is a compare-and-clear capability. When the main process
 // reports that it vanished or was replaced after the Board's preflight, keep
 // that result in the recovery lane instead of treating it as an ordinary

@@ -5,23 +5,20 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
   const nestedDragListenersRef = useRef(null);
   const nestedDragRef = useRef(null);
 
-  useEffect(() => {
-    return () => {
-      if (nestedDragListenersRef.current) {
-        window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
-        window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
-        window.removeEventListener('pointercancel', nestedDragListenersRef.current.onCancel);
-      }
-    };
+  const detachListeners = useCallback(() => {
+    const listeners = nestedDragListenersRef.current;
+    if (!listeners) return;
+    window.removeEventListener('pointermove', listeners.onMove);
+    window.removeEventListener('pointerup', listeners.onUp);
+    window.removeEventListener('pointercancel', listeners.onCancel);
+    nestedDragListenersRef.current = null;
   }, []);
+
+  useEffect(() => detachListeners, [detachListeners]);
 
   const onNestedCanvasDragStart = useCallback((startX, startY) => {
     // If a previous drag was somehow still active, clean it up first
-    if (nestedDragListenersRef.current) {
-      window.removeEventListener('pointermove', nestedDragListenersRef.current.onMove);
-      window.removeEventListener('pointerup', nestedDragListenersRef.current.onUp);
-      window.removeEventListener('pointercancel', nestedDragListenersRef.current.onCancel);
-    }
+    detachListeners();
 
     nestedDragRef.current = { dragging: false, startX, startY };
 
@@ -38,10 +35,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
     };
 
     const onUp = (e) => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onCancel);
-      nestedDragListenersRef.current = null;
+      detachListeners();
       const ref = nestedDragRef.current;
       nestedDragRef.current = null;
       cursorsRef.current?.updateNestedDrag(null);
@@ -62,10 +56,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
     // (window blur, system gesture, device disconnect). Clear the drag cursor
     // and listeners without creating a node at a stale position.
     const onCancel = () => {
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-      window.removeEventListener('pointercancel', onCancel);
-      nestedDragListenersRef.current = null;
+      detachListeners();
       nestedDragRef.current = null;
       cursorsRef.current?.updateNestedDrag(null);
     };
@@ -74,7 +65,7 @@ export function useNestedCanvasDrag({ isAnimatingRef, screenToFlowPosition, take
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
     window.addEventListener('pointercancel', onCancel);
-  }, [screenToFlowPosition, takeSnapshot, setNodes, isAnimatingRef, cursorsRef]);
+  }, [screenToFlowPosition, takeSnapshot, setNodes, isAnimatingRef, cursorsRef, detachListeners]);
 
   return { onNestedCanvasDragStart };
 }

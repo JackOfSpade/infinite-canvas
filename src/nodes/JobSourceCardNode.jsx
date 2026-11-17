@@ -542,10 +542,15 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
       // ignored React Flow deletion clears the marker shortly after, ensuring a
       // later person-initiated deletion still uses the normal cancellation
       // ownership path.
+      const releaseAutomaticCleanDismissal = () => {
+        automaticCleanDismissalRef.current = false;
+        if (automaticCleanDismissalResetTimerRef.current != null) {
+          clearTimeout(automaticCleanDismissalResetTimerRef.current);
+          automaticCleanDismissalResetTimerRef.current = null;
+        }
+      };
+      releaseAutomaticCleanDismissal();
       automaticCleanDismissalRef.current = true;
-      if (automaticCleanDismissalResetTimerRef.current != null) {
-        clearTimeout(automaticCleanDismissalResetTimerRef.current);
-      }
       automaticCleanDismissalResetTimerRef.current = setTimeout(() => {
         automaticCleanDismissalRef.current = false;
         automaticCleanDismissalResetTimerRef.current = null;
@@ -561,25 +566,11 @@ export const JobSourceCardNode = React.memo(function JobSourceCardNode({ id, dat
             Array.isArray(outcome?.deletedNodes)
             && !outcome.deletedNodes.some(node => node?.id === id)
           ) {
-            automaticCleanDismissalRef.current = false;
-            if (automaticCleanDismissalResetTimerRef.current != null) {
-              clearTimeout(automaticCleanDismissalResetTimerRef.current);
-              automaticCleanDismissalResetTimerRef.current = null;
-            }
+            releaseAutomaticCleanDismissal();
           }
-        }).catch(() => {
-          automaticCleanDismissalRef.current = false;
-          if (automaticCleanDismissalResetTimerRef.current != null) {
-            clearTimeout(automaticCleanDismissalResetTimerRef.current);
-            automaticCleanDismissalResetTimerRef.current = null;
-          }
-        });
+        }).catch(releaseAutomaticCleanDismissal);
       } catch {
-        automaticCleanDismissalRef.current = false;
-        if (automaticCleanDismissalResetTimerRef.current != null) {
-          clearTimeout(automaticCleanDismissalResetTimerRef.current);
-          automaticCleanDismissalResetTimerRef.current = null;
-        }
+        releaseAutomaticCleanDismissal();
       }
     };
     document.addEventListener('job-source-dismiss-clean', onDismiss);

@@ -9,13 +9,13 @@ export const DICE_TEASER_MAX_CHARS = 600;
 
 const textLength = value => String(value || '').length;
 
+const rowTextLength = row => Math.max(textLength(row?.description), textLength(row?.snippet));
+
 export function isDiceTeaserRow(job) {
   if (!job || typeof job !== 'object' || job.source !== 'dice') return false;
   if (!String(job.url || '').trim()) return false;
-  return Math.max(textLength(job.description), textLength(job.snippet)) <= DICE_TEASER_MAX_CHARS;
+  return rowTextLength(job) <= DICE_TEASER_MAX_CHARS;
 }
-
-const rowTextLength = row => Math.max(textLength(row?.description), textLength(row?.snippet));
 
 export async function refreshDiceTeaserRows(jobs, { enrich, signal } = {}) {
   const input = Array.isArray(jobs) ? jobs : [];
@@ -28,7 +28,7 @@ export async function refreshDiceTeaserRows(jobs, { enrich, signal } = {}) {
   try {
     enrichedRows = await enrich(teaserRows, signal);
   } catch {
-    return { jobs: [...input], attempted: teaserRows.length, lengthened: 0 };
+    enrichedRows = null;
   }
   if (!Array.isArray(enrichedRows)) {
     return { jobs: [...input], attempted: teaserRows.length, lengthened: 0 };

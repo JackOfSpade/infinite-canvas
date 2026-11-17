@@ -71,7 +71,9 @@ export function createPracticeInference({
     settleAll(failure);
   });
   worker.on('exit', () => {
-    if (!closed) settleAll(new Error('inference worker exited'));
+    if (closed) return;
+    failure ||= new Error('inference worker exited');
+    settleAll(failure);
   });
 
   function request(kind, samples) {

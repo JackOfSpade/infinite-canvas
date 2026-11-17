@@ -51,7 +51,9 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
       return undefined;
     }
     void coordinator.discover({ canvasFilePath, rootNodes: rootNodesRef.current }).then(async (next) => {
-      if (cancelled) return;
+      // Nothing has acted on this plan yet: give its claims back so the
+      // effect's next run offers the same recoveries instead of losing them.
+      if (cancelled) { coordinator.release?.(next); return; }
       // Marketplace Status inputs include Settings-owned watch URLs. Compare
       // them before issuing the exact resume request: the main handler can
       // create a fresh run for a mismatch, which is correct for an explicit
@@ -65,7 +67,7 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
         // The status entry is kept paused below rather than guessing.
         watchUrlsByPlatform = null;
       }
-      if (cancelled) return;
+      if (cancelled) { coordinator.release?.(next); return; }
       const settled = await Promise.all(next.map(async (entry) => {
         if (entry.kind === 'sellhub' && entry.state === 'terminal-replay-ready') {
           if (typeof updateNodeDataGlobally !== 'function') return { ...entry, state: 'update-unavailable' };
@@ -624,7 +626,11 @@ export function useWorkspaceStartupRecovery({ canvasFilePath, rootNodes, hydrate
           // workspace changes. Its request carries the old exact canvas/run
           // capability; allowing it to settle keeps that old sidecar coherent
           // and avoids any generic/destructive cancellation across workspaces.
-          if (cancelled) return { ...entry, state: 'cancelled' };
+          if (cancelled) {
+            // onStart already published `searching`; hand it back.
+            publishSettled({ providerSettled: false });
+            return { ...entry, state: 'cancelled' };
+          }
           const result = await window.electronAPI?.searchJobs?.(entry.request);
           if (result?.success === true) {
             publishSettled({ providerSettled: true });

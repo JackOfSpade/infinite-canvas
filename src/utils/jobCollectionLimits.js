@@ -76,7 +76,7 @@ export function resolveJobsPerPlatform(limits) {
 
 /**
  * The FINITE per-query ceiling every walker loop should use. A blank setting
- * resolves to Auto's 10 pages; an explicit number is used verbatim.
+ * resolves to Auto's per-query backstop; an explicit number is used verbatim.
  */
 export function resolvePageCeiling(limits) {
   return normalizeJobCollectionLimits(limits).pagesPerPlatform ?? JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;

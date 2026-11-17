@@ -285,6 +285,19 @@ const sameCardText = (left, right) => statementOf(left.headline) === statementOf
   && JSON.stringify((left.bullets || []).map(statementOf)) === JSON.stringify((right.bullets || []).map(statementOf))
   && extensionKey(left) === extensionKey(right);
 
+// ensureMatcher runs on every partial transcript; hashing the whole bank each
+// time is wasted work while neither the bank nor its live card list changed.
+const MATCHER_KEYS = new WeakMap();
+function matcherBankKey(sealedBank, bank) {
+  if (!sealedBank) return null;
+  const cards = cardsOf(sealedBank);
+  const cached = MATCHER_KEYS.get(sealedBank);
+  if (cached && cached.cards === cards) return cached.key;
+  const key = sha256(stableJson(bank));
+  MATCHER_KEYS.set(sealedBank, { cards, key });
+  return key;
+}
+
 /** Build the live card list for a sealed bank from stored Q&A cards. */
 export function attachInterviewLiveCards(bank, storeCards) {
   if (!bank) return bank;
@@ -578,7 +591,7 @@ export function createInterviewWindowController({
   const ensureMatcher = (session, sealedBank) => {
     // Match over the live (editable) cards; the sealed bank stays the binding.
     const bank = sealedBank && LIVE_CARDS.has(sealedBank) ? { ...sealedBank, cards: cardsOf(sealedBank) } : sealedBank;
-    const key = bank ? sha256(stableJson(bank)) : null;
+    const key = matcherBankKey(sealedBank, bank);
     if (session.matcher && session.matcherKey === key) return session.matcher;
     session.matcher?.close();
     session.matcherKey = key;

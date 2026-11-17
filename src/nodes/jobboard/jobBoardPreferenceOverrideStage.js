@@ -70,7 +70,8 @@ export async function runBoardPreferenceOverrideStage(modules, {
     const scored = sameRecord ? { ...(prior?.scored || {}) } : {};
     const unanswered = listings.filter(job => !assessments[jobBoardOverrideJobKey(job)]);
     const stored = unanswered.filter(job => hasStoredPreferenceVerdicts([job], record.plan));
-    const toAsk = unanswered.filter(job => !stored.includes(job));
+    const storedSet = new Set(stored);
+    const toAsk = unanswered.filter(job => !storedSet.has(job));
     const collect = (rows) => {
       for (const row of rows) {
         assessments[jobBoardOverrideJobKey(row)] = row.preferenceAssessment;

@@ -99,33 +99,6 @@ export function atsSafePdfFontExpression() {
   })()`;
 }
 
-/** Detect any Type 3 programs, including extractable color-emoji subsets. */
-export async function pdfContainsType3Fonts(bytes) {
-  const pdf = await PDFDocument.load(bytes, { ignoreEncryption: true });
-  return pdfDocContainsType3Fonts(pdf);
-}
-
-// Keep the raw diagnostic separate from the production safety check, which
-// distinguishes mapped color emoji from Type 3 prose fonts.
-function pdfDocContainsType3Fonts(pdf) {
-  const type3 = PDFLib.PDFName.of('Type3');
-  const subtype = PDFLib.PDFName.of('Subtype');
-  return pdf.context.enumerateIndirectObjects().some(([, object]) =>
-    object instanceof PDFLib.PDFDict && object.get(subtype) === type3);
-}
-
-// The screen-preview `.page` box has a fixed minimum paper height, but it
-// expands when its contents overflow. Fit telemetry must compare text against
-// the fixed type area, never against that expanded box.
-export function fixedPageTypeAreaHeight(minPageHeightPx, paddingTopPx, paddingBottomPx) {
-  const minPageHeight = Number(minPageHeightPx);
-  const paddingTop = Number(paddingTopPx);
-  const paddingBottom = Number(paddingBottomPx);
-  if (!Number.isFinite(minPageHeight) || !Number.isFinite(paddingTop) || !Number.isFinite(paddingBottom)) return null;
-  const height = minPageHeight - paddingTop - paddingBottom;
-  return height > 0 ? height : null;
-}
-
 // Keep the browser-side probe self-contained and assemble it without a
 // JavaScript template literal. The previous template contained a backtick in
 // an inline comment; that closed the template early and made Chromium try to
@@ -237,12 +210,12 @@ export function renderedPageLayoutIssues(layout) {
   return issues;
 }
 
-function throwIfAborted(signal) {
-  if (signal?.aborted) throw Object.assign(new Error('aborted'), { name: 'AbortError' });
-}
-
 function abortError() {
   return Object.assign(new Error('aborted'), { name: 'AbortError' });
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortError();
 }
 
 // Destroying a BrowserWindow normally makes the in-flight Electron operation

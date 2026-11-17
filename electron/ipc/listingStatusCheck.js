@@ -628,6 +628,15 @@ export function finalizeTerminalHubScan({ platformId, sources, readState }) {
   return finalizedPreparedHubScan({ platformId, inputs: [], terminalSources: sources, readState, parsed: {} });
 }
 
+function hubScanMessage({ platformId, status, summary, attention, sources }) {
+  return summary || (
+    status === 'ok'          ? (attention.length ? `${attention.length} item${attention.length === 1 ? '' : 's'} flagged.` : 'No action items found.')
+    : status === 'needs-login' ? `${getSellMonitorConfig(platformId)?.name || platformId} session needs login. Open Settings → Marketplace Login.`
+    : status === 'error'       ? (sources.find(source => source.message)?.message || 'Hub scan failed.')
+    : 'Could not read this platform’s hub pages.'
+  );
+}
+
 function finalizedPreparedHubScan({ platformId, inputs, terminalSources, readState, parsed }) {
   const sources = Array.isArray(terminalSources) ? [...terminalSources] : [];
   const attention = resolveAttentionSourceUrls(
@@ -645,12 +654,7 @@ function finalizedPreparedHubScan({ platformId, inputs, terminalSources, readSta
     });
   }
   const status = deriveHubScanStatus(sources);
-  const message = summary || (
-    status === 'ok'          ? (attention.length ? `${attention.length} item${attention.length === 1 ? '' : 's'} flagged.` : 'No action items found.')
-    : status === 'needs-login' ? `${getSellMonitorConfig(platformId)?.name || platformId} session needs login. Open Settings → Marketplace Login.`
-    : status === 'error'       ? (sources.find(source => source.message)?.message || 'Hub scan failed.')
-    : 'Could not read this platform’s hub pages.'
-  );
+  const message = hubScanMessage({ platformId, status, summary, attention, sources });
   return { status, message, summary, attention, sources, readState: readState || { read: 0, unread: 0 } };
 }
 
@@ -683,12 +687,7 @@ export function mergePreparedHubScanSections(sections) {
     unread: state.unread + (part.scan.readState?.unread || 0),
   }), { read: 0, unread: 0 });
   const status = deriveHubScanStatus(sources);
-  const message = summary || (
-    status === 'ok'          ? (attention.length ? `${attention.length} item${attention.length === 1 ? '' : 's'} flagged.` : 'No action items found.')
-    : status === 'needs-login' ? `${getSellMonitorConfig(platformId)?.name || platformId} session needs login. Open Settings → Marketplace Login.`
-    : status === 'error'       ? (sources.find(source => source.message)?.message || 'Hub scan failed.')
-    : 'Could not read this platform’s hub pages.'
-  );
+  const message = hubScanMessage({ platformId, status, summary, attention, sources });
   return { status, message, summary, attention, sources, readState };
 }
 

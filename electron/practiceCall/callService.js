@@ -174,7 +174,6 @@ export function createPracticeCallService(deps = {}) {
   const store = deps.store;
   let state = freshState();
   let call = null;
-  let seq = 0;
   let starting = false;
   let finishing = false;
   let elapsedTimer = null;
@@ -423,14 +422,15 @@ export function createPracticeCallService(deps = {}) {
     if (!self || self.finished) return snapshot();
     setPhase('precheck');
     const usageLimit = await resolve('usageLimit');
-    call.usageLimit = await usageLimit();
-    state.usageWarning = call.usageLimit ? USAGE_LIMIT_MESSAGE : null;
+    self.usageLimit = await usageLimit();
+    if (call !== self || self.finished) return snapshot();
+    state.usageWarning = self.usageLimit ? USAGE_LIMIT_MESSAGE : null;
     publish();
     const readKey = await resolve('readKey');
     const key = await readKey();
     if (call !== self || self.finished) return snapshot();
     if (typeof key !== 'string' || !key) throw new Error('No ElevenLabs key.');
-    call.key = key;
+    self.key = key;
     const fetchImpl = deps.fetch ?? globalThis.fetch;
     const fetchTier = await resolve('subscriptionTier');
     let tier = 'free';
@@ -447,12 +447,12 @@ export function createPracticeCallService(deps = {}) {
     const recentVoiceId = mostRecentlyUsed(pool?.state.lastUsed);
     const prompts = await resolve('prompts');
     const random = deps.random ?? Math.random;
-    const temperament = temperamentFor({ request: call.args, brief: call.brief });
+    const temperament = temperamentFor({ request: self.args, brief: self.brief });
     const voiceFactory = await resolve('voiceFactory');
     const personaOf = (chosen, voiceSource) => {
       const picked = !chosen?.name && typeof prompts.pickPersona === 'function' ? prompts.pickPersona({ random, temperament: temperament ?? 'neutral' }) : null;
       return {
-        name: chosen?.name || picked?.name || 'Alex Morgan', role: roleFor(call.brief, random), team: teamFor(call.brief),
+        name: chosen?.name || picked?.name || 'Alex Morgan', role: roleFor(self.brief, random), team: teamFor(self.brief),
         temperament, temperamentFrom: temperament ? 'request' : null,
         voice: chosen ? { gender: chosen.gender, age: chosen.age, accent: chosen.accent, character: chosen.character } : null,
         voiceId: chosen?.voiceId, voiceSource, initials: initialsOf(chosen?.name || picked?.name),
@@ -492,11 +492,11 @@ export function createPracticeCallService(deps = {}) {
         userMessage: 'The interviewer voice did not respond. Try starting the call again.',
       });
     }
-    call.promptBrief = promptBrief(call.brief);
-    call.persona = persona;
+    self.promptBrief = promptBrief(self.brief);
+    self.persona = persona;
     state.persona = { name: persona.name, initials: persona.initials, role: persona.role, team: persona.team };
     // call.voice is always the factory of the voice actually used.
-    call.voice = factory;
+    self.voice = factory;
     if (pool && persona.voiceId) {
       // A stale pool file must never cost the call its voice.
       pool.state.lastUsed[persona.voiceId] = clock.now();
@@ -504,17 +504,17 @@ export function createPracticeCallService(deps = {}) {
     }
     const helperFactory = await resolve('helperFactory');
     const trackFactory = await resolve('trackFactory');
-    call.voiceRate = voiceRate;
-    call.track = trackFactory({ sampleRate: voiceRate });
-    call.audioMirror = createMirror(null, call.track);
+    if (call !== self || self.finished) return snapshot();
+    self.voiceRate = voiceRate;
+    self.track = trackFactory({ sampleRate: voiceRate });
     const helper = helperFactory({ onEvent: onHelperEvent });
-    call.helper = helper;
-    call.audioMirror = createMirror(helper, call.track);
-    const candidatePath = path.join(call.dir, 'candidate.wav');
-    call.candidatePath = candidatePath;
-    call.recordingClosed = null;
-    const closed = new Promise(resolveClosed => { call.recordingClosed = resolveClosed; });
-    call.recordingClosedPromise = closed;
+    self.helper = helper;
+    self.audioMirror = createMirror(helper, self.track);
+    const candidatePath = path.join(self.dir, 'candidate.wav');
+    self.candidatePath = candidatePath;
+    self.recordingClosed = null;
+    const closed = new Promise(resolveClosed => { self.recordingClosed = resolveClosed; });
+    self.recordingClosedPromise = closed;
     const started = await helper.start({ recordingPath: candidatePath });
     // R4: a refused helper start is a failed call, not a silent one.
     if (started && started.ok === false) {
@@ -523,25 +523,26 @@ export function createPracticeCallService(deps = {}) {
     }
     if (call !== self || self.finished) return snapshot();
     const earFactory = await resolve('earFactory');
+    if (call !== self || self.finished) return snapshot();
     // The worker entry is built as its own bundle entry, so only the service
     // knows its built path: hand the ear a factory that names it.
     const inference = async ({ smartTurnPath, tonePath }) => {
       const createInference = await resolve('inference');
       return createInference({ smartTurnPath, tonePath, workerPath: deps.inferenceWorkerPath });
     };
-    call.ear = earFactory({
-      candidatePath, smartTurnPath: call.modelStore.pathOf('smartTurn'), tonePath: call.modelStore.pathOf('tone'),
+    self.ear = earFactory({
+      candidatePath, smartTurnPath: self.modelStore.pathOf('smartTurn'), tonePath: self.modelStore.pathOf('tone'),
       inference,
-      onToneSample: sample => { call.toneSamples.push(sample); },
+      onToneSample: sample => { self.toneSamples.push(sample); },
     });
-    await createSessions();
-    if (call !== self || self.finished) return snapshot();
-    call.timings.precheckMs = Math.round(clock.now() - call.startedAt);
+    await createSessions(self);
+    if (call !== self || self.finished) { await closeWarmSessions(self); return snapshot(); }
+    self.timings.precheckMs = Math.round(clock.now() - self.startedAt);
     setPhase('ringing');
     return snapshot();
   }
 
-  async function createSessions() {
+  async function createSessions(self) {
     const sessionsFactory = await resolve('sessionsFactory');
     const prompts = await resolve('prompts');
     const create = () => sessionsFactory({ model: 'opus', effort: 'low' });
@@ -551,19 +552,19 @@ export function createPracticeCallService(deps = {}) {
     const targetMinutes = deps.targetMinutes ?? [25, 30];
     const optionsFor = temperament => ({
       persona: {
-        name: call.persona.name, role: call.persona.role, team: call.persona.team, temperament, voice: call.persona.voice,
+        name: self.persona.name, role: self.persona.role, team: self.persona.team, temperament, voice: self.persona.voice,
       },
-      brief: call.promptBrief, plan: call.plan, targetMinutes, steering: call.steering,
+      brief: self.promptBrief, plan: self.plan, targetMinutes, steering: self.steering,
     });
     const settle = temperament => {
       const options = optionsFor(temperament);
-      call.instructions = { opener: prompts.buildOpenerInstructions(options), main: prompts.buildInterviewerInstructions(options) };
+      self.instructions = { opener: prompts.buildOpenerInstructions(options), main: prompts.buildInterviewerInstructions(options) };
     };
-    if (call.persona.temperament) {
-      settle(call.persona.temperament);
+    if (self.persona.temperament) {
+      settle(self.persona.temperament);
       await Promise.all([
-        opener.start({ instructions: call.instructions.opener }),
-        main.start({ instructions: call.instructions.main }),
+        opener.start({ instructions: self.instructions.opener }),
+        main.start({ instructions: self.instructions.main }),
         classifier.start({ instructions: CLASSIFIER_INSTRUCTIONS }),
       ]);
     } else {
@@ -573,22 +574,22 @@ export function createPracticeCallService(deps = {}) {
       classifierReady.catch(() => {}); // still awaited below; this only covers a main-session failure first
       const ready = await main.start({ instructions: prompts.buildInterviewerInstructions(optionsFor(null)) });
       const picked = typeof prompts.temperamentFromReady === 'function' ? prompts.temperamentFromReady(ready?.reply) : null;
-      call.persona.temperament = picked || 'neutral';
-      call.persona.temperamentFrom = picked ? 'claude' : 'fallback';
+      self.persona.temperament = picked || 'neutral';
+      self.persona.temperamentFrom = picked ? 'claude' : 'fallback';
       // A restarted main session gets the settled temperament, not a fresh choice.
-      settle(call.persona.temperament);
-      await Promise.all([opener.start({ instructions: call.instructions.opener }), classifierReady]);
+      settle(self.persona.temperament);
+      await Promise.all([opener.start({ instructions: self.instructions.opener }), classifierReady]);
     }
-    call.sessions = { opener, main, classifier };
-    call.restartSession = async (kind, { transcriptText } = {}) => {
+    self.sessions = { opener, main, classifier };
+    self.restartSession = async (kind, { transcriptText } = {}) => {
       const next = create();
-      const base = kind === 'opener' ? call.instructions.opener : kind === 'classifier' ? CLASSIFIER_INSTRUCTIONS : call.instructions.main;
+      const base = kind === 'opener' ? self.instructions.opener : kind === 'classifier' ? CLASSIFIER_INSTRUCTIONS : self.instructions.main;
       const earlier = typeof transcriptText === 'string' ? transcriptText.trim() : '';
       await next.start({ instructions: earlier ? `${base}\n\nEarlier in this call:\n${earlier}` : base });
-      call.sessions = { ...call.sessions, [kind]: next };
-      return call.sessions;
+      self.sessions = { ...self.sessions, [kind]: next };
+      return self.sessions;
     };
-    return call.sessions;
+    return self.sessions;
   }
 
   function onEngineEvent(event) {
@@ -817,8 +818,12 @@ export function createPracticeCallService(deps = {}) {
   }
 
   async function prepare() {
-    if (!call || call.finished) return snapshot();
-    try { return await precheck(); } catch (error) { return fail('precheck-failed', error); }
+    const self = call;
+    if (!self || self.finished) return snapshot();
+    try { return await precheck(); } catch (error) {
+      if (call !== self) return snapshot();
+      return fail('precheck-failed', error);
+    }
   }
 
   return Object.freeze({
@@ -886,9 +891,8 @@ export function createPracticeCallService(deps = {}) {
     list: nodeId => store.list(nodeId),
     onState(listener) {
       if (typeof listener !== 'function') throw new TypeError('onState expects a function');
-      const token = ++seq;
       stateListeners.add(listener);
-      return () => { if (stateListeners.size && seq >= token) stateListeners.delete(listener); };
+      return () => stateListeners.delete(listener);
     },
     onEvent(listener) {
       if (typeof listener !== 'function') throw new TypeError('onEvent expects a function');

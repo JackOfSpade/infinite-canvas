@@ -14,8 +14,8 @@ const BROAD = { minAttempts: 20, minBad: 8, maxShare: 0.3 };
 // Provisional: the log held only 168 board-data reads (0 bad) over 4 hours, spread over 7 vendors.
 const PER_VENDOR = { minAttempts: 5, minBad: 3, maxShare: 0.5 };
 // Reads gathered before a long run reports, and how many recent reads each surface is judged on.
-export const OFFICIAL_READ_WINDOW = 50;
-export const OFFICIAL_RECENT_READS = 100;
+const OFFICIAL_READ_WINDOW = 50;
+const OFFICIAL_RECENT_READS = 100;
 // A block already has its own message, and these renders never tried to read the site.
 // 202 is a firewall challenge: AptDeco answered one live on 2026-11-05, and it is the only status on the 8 unread pages in the log.
 const KNOWN_BLOCK_STATUSES = new Set([202, 401, 403, 429]);

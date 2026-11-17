@@ -10,7 +10,7 @@ import { EventLogger } from '../utils/EventLogger.js';
 // Navigation removes a Board's React instance while retaining its node in the
 // canvas stack. Only callers with live whole-canvas access may keep that work
 // running; a missing/deleted owner or a different file still ends ownership.
-function retainedBoardOwner(options, canvasFilePath = options.canvasFilePath, nodeId = options.nodeId) {
+export function retainedBoardOwner(options, canvasFilePath = options.canvasFilePath, nodeId = options.nodeId) {
   if (typeof options.getCurrentFile !== 'function' || options.getCurrentFile() !== canvasFilePath
     || isJobWorkflowDeletionPending(nodeId)) return false;
   const owner = options.getNode(nodeId);

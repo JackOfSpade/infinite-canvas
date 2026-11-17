@@ -200,7 +200,7 @@ export function extractOfficialPostingVendorAccountReceipt({ body, sourceUrl } =
       const script = (node.childNodes || []).filter(child => child.nodeName === '#text').map(child => child.value || '').join('');
       if (/^\s*window\.jobBoard\s*=/u.test(script)) scripts.push(script);
     }
-    stack.push(...(node.childNodes || []));
+    for (const child of node.childNodes || []) stack.push(child);
   }
   if (scripts.length !== 1) return null;
   const state = stateObject(scripts[0]); const key = `api/v1/companies/${r.tenant}`;

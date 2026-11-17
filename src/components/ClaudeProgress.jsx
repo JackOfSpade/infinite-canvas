@@ -91,7 +91,7 @@ export function ClaudeProgress({ run, item }) {
   // The dock item's run is a discovery-time snapshot; activity-only updates
   // land in the store, so read the live run from there.
   const liveRun = useSyncExternalStore(
-    listener => subscribeClaudeApplicationRuns(() => listener()),
+    subscribeClaudeApplicationRuns,
     () => getClaudeApplicationRun(jobId),
     () => getClaudeApplicationRun(jobId),
   );

@@ -964,14 +964,9 @@ export default [
     },
   },
   {
-    name: 'Amendment 4 both late renderer merges preserve open copies verified closed copies and ghost survivors',
+    name: 'Amendment 4 the late renderer merge preserves open copies verified closed copies and ghost survivors',
     run() {
       const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
-      const lateAt = source.indexOf("if (currentState === 'sources-ready')");
-      const lateStart = source.indexOf('const prevPending =', lateAt);
-      const lateEnd = source.indexOf('// This source completed', lateStart);
-      assert.ok(lateAt > 0 && lateStart > lateAt && lateEnd > lateStart);
-      const lateBody = source.slice(lateStart, lateEnd);
       const resolvedAt = source.indexOf('const resolvedItems = prevPending.filter(j => sourceWarningOverrides.has(j?.source));');
       const resolvedExpression = source.slice(resolvedAt).match(/foundJobs = ([^\n]+);/u)?.[1];
       assert.ok(resolvedAt > 0 && resolvedExpression);
@@ -981,10 +976,10 @@ export default [
       const runMerge = (site, retained, incoming) => {
         const context = { dedupJobsAcrossSources, uniqueJobsAcrossSources, mergeResolvedSourceItems,
           pendingJobsRef: { current: retained }, freshJobs: incoming, resolvedItems: retained, foundJobs: incoming };
-        const result = runInNewContext(site === 'late-usajobs' ? `${lateBody}\nmergedPending;` : resolvedExpression, context);
+        const result = runInNewContext(resolvedExpression, context);
         return Array.from(result);
       };
-      for (const site of ['late-usajobs', 'post-backend']) {
+      for (const site of ['post-backend']) {
         for (const [priorVerified, incomingVerified, expectedSource] of [[false, false, 'usajobs'], [true, false, 'linkedin'], [true, true, 'usajobs']]) {
           const retained = [make('linkedin', 'closed', { boardClosed: marker, ...(priorVerified ? { officialPosting: posting() } : {}) })];
           const incoming = [make('usajobs', 'open', incomingVerified ? { officialPosting: posting() } : {})];

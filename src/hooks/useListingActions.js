@@ -4,6 +4,14 @@ import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { buildItemQuery } from '../utils/bundlePricing';
 import { useToast } from '../components/ToastProvider';
 
+// A failed pricing IPC reply becomes a thrown error that keeps its rate-limit flag.
+function assertPricingSuccess(result) {
+  if (result.success) return;
+  const err = new Error(result.error);
+  if (result.isRateLimit) err.isRateLimit = true;
+  throw err;
+}
+
 /**
  * useListingActions — shared logic for SellHubNode's product/pricing state.
  *
@@ -96,11 +104,7 @@ export function useListingActions(id, data) {
       recovery: recovery || undefined,
       autoResume,
     });
-    if (!result.success) {
-      const err = new Error(result.error);
-      if (result.isRateLimit) err.isRateLimit = true;
-      throw err;
-    }
+    assertPricingSuccess(result);
     return result;
   }, [buildSearchQuery, product.condition, product.category, id, canvasFilePath]);
 
@@ -118,11 +122,7 @@ export function useListingActions(id, data) {
     payload.recovery = recovery || undefined;
     payload.autoResume = autoResume;
     const result = await window.electronAPI.rescrapeSource(payload);
-    if (!result.success) {
-      const err = new Error(result.error);
-      if (result.isRateLimit) err.isRateLimit = true;
-      throw err;
-    }
+    assertPricingSuccess(result);
     return result;
   }, [buildSearchQuery, canvasFilePath, id]);
 
@@ -150,11 +150,7 @@ export function useListingActions(id, data) {
         comps: item.comps || { sold: [], active: [] },
       })),
     });
-    if (!result.success) {
-      const err = new Error(result.error);
-      if (result.isRateLimit) err.isRateLimit = true;
-      throw err;
-    }
+    assertPricingSuccess(result);
     return result;
   }, [buildSearchQuery, product.condition, product.model, product.color, product.generated_title, data.pricingNotes, id, canvasFilePath]);
 
@@ -173,11 +169,7 @@ export function useListingActions(id, data) {
       recovery: recovery || undefined,
       autoResume,
     });
-    if (!result.success) {
-      const err = new Error(result.error);
-      if (result.isRateLimit) err.isRateLimit = true;
-      throw err;
-    }
+    assertPricingSuccess(result);
     return result.bundlePricing || null;
   }, [id, canvasFilePath]);
 

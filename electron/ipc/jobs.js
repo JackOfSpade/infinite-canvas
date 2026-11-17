@@ -1296,8 +1296,8 @@ async function copyCareerInputToStaging(filePath, stagedPath, { afterInspection 
     destination = await openCareerStageDestination(stagedPath);
     const hash = crypto.createHash('sha256');
     let copied = 0;
+    const buffer = Buffer.allocUnsafe(64 * 1024);
     while (true) {
-      const buffer = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       copied += bytesRead;
@@ -1329,8 +1329,8 @@ async function boundedCareerInputDescriptor(filePath) {
   try {
     const hash = crypto.createHash('sha256');
     let read = 0;
+    const buffer = Buffer.allocUnsafe(64 * 1024);
     while (true) {
-      const buffer = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await source.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       read += bytesRead;
@@ -1423,8 +1423,8 @@ async function stagedCareerAttachmentHashMatches(record) {
     if (!before.isFile() || Number(before.nlink) !== 1 || !sameStagedCareerContentVersion(before, record.version)) return false;
     const hash = crypto.createHash('sha256');
     let read = 0;
+    const buffer = Buffer.allocUnsafe(64 * 1024);
     while (true) {
-      const buffer = Buffer.allocUnsafe(64 * 1024);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       read += bytesRead;
@@ -3268,8 +3268,7 @@ async function restoreUnverifiedCheckpointTombstone(tombstonePath, originalPath)
     await fs.promises.link(tombstonePath, originalPath);
     await fs.promises.unlink(tombstonePath);
     return 'restored';
-  } catch (error) {
-    if (error?.code === 'EEXIST') return 'preserved-tombstone';
+  } catch {
     return 'preserved-tombstone';
   }
 }
@@ -3734,9 +3733,12 @@ async function listDescriptionRecoveryCheckpoints(canvasFilePath) {
       }
       const snapshot = JSON.parse(read.text);
       const expectedPath = descriptionRecoveryCheckpointPath(canvasFilePath, snapshot?.runId);
-      if (expectedPath !== filePath
-          || !hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) {
+      if (!hasExactDescriptionRecoveryOwnership(snapshot, snapshot?.nodeId, snapshot?.runId)) {
         ignored.ownershipMismatch += 1;
+        continue;
+      }
+      if (expectedPath !== filePath) {
+        ignored.pathMismatch += 1;
         continue;
       }
       const metadata = descriptionRecoveryCheckpointMeta(snapshot, read.updatedAt);
@@ -4028,9 +4030,7 @@ export async function __saveDescriptionRecoverySnapshotIfCurrentForTests(snapsho
         ? 'ownership-mismatch'
         : error?.code === 'ENOENT'
           ? 'checkpoint-unavailable'
-          : error instanceof SyntaxError
-            ? 'checkpoint-invalid'
-            : 'checkpoint-invalid';
+          : 'checkpoint-invalid';
     }
     if (!snapshotOperationAuthority(snapshot) && sealedParentFailure) {
       return { saved: false, globalSaved: false, reason: sealedParentFailure };
@@ -4143,10 +4143,6 @@ async function discardUnknownOwnerJobRun(canvasFilePath, runId, { trashItem = nu
     expectedOwnerUnknown: true,
   });
   return { ...cleanup, legacyOwnerUnknown: true };
-}
-
-export async function __discardUnknownOwnerJobRunForTests(canvasFilePath, runId) {
-  return discardUnknownOwnerJobRun(canvasFilePath, runId);
 }
 
 async function loadJobAnalysisSnapshot(canvasFilePath, nodeId = null, jobRunId = null) {
@@ -4622,7 +4618,7 @@ function buildCandidateEvidenceForScoring(profile, careerData, { approvedSnapsho
   // their established raw-text safety bound.
   const bounded = raw.slice(0, MAX_SCORING_CAREER_DATA_CHARS);
   const tag = `candidate-career-evidence-${crypto.randomUUID().slice(0, 8)}`;
-  const truncation = !approvedSnapshot && raw.length > bounded.length
+  const truncation = raw.length > bounded.length
     ? ` The source was bounded to its first ${MAX_SCORING_CAREER_DATA_CHARS.toLocaleString()} characters for this scoring run; text beyond that boundary is unavailable for quoting, and its absence still means only not documented in the supplied career data.`
     : '';
   return {
@@ -6136,11 +6132,8 @@ export function getJobsBoardTelemetryForReport(boardIds, reportWindowId = null, 
 // hub can truthfully own the combined funnel. Do not use it for any other
 // telemetry section.
 export function getJobsSourceRunHistoryForReport(currentNodeIds, reportWindowId = null) {
-  const context = getCurrentIpcRequestContext();
-  const sender = context?.sender;
-  const ids = currentNodeIds instanceof Set ? currentNodeIds : new Set(currentNodeIds || []);
   const recordsFor = (nodeId, telemetry) => {
-    if (!ids.has(nodeId) || telemetry?.nodeId !== nodeId || !telemetry?.sourceRunHistory) return null;
+    if (!telemetry?.sourceRunHistory) return null;
     const history = Object.entries(telemetry.sourceRunHistory)
       // Receipts are written only for known source IDs. Keep that invariant at
       // the report boundary too, so malformed in-memory state cannot introduce
@@ -6149,29 +6142,15 @@ export function getJobsSourceRunHistoryForReport(currentNodeIds, reportWindowId 
       .map(([sourceId, records]) => ({ sourceId, records: records.slice(-MAX_SOURCE_RUN_HISTORY_PER_SOURCE) }));
     return history.length > 0 ? { nodeId, history } : null;
   };
-  if (!sender) {
-    const record = recordsFor(latestJobsTelemetry?.nodeId, latestJobsTelemetry);
-    return record ? [record] : [];
-  }
-  if (reportWindowId != null && sender.id !== reportWindowId) return [];
-  const byNode = jobsTelemetryBySender.get(sender);
-  if (!byNode) {
-    // Preserve the existing synthetic-handler test seam, but real windows
-    // fail closed rather than borrowing another window's diagnostics.
-    if (typeof sender?.getURL === 'function') return [];
-    const record = recordsFor(latestJobsTelemetry?.nodeId, latestJobsTelemetry);
-    return record ? [record] : [];
-  }
-  return [...byNode.entries()]
+  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId)
     .map(([nodeId, telemetry]) => recordsFor(nodeId, telemetry))
-    .filter(Boolean)
-    .sort((a, b) => String(a.nodeId).localeCompare(String(b.nodeId)));
+    .filter(Boolean);
 }
 
 /**
- * The hub-attribution gate getJobsSourceRunHistoryForReport applies inline,
- * returned as [nodeId, telemetry] pairs so the two accessors below cannot
- * drift away from it. Every branch is deliberately identical to the sibling's:
+ * The hub-attribution gate shared by getJobsSourceRunHistoryForReport and the
+ * accessors below, returned as [nodeId, telemetry] pairs so they cannot drift
+ * apart. Its branches are:
  * the contextless ambient fallback, the reportWindowId check, the synthetic
  * handler seam (a real Electron WebContents has getURL(), so a real window
  * that produced no sender-local telemetry fails closed rather than borrowing
@@ -6293,6 +6272,14 @@ export function appendCareerConvergenceRound(telemetry, value) {
   return true;
 }
 
+// Compilation happens before the search funnel exists. Keep each hub's
+// bounded cache/stage evidence independently reportable on multi-hub canvases.
+export function getJobsCareerCompilationForReport(currentNodeIds, reportWindowId = null) {
+  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId, { careerCompilation: true })
+    .filter(([, telemetry]) => telemetry?.careerSnapshotCache)
+    .map(([nodeId, telemetry]) => ({ nodeId, cache: telemetry.careerSnapshotCache }));
+}
+
 /**
  * How many current-canvas hubs hold attributable telemetry in this window.
  *
@@ -6305,14 +6292,6 @@ export function appendCareerConvergenceRound(telemetry, value) {
  * of absence the report never observed. This count is the observation it can
  * state instead: N hubs hold telemetry, so no single hub owns this section.
  */
-// Compilation happens before the search funnel exists. Keep each hub's
-// bounded cache/stage evidence independently reportable on multi-hub canvases.
-export function getJobsCareerCompilationForReport(currentNodeIds, reportWindowId = null) {
-  return reportAttributableHubTelemetry(currentNodeIds, reportWindowId, { careerCompilation: true })
-    .filter(([, telemetry]) => telemetry?.careerSnapshotCache)
-    .map(([nodeId, telemetry]) => ({ nodeId, cache: telemetry.careerSnapshotCache }));
-}
-
 export function getJobsTelemetryHubCountForReport(currentNodeIds, reportWindowId = null) {
   return reportAttributableHubTelemetry(currentNodeIds, reportWindowId).length;
 }
@@ -6639,7 +6618,6 @@ export function recordJobSourceProgress(payload = {}, { updatePipeline = true, e
   return true;
 }
 
-/** Write only the current LinkedIn Solve result; the pass trail owns history. */
 function ownsCurrentJobTelemetry(nodeId, jobRunId) {
   return !!jobRunId
     && jobsTelemetry.nodeId === nodeId
@@ -7693,6 +7671,13 @@ function linkedInShortDescriptionWarning(jobs) {
   };
 }
 
+/** The same health check for rows that reach a gate through Solve or a resume, not a full search. */
+function sourceHealthWarningForRows(sourceId, rows, nodeId) {
+  const warning = sourceHealthWarning(sourceId, assessSourceHealth(rows));
+  if (warning) logger.error(`[Jobs][${nodeId}] Scrape health failed for ${sourceId}: ${warning.evidence}`);
+  return warning;
+}
+
 /**
  * Keep only listings with enough employer-supplied text to be worth ranking.
  *
@@ -7701,13 +7686,6 @@ function linkedInShortDescriptionWarning(jobs) {
  * therefore surface on a later run once its employer finishes it; recording it
  * as seen now would hide that improved version for the history retention window.
  */
-/** The same health check for rows that reach a gate through Solve or a resume, not a full search. */
-function sourceHealthWarningForRows(sourceId, rows, nodeId) {
-  const warning = sourceHealthWarning(sourceId, assessSourceHealth(rows));
-  if (warning) logger.error(`[Jobs][${nodeId}] Scrape health failed for ${sourceId}: ${warning.evidence}`);
-  return warning;
-}
-
 export function filterJobsByDescriptionEvidence(jobs, shortThreshold = JOB_DESCRIPTION_EVIDENCE_MIN_CHARS) {
   const retained = [];
   const dropped = [];
@@ -8308,12 +8286,10 @@ export function jobSourceRecoveryDisposition(sourceId, warnings = []) {
   const needsHuman = list.some((warning) => {
     const code = String(warning?.code || '').trim().toLowerCase();
     const mode = String(warning?.resumeState?.mode || '').trim().toLowerCase();
-    const explicitHuman = warning?.severity === 'paste'
+    return warning?.severity === 'paste'
       || ['login-platform', 'open-external'].includes(warning?.action)
       || ['native-login', 'native-challenge'].includes(mode)
       || /(?:captcha|challenge|login|sign-in|auth|credentials?|config(?:uration)?-missing|cloudflare|hard-block)/i.test(code);
-    if (explicitHuman) return true;
-    return false;
   });
   return needsHuman ? 'manual' : 'automatic';
 }
@@ -8744,23 +8720,6 @@ export function selectIndeedResumePlan(queries, resumePlans, collectionLimits = 
   };
 }
 
-/**
- * Pick the top `n` jobs FAIRLY across sources (round-robin), preserving each
- * source's gathered order within its turn. Caps how many jobs reach the
- * quota-bound LLM scorer when a widened gather over-fills the budget, so we
- * score "the best slice across all sources" instead of letting whichever source
- * returned most monopolize the scoring budget. Returns all jobs unchanged when
- * there are <= n — which is the CURRENT state, since JOB_SCORE_CAP is Infinity.
- *
- * DO NOT read "gathered order" as "relevance order". Measured per platform:
- * LinkedIn and Google hold ~100% on-target at every depth, Glassdoor decays
- * (and then partially recovers) with depth, USAJobs has no usable relevance
- * ordering at all, and ZipRecruiter is INVERTED — its page 1 was its worst page
- * (35% on-target) rising to ~100% by page 25. So cutting a source at the head
- * keeps its worst rows on at least one platform. If a finite scoring budget is
- * ever reintroduced (see resultCaps.js), sample each source with a STRIDE
- * across its gathered rows rather than slicing the head.
- */
 function dedupByTitleCompany(arr, options) {
   // Location-aware: title+company alone would silently collapse legitimately
   // distinct same-title/company reqs in different cities (see
@@ -8907,6 +8866,23 @@ function boundedDedupProvenance(entries) {
   return { total: entries.length, counts, entries: out, omitted: Math.max(0, entries.length - out.length) };
 }
 
+/**
+ * Pick the top `n` jobs FAIRLY across sources (round-robin), preserving each
+ * source's gathered order within its turn. Caps how many jobs reach the
+ * quota-bound LLM scorer when a widened gather over-fills the budget, so we
+ * score "the best slice across all sources" instead of letting whichever source
+ * returned most monopolize the scoring budget. Returns all jobs unchanged when
+ * there are <= n — which is the CURRENT state, since JOB_SCORE_CAP is Infinity.
+ *
+ * DO NOT read "gathered order" as "relevance order". Measured per platform:
+ * LinkedIn and Google hold ~100% on-target at every depth, Glassdoor decays
+ * (and then partially recovers) with depth, USAJobs has no usable relevance
+ * ordering at all, and ZipRecruiter is INVERTED — its page 1 was its worst page
+ * (35% on-target) rising to ~100% by page 25. So cutting a source at the head
+ * keeps its worst rows on at least one platform. If a finite scoring budget is
+ * ever reintroduced (see resultCaps.js), sample each source with a STRIDE
+ * across its gathered rows rather than slicing the head.
+ */
 function selectTopAcrossSources(jobs, n) {
   const arr = Array.isArray(jobs) ? jobs : [];
   if (n <= 0) return [];
@@ -8938,10 +8914,6 @@ function selectTopAcrossSources(jobs, n) {
   return picked;
 }
 
-/**
- * Fetch API-based sources in parallel (no Puppeteer needed).
- * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
- */
 // Fan-out a single-query fetcher across all queries, merge and deduplicate by
 // title+company. Returns the same { items, warning } shape.
 //
@@ -9107,6 +9079,10 @@ export function __queryFanOutForTests(queries, fetcher, signal, options = {}) {
 
 export const __fetchHttpSourcesForTests = (...args) => fetchHttpSources(...args);
 
+/**
+ * Fetch API-based sources in parallel (no Puppeteer needed).
+ * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
+ */
 async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null, maxAgeDaysBySource = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
@@ -10404,8 +10380,10 @@ async function runFreshCompensationPipeline({ all, metrics, fail, apply, assessB
 
 async function processCompensationCohortBatches(groups, { signal, nodeId, researchedAt } = {}) {
   const metrics = { processed: 0, cacheHits: 0, researched: 0, failedCohorts: 0, assessed: 0, recommendedNoOffer: 0, failures: [], handled: new Set() };
+  const failedEntries = new Set();
   const fail = (entry, error) => {
     const { group } = entry;
+    failedEntries.add(entry);
     const firstFailureForCohort = !metrics.handled.has(entry.researchKey);
     metrics.handled.add(entry.researchKey);
     if (firstFailureForCohort) {
@@ -10609,7 +10587,7 @@ ${batch.map((entry) => `BEGIN COMPENSATION RESEARCH ${entry.researchId}\nCOHORT 
   // Stable slicing happens before any assessment can mutate its cache.
   const stableAssessmentBatches = packCompensationAssessmentBatches(all);
   for (const entry of all) {
-    if (signal?.aborted) { fail(entry, new Error('Compensation research was interrupted.')); continue; }
+    if (signal?.aborted) { if (!failedEntries.has(entry)) fail(entry, new Error('Compensation research was interrupted.')); continue; }
     const research = cachedCompensationResearch(entry.researchKey);
     const answers = cachedCompensationAssessment(entry.assessmentCacheKey, research);
     if (research && answers) {
@@ -11004,12 +10982,7 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
       // Role-band enrichment is separate from final salary-market research.
       // Preserve its outcome even when the listing-level fallback can proceed.
       roleBandResearches++;
-      if (signal?.aborted) {
-        // The lookup was attempted but cancelled. It is not a provider failure
-        // and no final market cohort existed yet, so preserve it only in the
-        // dedicated interruption partition.
-        roleBandInterruptedJobs += roleCandidates.length;
-      } else if (err?.code === 'COMPENSATION_ROLE_BAND_UNAVAILABLE') {
+      if (err?.code === 'COMPENSATION_ROLE_BAND_UNAVAILABLE') {
         // An accepted empty evidence result is an honest research outcome,
         // not a transport/validation failure and never grounds for inventing
         // a salary ladder. Keep its rows explicit in the report partition.
@@ -11020,14 +10993,6 @@ export async function researchCompensationAssessments(scoredJobs, { remoteReside
         roleBandFailureJobs += roleCandidates.length;
         if (roleBandFailureDetails.length < 5) roleBandFailureDetails.push({ role, reason: String(err?.message || err).slice(0, 300) });
         logger.warn(`[Jobs][${nodeId}] Experience-band research failed for ${role}:`, err?.message || err);
-      }
-      if (signal?.aborted) {
-        for (const candidate of roleCandidates) {
-          candidate.job.compensationAssessment = compensationFallback(candidate.postingJob || candidate.job, 'research_interrupted', 'Compensation research was interrupted; fit scoring completed normally.', candidate.location);
-          processed++;
-        }
-        progress();
-        continue;
       }
       // A published years-to-level ladder is optional evidence, not a reason
       // to suppress grounded salary research for a known role and location.
@@ -13692,15 +13657,6 @@ Return a JSON object with four arrays of search query strings:
       }
       if (res.truncated) sourceResults[res.sourceId].truncated = true;
       if (res.pageShapeFailures > 0) sourceResults[res.sourceId].pageShapeFailures = (sourceResults[res.sourceId].pageShapeFailures || 0) + res.pageShapeFailures;
-      if (res.pagesFetched != null) {
-        const pagesFetched = Math.max(0, Number(res.pagesFetched) || 0);
-        if (pagesFetched > 0) {
-          sourceResults[res.sourceId].pagesWalked = Math.max(
-            Number(sourceResults[res.sourceId].pagesWalked) || 0,
-            pagesFetched,
-          );
-        }
-      }
       if (Array.isArray(res.stopReasons) && res.stopReasons.length > 0) {
         // Manual walkers keep this as a Set; API fan-out returns an array.
         // Merge rather than replace so a recovery/second API pass cannot erase
@@ -13730,12 +13686,6 @@ Return a JSON object with four arrays of search query strings:
           Number(sourceResults[res.sourceId].pagesWalked) || 0,
           Math.max(0, Number(res.pagesFetched) || 0),
         );
-      }
-      if (Array.isArray(res.stopReasons) && res.stopReasons.length > 0) {
-        if (!(sourceResults[res.sourceId].stopReasons instanceof Set)) {
-          sourceResults[res.sourceId].stopReasons = new Set(sourceResults[res.sourceId].stopReasons || []);
-        }
-        for (const stopReason of res.stopReasons) sourceResults[res.sourceId].stopReasons.add(stopReason);
       }
       if (Array.isArray(res.relevanceRejected) && res.relevanceRejected.length > 0) {
         sourceResults[res.sourceId].relevanceRejected = res.relevanceRejected;
@@ -14195,7 +14145,12 @@ Return a JSON object with four arrays of search query strings:
       const enriched = await enrichDiceDescriptions(diceKept, combinedSignal);
       await assertSearchCurrent();
       const enrichedByUrl = new Map(enriched.map(j => [j.url, j]));
-      kept = kept.map(j => j.source === 'dice' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
+      // A Dice row confirmed closed on an ATS host is dropped, as LinkedIn does,
+      // not restored from its unenriched copy.
+      const diceClosedUrls = new Set(enriched.structurallyDroppedUrls || []);
+      kept = kept
+        .filter(j => !(j.source === 'dice' && diceClosedUrls.has(j.url)))
+        .map(j => j.source === 'dice' && enrichedByUrl.has(j.url) ? enrichedByUrl.get(j.url) : j);
 
       // Re-stage the enriched Dice rows. The page-level rows staged at gather
       // time carry only the ~500-char list teaser, so a crash AFTER this point —
@@ -14521,7 +14476,14 @@ Return a JSON object with four arrays of search query strings:
     // we score/surface is the most-recent, per the run's intent. Unparseable
     // dates sort last (kept, not dropped); the sort is stable so same-date ties
     // keep gather order (≈ platform relevance).
-    const postedMs = (j) => { const d = parsePostedDate(j?.posted); return d ? d.getTime() : -Infinity; };
+    const postedMsCache = new WeakMap();
+    const postedMs = (j) => {
+      if (j && typeof j === 'object' && postedMsCache.has(j)) return postedMsCache.get(j);
+      const d = parsePostedDate(j?.posted);
+      const ms = d ? d.getTime() : -Infinity;
+      if (j && typeof j === 'object') postedMsCache.set(j, ms);
+      return ms;
+    };
     kept.sort((a, b) => postedMs(b) - postedMs(a));
 
     // Repair mojibake (UTF-8 mis-decoded as Latin-1) BEFORE anything reads the
@@ -15196,11 +15158,6 @@ Return a JSON object with four arrays of search query strings:
     });
     await assertSearchCurrent();
     if (gatheredStageAdvanced !== true) return searchSupersededResult();
-    if (hasExactResumeToken && gatheredStageAdvanced !== true) {
-      const failure = await exactResumeStageFailure();
-      retirePipeline('recovery-superseded', failure.error);
-      return { success: false, ...failure };
-    }
     // The user may have started a fresh run while this recovered result was
     // being finalized. Re-check the manifest token immediately before returning
     // so old staged jobs can never be painted onto its successor.
@@ -15584,11 +15541,7 @@ Return a JSON object with four arrays of search query strings:
       if (!suppliedCareerSnapshotId || suppliedCareerSnapshotId !== persistedCareerSnapshotId) {
         return { ok: false, cleared: false, receipt: null, careerSnapshotMismatch: true };
       }
-      const manifestAuthority = jobAnalysisOperationAuthorityReceipt(manifest.inputs?.operationAuthority);
-      if (!suppliedAuthority || !manifestAuthority
-        || suppliedAuthority.operationId !== manifestAuthority.operationId
-        || suppliedAuthority.revision !== manifestAuthority.revision
-        || JSON.stringify(suppliedAuthority.semanticBase) !== JSON.stringify(manifestAuthority.semanticBase)
+      if (!sameJobAnalysisOperationAuthority(manifest.inputs?.operationAuthority, suppliedAuthority)
         || !await currentJobAnalysisOperationAuthority({ canvasFilePath, hubId: nodeId, ...suppliedAuthority })) {
         return { ok: false, cleared: false, receipt: null, operationAuthorityMismatch: true };
       }
@@ -15597,14 +15550,10 @@ Return a JSON object with four arrays of search query strings:
       // surviving receipt is the only durable owner for an idempotent retry;
       // never substitute whichever operation happens to be current now.
       const priorReceipt = await readLastRunReceipt(canvasFilePath, { nodeId });
-      const priorAuthority = jobAnalysisOperationAuthorityReceipt(priorReceipt?.operationAuthority);
-      if (!suppliedAuthority || !priorReceipt || priorReceipt.runId !== runId
+      if (!priorReceipt || priorReceipt.runId !== runId
         || priorReceipt.nodeId !== nodeId
         || normalizeCareerSnapshotIdentifier(priorReceipt.careerSnapshotId) !== suppliedCareerSnapshotId
-        || !priorAuthority
-        || priorAuthority.operationId !== suppliedAuthority.operationId
-        || priorAuthority.revision !== suppliedAuthority.revision
-        || JSON.stringify(priorAuthority.semanticBase) !== JSON.stringify(suppliedAuthority.semanticBase)) {
+        || !sameJobAnalysisOperationAuthority(priorReceipt.operationAuthority, suppliedAuthority)) {
         return { ok: false, cleared: false, receipt: priorReceipt || null, operationAuthorityMismatch: true };
       }
     }
@@ -16757,13 +16706,6 @@ Return a JSON object with four arrays of search query strings:
     }
   });
 
-  // ── Board research for jobs at or above the fit threshold ────────────────
-  // The Board's official-posting stage has already looked up the eligible rows.
-  // This stage finishes what used to run before scoring, for those rows only:
-  // listing recheck, official dedup, closed-listing settlement, one rescore when
-  // official text materially differs, and deferred company research. Rows below
-  // the threshold pass through untouched; a confirmed-closed one is reported for
-  // removal. Indexes are into the request, so the renderer can keep protected cards.
   // Jobs a Board's own preferences pass that their Search never scored. Their
   // scores live on the Board, so the Search's result and scoring snapshot stay.
   handleSafe('score-board-preference-jobs', async (_event, { jobs, careerSnapshotId, nodeId } = {}, signal) => {
@@ -16775,6 +16717,13 @@ Return a JSON object with four arrays of search query strings:
     return { success: true, scoredJobs: [...scored, ...unscored].map(row => ({ ...row, careerSnapshotId })) };
   });
 
+  // ── Board research for jobs at or above the fit threshold ────────────────
+  // The Board's official-posting stage has already looked up the eligible rows.
+  // This stage finishes what used to run before scoring, for those rows only:
+  // listing recheck, official dedup, closed-listing settlement, one rescore when
+  // official text materially differs, and deferred company research. Rows below
+  // the threshold pass through untouched; a confirmed-closed one is reported for
+  // removal. Indexes are into the request, so the renderer can keep protected cards.
   handleSafe('settle-board-research', async (event, { jobs, nodeId, manualAiRunId, officialLookups = 0 } = {}, signal) => {
     if (!Array.isArray(jobs)) throw new Error('Board research requires a jobs array.');
     const telemetry = getScopedJobsTelemetry();

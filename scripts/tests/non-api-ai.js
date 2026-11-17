@@ -2,9 +2,9 @@ import { readFileSync } from 'node:fs';
 import { __allowDurableTaskIdsForTests } from '../../electron/ipc/nonApiAi.js';
 import { EventEmitter } from 'node:events';
 import nodeAssert, { rejects } from 'node:assert/strict';
-import { dropRetiredDurableSteps, fallbackWorkerAttachmentToManual, flushNonApiAiPersistence, isNonApiAiStepBackError } from '../../electron/ipc/nonApiAi.js';
+import { dropRetiredDurableSteps, flushNonApiAiPersistence, isNonApiAiStepBackError } from '../../electron/ipc/nonApiAi.js';
 import { _resetNonApiAiHandoffLifecycle, abortNodeTasksAndWait, applyBugReportCode, assert, buildNonApiAiHandoffLifecycleMarkdown, callLLMRaw, callLLMText, callLLMVision, createHostStagedVisionCaller, checkPromptFits, __durableStepKeysForTests, __reloadDurableStateForTests, __nonApiAiProgressScopeSnapshotForTests, __pruneInactiveEphemeralProgressScopesForTests, __selectDurableStepForTests, canonicalizeGeneratedUntrustedBoundaryNonces, deriveHandoffCode, durableRunHasAnyTask, durableRunSettlementSummary, electronPkg, fs, generateMarkdown, getKnownTaskIds, getNonApiAiHandoffLifecycle, handleSafe, HANDOFF_CODE_ALPHABET, hardenStructuredTaskPrompt, ipcMain, listingIdsForRootBatch, materializeNonApiPrompt, NON_API_AI_TRANSPORT, NonApiAiCodeMismatchError, registerNonApiAiHandlers, requestNonApiAi, runBoundedJobTaxonomy, SAFE_NON_API_AI_LOG_ERROR_CODES, SAFE_VALIDATION_DIAGNOSTIC_REASONS, taskMaxTokensFor, taskModelRoutingSnapshot, validateCompensationEvidenceSubmission, validateJobPreferenceListingSubmission, validateNonApiAiSubmission, validateRoleFamilyExperienceBandsSubmission, wrapUntrustedText } from '../test-dependencies.js';
-import { WORKER_ATTACHMENT_TRANSPORT_ENABLED, readWorkerHandoffAttachments, readWorkerHandoff, markWorkerHandoffAssigned, listWorkerHandoffs, returnHandoffToPerson, requeueWorkerHandoff } from '../../electron/ipc/nonApiAi.js';
+import { WORKER_ATTACHMENT_TRANSPORT_ENABLED, readWorkerHandoffAttachments, readWorkerHandoff, markWorkerHandoffAssigned, listWorkerHandoffs, returnHandoffToPerson } from '../../electron/ipc/nonApiAi.js';
 import { pendingManualHandoffsForActiveTasks } from '../../electron/ipc/bugReport.js';
 import { __claimAcceptedResponseFingerprintForTests, __defaultSafeValidationDiagnosticForTests, __nonApiAiHandoffLifecycleAggregateCountForTests, __nonApiAiLogErrorCodeForTests, __promptForRetryForTests, DUPLICATE_RESPONSE_MIN_LENGTH, getNonApiAiHandoffLifecycleSnapshot, NonApiAiCodeMissingError, NonApiAiDuplicateResponseError, submitWorkerResponse } from '../../electron/ipc/nonApiAi.js';
 import { getRecentLogs, logger } from '../../electron/logger.js';
@@ -171,85 +171,6 @@ export default [
       await f.cleanup();
     },
   })),
-  {
-    name: 'comparative transport: simultaneous reserved handoffs requeue without settling and complete on a new worker',
-    run: async () => {
-      let assigned = 0;
-      const f = await comparativeTransportFixture('reserved-recovery', () => { assigned++; });
-      const owners = Array.from({ length: 5 }, (_, slot) => f.invoke('A', slot));
-      let requests;
-      for (let turn = 0; turn < 200; turn++) {
-        requests = f.sent.filter(item => item.channel === 'non-api-ai-request').map(item => item.payload);
-        if (requests.length === owners.length) break;
-        await new Promise(resolve => setTimeout(resolve, 5));
-      }
-      assert(requests.length === owners.length, 'all original comparative invocations are pending together');
-      requests.forEach((request, index) => assert(f.read(request, 'A', false, String(index + 1)).ok));
-      assert(assigned === 0, 'reads reserve every request without starting response timers');
-      requests.forEach(request => assert(requeueWorkerHandoff({ ...f.bridgeArgs(request), reason: 'worker-lost' })));
-      assert(assigned === 0, 'requeue cannot start an unassigned response timer');
-      const stillPending = listWorkerHandoffs({ allowTasks: new Set([COMPARATIVE_TASK]) }).handoffs;
-      assert(requests.every(request => stillPending.some(item => item.requestId === request.requestId && item.handoffCode === request.handoffCode)),
-        'all pending registry promises retain their original request and handoff identities');
-      for (const request of requests) {
-        assert(f.read(request, 'A', false, '9').ok);
-        assert(markWorkerHandoffAssigned(f.bridgeArgs(request)));
-        assert((await f.submit(request)).outcome === 'accepted');
-      }
-      assert((await Promise.all(owners)).every(item => item.answer?.answer === 'valid'), 'all original promises complete successfully');
-      assert(assigned === requests.length, 'each response timer starts exactly once on the replacement worker');
-      await f.cleanup();
-    },
-  },
-  {
-    name: 'comparative transport: two requeues preserve identity and assignment, while the third fails with its recovery code',
-    run: async () => {
-      let assigned = 0;
-      const f = await comparativeTransportFixture('bounded-recovery', () => { assigned++; });
-      const owner = f.invoke('A'); const request = await f.waitRequest(); const args = f.bridgeArgs(request);
-      assert(f.read(request, 'A').ok && markWorkerHandoffAssigned(args) && assigned === 1);
-      for (const [index, reason] of ['worker-lost', 'worker-replaced'].entries()) {
-        assert(requeueWorkerHandoff({ ...args, reason }), 'an infrastructure retry keeps its owner promise pending');
-        const pending = listWorkerHandoffs({ allowTasks: new Set([COMPARATIVE_TASK]) }).handoffs.find(item => item.requestId === request.requestId);
-        assert(pending?.handoffCode === request.handoffCode && f.read(request, 'A', false, String(index + 3)).ok);
-        assert(markWorkerHandoffAssigned(args) && assigned === 1, 'replacement assignment does not reset or restart the response budget');
-      }
-      assert(requeueWorkerHandoff({ ...args, reason: 'fresh-context-required' }));
-      const result = await owner;
-      assert(result.failureCode === 'WORKER_REQUEUE_EXHAUSTED' && result.recoveryCode === 'WORKER_FRESH_CONTEXT_REQUIRED',
-        'retry exhaustion remains distinct from validation and preserves its last infrastructure cause');
-      assert(!requeueWorkerHandoff({ ...args, reason: 'worker-lost' }), 'a terminal handoff cannot resurrect');
-      await f.cleanup();
-    },
-  },
-  {
-    name: 'comparative transport: cancellation after requeue prevents another assignment or requeue',
-    run: async () => {
-      let assigned = 0;
-      const f = await comparativeTransportFixture('cancelled-recovery', () => { assigned++; });
-      const owner = f.invoke('B'); const request = await f.waitRequest(); const args = f.bridgeArgs(request);
-      assert(f.read(request, 'B').ok && requeueWorkerHandoff({ ...args, reason: 'comparison-contaminated' }));
-      await ipcMain.__getInvokeHandler('cancel-non-api-ai-request')({ sender: f.sender }, { requestId: request.requestId });
-      await owner;
-      assert(!requeueWorkerHandoff({ ...args, reason: 'worker-replaced' })
-        && !markWorkerHandoffAssigned(args) && assigned === 0, 'cancellation wins without starting the unassigned timer');
-      await f.cleanup();
-    },
-  },
-  {
-    name: 'comparative transport: worker recovery does not erase genuine invalid-response attempts',
-    run: async () => {
-      const f = await comparativeTransportFixture('invalid-after-recovery');
-      const owner = f.invoke('A'); const request = await f.waitRequest();
-      assert(f.read(request, 'A').ok && (await f.submit(request, 'invalid')).outcome === 'rejected');
-      assert(requeueWorkerHandoff({ ...f.bridgeArgs(request), reason: 'worker-replaced' }));
-      assert(f.read(request, 'A', false, '3').ok, 'replacement earns fresh bridge proof for the same request');
-      assert((await f.submit(request, 'invalid')).accepted === false);
-      assert((await owner).failureCode === 'OFFICIAL_POSTING_COMPARATIVE_INVALID',
-        'a second genuinely invalid answer still ends the comparative run after worker recovery');
-      await f.cleanup();
-    },
-  },
   {
     name: 'non-API AI: manual delivery and escalation start assignment once, while failed delivery never does',
     run: async () => {
@@ -1082,8 +1003,8 @@ export default [
         && jobSearchSource.includes('const errorControlsLocked = !!data.locked || !!data.queuedModuleRun || manualAiRecoveryAdmissionLocked;')
         && genericRerun.includes('Choose Resume for the saved manual-AI recovery, or use Clear career data to deliberately remove it before another search.')
         && !genericRerun.includes('Start fresh')
-        && pipelineAdmission.includes('staleRecoveryBlockedAtLaneStart')
-        && pipelineAdmission.includes('staleOrdinaryManualAiResumeBlocksAdmission(laneData.manualAiResume'),
+        && pipelineAdmission.includes('staleOrdinaryManualAiResumeBlocksAdmission(liveData.manualAiResume')
+        && pipelineAdmission.includes('staleOrdinaryManualAiResumeBlocksAdmission(laneTurnData.manualAiResume'),
       'a pending stale recovery locks normal controls and is rechecked at the shared-lane turn, while the exact user-authorized Resume remains admissible and Clear career data is the sole removal path');
       const scoringContinuation = sliceSource('const resumeScoring = useCallback', 'resumeScoringRef.current = resumeScoring;');
       const interruptedResume = sliceSource('const handleResumeRun = useCallback', 'resumeInterruptedRunRef.current = handleResumeRun;');
@@ -1128,7 +1049,7 @@ export default [
         && jobSearchSource.includes('completeManualAiRun(effectiveManualAiRunId)')
         && jobBoardSource.includes('completeManualAiRun(manualAiRunId)'),
       'a prompt settlement no longer clears restart state; only committed workflow completion or cancellation does');
-      assert(jobSearchSource.includes("manualAiRecoveryMode: 'append-scored-jobs'")
+      assert(jobSearchSource.includes("manualAiRecoveryMode: resultMode === 'append' ? 'append-scored-jobs' : null")
         && jobSearchSource.includes("resultMode === 'append'")
         && jobSearchSource.includes('recoveryMode: resume.recoveryMode'),
       'background scoring marks append recovery and consumes that mode again after restart');
@@ -1220,18 +1141,10 @@ export default [
         const to = source.indexOf(end, from);
         return from >= 0 && to > from ? source.slice(from, to) : '';
       };
-      const usaJobs = between('const triggerUSAJobsBackgroundSearch = useCallback', 'const handleJobsSettingsChange = useCallback');
       const paused = between('const resumeScoring = useCallback', 'useEffect(() => {\n    resumeScoringRef.current = resumeScoring;');
       const crashResume = between('const handleResumeRun = useCallback', 'resumeInterruptedRunRef.current = handleResumeRun;');
       const savedScrape = between('const handleResumeSavedScrape = useCallback', 'const autoResumedManualAiRunRef = useRef(null);');
 
-      assert(usaJobs.includes("lane: 'job-search'")
-        && usaJobs.includes('const manualAiRunId = createManualAiRunId(currentId);')
-        && usaJobs.includes('manualAiRunId,')
-        && usaJobs.includes('lease?.release();')
-        && usaJobs.includes('processingRunsRef.current.finish(processingToken)')
-        && usaJobs.includes('await resumeScoringRef.current?.()'),
-      'the USAJobs append holds the shared job lane and one workflow id, then releases before handing off paused scoring so it cannot deadlock itself');
       assert(paused.includes("lane: 'job-search'")
         && paused.includes('const manualAiRunId = createManualAiRunId(currentId);')
         && paused.includes('completeManualAiRun(manualAiRunId);'),
@@ -1257,7 +1170,7 @@ export default [
         && source.includes('isSavedScrapeManualAiResume(resume)')
         && source.includes('Saved recovery queue delegated to Job Board'),
       'saved-scrape recovery is lane-serialized when standalone, reuses the Board lease when orchestrated, and routes either saved replay mode back to the exact saved snapshot after restart');
-      return { workflows: 4, lane: 'job-search' };
+      return { workflows: 3, lane: 'job-search' };
     },
   },
   {
@@ -4262,35 +4175,6 @@ export default [
         'neither a rejected late manual admission nor a completed manual step leaves a pending record');
     },
   })),
-  {
-    name: 'non-API AI: attachment fallback to manual rejects after its MCP renderer has actually stopped',
-    run: async () => {
-      ipcMain.__clearInvokeHandlers();
-      registerNonApiAiHandlers();
-      const sent = [];
-      const sender = new EventEmitter();
-      sender.id = 976;
-      sender.isDestroyed = () => false;
-      sender.send = (channel, payload) => sent.push({ channel, payload });
-      handleSafe('non-api-fallback-renderer-loss-test', async (_event, _args, signal) => ({
-        answer: await requestNonApiAi({ prompt: 'Synthetic attachment transport', task: 'vision-product-analysis', signal,
-          attachmentPaths: ['/tmp/synthetic-handoff-fallback.png'], attachmentReader: async () => new Uint8Array([1, 2, 3]),
-          responseSchema: { type: 'object', required: ['answer'], properties: { answer: { type: 'string' } } } }),
-      }));
-      const owner = ipcMain.__getInvokeHandler('non-api-fallback-renderer-loss-test')({ sender }, { nodeId: 'fallback-renderer-loss' });
-      for (let turn = 0; turn < 100 && !sent.some(item => item.channel === 'non-api-ai-request'); turn++) {
-        await new Promise(resolve => setTimeout(resolve, 5));
-      }
-      const request = sent.find(item => item.channel === 'non-api-ai-request')?.payload;
-      assert(request?.workerOwned === true, 'the attachment begins with live MCP transport');
-      sender.emit('render-process-gone', {}, { reason: 'crashed' });
-      const fallback = fallbackWorkerAttachmentToManual({ requestId: request.requestId, allowTasks: new Set(['vision-product-analysis']) });
-      const result = await owner;
-      assert(fallback && result.success === false && result.errorCode === 'WORKER_RENDERER_UNAVAILABLE'
-        && !listWorkerHandoffs({ allowTasks: new Set(['vision-product-analysis']) }).pending,
-      'manual fallback has no transport after confirmed renderer loss and settles with its infrastructure code');
-    },
-  },
   {
     name: 'non-API AI: a manual sender destroyed during delivery rejects with the renderer code',
     run: async () => {

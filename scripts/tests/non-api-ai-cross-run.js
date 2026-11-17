@@ -8,7 +8,7 @@ import { buildOfficialPostingJudgeRequest } from '../../electron/ipc/officialPos
 import {
   __reloadDurableStateForTests, flushNonApiAiPersistence, listWorkerHandoffs,
   readWorkerHandoff, registerNonApiAiHandlers, requestNonApiAi,
-  requeueWorkerHandoff, submitWorkerResponse,
+  submitWorkerResponse,
 } from '../../electron/ipc/nonApiAi.js';
 
 const { app, ipcMain } = electronPkg;
@@ -106,9 +106,6 @@ export default [
               f.controllers.at(-1).abort(Object.assign(new Error('Synthetic prior run aborted'), { code: 'bridge-aborted' }));
               assert.equal((await owner).failureCode, 'bridge-aborted');
             }
-          } else if (slot === 2) {
-            for (let attempt = 0; attempt < 3; attempt++) assert(requeueWorkerHandoff({ ...f.args(request), reason: 'worker-lost' }));
-            assert.equal((await owner).failureCode, 'WORKER_REQUEUE_EXHAUSTED');
           } else {
             f.controllers.at(-1).abort(Object.assign(new Error('Synthetic prior run stopped'), { code: 'bridge-aborted' }));
             assert.equal((await owner).failureCode, 'bridge-aborted');
@@ -145,35 +142,6 @@ export default [
         }
         assert((await Promise.all(owners)).every(result => result.answer?.choice === 'uncertain'));
         assert.equal(JSON.stringify(f.disk().runs[f.oldRun]), priorRun, 'issuing and accepting a new run does not adopt or mutate its predecessor');
-      } finally { await f.cleanup(); }
-    },
-  },
-  {
-    name: 'official posting cross-run: live adoption and requeue remain in their own run during failed presentation',
-    async run() {
-      const f = fixture();
-      try {
-        const originalOwner = f.invoke(f.oldRun, 0);
-        const original = await until(() => f.attempted[0]);
-        assert(f.read(original, 0).ok);
-        assert(requeueWorkerHandoff({ ...f.args(original), reason: 'worker-replaced' }));
-        f.failDelivery(true);
-        const adoptedOwner = f.invoke(f.oldRun, 0);
-        const newOwner = f.invoke(f.newRun, 0);
-        await until(() => f.attempted.filter(item => item.requestId === original.requestId).length >= 2 && f.attempted.some(item => item.runId === f.newRun));
-        const current = f.attempted.find(item => item.runId === f.newRun);
-        assert.notEqual(current.requestId, original.requestId);
-        assert.notEqual(current.handoffCode, original.handoffCode, 'the new run has independent worker authorization while its predecessor is live');
-        assert.equal(current.stepKey, original.stepKey);
-        assert.equal(f.pending(f.oldRun).length, 1, 'same-run adoption joins the requeued record');
-        assert.equal(f.pending(f.newRun).length, 1, 'a different run does not adopt the old record');
-        for (const request of [current, original]) {
-          assert(f.read(request, 0).ok);
-          assert.equal((await f.submit(request)).outcome, 'accepted');
-        }
-        const [oldResult, adoptedResult, newResult] = await Promise.all([originalOwner, adoptedOwner, newOwner]);
-        assert.deepEqual(oldResult, adoptedResult);
-        assert.equal(newResult.answer.choice, 'uncertain');
       } finally { await f.cleanup(); }
     },
   },

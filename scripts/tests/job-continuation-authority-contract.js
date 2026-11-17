@@ -71,7 +71,7 @@ export async function runJobContinuationAuthorityContract() {
     // Exercise the actual renderer claim argument expressions against the host
     // store. A public begin/list response deliberately has no canvasFilePath;
     // tests that spread the original begin inputs masked this IPC regression.
-    for (const component of ['JobSourceCardNode', 'JobSearchNode']) {
+    for (const component of ['JobSourceCardNode']) {
       const source = await fs.readFile(new URL(`../../src/nodes/${component}.jsx`, import.meta.url), 'utf8');
       const calls = [...source.matchAll(/claimJobContinuation\?\.\((\{[\s\S]*?\n\s*\})\);/g)];
       assert.equal(calls.length, 2, `${component} must exercise both saved and fresh claims`);
@@ -134,7 +134,7 @@ export async function runJobContinuationAuthorityContract() {
     const reboundS3 = await claimJobContinuation(canvas, { ...identity, operationAuthority: third.receipt, intentId: reboundS2.intent.intentId }, { sender });
     assert.equal(reboundS3.ok, true, `S3 adopts only the immediately rebound S2 continuation: ${JSON.stringify(reboundS3)}`);
     assert.equal(releaseJobContinuationExecution(reboundS3.intent.intentId, reboundS3.leaseToken, sender), true);
-    return { rendererClaimPaths: 4, s1ToS3ExactRebind: true };
+    return { rendererClaimPaths: 2, s1ToS3ExactRebind: true };
   } finally {
     await fs.rm(dir, { recursive: true, force: true });
   }

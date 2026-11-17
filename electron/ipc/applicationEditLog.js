@@ -456,7 +456,7 @@ const EDIT_OPS = new Set(['added', 'removed', 'rewritten', 'moved']);
  * generation was not sent), and neither does a pair reviewed by a past session.
  */
 export function recurringEditSections(state, { window = RECURRING_WINDOW, min = RECURRING_MIN_BUNDLES } = {}) {
-  const since = Number.isFinite(Date.parse(state?.lastSessionAt)) ? Date.parse(state.lastSessionAt) : -Infinity;
+  const since = sinceSession(state);
   const recent = (state?.pairs || [])
     .filter(pair => !pair.supersededAt && Date.parse(pair.generatedAt) >= since)
     .sort((left, right) => String(left.generatedAt).localeCompare(String(right.generatedAt)))

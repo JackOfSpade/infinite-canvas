@@ -136,9 +136,9 @@ export function CustomizeDialog({
    *  ride along on an unrelated field's emit (e.g. a color swatch click). */
   const emit = (overrides) => {
     const payload = {
-      ...(hasFont ? { fontSize: appliedFontSizeRef.current, fontFamily, textColor } : {}),
+      ...(hasFont ? { fontSize: appliedFontSizeRef.current, fontFamily, textColor: appliedTextColorRef.current } : {}),
       ...(showSpacing ? { titleSpacing: appliedSpacingRef.current } : {}),
-      ...(showBackground ? { backgroundColor } : {}),
+      ...(showBackground ? { backgroundColor: appliedBgColorRef.current } : {}),
       ...(showStaticGlow ? { staticGlowColor: appliedStaticGlowColorRef.current } : {}),
       ...overrides
     };

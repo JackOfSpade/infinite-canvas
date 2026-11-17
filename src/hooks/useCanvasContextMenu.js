@@ -193,10 +193,9 @@ export function useCanvasContextMenu({
     takeSnapshot();
 
     const targetIds = new Set(getTargetNodeIds(reactFlow, menu.node.id));
-    let count = 0;
+    const count = reactFlow.getNodes().filter(n => targetIds.has(n.id) && n.type === 'jobcard').length;
     setNodes(nds => nds.map(n => {
       if (!targetIds.has(n.id) || n.type !== 'jobcard') return n;
-      count += 1;
       const data = { ...n.data };
       if (color) data.markColor = color;
       else delete data.markColor;

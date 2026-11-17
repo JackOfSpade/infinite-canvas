@@ -87,12 +87,19 @@ function wavHeader(dataBytes, sampleRate) {
 export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) {
   if (!fs) throw new Error('mixdown: mixTracks requires fs');
   const candidate = openTrack(candidatePath, fs, 'candidate');
-  const interviewer = openTrack(interviewerPath, fs, 'interviewer');
+  let interviewer;
+  try {
+    interviewer = openTrack(interviewerPath, fs, 'interviewer');
+  } catch (error) {
+    fs.closeSync(candidate.fd);
+    throw error;
+  }
   const durationMs = Math.max(candidate.durationMs, interviewer.durationMs);
   const totalFrames = Math.round((durationMs * OUT_RATE) / 1000);
   const blockFrames = OUT_RATE * BLOCK_SECONDS;
-  const outFd = fs.openSync(outPath, 'w');
+  let outFd;
   try {
+    outFd = fs.openSync(outPath, 'w');
     fs.writeSync(outFd, wavHeader(totalFrames * 2, OUT_RATE), 0, HEADER_BYTES, 0);
     let position = HEADER_BYTES;
     for (let offset = 0; offset < totalFrames; offset += blockFrames) {
@@ -107,7 +114,7 @@ export function mixTracks({ candidatePath, interviewerPath, outPath, fs } = {}) 
       position += chunk.length;
     }
   } finally {
-    fs.closeSync(outFd);
+    if (outFd !== undefined) fs.closeSync(outFd);
     fs.closeSync(candidate.fd);
     fs.closeSync(interviewer.fd);
   }

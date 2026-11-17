@@ -17,16 +17,10 @@ export function getCurrentIpcRequestContext() {
   return ipcRequestContext.getStore() || null;
 }
 
-// Host-owned companion workflows bind handoffs to their canvas owner rather
-// than giving the restricted child a general AI bridge.
-export function runWithIpcRequestContext(context, callback) {
-  return ipcRequestContext.run(context || null, callback);
-}
-
 // Test seam for exercising main-process helpers that rely on the same request
 // context as handleSafe, without registering a real Electron IPC handler.
 export function __runWithIpcRequestContextForTests(context, callback) {
-  return runWithIpcRequestContext(context, callback);
+  return ipcRequestContext.run(context || null, callback);
 }
 
 // ── Node Task Registry ──────────────────────────────────────────────────────
@@ -638,22 +632,15 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
         additionalNodeIds = [...new Set(ids)];
       }
       nodeId = args?.nodeId;
-      registerSenderTask(event.sender, ac, { channel, nodeId,
-        manualAiRunId: typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null });
+      const manualAiRunId = typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null;
+      const logTaskRegistration = options.logTaskRegistration !== false;
+      registerSenderTask(event.sender, ac, { channel, nodeId, manualAiRunId });
       senderTaskRegistered = true;
-      if (nodeId) {
-        registerNodeTask(
-          event.sender,
-          nodeId,
-          ac,
-          channel,
-          typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
-          options.logTaskRegistration !== false,
-        );
-      }
+      if (nodeId) registerNodeTask(event.sender, nodeId, ac, channel, manualAiRunId, logTaskRegistration);
 
-      for (const ownerId of additionalNodeIds) if (ownerId !== nodeId) registerNodeTask(event.sender, ownerId, ac, channel,
-        typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null, options.logTaskRegistration !== false);
+      for (const ownerId of additionalNodeIds) {
+        if (ownerId !== nodeId) registerNodeTask(event.sender, ownerId, ac, channel, manualAiRunId, logTaskRegistration);
+      }
 
       const livenessRules = options.captureListingLiveness === true
         ? await ensureListingLivenessRules() : null;
@@ -671,7 +658,7 @@ export function handleSafe(channel, handler, timeoutOrOptions = 0) {
           // A renderer-created id spanning every manual AI step in one logical
           // workflow. nonApiAi uses it to replay accepted copy/paste steps after
           // a process restart without ever confusing two runs of the same node.
-          manualAiRunId: typeof args?.manualAiRunId === 'string' ? args.manualAiRunId : null,
+          manualAiRunId,
           // Recovery semantics are workflow-owned renderer state. In particular,
           // a late background source refresh appends its scored rows while a
           // normal search/re-analysis replaces the prior result set.

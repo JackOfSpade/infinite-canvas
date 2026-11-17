@@ -61,16 +61,6 @@ function normalizeReconcileText(value) {
     .trim();
 }
 
-export function normalizePdfText(value) {
-  return normalizeReconcileText(value)
-    // pdf.js separates visual lines, so a normally hyphenated word that wraps
-    // can arrive as `full- scale`. The DOM still contains `full-scale`; join
-    // only an attached ASCII hyphen followed by an alphanumeric continuation.
-    // A true spaced dash (`word - next`) keeps its leading space and therefore
-    // does not match this repair.
-    .replace(/([\p{L}\p{N}])- +(?=[\p{L}\p{N}])/gu, '$1-');
-}
-
 function textTokens(value) {
   return normalizeReconcileText(value).match(PDF_TEXT_TOKEN) || [];
 }
@@ -1143,11 +1133,7 @@ export function reconcileApplicationHtmlFromPdfBlocks({ applicationHtml, html, d
 }
 
 /** Extract the PDF then reconcile one selected application panel. */
-async function reconcileApplicationPdf({ applicationHtml, html, pdfBytes, documentKind = 'resume', document } = {}) {
+export async function reconcileApplicationHtmlFromPdf({ applicationHtml, html, pdfBytes, documentKind = 'resume', document } = {}) {
   const blocks = await extractPdfTextBlocks(pdfBytes);
   return reconcileApplicationHtmlFromPdfBlocks({ applicationHtml, html, documentKind, document, blocks });
 }
-
-// Integration-facing name: accepts PDF bytes and intentionally shares the
-// same cautious result contract as the pure `...FromPdfBlocks` helper.
-export const reconcileApplicationHtmlFromPdf = reconcileApplicationPdf;

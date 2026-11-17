@@ -380,6 +380,49 @@ function getTargetCanvasWindow() {
 }
 
 /**
+ * Send one request to a window's renderer and resolve with its matching reply.
+ * `onReply` maps the reply payload to the result; `onUnavailable` supplies the
+ * result when no reply can arrive: 'destroyed', 'navigation' (a reload keeps
+ * the WebContents but discards the renderer callback that received the
+ * request), 'gone', 'timeout', or 'unreachable' (the request was never sent).
+ * The request id keeps a late reply to an earlier request from satisfying
+ * this one, and every listener is removed on whichever result comes first.
+ */
+function awaitRendererReply(win, { requestChannel, replyChannel, payload = {}, timeoutMs, onReply, onUnavailable }) {
+  return new Promise(resolve => {
+    const expectedSender = win.webContents;
+    const requestId = ++rendererHandshakeRequestId;
+    let timer;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      electronPkg.ipcMain.removeListener(replyChannel, handler);
+      expectedSender.removeListener('destroyed', onDestroyed);
+      expectedSender.removeListener('did-start-navigation', onNavigation);
+      expectedSender.removeListener('render-process-gone', onGone);
+      resolve(result);
+    };
+    const handler = (event, reply) => {
+      if (event.sender !== expectedSender || reply?.requestId !== requestId) return;
+      finish(onReply(reply));
+    };
+    const onDestroyed = () => finish(onUnavailable('destroyed'));
+    const onNavigation = (_event, _url, isInPlace, isMainFrame) => {
+      if (isMainFrame && !isInPlace) finish(onUnavailable('navigation'));
+    };
+    const onGone = () => finish(onUnavailable('gone'));
+    electronPkg.ipcMain.on(replyChannel, handler);
+    expectedSender.once('destroyed', onDestroyed);
+    expectedSender.on('did-start-navigation', onNavigation);
+    expectedSender.once('render-process-gone', onGone);
+    if (timeoutMs) timer = setTimeout(() => finish(onUnavailable('timeout')), timeoutMs);
+    if (!safeMenuSend(win, requestChannel, { ...payload, requestId })) finish(onUnavailable('unreachable'));
+  });
+}
+
+/**
  * Ask a window's renderer to save, and resolve once it reports back. There is
  * deliberately no fixed timeout: for a never-saved canvas the renderer's save
  * routes through a native, human-paced Save dialog (filesystem.js's
@@ -391,39 +434,12 @@ function getTargetCanvasWindow() {
  * handler.
  */
 function requestSaveAndWait(win, { skipDocumentSessions = false, forceCanvasSave = false } = {}) {
-  return new Promise(resolve => {
-    const expectedSender = win.webContents;
-    const requestId = ++rendererHandshakeRequestId;
-    let settled = false;
-    const finish = (success) => {
-      if (settled) return;
-      settled = true;
-      electronPkg.ipcMain.removeListener('save-response', saveHandler);
-      expectedSender.removeListener('destroyed', onDestroyed);
-      expectedSender.removeListener('did-start-navigation', onMainFrameNavigation);
-      expectedSender.removeListener('render-process-gone', onRenderProcessGone);
-      resolve(success);
-    };
-    const saveHandler = (event, { success, requestId: responseRequestId } = {}) => {
-      if (event.sender !== expectedSender || responseRequestId !== requestId) return;
-      finish(Boolean(success));
-    };
-    const onDestroyed = () => finish(false);
-    // A reload preserves WebContents but discards the renderer callback that
-    // received this request. Do not leave the save promise/listener hanging.
-    const onMainFrameNavigation = (_event, _url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !isInPlace) finish(false);
-    };
-    const onRenderProcessGone = () => finish(false);
-    electronPkg.ipcMain.on('save-response', saveHandler);
-    expectedSender.once('destroyed', onDestroyed);
-    expectedSender.on('did-start-navigation', onMainFrameNavigation);
-    expectedSender.once('render-process-gone', onRenderProcessGone);
-    if (!safeMenuSend(win, 'request-save-and-respond', {
-      requestId,
-      skipDocumentSessions,
-      forceCanvasSave,
-    })) finish(false);
+  return awaitRendererReply(win, {
+    requestChannel: 'request-save-and-respond',
+    replyChannel: 'save-response',
+    payload: { skipDocumentSessions, forceCanvasSave },
+    onReply: ({ success }) => Boolean(success),
+    onUnavailable: () => false,
   });
 }
 
@@ -432,68 +448,23 @@ function requestQuitCommitAndWait(win) {
   // to checkUnsavedChanges, which still requires explicit native confirmation
   // before abandoning unverified work. Hung/live renderers keep the fence.
   if (hasStoppedRenderer(win)) return Promise.resolve(true);
-  return new Promise(resolve => {
-    const expectedSender = win.webContents;
-    const requestId = ++rendererHandshakeRequestId;
-    let timer;
-    let settled = false;
-    const finish = (success) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      electronPkg.ipcMain.removeListener('quit-commit-ack', handler);
-      expectedSender.removeListener('destroyed', onUnavailable);
-      expectedSender.removeListener('did-start-navigation', onNavigation);
-      expectedSender.removeListener('render-process-gone', onUnavailable);
-      resolve(success);
-    };
-    const handler = (event, { requestId: responseRequestId } = {}) => {
-      if (event.sender === expectedSender && responseRequestId === requestId) finish(true);
-    };
-    const onUnavailable = () => finish(false);
-    const onNavigation = (_event, _url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !isInPlace) finish(false);
-    };
-    electronPkg.ipcMain.on('quit-commit-ack', handler);
-    expectedSender.once('destroyed', onUnavailable);
-    expectedSender.on('did-start-navigation', onNavigation);
-    expectedSender.once('render-process-gone', onUnavailable);
-    timer = setTimeout(() => finish(false), 1500);
-    if (!safeMenuSend(win, 'quit-commit-request', { requestId })) finish(false);
+  return awaitRendererReply(win, {
+    requestChannel: 'quit-commit-request',
+    replyChannel: 'quit-commit-ack',
+    timeoutMs: 1500,
+    onReply: () => true,
+    onUnavailable: () => false,
   });
 }
 
 function requestQuitPauseAndWait(win) {
   if (win.isDestroyed() || hasStoppedRenderer(win)) return Promise.resolve({ success: false });
-  return new Promise(resolve => {
-    const expectedSender = win.webContents;
-    const requestId = ++rendererHandshakeRequestId;
-    let timer;
-    let settled = false;
-    const finish = result => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      electronPkg.ipcMain.removeListener('quit-pause-ack', handler);
-      expectedSender.removeListener('destroyed', onUnavailable);
-      expectedSender.removeListener('did-start-navigation', onNavigation);
-      expectedSender.removeListener('render-process-gone', onUnavailable);
-      resolve(result);
-    };
-    const handler = (event, { requestId: responseRequestId, success, requiresCanvasSave } = {}) => {
-      if (event.sender !== expectedSender || responseRequestId !== requestId) return;
-      finish({ success: success === true, requiresCanvasSave: requiresCanvasSave === true });
-    };
-    const onUnavailable = () => finish({ success: false });
-    const onNavigation = (_event, _url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !isInPlace) onUnavailable();
-    };
-    electronPkg.ipcMain.on('quit-pause-ack', handler);
-    expectedSender.once('destroyed', onUnavailable);
-    expectedSender.on('did-start-navigation', onNavigation);
-    expectedSender.once('render-process-gone', onUnavailable);
-    timer = setTimeout(onUnavailable, 120000);
-    if (!safeMenuSend(win, 'quit-pause-request', { requestId })) onUnavailable();
+  return awaitRendererReply(win, {
+    requestChannel: 'quit-pause-request',
+    replyChannel: 'quit-pause-ack',
+    timeoutMs: 120000,
+    onReply: ({ success, requiresCanvasSave }) => ({ success: success === true, requiresCanvasSave: requiresCanvasSave === true }),
+    onUnavailable: () => ({ success: false }),
   });
 }
 
@@ -609,48 +580,17 @@ async function checkUnsavedChanges(win, actionType = 'close') {
   if (hasStoppedRenderer(win)) return { action: showUnverifiedSaveStateDialog(win, actionType) };
 
   const expectedSender = win.webContents;
-  const requestId = ++rendererHandshakeRequestId;
-
-  const rendererState = await new Promise(resolve => {
-    let timeoutId;
-    let settled = false;
-    const finish = (state) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeoutId);
-      electronPkg.ipcMain.removeListener('quit-response', handler);
-      expectedSender.removeListener('destroyed', onDestroyed);
-      expectedSender.removeListener('did-start-navigation', onMainFrameNavigation);
-      expectedSender.removeListener('render-process-gone', onRenderProcessGone);
-      resolve(state);
-    };
-    const handler = (event, { hasUnsavedChanges, documentSaveFailed = false, draftSaveFailed = false, requestId: responseRequestId } = {}) => {
-      if (event.sender !== expectedSender || responseRequestId !== requestId) return;
-      finish({ hasUnsavedChanges, documentSaveFailed, draftSaveFailed });
-    };
-    const onDestroyed = () => finish({ destroyed: true });
-    const onMainFrameNavigation = (_event, _url, isInPlace, isMainFrame) => {
-      if (isMainFrame && !isInPlace) finish({ timeout: true });
-    };
-    const onRenderProcessGone = () => finish({ timeout: true });
-
-    electronPkg.ipcMain.on('quit-response', handler);
-    expectedSender.once('destroyed', onDestroyed);
-    expectedSender.on('did-start-navigation', onMainFrameNavigation);
-    expectedSender.once('render-process-gone', onRenderProcessGone);
-
-    timeoutId = setTimeout(() => {
-      // The response could be delayed behind a document flush or the renderer
-      // could be hung. We cannot safely infer either document or canvas state.
-      finish({ timeout: true });
-    }, 1500);
-
-    if (!safeMenuSend(win, 'quit-request', { requestId })) {
-      // The renderer was no longer reachable. Treat its state as unverified
-      // so the normal fail-closed prompt, rather than a guessed clean state,
-      // decides whether the window may be destroyed.
-      finish({ timeout: true });
-    }
+  // A reply delayed behind a document flush, a hung renderer and one that is
+  // no longer reachable all leave document and canvas state unverified, so the
+  // fail-closed prompt (not a guessed clean state) decides what happens next.
+  const rendererState = await awaitRendererReply(win, {
+    requestChannel: 'quit-request',
+    replyChannel: 'quit-response',
+    timeoutMs: 1500,
+    onReply: ({ hasUnsavedChanges, documentSaveFailed = false, draftSaveFailed = false }) => (
+      { hasUnsavedChanges, documentSaveFailed, draftSaveFailed }
+    ),
+    onUnavailable: reason => (reason === 'destroyed' ? { destroyed: true } : { timeout: true }),
   });
 
   if (rendererState.destroyed || win.isDestroyed() || expectedSender.isDestroyed()) {
@@ -748,8 +688,8 @@ function createWindow(initSpec = { mode: 'auto' }) {
       backgroundThrottling: false,
     },
   });
-  if (isBackgroundE2E) win.setAlwaysOnTop(false);
   if (isBackgroundE2E) {
+    win.setAlwaysOnTop(false);
     // Removing the native menu also removes Electron's Cmd/Ctrl+S accelerator.
     // Preserve that smoke coverage through this one hidden WebContents only;
     // never register a global shortcut that could intercept the user's desktop.
@@ -1058,7 +998,7 @@ app.on('web-contents-created', (_, contents) => {
       if (trusted) return;
 
       event.preventDefault();
-      if (contents.__isCanvasRenderer && (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:')) {
+      if (parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:') {
         openExternalSafely(navigationUrl);
       }
     } catch {
@@ -1361,7 +1301,10 @@ if (!gotTheLock) {
         }
 
         await assertPinnedLocalFileBinding(pinnedFile);
-        const stream = createPinnedLocalReadStream(pinnedFile);
+        // Read from an explicit offset: a failed preview above has already
+        // consumed this descriptor to its end, and a stream without `start`
+        // continues from the current position (an empty body).
+        const stream = createPinnedLocalReadStream(pinnedFile, { start: 0 });
         pinnedFile = null; // the stream owns descriptor cleanup now
         return new Response(Readable.toWeb(stream), {
           status: 200,
@@ -1463,7 +1406,12 @@ if (!gotTheLock) {
     electronPkg.ipcMain.on('window:set-current-file', (event, filePath) => {
       const win = BrowserWindow.fromWebContents(event.sender);
       if (win && !win.isDestroyed()) {
-        win.__canvasFilePath = filePath || null;
+        // openOrFocusCanvasWindow compares against the canonical spelling, so
+        // store that one; a symlinked or differently-cased renderer path
+        // would otherwise open the same canvas in a second editable window.
+        win.__canvasFilePath = typeof filePath === 'string' && filePath
+          ? resolveSafeCanvasFilePath(filePath) || filePath
+          : null;
       }
     });
 

@@ -6,7 +6,7 @@ import childProcess from 'node:child_process';
 import crypto from 'node:crypto';
 import { CLAUDE_HANDOFF_SYSTEM_PROMPT, ClaudeRunnerError } from './claudeApplicationRunner.js';
 import { offloadReasoning } from './aiCallProviders.js';
-import { OFFLOAD_MAX_TOKENS, OFFLOAD_TIMEOUT_MS, offloadFailure, runOffloadComplete } from './offloadCompleteStage.js';
+import { OFFLOAD_MAX_TOKENS, OFFLOAD_TIMEOUT_MS, offloadEmptyAnswer, offloadFailure, offloadUsage, runOffloadComplete } from './offloadCompleteStage.js';
 
 /** The handoff system prompt (plus any shared reference) and the user text, as CLI messages. */
 export function handoffMessages({ text, systemAppend = '' }) {
@@ -57,22 +57,13 @@ export async function offloadTextCall({
   }
   const answer = typeof result.text === 'string' ? result.text : '';
   if (!answer.trim()) {
-    throw new ClaudeRunnerError('OFFLOAD_EMPTY', 'The offload provider returned an empty answer.', {
-      offloadCode: 'empty', latencyMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
-      costUsd: typeof result.costUsd === 'number' ? result.costUsd : null });
+    throw offloadEmptyAnswer(result);
   }
-  const raw = result.usage && typeof result.usage === 'object' ? result.usage : {};
   return {
     text: answer,
     model: typeof result.model === 'string' ? result.model : route,
     durationMs: Number.isFinite(result.latencyMs) ? result.latencyMs : null,
-    usage: {
-      input_tokens: raw.cacheMissTokens ?? 0,
-      cache_read_input_tokens: raw.cacheHitTokens ?? 0,
-      output_tokens: raw.outputTokens ?? 0,
-      reasoning_tokens: raw.reasoningTokens ?? 0,
-      provider_usage: raw,
-    },
+    usage: offloadUsage(result),
     costUsd: typeof result.costUsd === 'number' ? result.costUsd : undefined,
     provider: 'offload',
     route,

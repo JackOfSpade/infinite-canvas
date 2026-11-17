@@ -88,10 +88,12 @@ const LAUNCH_ARGS = [
   '--lang=en-US,en',
 ];
 
+const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 // Waits for `ms` milliseconds, calling onTick(secondsRemaining) every second.
-async function waitWithCountdown(ms, onTick) {
+async function waitWithCountdown(ms, onTick, signal = null) {
   const deadline = Date.now() + ms;
-  while (true) {
+  while (!signal?.aborted) {
     const remaining = Math.ceil((deadline - Date.now()) / 1000);
     if (remaining <= 0) break;
     onTick(remaining);
@@ -782,7 +784,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
           count: index + 1,
           status: `${index + 1}/${targets.length}`,
         }).catch(() => {});
-        await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(3000 + Math.round(Math.random() * 1000));
+        await (runtime?.sleep || sleepMs)(3000 + Math.round(Math.random() * 1000));
         const signals = await (runtime?.getChallengeSignals || getChallengeSignals)(page);
         if (signals.isChallenge) {
           challengeReason = signals.reason || 'challenge';
@@ -818,7 +820,7 @@ export async function retryIndeedJobDescriptions(jobs, signal = null, profileDir
         }
         await captureIndeedListingLiveness(page, job, { requestedUrl: jobUrl, httpStatus, descriptionText: description });
         if (index < targets.length - 1) {
-          await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(1500 + Math.round(Math.random() * 1000));
+          await (runtime?.sleep || sleepMs)(1500 + Math.round(Math.random() * 1000));
         }
       } catch (error) {
         recordIndeedEnrichmentAttempt(job, { stage: 'exact-retry', outcome: 'error', reason: error.message });
@@ -850,7 +852,7 @@ export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUnti
     try {
       const navigationResponse = await page.goto(jobUrl, { waitUntil, timeout });
       const httpStatus = navigationResponse?.status?.() ?? null;
-      await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(settleMs[0] + Math.round(Math.random() * settleMs[1]));
+      await (runtime?.sleep || sleepMs)(settleMs[0] + Math.round(Math.random() * settleMs[1]));
       const sigs = await (runtime?.getChallengeSignals || getChallengeSignals)(page);
       if (sigs.isChallenge) {
         recordIndeedEnrichmentAttempt(job, { stage, outcome: 'challenge', reason: sigs.reason });
@@ -884,7 +886,7 @@ export async function runIndeedReEnrichPass(page, { jobs, stage, label, waitUnti
       }
       await captureIndeedListingLiveness(page, job, { requestedUrl: jobUrl, httpStatus, descriptionText: desc });
       if (ri < jobs.length - 1) {
-        await (runtime?.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms))))(gapMs[0] + Math.round(Math.random() * gapMs[1]));
+        await (runtime?.sleep || sleepMs)(gapMs[0] + Math.round(Math.random() * gapMs[1]));
       }
     } catch (e) {
       recordIndeedEnrichmentAttempt(job, { stage, outcome: 'error', reason: e.message });
@@ -1120,7 +1122,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
             : 'Indeed returned a non-interactive block. Wait before retrying, or use a different network/session.',
           resumeState: {
             mode: shouldHandoffIndeedChallengeToNative(preflight.reason) ? 'native-challenge' : 'retry-later',
-            challengeUrl: page.url(), remainingQueries: queryList, startPage, startPages, pageBudgets, queryIndexes,
+            challengeUrl: page.url(), remainingQueries: queryList, startPage: startPages[0] || 0, startPages, pageBudgets, queryIndexes,
           },
         },
         gathered: 0,
@@ -1554,10 +1556,8 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
           break;
         }
 
-        if (p < maxPages - 1) {
-          const delay = PAGE_DELAY_MS[0] + Math.round(Math.random() * (PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]));
-          await new Promise(r => setTimeout(r, delay));
-        }
+        const delay = PAGE_DELAY_MS[0] + Math.round(Math.random() * (PAGE_DELAY_MS[1] - PAGE_DELAY_MS[0]));
+        await new Promise(r => setTimeout(r, delay));
       }
 
       // Pace the gap between queries so consecutive searches don't look scripted.
@@ -1594,7 +1594,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
       if (totalChallenges > 0) {
         const cooldownMs = Math.min(120_000, Math.ceil(totalChallenges / 10) * 30_000);
         logger.info(`[Indeed/Browser] Re-enrich: waiting ${cooldownMs / 1000}s CF cooldown before re-enrichment (${totalChallenges} challenges this run)`);
-        await waitWithCountdown(cooldownMs, (s) => onProgress?.(`Re-enrich CF cooldown ${s}s…`));
+        await waitWithCountdown(cooldownMs, (s) => onProgress?.(`Re-enrich CF cooldown ${s}s…`), signal);
       }
       logger.info(`[Indeed/Browser] Re-enriching ${missingDescJobs.length} jobs with missing descriptions`);
       reEnriched = await runReEnrichPass({

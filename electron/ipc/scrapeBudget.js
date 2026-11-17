@@ -77,13 +77,6 @@ function writeStats(key, stats) {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Resolve the working hard-timeout for a source from its learned history.
- *
- * @param {string} key            stable source id (e.g. 'ebay-sold', 'indeed', 'linkedin-api')
- * @param {number} seedTimeoutMs  the configured timeout — treated as the ABSOLUTE ceiling
- * @returns {{ timeoutMs:number, firstBeatMs:number, learned:boolean }}
- */
-/**
  * Pure budget-derivation math, isolated from persistence so the safety contract
  * is unit-testable. Given a source's learned `stats` and the configured `seed`
  * (already a positive integer = the ABSOLUTE ceiling), return the working hard
@@ -103,6 +96,13 @@ export function deriveTimeoutBudget(stats, seed) {
   return { timeoutMs: Math.min(seed, learnedBudget), learned: true };
 }
 
+/**
+ * Resolve the working hard-timeout for a source from its learned history.
+ *
+ * @param {string} key            stable source id (e.g. 'ebay-sold', 'indeed', 'linkedin-api')
+ * @param {number} seedTimeoutMs  the configured timeout — treated as the ABSOLUTE ceiling
+ * @returns {{ timeoutMs:number, firstBeatMs:number, learned:boolean }}
+ */
 export function resolveBudget(key, seedTimeoutMs) {
   const seed = Number(seedTimeoutMs) > 0 ? Math.round(Number(seedTimeoutMs)) : 30000;
   const stats = statsFor(key);

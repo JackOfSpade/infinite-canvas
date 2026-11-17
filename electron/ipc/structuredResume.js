@@ -500,9 +500,7 @@ const POSTING_NAMED_SKILL_TERM_RULE = 'skill-block-omits-posting-named-attested-
  * construction: a name returned here sits inside a plan quote a skill group may
  * cite and is an exact approved name. Deliberately never throws.
  */
-export function careerAttestedSkillTerms(evidenceCatalog, careerSkillEvidence = null) {
-  return snapshotRequiredSkillTerms(evidenceCatalog, careerSkillEvidence) ?? [];
-}
+export const careerAttestedSkillTerms = requiredCareerAttestedSkillTerms;
 
 /**
  * A bounded, deterministic skill index for this résumé. Posting-named terms
@@ -1047,13 +1045,16 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
   if (careerRegion) {
     const bodyStart = careerSectionBodyStart(careerRegion, source);
     const planBodyQuotes = [...(careerEvidenceQuotesById?.values() || [])]
+      .map(quotes => (Array.isArray(quotes) ? quotes[0] : quotes))
       .filter(quote => quoteReachesSectionBody(quote, careerRegion, bodyStart));
     for (const [bulletIndex, bullet] of normalized.bullets.entries()) {
       // A bullet whose evidence IDs were already rejected would fail this too;
       // reporting it twice would only obscure the real correction.
       if (!evidenceAccepted[bulletIndex]) continue;
       const citedCareerEvidenceIds = bullet.evidenceIds.filter(evidenceId => careerEvidenceIds?.has(evidenceId));
-      const careerQuotes = careerQuotesForEvidenceIds(citedCareerEvidenceIds, careerEvidenceQuotesById);
+      // The region holds the source text, so only each id's source quote is
+      // located in it; an id's clean-text variant is not source text.
+      const careerQuotes = careerSourceQuotesForEvidenceIds(citedCareerEvidenceIds, careerEvidenceQuotesById);
       if (!citedCareerEvidenceIds.length || careerQuotes.length !== citedCareerEvidenceIds.length
         || careerQuotes.some(quote => !careerQuoteOccursInRoleCareerRegion(quote, careerRegion))) {
         offend(bulletOffenses, ROLE_BULLET_SCOPE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
@@ -1076,7 +1077,8 @@ function normalizeRole(raw, index, sourceById, allowedEvidenceIds, careerEvidenc
       if (!evidenceAccepted[bulletIndex]) continue;
       const citedCareerEvidenceIds = bullet.evidenceIds.filter(evidenceId => careerEvidenceIds.has(evidenceId));
       const careerQuotes = careerQuotesForEvidenceIds(citedCareerEvidenceIds, careerEvidenceQuotesById);
-      if (!citedCareerEvidenceIds.length || careerQuotes.length !== citedCareerEvidenceIds.length
+      if (!citedCareerEvidenceIds.length
+        || careerSourceQuotesForEvidenceIds(citedCareerEvidenceIds, careerEvidenceQuotesById).length !== citedCareerEvidenceIds.length
         || !careerQuotes.some(quote => quoteExplicitlyEstablishesRoleScope(quote, source))) {
         offend(bulletOffenses, ROLE_BULLET_SCOPE_RULE, `roles[${index}].bullets[${bulletIndex}]`,
           `roles[${index}].bullets[${bulletIndex}] is nested under ${JSON.stringify(source.company || source.title)}, but its cited career-data evidence has no uniquely recognized role section and does not explicitly name that role's employer. Cite evidence that names the employer, or use an approved structured role relationship.`, bullet.id);
@@ -1189,6 +1191,7 @@ export const CAREER_DATA_ROLE_SECTION_RULE = 'the block that begins at that empl
 // line immediately followed by an employer line.
 function careerDataRoleRegionsForSourceRoles(careerData, sourceRoles) {
   const lines = careerDataLines(careerData);
+  const headings = lines.map(line => markdownHeading(line.text));
   const candidatesByRole = new Map(sourceRoles.map(role => [role.id, []]));
   for (const role of sourceRoles) {
     const candidates = candidatesByRole.get(role.id);
@@ -1197,7 +1200,7 @@ function careerDataRoleRegionsForSourceRoles(careerData, sourceRoles) {
     // roles, so do not mix its exact match with legacy fuzzy candidates.
     const roleMarker = `[Role ID: ${role.id}]`;
     const markedStarts = lines
-      .filter(line => markdownHeading(line.text)?.label.includes(roleMarker))
+      .filter((_line, lineIndex) => headings[lineIndex]?.label.includes(roleMarker))
       .map(line => line.start);
     if (markedStarts.length) {
       candidates.push(...markedStarts);
@@ -1218,8 +1221,8 @@ function careerDataRoleRegionsForSourceRoles(careerData, sourceRoles) {
     // employer headings remain multiple candidates and therefore correctly
     // fail closed below.
     const headingStarts = lines
-      .filter(line => {
-        const heading = markdownHeading(line.text);
+      .filter((_line, lineIndex) => {
+        const heading = headings[lineIndex];
         return Boolean(heading && (role.company
           ? containsRoleMatch(heading.label, role.company)
           : containsRoleMatch(heading.label, role.title)));
@@ -1256,11 +1259,11 @@ function careerDataRoleRegionsForSourceRoles(careerData, sourceRoles) {
   const regions = new Map();
   for (let index = 0; index < scoped.length; index += 1) {
     const current = scoped[index];
-    const currentHeading = markdownHeading(lines.find(line => line.start === current.start)?.text || '');
+    const currentHeading = headings[lines.findIndex(line => line.start === current.start)] ?? null;
     const nextRole = scoped[index + 1]?.start ?? Infinity;
-    const boundaries = lines.filter((line) => {
+    const boundaries = lines.filter((line, lineIndex) => {
       if (/^\s*---+\s*$/u.test(line.text)) return true;
-      const heading = markdownHeading(line.text);
+      const heading = headings[lineIndex];
       return Boolean(currentHeading && heading && heading.level <= currentHeading.level);
     }).map(line => line.start);
     const nextBoundary = boundaries.find(start => start > current.start) ?? Infinity;
@@ -1431,6 +1434,13 @@ function careerQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById) {
   return evidenceIds.flatMap(evidenceId => careerEvidenceQuotesById?.get(evidenceId) || []);
 }
 
+function careerSourceQuotesForEvidenceIds(evidenceIds, careerEvidenceQuotesById) {
+  return evidenceIds.flatMap(evidenceId => {
+    const quotes = careerEvidenceQuotesById?.get(evidenceId);
+    return quotes == null ? [] : [Array.isArray(quotes) ? quotes[0] : quotes];
+  });
+}
+
 // What "the whole term" means, once, for every grounding comparison here.
 //
 // A term is not stated by a longer token that merely contains it, and the longer
@@ -1449,10 +1459,21 @@ function wholeTermPattern(literal, flags) {
   return new RegExp(`(?<![${letterOrJoiner}])(?<![\\p{L}\\p{N}]\\.)${escaped}(?![${letterOrJoiner}])(?!\\.[\\p{L}\\p{N}])`, flags);
 }
 
+// Skill selection tests every approved name against every quote, several times
+// over; the stateless (no `g` flag) pattern for one name is built once.
+const QUOTED_TERM_PATTERNS = new Map();
+const QUOTED_TERM_PATTERN_CAP = 2000;
+
 function quotedEvidenceHasTerm(value, quotes, flags) {
   const literal = String(value || '').trim();
   if (!literal) return false;
-  const exactTerm = wholeTermPattern(literal, flags);
+  const cacheKey = `${flags}\u0000${literal}`;
+  let exactTerm = QUOTED_TERM_PATTERNS.get(cacheKey);
+  if (!exactTerm) {
+    if (QUOTED_TERM_PATTERNS.size >= QUOTED_TERM_PATTERN_CAP) QUOTED_TERM_PATTERNS.clear();
+    exactTerm = wholeTermPattern(literal, flags);
+    QUOTED_TERM_PATTERNS.set(cacheKey, exactTerm);
+  }
   return quotes.some(quote => exactTerm.test(String(quote)));
 }
 

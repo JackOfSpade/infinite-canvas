@@ -21,9 +21,9 @@ import {
   officialResearchSettled, listingStateRank, OFFICIAL_POSTING_ROW_FIELDS, OFFICIAL_POSTING_TRAIL,
 } from '../../electron/ipc/officialPostingFields.js';
 import {
-  BOARD_CLOSED_DISPOSITIONS, boardClosedDetailAllowed, boardClosedRetirement, boardClosedSetAside,
+  BOARD_CLOSED_DISPOSITIONS, boardClosedRetirement, boardClosedSetAside,
   boardClosedTelemetryBlock, isBoardClosedRow, mergeBoardClosedTelemetry, preferOpenRows,
-  scoreSafeRowsWithBoardClosed, settleBoardClosedRows, withBoardClosed,
+  scoreSafeRowsWithBoardClosed, settleBoardClosedRows,
 } from '../../electron/ipc/officialPostingBoardClosed.js';
 import { createOfficialPostingRecoveryPassResolver, mergeOfficialPostingTelemetry, officialPostingDedup } from '../../electron/ipc/officialPostingService.js';
 import { shouldPersistOfficialPostingResult } from '../../electron/ipc/officialPostingResolver.js';
@@ -211,10 +211,6 @@ const pureTests = [
       assert.deepEqual(card.data.boardClosed, marker());
       assert.equal(cardOf(row({ matchScore: 80, reuseCardId: card.id }), [card]).data.boardClosed, undefined, 'a reused card does not keep a stale marker');
       assert.equal(isBoardClosedRow(card.data), true); assert.equal(isBoardClosedRow(row()), false);
-      assert.deepEqual(withBoardClosed(row(), { board: 'indeed', reason: 'indeed-job-unavailable', now: new Date(AT) }).boardClosed, marker('indeed', 'indeed-job-unavailable'));
-      const plain = row();
-      assert.equal(withBoardClosed(plain, { board: 'indeed', reason: 'not an enum value' }), plain);
-      assert.equal(withBoardClosed(plain, { board: 'indeed', reason: 'indeed-job-unavailable', now: new Date('nonsense') }), plain);
 
       // The discovery stage prompt prints the job's identifying facts only.
       const auditAt = '2026-10-26T12:34:56.000Z';
@@ -275,9 +271,6 @@ const pureTests = [
         expectedUrl: 'https://jobs.lever.co/northwind/abc', finalUrl: 'https://www.ziprecruiter.com/jobseeker/home', now }).row.boardClosed.board,
       'ziprecruiter', 'the final aggregator host determines ownership');
       assert.equal(unavailableDetailDisposition({ pageInfo: { httpStatus: 404 }, job: null, sourceId: 'ziprecruiter', expectedUrl: card.url, finalUrl: card.url }).row, null);
-      assert.equal(boardClosedDetailAllowed({ expectedUrl: 'https://www.linkedin.com/jobs/view/1', finalUrl: 'https://www.linkedin.com/jobs/view/1' }), true);
-      assert.equal(boardClosedDetailAllowed({ expectedUrl: 'https://www.linkedin.com/jobs/view/1', finalUrl: 'https://careers.example.test/x' }), false);
-      assert.equal(boardClosedDetailAllowed({ expectedUrl: 'https://jobs.lever.co/northwind/abc', finalUrl: 'https://www.ziprecruiter.com/jobs/1' }), true);
 
       // Counters stay apart: dropped rows are NOT kept rows, and a kept row is still terminal proof.
       assert.equal(didDetailBlockReprobeRecover({ boardClosedDetailKept: 1 }), true);

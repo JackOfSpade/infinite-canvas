@@ -110,7 +110,7 @@ export function sourceTenantTaglineEqual(owner, label) {
 
 /** Alias pairs must come from a fetched own-root Organization property or an
  * explicit declaration on that root or one of its linked legal pages. */
-export function rootEmployerAliasMatches(left, right, aliases = []) {
+function rootEmployerAliasMatches(left, right, aliases = []) {
   return strictEmployerEqual(left, right) || aliases.some(pair => Array.isArray(pair) && pair.length === 2
     && (strictEmployerEqual(left, pair[0]) && strictEmployerEqual(right, pair[1])
       || strictEmployerEqual(left, pair[1]) && strictEmployerEqual(right, pair[0])));

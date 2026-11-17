@@ -48,7 +48,7 @@ function safeGeneration(value) {
     : null;
 }
 
-function safeSnapshotCreatedAtMs(value) {
+function safeTimestampMs(value) {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
     && Number.isFinite(new Date(value).getTime()) ? value : null;
 }
@@ -57,8 +57,7 @@ function normalizeEvent(input = {}, { persisted = false } = {}) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const operation = enumValue(input.operation, OPERATIONS, null);
   if (!operation) return null;
-  const recordedAt = typeof input.at === 'number' && Number.isSafeInteger(input.at) && input.at > 0
-    && Number.isFinite(new Date(input.at).getTime()) ? input.at : null;
+  const recordedAt = safeTimestampMs(input.at);
   // Never manufacture a fresh timestamp while reading a persisted journal:
   // it could turn corrupt old evidence into an apparently current completion.
   if (persisted && recordedAt == null) return null;
@@ -84,7 +83,7 @@ function normalizeEvent(input = {}, { persisted = false } = {}) {
   const unscored = finiteCount(input.unscoredJobCount);
   const failedBatches = finiteCount(input.failedBatchCount);
   const revision = persistedOpaque(input.analysisRevision, input.analysisRevisionId);
-  const snapshotCreatedAt = safeSnapshotCreatedAtMs(input.snapshotCreatedAtMs);
+  const snapshotCreatedAt = safeTimestampMs(input.snapshotCreatedAtMs);
   if (operation === 'reanalysis-score-complete'
     && (event.recoveryMode !== 'reanalyze-saved-jobs' || !revision
       || !['completed', 'partial'].includes(event.result)

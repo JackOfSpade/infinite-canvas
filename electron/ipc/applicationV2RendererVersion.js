@@ -9,6 +9,13 @@ const FONT_EXTENSION = /\.(?:ttf|otf|ttc|woff2?)$/iu;
 const SYSTEM_FONT_FAMILY = /^(?:Arial(?:[ .]|$)|Georgia(?:[ .]|$)|Menlo[.]|Times New Roman(?:[ .]|$)|Helvetica(?:Neue)?[.]|Courier(?: New)?(?:[ .]|$)|Apple Color Emoji[.]|Apple Symbols[.]|SFNS(?:Mono)?[.]|LastResort[.])/u;
 const hash = value => crypto.createHash('sha256').update(value).digest('hex');
 
+// Relative url(...) references of a stylesheet; absolute, protocol and fragment URLs are not local files.
+function localStylesheetUrls(text) {
+  return [...text.matchAll(/url\(\s*['"]?([^'"\s)]+)['"]?\s*\)/giu)]
+    .map(match => match[1])
+    .filter(url => !/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/iu.test(url));
+}
+
 export function applicationRendererSourceDigest(root = process.cwd()) {
   return hash(JSON.stringify(SOURCE_FILES.map(file => [file, hash(fs.readFileSync(path.join(root, file)))])));
 }
@@ -30,9 +37,8 @@ export function applicationRendererAssetDigest({ sourceDigest, designDir, fontCo
     const source = path.join(designDir, file);
     const bytes = fs.readFileSync(source);
     const localFonts = [];
-    for (const match of bytes.toString('utf8').matchAll(/url\(\s*['"]?([^'"\s)]+)['"]?\s*\)/giu)) {
-      if (/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/iu.test(match[1])) continue;
-      const asset = path.resolve(path.dirname(source), match[1]);
+    for (const url of localStylesheetUrls(bytes.toString('utf8'))) {
+      const asset = path.resolve(path.dirname(source), url);
       const relative = path.relative(path.resolve(designDir), asset);
       if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative) || !FONT_EXTENSION.test(asset))
         throw new Error('Invalid renderer font asset.');
@@ -57,9 +63,8 @@ export function applicationV2RendererVersion({ designDir, fontContract, sourceRo
     const paths = fontRoots.filter(root => fs.existsSync(root)).flatMap(fontFiles).sort();
     if (!['Arial', 'Georgia', 'Menlo'].every(family => paths.some(file => path.basename(file).startsWith(`${family}.`)))) return null;
     const styles = CSS_FILES.map(file => path.join(designDir, file));
-    const localFonts = styles.flatMap(file => [...fs.readFileSync(file, 'utf8').matchAll(/url\(\s*['"]?([^'"\s)]+)['"]?\s*\)/giu)]
-      .filter(match => !/^(?:[a-z][a-z\d+.-]*:|\/\/|#)/iu.test(match[1]))
-      .map(match => path.resolve(path.dirname(file), match[1])));
+    const localFonts = styles.flatMap(file => localStylesheetUrls(fs.readFileSync(file, 'utf8'))
+      .map(url => path.resolve(path.dirname(file), url)));
     const files = [...styles, ...paths, ...localFonts, ...(!builtSourceDigest ? SOURCE_FILES.map(file => path.join(sourceRoot, file)) : [])];
     const signature = JSON.stringify(files.map(file => {
       const stat = fs.statSync(file);

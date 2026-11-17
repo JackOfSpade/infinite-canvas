@@ -143,6 +143,17 @@ export function assessMarketplaceScrape({ yieldBySource = {}, shapeBySource = {}
   return out;
 }
 
+const hubSourceCauseKnown = source => Boolean(source?.antiBot || source?.warning || source?.challenged || source?.loggedOut
+  || source?.loginBounce || source?.appleEventsDisabled || source?.status === 'needs-login');
+
+/** One entry per page this scan read: false for a readable page, true for a failure with no known cause. */
+function hubScanReads(prepared) {
+  const readable = Array.isArray(prepared?.llmInputs) ? prepared.llmInputs.length : 0;
+  const sources = Array.isArray(prepared?.sources) ? prepared.sources : [];
+  return [...Array.from({ length: readable }, () => false),
+    ...sources.filter(source => !hubSourceCauseKnown(source)).map(source => source?.readFailure === true)];
+}
+
 /**
  * Judges one platform's hub page reads from prepareHubPages' result. A page counts as bad only when its terminal
  * outcome carries readFailure and no known cause (anti-bot wall, login, challenge). Known-cause pages are left out
@@ -151,12 +162,7 @@ export function assessMarketplaceScrape({ yieldBySource = {}, shapeBySource = {}
 export function assessHubScan(prepared, { earlierReads = [] } = {}) {
   const platformId = String(prepared?.platformId || '').trim();
   if (!platformId) return null;
-  const sources = Array.isArray(prepared?.sources) ? prepared.sources : [];
-  const readable = Array.isArray(prepared?.llmInputs) ? prepared.llmInputs.length : 0;
-  const known = source => Boolean(source?.antiBot || source?.warning || source?.challenged || source?.loggedOut
-    || source?.loginBounce || source?.appleEventsDisabled || source?.status === 'needs-login');
-  const counted = sources.filter(source => !known(source));
-  const reads = [...earlierReads, ...Array.from({ length: readable }, () => false), ...counted.map(source => source?.readFailure === true)].slice(-HUB_RECENT_READS);
+  const reads = [...earlierReads, ...hubScanReads(prepared)].slice(-HUB_RECENT_READS);
   const attempts = reads.length;
   const bad = reads.filter(Boolean).length;
   const base = { key: `hub-scan:${platformId}`, surface: SURFACE_HUB, site: platformId };
@@ -172,11 +178,7 @@ export function assessHubScanWithHistory(prepared) {
   const platformId = String(prepared?.platformId || '').trim();
   const verdict = assessHubScan(prepared, { earlierReads: recentHubReads.get(platformId) || [] });
   if (!verdict) return null;
-  const known = source => Boolean(source?.antiBot || source?.warning || source?.challenged || source?.loggedOut
-    || source?.loginBounce || source?.appleEventsDisabled || source?.status === 'needs-login');
-  const fresh = [...Array.from({ length: Array.isArray(prepared?.llmInputs) ? prepared.llmInputs.length : 0 }, () => false),
-    ...(Array.isArray(prepared?.sources) ? prepared.sources : []).filter(source => !known(source)).map(source => source?.readFailure === true)];
-  recentHubReads.set(platformId, [...(recentHubReads.get(platformId) || []), ...fresh].slice(-HUB_RECENT_READS));
+  recentHubReads.set(platformId, [...(recentHubReads.get(platformId) || []), ...hubScanReads(prepared)].slice(-HUB_RECENT_READS));
   return verdict;
 }
 

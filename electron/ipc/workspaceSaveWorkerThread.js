@@ -8,8 +8,9 @@ import { parentPort } from 'node:worker_threads';
 import { formatPooledWorkspace, parseWorkspaceText, poolWorkspaceContent } from './workspaceContentPool.js';
 
 /**
- * Returns the pooled file text for a canvas already serialized as `plain`, or
- * null when pooling does not apply or does not restore to exactly `plain`.
+ * Returns `{ serialized, mismatch }` for a canvas already serialized as `plain`:
+ * the pooled file text, or `serialized: null` when pooling does not apply
+ * (`mismatch` false) or does not restore to exactly `plain` (`mismatch` true).
  */
 export function pooledTextForPlain(plain) {
   const pooled = poolWorkspaceContent(JSON.parse(plain));

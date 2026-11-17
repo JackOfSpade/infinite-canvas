@@ -575,9 +575,13 @@ export function sentences(value) {
   return joinAbbreviationSplits(rawSentenceSegments(source)).map(text).filter(Boolean);
 }
 
+// One segmenter for the module: constructing it costs more than segmenting a
+// paragraph, and every sentence-level check calls this.
+const SENTENCE_SEGMENTER = typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter('en', { granularity: 'sentence' }) : null;
+
 function rawSentenceSegments(source) {
-  return typeof Intl?.Segmenter === 'function'
-    ? Array.from(new Intl.Segmenter('en', { granularity: 'sentence' }).segment(source)).map(segment => String(segment?.segment ?? ''))
+  return SENTENCE_SEGMENTER
+    ? Array.from(SENTENCE_SEGMENTER.segment(source)).map(segment => String(segment?.segment ?? ''))
     : source.split(/(?<=[.!?])\s+(?=[\p{Lu}\p{N}])/u);
 }
 
@@ -692,24 +696,6 @@ export function checkEvidenceGrounding(plan = {}, evidence = {}) {
     }
   }
   return result('evidence-grounding', true, `${mappings.length} mapping(s) grounded in résumé bullets`);
-}
-
-export function checkNeedGrounding(needs = [], jobText = '', researchText = '') {
-  const posting = normalized(jobText);
-  const research = normalized(researchText);
-  const list = Array.isArray(needs) ? needs : [];
-  for (let index = 0; index < list.length; index++) {
-    const need = list[index] || {};
-    const quote = normalized(need.quote);
-    if (need.source !== 'posting' && need.source !== 'research') {
-      return result('need-grounding', false, `need ${index + 1} has invalid source “${boundedDetailValue(need.source) || 'missing'}”`);
-    }
-    const source = need.source === 'research' ? research : posting;
-    if (!quote || !source.includes(quote)) {
-      return result('need-grounding', false, `need ${index + 1} quote is not present in its ${need.source || 'provided'} source text`);
-    }
-  }
-  return result('need-grounding', true, `${list.length} need quote(s) grounded in source text`);
 }
 
 // The writer audit binds each proof-bearing final paragraph to these three
@@ -1716,36 +1702,6 @@ export function paragraphArgumentSpanGaps(paragraph = '', postingQuoteText = '',
   return gaps;
 }
 
-/**
- * The drafting-stage twin of the argument audit, as a check row.
- *
- * paragraphArgumentSpanGaps asks, of each paragraph that states an action of
- * the candidate's own, whether the paragraph could supply a claim span and a
- * relevance span at all. Those spans are the shape mandates of the audit
- * (CLAIM and RELEVANCE grammar), so a paragraph that cannot supply one is not
- * thereby false, and the twin was measured rejecting paragraphs that were not
- * defective. It carries the id `paragraph-argument-span-gaps`, which the
- * disposition table keeps OFF: the row exists so the id is named and a caller
- * that wants the observation can still read it, and a caller that partitions
- * by disposition drops it. `postingQuoteText` is the posting copy
- * checkParagraphArgumentLinks grades jobNeedQuote against.
- */
-export function checkParagraphArgumentSpanGaps(paragraphs = [], postingQuoteText = '') {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text);
-  const owesTransfer = explicitTransferOwed(list);
-  const owesClaim = explicitClaimOwed(list);
-  const owesRelevance = explicitRelevanceOwed(list);
-  const observations = [];
-  list.forEach((paragraph, index) => {
-    const gaps = paragraphArgumentSpanGaps(paragraph, postingQuoteText, {
-      owesTransfer: owesTransfer[index], owesClaim: owesClaim[index], owesRelevance: owesRelevance[index],
-    });
-    if (gaps.length) observations.push(`paragraph ${index + 1} contains no span that could be its ${gaps.map(gap => gap.field).join(' or its ')}`);
-  });
-  return observationResult('paragraph-argument-span-gaps', observations, MAX_GENERIC_OBSERVATIONS,
-    `${list.length} paragraph(s) each offer the spans their audit mapping would record`);
-}
-
 // Deliberately wider than PAST_PROOF_CUE's closed verb list. That list decides
 // which paragraph owes an argumentMapping, a question about one paragraph's
 // argument; this one asks whether the candidate ever acts anywhere in the
@@ -2172,123 +2128,14 @@ export const LETTER_PROPORTION_RULE =
   + `, and no career-data quote cited by more than ${MAX_PARAGRAPHS_PER_CITED_QUOTE} paragraphs`
   + '. A persuasive letter selects the strongest two or three proofs, develops each in one paragraph of two to four sentences, and binds each to the work it answers; detail beyond those proofs stays in the résumé and does not get a paragraph of its own';
 
-const PERFORMANCE_NEED_KINDS = new Set(['capability', 'domain', 'scale']);
-const ELIGIBILITY_NEED_KINDS = new Set(['credential', 'logistics']);
-
-/**
- * A requirements list dominated by credentials/age/other screens gives the
- * argument planner no view of the work the person would actually perform.
- * This is intentionally a portfolio check, not a claim that eligibility is
- * unimportant: only lists of three or more need two supported work-oriented
- * requirements.
- */
-export function checkNeedsPortfolio(needs = []) {
-  const list = Array.isArray(needs) ? needs : [];
-  if (list.length < 3) return result('needs-portfolio', true, `${list.length} need(s); performance portfolio minimum does not apply`);
-  const performanceCount = list.filter(need => PERFORMANCE_NEED_KINDS.has(text(need?.kind))).length;
-  return performanceCount >= 2
-    ? result('needs-portfolio', true, `${performanceCount} performance-oriented need(s) in ${list.length}-need portfolio`)
-    : result('needs-portfolio', false,
-      `needs portfolio has ${performanceCount} performance-oriented need(s) (capability/domain/scale); at least 2 are required when ${list.length} needs are extracted`);
-}
-
-function needsPortfolioQuality(needs, check) {
-  const list = Array.isArray(needs) ? needs : [];
-  const performanceCount = list.filter(need => PERFORMANCE_NEED_KINDS.has(text(need?.kind))).length;
-  return (check?.passed ? 100000 : 0) + performanceCount * 100 + list.length;
-}
-
-/** Keeps the best completed needs pass while the convergence loop continues. */
-export function selectBetterLetterNeeds(firstNeeds, firstCheck, retryNeeds, retryCheck) {
-  return needsPortfolioQuality(retryNeeds, retryCheck) > needsPortfolioQuality(firstNeeds, firstCheck)
-    ? { needs: retryNeeds, check: retryCheck, selected: 'retry' }
-    : { needs: firstNeeds, check: firstCheck, selected: 'first' };
-}
-
-/**
- * Legacy compatibility entry point. Career-data support never makes logistics
- * cover-letter material; any nonempty plan value is now rejected outright.
- */
-export function checkLogisticsGrounding(plan = {}, careerData = '') {
-  void careerData;
-  return checkLogisticsExclusion(plan);
-}
-
-function droppedNeed(plan, needIndex) {
-  return (Array.isArray(plan?.droppedNeeds) ? plan.droppedNeeds : [])
-    .find(item => Number(item?.needIndex) === needIndex && text(item?.reason));
-}
-
-function mappedNeedIndexes(plan) {
-  return new Set((Array.isArray(plan?.mappings) ? plan.mappings : [])
-    .map(mapping => Number(mapping?.needIndex))
-    .filter(Number.isInteger));
-}
-
-/** Every employer need must be either argued or consciously recorded as dropped. */
-export function checkAllNeedDisposition(plan = {}, needs = []) {
-  const rankedNeeds = Array.isArray(needs) ? needs : [];
-  if (!rankedNeeds.length) return result('all-needs-disposition', true, 'skipped: ranked needs unavailable');
-  const mapped = mappedNeedIndexes(plan);
-  const missing = rankedNeeds.findIndex((_, index) => !mapped.has(index) && !droppedNeed(plan, index));
-  return missing === -1
-    ? result('all-needs-disposition', true, `${rankedNeeds.length} ranked need(s) are mapped or recorded as dropped`)
-    : result('all-needs-disposition', false, `need ${missing + 1} is neither mapped nor recorded as dropped`);
-}
-
-/**
- * Surface every consciously dropped eligibility screen. This is a status, not
- * a repair instruction: prose cannot truthfully create a credential, driver
- * authorization, or other logistical qualification. `item.reason` is
- * curly-quoted below though this check is not (yet) in PASTE_CHECK_PROSE_UNITS'
- * fingerprinted battery — see checkPriorEmployerOpening's comment above; the
- * same bare-interpolation defect would reappear the day this check joins that
- * battery, so it is fixed here on the same audit pass rather than left for a
- * second incident to find.
- */
-export function checkEligibilityNeedDisposition(plan = {}, needs = []) {
-  const rankedNeeds = Array.isArray(needs) ? needs : [];
-  const mapped = mappedNeedIndexes(plan);
-  const dropped = rankedNeeds.flatMap((need, index) => {
-    if (mapped.has(index) || !ELIGIBILITY_NEED_KINDS.has(text(need?.kind))) return [];
-    const item = droppedNeed(plan, index);
-    return item ? [{ index, kind: text(need?.kind), reason: text(item.reason) }] : [];
-  });
-  if (!dropped.length) return result('eligibility-need-disposition', true, 'no eligibility need is honestly dropped');
-  return result('eligibility-need-disposition', false,
-    `${dropped.length} eligibility need(s) honestly dropped: ${dropped.map(item => `#${item.index + 1} ${item.kind} — “${boundedDetailValue(item.reason)}”`).join('; ')}`);
-}
-
-/**
- * A truthful plan may leave a hard credential or eligibility screen unargued.
- * That cannot be fixed by asking the model to invent a qualification, but it
- * must remain visible beside the shipped letter rather than only in telemetry.
- * `dropped.reason` is curly-quoted below — see checkEligibilityNeedDisposition's
- * comment above.
- */
-export function checkTopNeedDisposition(plan = {}, needs = []) {
-  const rankedNeeds = Array.isArray(needs) ? needs : [];
-  if (!rankedNeeds.length) return result('top-need-disposition', true, 'skipped: ranked needs unavailable');
-  const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
-  if (mappings.some(mapping => Number(mapping?.needIndex) === 0)) {
-    return result('top-need-disposition', true, 'top-ranked need is argued');
-  }
-  const dropped = droppedNeed(plan, 0);
-  if (dropped) {
-    const kind = text(rankedNeeds[0]?.kind) || 'requirement';
-    return result('top-need-disposition', false,
-      `top-ranked ${kind} need is not argued (honestly dropped): ${dropped.reason ? `“${boundedDetailValue(dropped.reason)}”` : 'no reason recorded'}`);
-  }
-  return result('top-need-disposition', false, 'top-ranked need is neither argued nor recorded as dropped');
-}
-
 export function checkRedundancy(paragraphs = [], evidence = {}) {
   const bullets = bulletTexts(evidence);
+  const bulletWords = bullets.map(words);
   const list = Array.isArray(paragraphs) ? paragraphs : [];
   for (let paragraphIndex = 0; paragraphIndex < list.length; paragraphIndex++) {
     const paragraphWords = words(list[paragraphIndex]);
     for (let bulletIndex = 0; bulletIndex < bullets.length; bulletIndex++) {
-      const run = longestSharedRun(paragraphWords, words(bullets[bulletIndex]));
+      const run = longestSharedRun(paragraphWords, bulletWords[bulletIndex]);
       if (run.length >= REDUNDANCY_SHINGLE_WORDS) {
         return result('redundancy', false,
           `paragraph ${paragraphIndex + 1} shares a ${run.length}-word run ${quotedRunPhrase(run.words)} with résumé bullet ${bulletIndex + 1}`);
@@ -2911,31 +2758,6 @@ export function checkFigureDiscipline(paragraphs = [], evidence = {}, plan = nul
   ]);
 }
 
-/**
- * Some postings contain an application instruction that is neither a role
- * capability nor cover-letter argument material.  A request for a portfolio,
- * repository, shipped-work link, or demo must remain visible when the résumé
- * has no clickable http(s) link; silently omitting it can invalidate an
- * otherwise polished application.
- */
-export function checkRequestedWorkSampleLink(jobText = '', resumeMainHtml = '') {
-  const posting = normalized(jobText);
-  const requestsLink = /\b(?:include|provide|submit|share|send|attach)\b[^.!?\n]{0,100}\b(?:link|url)\b[^.!?\n]{0,100}\b(?:built|build|shipped|portfolio|repo(?:sitory)?|github|demo|work sample|project)\b/u.test(posting)
-    || /\b(?:portfolio|repo(?:sitory)?|github|demo|work sample|project)\b[^.!?\n]{0,100}\b(?:link|url)\b/u.test(posting);
-  if (!requestsLink) return result('work-sample-link', true, 'posting does not request a portfolio, repository, demo, or shipped-work link');
-
-  const markup = String(resumeMainHtml || '');
-  const hasHttpLink = /<a\b[^>]*\bhref\s*=\s*(?:"https?:\/\/[^"\s]+"|'https?:\/\/[^'\s]+'|https?:\/\/[^\s>]+)/iu.test(markup);
-  return hasHttpLink
-    ? result('work-sample-link', true, 'posting-requested work-sample link is present in the résumé')
-    : result('work-sample-link', false, 'posting requests a portfolio, repository, demo, or shipped-work link, but the résumé has no clickable http(s) link');
-}
-
-/** Legacy compatibility entry point; sourced logistics are no longer letter material. */
-export function checkLogisticsContainment(plan = {}, paragraphs = []) {
-  return checkLogisticsExclusion(plan, paragraphs);
-}
-
 // A cover letter argues fit; it is not an application-form substitute. Keep
 // this deliberately promise-shaped so a factual discussion of a system's
 // geographic data or availability does not become a false positive.
@@ -2997,7 +2819,7 @@ export function checkLogisticsExclusion(plan = {}, paragraphs = []) {
 
 /**
  * Shared observation tail for the checks below: identical cap-and-join
- * behaviour to checkGenericPhrases/checkLogisticsContainment so a defect list
+ * behaviour to checkGenericPhrases/checkLogisticsExclusion so a defect list
  * can never flood the revision prompt or the audit line.
  */
 function observationResult(id, observations, cap, passedDetail) {
@@ -3729,13 +3551,15 @@ function scopeFunctionTerm(term) {
   // scopeTerms strips a trailing “s”, so “across” arrives as “acros”.
   return FRAME_FUNCTION_WORDS.has(term) || FRAME_FUNCTION_WORDS.has(`${term}s`) || TARGET_SCOPE_CONNECTIVES.has(term);
 }
+// `word` comes from scopeTerms, already stripped of one trailing “s”, as are
+// both term sets; stripping again turned “process” into “proce”, which no set
+// holds, so such a word could never read as source-only.
 function sourceOnlyTerm(word, jobTerms, evidenceTerms) {
-  const normalizedWord = word.replace(/s$/u, '');
-  return normalizedWord.length >= 4
-    && !TARGET_SCOPE_STOP_WORDS.has(normalizedWord)
-    && !scopeFunctionTerm(word) && !scopeFunctionTerm(normalizedWord)
-    && evidenceTerms.has(normalizedWord)
-    && !jobTerms.has(normalizedWord);
+  return word.length >= 4
+    && !TARGET_SCOPE_STOP_WORDS.has(word)
+    && !scopeFunctionTerm(word)
+    && evidenceTerms.has(word)
+    && !jobTerms.has(word);
 }
 
 function scopeTerms(value) {
@@ -4008,14 +3832,22 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
     .map(project => `${project?.name || ''} ${project?.description || ''}`).join(' ');
   const evidenceCorpus = normalized(`${resumeEvidenceText(evidence || {})} ${projectText}`);
   const observations = [];
+  // Each alias pattern is built once for the whole letter, not once per sentence.
+  // The patterns are global, so matchAll below works on a copy and they stay reusable.
+  const aliasPatterns = new Map();
+  const aliasPattern = (kind, alias, build) => {
+    const key = `${kind}\u0000${alias}`;
+    if (!aliasPatterns.has(key)) aliasPatterns.set(key, build(escapeRegExp(alias)));
+    return aliasPatterns.get(key);
+  };
   (Array.isArray(paragraphs) ? paragraphs : []).forEach((paragraph, paragraphIndex) => {
     sentences(paragraph).forEach((sentence, sentenceIndex) => {
       const value = text(sentence);
-      const targetSpans = targetAliases.flatMap(alias => [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(alias)}(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))]
+      const targetSpans = targetAliases.flatMap(alias => [...value.matchAll(aliasPattern('target', alias, escaped => new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu')))]
         .map(match => [match.index, match.index + match[0].length]))
         .sort((left, right) => right[1] - right[0] - (left[1] - left[0]));
       const aliasObjects = bindingAliases.flatMap(alias =>
-        [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(to|join|joining|help|helping|support|supporting|serve|serving|assist|assisting)\\s+(?:the\\s+)?(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].filter(match => aliasSurfaceAllowed(alias, match[2])).map(match => ({
+        [...value.matchAll(aliasPattern('object', alias, escaped => new RegExp(`(?<![\\p{L}\\p{N}])(to|join|joining|help|helping|support|supporting|serve|serving|assist|assisting)\\s+(?:the\\s+)?(${escaped})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu')))].filter(match => aliasSurfaceAllowed(alias, match[2])).map(match => ({
           value: match[2], index: match.index ?? -1, preposition: match[1].toLowerCase(), prefixEnd: (match.index ?? 0) + match[0].indexOf(match[2]),
         })));
       if (!PROSPECTIVE_COMPANY_FRAME.test(value)
@@ -4034,17 +3866,17 @@ export function checkTargetCompanyBinding(paragraphs = [], companyName = '', pri
         })),
         ...aliasObjects,
         ...bindingAliases.flatMap(alias =>
-          [...value.matchAll(new RegExp(`^(At|For|With|To)\\s+(${escapeRegExp(alias)})(?=,?\\s+(?:i|we)\\s+(?:would|could|can|will)\\b)`, 'giu'))].map(match => ({
+          [...value.matchAll(aliasPattern('opener', alias, escaped => new RegExp(`^(At|For|With|To)\\s+(${escaped})(?=,?\\s+(?:i|we)\\s+(?:would|could|can|will)\\b)`, 'giu')))].map(match => ({
             value: match[2], index: 0, preposition: match[1].toLowerCase(), opener: true, prefixEnd: match[0].indexOf(match[2]),
           }))),
         // Prior-employer subjects and plural possessives are prospective
         // targets too, without widening the ordinary preposition extractor.
         ...bindingAliases.flatMap(alias =>
-          [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeRegExp(alias)})(?:['’]s?(?=\\s)|(?=\\s+(?:would|could|can|will)\\b))(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
+          [...value.matchAll(aliasPattern('subject', alias, escaped => new RegExp(`(?<![\\p{L}\\p{N}])(${escaped})(?:['’]s?(?=\\s)|(?=\\s+(?:would|could|can|will)\\b))(?![\\p{L}\\p{N}])`, 'giu')))].map(match => ({
             value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
           }))),
         ...bindingForbiddenAliases.flatMap(alias =>
-          [...value.matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${escapeRegExp(alias)})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu'))].map(match => ({
+          [...value.matchAll(aliasPattern('forbidden', alias, escaped => new RegExp(`(?<![\\p{L}\\p{N}])(${escaped})(?:['’]s?)?(?![\\p{L}\\p{N}])`, 'giu')))].map(match => ({
             value: match[1], index: match.index ?? -1, preposition: '', prefixEnd: match.index ?? 0,
           }))),
       ].filter(match => {
@@ -5658,17 +5490,6 @@ function candidateContributionRequirement(missing, companyName) {
 // modal actually contains.
 const ALL_CONTRIBUTION_HALVES = Object.freeze(['asset', 'action', 'target']);
 
-/**
- * The three parts a closing's final substantive sentence needs (asset, action,
- * target), each in the words checkDirectWelcomeClosing itself reports, with no
- * employer name. The stage contract states them once, before any closing has
- * been written, so a writer does not first learn them from a rejection; it
- * reads them from this function so the contract and the check cannot drift.
- */
-export function closingContributionParts() {
-  return ALL_CONTRIBUTION_HALVES.map(half => contributionHalfRequirement(half, ''));
-}
-
 // The functions the host requires of the sentences of a cover letter, each in one phrase, and the
 // checks that can reject a letter for losing one. No closing function is listed: how a letter closes
 // is the writer's choice. The phrases are built from the budgets so they can never name a function
@@ -6057,31 +5878,6 @@ export function findUnsupportedDurationClaim(finalText, sourceQuotes = []) {
   return null;
 }
 
-/**
- * findUnsupportedDurationClaim over a whole letter, as a check row.
- *
- * `citations` is parallel to `paragraphs`: for paragraph i, the career-data
- * quotes it cites. Each paragraph is judged against ITS OWN quotes, which is
- * how every stage that writes a span reads it (a span is only as true as the
- * evidence the unit itself cites). When the quotes cannot be lined up with the
- * paragraphs the check does not judge rather than guess, the way
- * analyzeLetterProportion treats an unlined quote limit. The decision itself
- * is findUnsupportedDurationClaim's, unchanged.
- */
-export function checkUnsupportedExperienceSpan(paragraphs = [], citations = null) {
-  const list = (Array.isArray(paragraphs) ? paragraphs : []).map(text);
-  if (!Array.isArray(citations) || citations.length !== list.length) {
-    return result('unsupported-experience-span', true, 'skipped: the quotes each paragraph cites are not available');
-  }
-  const observations = [];
-  list.forEach((paragraph, index) => {
-    const found = findUnsupportedDurationClaim(paragraph, Array.isArray(citations[index]) ? citations[index] : []);
-    if (found) observations.push(`paragraph ${index + 1} claims an experience span (“${found.phrase}”) that none of the career-data evidence it cites states`);
-  });
-  return observationResult('unsupported-experience-span', observations, MAX_GENERIC_OBSERVATIONS,
-    `${list.length} paragraph(s) claim no experience span their cited evidence does not state`);
-}
-
 // A paragraph-opening demonstrative noun phrase promises that its referent
 // sits in the paragraph the reader just finished. A shipped letter opened a
 // paragraph “That <topic> practice …” two paragraphs after the <topic>
@@ -6152,11 +5948,6 @@ function paragraphOpeningWord(value) {
   return match ? match[0] : '';
 }
 
-function listParagraphNumbers(numbers) {
-  if (numbers.length <= 1) return numbers.join('');
-  return `${numbers.slice(0, -1).join(', ')} and ${numbers[numbers.length - 1]}`;
-}
-
 /**
  * Records consecutive paragraphs that open on the same word (case-insensitive).
  * Advisory only: names paragraph numbers and the writer's own word, never a
@@ -6176,7 +5967,7 @@ export function checkParagraphOpeners(paragraphs = []) {
     if (key && end - start >= 2) {
       const numbers = [];
       for (let index = start; index < end; index++) numbers.push(index + 1);
-      observations.push(`paragraphs ${listParagraphNumbers(numbers)} open with the same word (“${boundedDetailValue(openers[start])}”); start at least one of them on a different word, such as the work or its setting`);
+      observations.push(`paragraphs ${joinAnd(numbers)} open with the same word (“${boundedDetailValue(openers[start])}”); start at least one of them on a different word, such as the work or its setting`);
     }
     start = end;
   }
@@ -6371,8 +6162,7 @@ export const ADJACENT_SENTENCE_SHAPE_RULE =
  */
 function joinShapeLocations(locations) {
   const parts = locations.map(({ paragraph, sentence }) => `paragraph ${paragraph} sentence ${sentence}`);
-  if (parts.length < 2) return parts[0];
-  return `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}`;
+  return joinAnd(parts);
 }
 
 /**
@@ -7229,8 +7019,10 @@ export function checkDanglingDemonstrative(paragraphs = []) {
     const own = sentences(paragraph);
     own.forEach((sentence, position) => {
       if (position === 0) return;
+      const carriers = demonstrativeCarriers(sentence);
+      if (!carriers.length) return;
       const earlier = own.slice(0, position).flatMap(words).flatMap(word => [word, ...word.split('-')]).map(carrierNounStem);
-      for (const carrier of demonstrativeCarriers(sentence)) {
+      for (const carrier of carriers) {
         const candidates = [...carrier.modifiers, carrier.noun];
         const referenced = candidates.some(candidate => [candidate, ...candidate.split('-')].some(part => {
           const stem = carrierNounStem(part);
@@ -7562,48 +7354,6 @@ function paragraphJobNeedQuotes(plan) {
     .map(planned => text(planned?.argumentMapping?.jobNeedQuote));
 }
 
-/** Returns the strict pre-prose gate without ever throwing or blocking shipping. */
-export function checkPlanGate(plan = {}, evidence = {}, needs = [], jobText = '', researchText = '') {
-  const checks = [
-    checkRoleThesis(plan),
-    checkEvidenceGrounding(plan, evidence),
-    checkNeedGrounding(needs, jobText, researchText),
-    checkLogisticsExclusion(plan),
-    checkMappingNarrativeStructure(plan),
-  ];
-  const mappings = Array.isArray(plan?.mappings) ? plan.mappings : [];
-  if (mappings.length < 1) checks.push(result('plan-mappings', false, 'plan has no mappings'));
-  else checks.push(result('plan-mappings', true, `plan has ${mappings.length} mapping(s)`));
-  // When needs analysis succeeded, a mapping must actually point back to that
-  // ranked list. Without this check an out-of-range `needIndex` can make the
-  // plan look valid while silently bypassing the top-need telemetry and the
-  // argument contract. If needs are unavailable, the documented direct-job
-  // fallback intentionally has no list to validate against.
-  const rankedNeeds = Array.isArray(needs) ? needs : [];
-  if (rankedNeeds.length) {
-    const invalid = mappings.findIndex(mapping => !Number.isInteger(mapping?.needIndex)
-      || mapping.needIndex < 0 || mapping.needIndex >= rankedNeeds.length);
-    checks.push(invalid === -1
-      ? result('plan-need-references', true, `${mappings.length} mapping(s) reference ranked needs`)
-      : result('plan-need-references', false, `mapping ${invalid + 1} references invalid needIndex “${boundedDetailValue(mappings[invalid]?.needIndex) || 'missing'}”`));
-  }
-  const allStated = mappings.length > 0 && mappings.every(mapping => mapping?.resumeStatus === 'stated');
-  checks.push(result('plan-redundancy', !allStated,
-    allStated ? 'all mappings are marked resumeStatus “stated”' : 'at least one mapping requires interpretation'));
-  checks.push(checkAllNeedDisposition(plan, rankedNeeds));
-  const topNeedDisposition = checkTopNeedDisposition(plan, rankedNeeds);
-  checks.push(topNeedDisposition);
-  checks.push(checkEligibilityNeedDisposition(plan, rankedNeeds));
-  // A recorded top-ranked hard screen is an honest status, not a revision
-  // instruction: retrying it would pressure the model to manufacture a
-  // credential. An undisposed top need remains retryable because the plan has
-  // failed to make its choice auditable at all.
-  const shouldRetry = checks.some(check => !check.passed
-    && !(check.id === 'top-need-disposition' && /honestly dropped/.test(check.detail))
-    && check.id !== 'eligibility-need-disposition');
-  return { shouldRetry, checks };
-}
-
 // ---------------------------------------------------------------------------
 // CHECK DISPOSITIONS
 //
@@ -7719,17 +7469,6 @@ const CHECK_DISPOSITION_ROWS = Object.freeze([
   ['figure-count', 'advisory', 'TASTE', 'how many figures a letter carries is a density preference.'],
   ['letter-paragraph-ceiling', 'advisory', 'TASTE', 'paragraph count is a layout proxy; the renderer measures actual one-page fit.'],
   ['paragraph-argument-shape', 'advisory', 'TASTE', 'the claim must match a closed capability grammar, a proof must use one of a closed list of verbs, a relevance span must carry words of the quote, a paragraph that states an action owes a mapping, no two paragraphs bind one quote: wording decided by literal form.'],
-
-  // ---- the needs-analysis plan gate: no production caller since the APIs were removed
-  ['need-grounding', 'off', 'HYGIENE', 'dead code: no production caller.'],
-  ['plan-mappings', 'off', 'HYGIENE', 'dead code: no production caller.'],
-  ['plan-need-references', 'off', 'HYGIENE', 'dead code: no production caller.'],
-  ['plan-redundancy', 'off', 'TASTE', 'dead code: no production caller.'],
-  ['all-needs-disposition', 'off', 'HYGIENE', 'dead code: no production caller.'],
-  ['top-need-disposition', 'off', 'HYGIENE', 'dead code: no production caller.'],
-  ['eligibility-need-disposition', 'off', 'HYGIENE', 'dead code: no production caller.'],
-  ['needs-portfolio', 'off', 'TASTE', 'dead code: no production caller.'],
-  ['work-sample-link', 'off', 'HYGIENE', 'dead code: no production caller.'],
 ]);
 
 export const CHECK_DISPOSITIONS = Object.freeze(Object.fromEntries(CHECK_DISPOSITION_ROWS.map(([id, disposition]) => [id, disposition])));
@@ -7803,27 +7542,6 @@ export function partitionCheckResults(results, table = CHECK_DISPOSITIONS) {
     }
   }
   return { blocking, advisory: [...advisoryCounts].map(([id, count]) => ({ id, count })) };
-}
-
-/**
- * The table as data, for documents and tests: the values, the default, the
- * counts, the ids grouped by disposition and one row per id with its class and
- * the reason it has the disposition it has.
- */
-export function describeCheckDispositions(table = CHECK_DISPOSITIONS) {
-  const ids = { gate: [], advisory: [], off: [] };
-  const rows = Object.keys(table).map(id => {
-    const disposition = checkDisposition(id, table);
-    ids[disposition].push(id);
-    return { id, disposition, class: CHECK_CLASSES[id] ?? null, rationale: CHECK_RATIONALES[id] ?? null };
-  });
-  return {
-    values: CHECK_DISPOSITION_VALUES,
-    defaultDisposition: 'gate',
-    counts: { gate: ids.gate.length, advisory: ids.advisory.length, off: ids.off.length, total: rows.length },
-    ids,
-    rows,
-  };
 }
 
 /** Evaluates the prose-level checks used to decide the single revision attempt. */

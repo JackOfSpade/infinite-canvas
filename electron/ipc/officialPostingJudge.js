@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { officialHttpsUrl } from './officialPostingFields.js';
 import { canonicalLeadUrl, flatPostingText, isSingleStatedPlace, locationsCompatible, plainPostingText } from './officialPostingMatch.js';
 import { officialPostingSemanticScrapedEvidence } from './officialPostingSemantic.js';
-import { OFFICIAL_POSTING_MATCH_TASK } from './officialPostingBridge.js';
+import { OFFICIAL_POSTING_MATCH_TASK, untrustedJson } from './officialPostingBridge.js';
 import { collector } from './validationLines.js';
 import { isUnsafeControlCharacter } from './structuredResume.js';
 import { isAggregatorHost, isHostedAtsSurface, normalizedSourceHost } from './officialSourceHosts.js';
@@ -15,11 +15,11 @@ import { isAggregatorHost, isHostedAtsSurface, normalizedSourceHost } from './of
 // the scraped listing and each official quote is from the judge's own copy, and
 // whether the two judges agree.
 
-export const OFFICIAL_POSTING_JUDGE_CONTRACT = 'chat-judge-v1';
+const OFFICIAL_POSTING_JUDGE_CONTRACT = 'chat-judge-v1';
 export const MAX_JUDGE_LEADS = 8;
-export const MAX_JUDGE_DESCRIPTION_CHARS = 60_000;
-export const MAX_JUDGE_RESPONSE_CHARS = 160_000;
-export const OFFICIAL_POSTING_JUDGE_STATUSES = Object.freeze(['open', 'closed', 'unknown']);
+const MAX_JUDGE_DESCRIPTION_CHARS = 60_000;
+const MAX_JUDGE_RESPONSE_CHARS = 160_000;
+const OFFICIAL_POSTING_JUDGE_STATUSES = Object.freeze(['open', 'closed', 'unknown']);
 
 export const OFFICIAL_POSTING_JUDGE_CORRECTION_TEMPLATES = Object.freeze({
   'lookup.official-judge-json': 'official posting judgment must be one JSON object with exactly the requested keys',
@@ -48,10 +48,6 @@ function freezeTree(value) {
   if (value && typeof value === 'object') { for (const child of Object.values(value)) freezeTree(child); Object.freeze(value); }
   return value;
 }
-function untrustedJson(label, value) {
-  const body = JSON.stringify(value).replace(/[<>&]/gu, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, '0')}`);
-  return `BEGIN UNTRUSTED ${label} JSON\n${body}\nEND UNTRUSTED ${label} JSON`;
-}
 function fail(issues, message) {
   issues.fail({ templates: OFFICIAL_POSTING_JUDGE_CORRECTION_TEMPLATES, message, code: 'OFFICIAL_POSTING_RESPONSE_INVALID' });
 }
@@ -74,7 +70,7 @@ function judgeLeads(leads) {
 const answersConfirmedPageGone = (answer, lead) => lead?.confirmedEarlier === true && answer?.status === 'closed'
   && canonicalLeadUrl(answer?.postingUrl) === canonicalLeadUrl(lead.url);
 
-export function officialPostingJudgeSchema(leads) {
+function officialPostingJudgeSchema(leads) {
   const ids = judgeLeads(leads).map(lead => lead.id);
   const string = maxLength => ({ type: 'string', maxLength });
   return freezeTree({ type: 'object', additionalProperties: false, required: RESPONSE_KEYS, properties: {
@@ -96,7 +92,7 @@ function scrapedView(job) {
 }
 
 /** The judge's own copy, as one text the official quotes must come from. */
-export function officialPostingJudgeOfficialText(answer) {
+function officialPostingJudgeOfficialText(answer) {
   return [answer?.title, answer?.employer, answer?.location, answer?.salary, answer?.description].filter(Boolean).join('\n');
 }
 
@@ -216,7 +212,7 @@ ${untrustedJson('SCRAPED LISTING', scraped)}`;
 }
 
 /** Exact equality of the two judges' reported posting page. */
-export function judgedPostingUrl(answer) {
+function judgedPostingUrl(answer) {
   return canonicalLeadUrl(answer?.postingUrl);
 }
 
@@ -282,7 +278,7 @@ const display = (value, max) => Array.from(String(value ?? '').normalize('NFKC')
  * (same remote status and work mode, and the same city, region and country wherever both state one), and the copy kept is
  * the fullest one the chosen lead's snapshot shows verbatim, so neither judge's unshown wording becomes a posting fact.
  */
-export function reconciledJudgeLocation(copyA, copyB, snapshot) {
+function reconciledJudgeLocation(copyA, copyB, snapshot) {
   const copies = [display(copyA, 500), display(copyB, 500)];
   if (!copies.every(isSingleStatedPlace) || !locationsCompatible({ location: copies[0] }, { location: copies[1] })) return '';
   const pageText = flatPostingText([snapshot?.title, snapshot?.location, snapshot?.description, snapshot?.pageText]

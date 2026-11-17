@@ -9,7 +9,6 @@ import {
   buildResumeDocument,
   buildCoverLetterDocument,
   checkAdditiveSeam,
-  checkAllNeedDisposition,
   checkAnchorRelevance,
   checkClaimedEquivalence,
   checkCompanySpecificity,
@@ -18,23 +17,18 @@ import {
   checkDanglingParagraphTransition,
   checkDetachedRelevanceClaim,
   checkDirectWelcomeClosing,
-  checkEligibilityNeedDisposition,
   checkEvidenceGrounding,
   checkExperienceInfinitiveGrammar,
   checkFigureDiscipline,
   checkGenericPhrases,
   checkInterestFraming,
   checkIntroductoryWorkplaceComma,
-  checkLogisticsContainment,
   checkLogisticsExclusion,
-  checkLogisticsGrounding,
   checkLowInformationToolBuild,
   checkModifierAttachment,
   checkMigrationObjectClarity,
   checkNamedArtifactIntroduction,
   checkOpeningArtifactContext,
-  checkNeedGrounding,
-  checkNeedsPortfolio,
   checkOpeningDemonstrative,
   checkAdjacentEmployerRepetition,
   checkOpeningEmployerShorthand,
@@ -48,7 +42,6 @@ import {
   checkCandidateAgency,
   paragraphHasCandidatePastProof,
   checkPlainRegister,
-  checkPlanGate,
   checkPostingReference,
   checkPriorEmployerOpening,
   checkRepeatedPhrase,
@@ -60,14 +53,12 @@ import {
   checkReferenceClarity,
   checkResponsibilityTransition,
   checkSalientPhraseEcho,
-  checkRequestedWorkSampleLink,
   checkRoleThesis,
   checkSentenceLength,
   checkShape,
   checkTargetClaimScope,
   checkTargetCompanyBinding,
   checkToolCallsGardenPath,
-  checkTopNeedDisposition,
   checkVagueDomainWorkLabel,
   checkVisualReferencePrecision,
   COMPOUND_HYPHENATION_RULES,
@@ -84,7 +75,6 @@ import {
   MIN_SHARED_SHAPE_PARAGRAPHS,
   SENTENCE_SHAPE_FRAME_WORDS,
   path,
-  selectBetterLetterNeeds,
   sharedSentenceShapeCeiling,
   sentences,
   STACK_TOOL_LEXICON,
@@ -137,12 +127,6 @@ const groundedPlan = {
   }],
   companyHook: { detail: '' },
 };
-
-const needs = [{
-  need: 'manage incident escalation',
-  quote: 'manage incident escalation',
-  source: 'posting',
-}];
 
 // Sentences that mention a role, a position, or a posting without making the
 // advertisement the subject of what it states or requires. The posting-
@@ -573,19 +557,6 @@ export default [
         && secondaryOnlyFailure.detail.includes('best token overlap is 38% (need 60%)'),
       'an ungrounded secondary argument anchor identifies its exact non-rendered field and both grounding thresholds');
       return { pass: pass.detail, negativeControl: fail.detail, secondaryDiagnostic: secondaryOnlyFailure.detail };
-    },
-  },
-  {
-    name: 'cover letter harness: need grounding checks the declared posting or research source',
-    run: () => {
-      const pass = checkNeedGrounding(needs, 'The role must manage incident escalation during on-call rotations.', '');
-      assert(pass.passed, `verbatim posting quote must pass: ${pass.detail}`);
-      const fail = checkNeedGrounding([{ ...needs[0], quote: 'lead global transformation' }], 'The role must manage incident escalation.', '');
-      assert(!fail.passed, 'invented need quote must fail');
-      const invalidSource = checkNeedGrounding([{ ...needs[0], source: 'either' }], 'The role must manage incident escalation.', 'manage incident escalation');
-      assert(!invalidSource.passed && invalidSource.detail.includes('invalid source'),
-        'an undeclared source must not pass merely because its quote appears somewhere in the combined corpus');
-      return { pass: pass.detail, fail: fail.detail, invalidSource: invalidSource.detail };
     },
   },
   {
@@ -2164,10 +2135,6 @@ export default [
       const workStatusVerdicts = workStatusChecks.filter(check => check.id !== 'paragraph-openers');
       assert(workStatusVerdicts.length === workStatusChecks.length - 1 && workStatusVerdicts.every(check => check.passed),
         `stating work authorization in letter prose is no longer a defect: ${workStatusVerdicts.filter(check => !check.passed).map(check => `${check.id}: ${check.detail}`).join(' | ')}`);
-      const planStatusGate = checkPlanGate({ ...groundedPlan, logistics: '' }, evidence, needs,
-        'The role must manage incident escalation.', '', 'Candidates must be authorized to work in Canada.');
-      assert(!planStatusGate.checks.some(check => /legal|status|citizen|authoriz/iu.test(check.id)),
-        `no plan-gate check is named for legal work status: ${planStatusGate.checks.map(check => check.id).join(', ')}`);
       const logisticsExcluded = checkLogisticsExclusion(
         { logistics: 'I am willing to work anywhere.' },
         ['I am willing to work anywhere.', 'I can work hybrid or remotely and travel as needed.'],
@@ -2191,10 +2158,6 @@ export default [
       ]);
       assert(logisticsPositiveControls.passed,
         `system availability, historical travel duties, and neutral locations are not current logistics promises: ${logisticsPositiveControls.detail}`);
-      const logisticsGate = checkPlanGate({ ...groundedPlan, logistics: 'I am available to start on June 1.' }, evidence, needs,
-        'The role must manage incident escalation.', '', 'Logistics: I am available to start on June 1.');
-      assert(logisticsGate.shouldRetry && logisticsGate.checks.some(check => check.id === 'logistics-exclusion' && !check.passed),
-        'availability in plan logistics must request the plan retry that removes it');
       const unanchored = checkOpeningDemonstrative([
         'I built the nightly data integration between the depot booking system and its vendor platforms.',
         'That evaluation practice already covers AI products.',
@@ -2293,7 +2256,7 @@ export default [
       }).find(check => check.id === 'opening-employer-shorthand');
       assert(evaluatedEmployerShorthand && !evaluatedEmployerShorthand.passed,
         'the complete evaluator routes paragraph-opening prior-employer shorthand into its single prose-revision attempt');
-      return { workStatusChecks: workStatusChecks.length, logistics: proseOnlyLogistics.detail, planGate: logisticsGate.checks.find(check => check.id === 'logistics-exclusion').detail, unanchored: unanchored.detail, shorthandEmployer: shorthandEmployer.detail, repeatedEmployer: repeatedEmployer.detail };
+      return { workStatusChecks: workStatusChecks.length, logistics: proseOnlyLogistics.detail, unanchored: unanchored.detail, shorthandEmployer: shorthandEmployer.detail, repeatedEmployer: repeatedEmployer.detail };
     },
   },
   {
@@ -2506,6 +2469,13 @@ export default [
         'target-facing prose checks cover I bring, I would contribute, and an applying-my-work closing with a hyphenated source-domain mechanic');
       assert(!evaluated.find(check => check.id === 'target-claim-scope').passed,
         'the prose revision loop receives a target-claim-scope failure for the leaked target thesis');
+      // A source word ending in a double “s” (process, business, access) must
+      // still be recognised as source-only, not stripped twice into “proce”.
+      const doubleS = checkTargetClaimScope({}, [
+        'For this role\'s attendance reporting, I would bring my recall process experience.',
+      ], { bulletTexts: [...priorWorkEvidence.bulletTexts, 'Ran the recall process for cold-chain cartons.'] }, posting);
+      assert(!doubleS.passed && doubleS.detail.includes('recall proces'),
+        `a promoted source mechanic ending in a double s is caught (${doubleS.detail})`);
       // Faithful but list-adjacent: the posting says stock, residents and learners
       // where the evidence says inventory, patients and classrooms. A single source
       // word beside posting vocabulary is the candidate's own word for the same
@@ -3001,124 +2971,26 @@ export default [
     },
   },
   {
-    name: 'cover letter harness: plan candidate selection preserves the strongest pass and envelope remains builder-compatible',
+    name: 'cover letter harness: the logistics exclusion stays bounded and the envelope remains builder-compatible',
     run: () => {
-      const valid = checkPlanGate(groundedPlan, evidence, needs, 'The role must manage incident escalation.', '');
-      assert(!valid.shouldRetry, 'a grounded non-stated mapping must clear the plan gate');
-      const genericThesis = checkPlanGate({ ...groundedPlan, roleThesis: 'My experience aligns well with this role.' }, evidence, needs, 'The role must manage incident escalation.', '');
-      assert(genericThesis.shouldRetry && genericThesis.checks.some(check => check.id === 'role-thesis' && !check.passed),
-        'a generic thesis must enter the existing plan-revision loop');
-      const allStated = checkPlanGate({ ...groundedPlan, mappings: [{ ...groundedPlan.mappings[0], resumeStatus: 'stated' }] }, evidence, needs, 'The role must manage incident escalation.', '');
-      assert(allStated.shouldRetry && allStated.checks.some(check => check.id === 'plan-redundancy' && !check.passed), 'all stated mappings must request the one retry, not throw');
-      const invalidNeedReference = checkPlanGate({ ...groundedPlan, mappings: [{ ...groundedPlan.mappings[0], needIndex: 9 }] }, evidence, needs, 'The role must manage incident escalation.', '');
-      assert(invalidNeedReference.shouldRetry && invalidNeedReference.checks.some(check => check.id === 'plan-need-references' && !check.passed),
-        'a plan mapping may not silently point outside the ranked needs list');
-      const nonPrimaryFirst = checkPlanGate({
-        ...groundedPlan,
-        mappings: [{ ...groundedPlan.mappings[0], narrativeRole: 'foundation' }],
-      }, evidence, needs, 'The role must manage incident escalation.', '');
-      const secondaryWithoutRelationship = checkPlanGate({
-        ...groundedPlan,
-        mappings: [
-          ...groundedPlan.mappings,
-          { ...groundedPlan.mappings[0], narrativeRole: 'foundation', relationToPrevious: '' },
-        ],
-      }, evidence, needs, 'The role must manage incident escalation.', '');
-      const validFoundation = checkPlanGate({
-        ...groundedPlan,
-        mappings: [
-          ...groundedPlan.mappings,
-          {
-            ...groundedPlan.mappings[0],
-            evidence: 'Reduced response backlog by 32% while coordinating field crews across six regions.',
-            narrativeRole: 'foundation',
-            relationToPrevious: 'This supplies the operational foundation behind the primary judgment example.',
-          },
-        ],
-      }, evidence, needs, 'The role must manage incident escalation.', '');
-      assert(nonPrimaryFirst.shouldRetry
-        && secondaryWithoutRelationship.shouldRetry
-        && !validFoundation.shouldRetry,
-      'the plan gate requires a primary first mapping and an explicit relationship for a legitimate secondary foundation');
-      const sourcedLogistics = checkLogisticsGrounding(
-        { logistics: 'Available for full-time, evening, overnight, and weekend shifts.' },
-        'Available for full-time, evening, overnight, and weekend shifts in security roles.',
-      );
-      const inventedLogistics = checkLogisticsGrounding(
-        { logistics: 'Available to provide continuous, round-the-clock hospital coverage.' },
-        'Available for full-time, evening, overnight, and weekend shifts in security roles.',
-      );
-      const scatteredShortLogistics = checkLogisticsGrounding(
-        { logistics: 'Available weekends locally.' },
-        'Available weekends. Current location: Memphis, TN.',
-      );
-      assert(!sourcedLogistics.passed && !inventedLogistics.passed && !scatteredShortLogistics.passed
-        && sourcedLogistics.id === 'logistics-exclusion',
-      'even career-data-supported availability and schedules are excluded from the letter argument');
-      const containedSchedule = checkLogisticsContainment(
+      const containedSchedule = checkLogisticsExclusion(
         { logistics: 'Available for full-time, evening, overnight, and weekend shifts.' },
         ['I am available for full-time, evening, overnight, and weekend shifts.'],
       );
-      const inflatedCoverage = checkLogisticsContainment(
+      const inflatedCoverage = checkLogisticsExclusion(
         { logistics: '' },
         ['Continuous, round-the-clock coverage kept the facility open.'],
       );
-      const containmentOverflow = checkLogisticsContainment(
+      const containmentOverflow = checkLogisticsExclusion(
         { logistics: '' },
         Array.from({ length: 20 }, () => 'I am available for full-time, evening, overnight, weekend, on-call, round-the-clock, 24/7 coverage and can relocate locally or commute.'),
       );
       assert(!containedSchedule.passed && containedSchedule.id === 'logistics-exclusion'
         && inflatedCoverage.passed,
-      'legacy containment rejects candidate schedule promises and does not misread impersonal coverage as a candidate promise');
+      'the logistics exclusion rejects candidate schedule promises and does not misread impersonal coverage as a candidate promise');
       assert(!containmentOverflow.passed && containmentOverflow.detail.includes('additional observation(s) omitted')
         && containmentOverflow.detail.length < 2400 && MAX_LOGISTICS_CONTAINMENT_OBSERVATIONS === 8,
       'logistics-exclusion detail remains bounded for hostile multi-paragraph output');
-      const credentialHeavyNeeds = [
-        { kind: 'credential' }, { kind: 'logistics' }, { kind: 'credential' },
-        { kind: 'capability' }, { kind: 'disposition' },
-      ];
-      const performancePortfolio = [
-        { kind: 'capability' }, { kind: 'domain' }, { kind: 'credential' },
-      ];
-      const firstPortfolio = checkNeedsPortfolio(credentialHeavyNeeds);
-      const retryPortfolio = checkNeedsPortfolio(performancePortfolio);
-      const betterPortfolio = selectBetterLetterNeeds(credentialHeavyNeeds, firstPortfolio, performancePortfolio, retryPortfolio);
-      assert(!firstPortfolio.passed && retryPortfolio.passed && betterPortfolio.selected === 'retry'
-        && betterPortfolio.needs === performancePortfolio,
-      'a five-need credential-heavy portfolio retries once and deterministically keeps the performance-balanced result');
-      const eligibilityNeeds = [
-        { need: 'hold the required credential', quote: 'hold the required credential', source: 'posting', kind: 'credential' },
-        { need: 'manage incident escalation', quote: 'manage incident escalation', source: 'posting', kind: 'capability' },
-      ];
-      const eligibilityPlan = {
-        roleThesis: groundedPlan.roleThesis,
-        mappings: [{ ...groundedPlan.mappings[0], needIndex: 1 }],
-        companyHook: { detail: '' }, logistics: '',
-        droppedNeeds: [{ needIndex: 0, reason: 'The credential is not documented on the résumé.' }],
-      };
-      const eligibilityGate = checkPlanGate(eligibilityPlan, evidence, eligibilityNeeds,
-        'The role must hold the required credential and manage incident escalation.', '', '');
-      const topDisposition = checkTopNeedDisposition(eligibilityPlan, eligibilityNeeds);
-      assert(!eligibilityGate.shouldRetry && !topDisposition.passed && topDisposition.detail.includes('honestly dropped'),
-        'a documented missing top eligibility screen is surfaced, but never retried into a fabricated qualification');
-      const nonTopEligibilityNeeds = [
-        { need: 'manage incident escalation', quote: 'manage incident escalation', source: 'posting', kind: 'capability' },
-        { need: 'hold the required credential', quote: 'hold the required credential', source: 'posting', kind: 'credential' },
-        { need: 'operate secure equipment', quote: 'operate secure equipment', source: 'posting', kind: 'capability' },
-      ];
-      const nonTopEligibilityPlan = {
-        roleThesis: groundedPlan.roleThesis,
-        mappings: [{ ...groundedPlan.mappings[0], needIndex: 0 }], companyHook: { detail: '' }, logistics: '',
-        droppedNeeds: [{ needIndex: 1, reason: 'The credential is not documented on the résumé.' }],
-      };
-      const missingDisposition = checkAllNeedDisposition(nonTopEligibilityPlan, nonTopEligibilityNeeds);
-      const nonTopEligibility = checkEligibilityNeedDisposition(nonTopEligibilityPlan, nonTopEligibilityNeeds);
-      const nonTopEligibilityGate = checkPlanGate(nonTopEligibilityPlan, evidence, nonTopEligibilityNeeds,
-        'The role must manage incident escalation, hold the required credential, and operate secure equipment.', '', '');
-      assert(!missingDisposition.passed && missingDisposition.detail.includes('need 3')
-        && !nonTopEligibility.passed && nonTopEligibility.detail.includes('#2 credential')
-        && nonTopEligibilityGate.shouldRetry,
-      'every need must be mapped or dropped, while a non-top honestly dropped credential remains visible but non-retryable on its own');
       const envelope = authorCoverLetterEnvelope({ job: { company: 'Acme', title: 'Incident Lead' }, evidence, today: formatCoverLetterDate(new Date('2026-08-14T12:00:00Z')) });
       assert(envelope.recipient === '' && envelope.salutation === 'Dear Acme Hiring Team,', 'company envelope fields use the salutation rather than a redundant recipient block');
       const acronymCompany = 'Orchard Interactive Entertainment (OIE)';
@@ -3205,14 +3077,7 @@ export default [
       }).find(check => check.id === 'company-specificity');
       assert(emptyHookWithResearch?.passed && emptyHookWithResearch.detail.includes('intentionally omitted'),
         'available research must not force company padding after the plan intentionally leaves its hook empty');
-      const requestedWorkSample = 'Please include a link to something you have built and shipped — a repo, a deployed app, or a demo — with your application.';
-      const missingWorkSample = checkRequestedWorkSampleLink(requestedWorkSample, '<main><a href="mailto:maya@example.test">Email</a></main>');
-      const linkedWorkSample = checkRequestedWorkSampleLink(requestedWorkSample, '<main><a href="https://example.test/demo">Demo</a></main>');
-      const notRequested = checkRequestedWorkSampleLink('Build and ship internal tools.', '<main></main>');
-      assert(!missingWorkSample.passed && missingWorkSample.id === 'work-sample-link'
-        && linkedWorkSample.passed && notRequested.passed,
-      'a posting-requested work-sample link must stay visible unless the résumé contains a clickable http(s) URL');
-      return { validChecks: valid.checks.length, retryChecks: allStated.checks.length, sourcedLogistics: sourcedLogistics.detail, portfolio: betterPortfolio.selected, topNeed: topDisposition.detail, nonTopEligibility: nonTopEligibility.detail, proseChecks: proseChecks.length };
+      return { proseChecks: proseChecks.length };
     },
   },
   {

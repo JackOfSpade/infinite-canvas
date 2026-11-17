@@ -205,17 +205,18 @@ export default [
   {
     name: 'Compiler-owned provider continuation does not require a Job Board identity or acquire a second lease',
     async run() {
-      const start = source.indexOf('      if (!queueManagedByBoard && !queueManagedExternally) {');
-      const end = source.indexOf('\n\n      if (standaloneBecameBoardRecoveryManaged)', start);
+      const pipelineStart = source.indexOf('const runPipeline = useCallback');
+      const pipelineEnd = source.indexOf('const startProcessing = useCallback', pipelineStart);
+      assert(pipelineStart >= 0 && pipelineEnd > pipelineStart);
+      const pipeline = source.slice(pipelineStart, pipelineEnd);
+      assert(!pipeline.includes('acquireModuleRun'), 'runPipeline never acquires a lane of its own');
+      const start = pipeline.indexOf("      if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.');");
+      const end = pipeline.indexOf('\n\n      const laneTurnData', start);
       assert(start >= 0 && end > start);
-      const admit = Function('queueManagedByBoard', 'queueManagedExternally', 'orchestratorNodeId', 'moduleRunQueue',
-        `return (async () => { let lease; const currentId = 'fixture'; const updateGlobal = () => {}; const EventLogger = { log() {} }; ${source.slice(start, end)} })();`);
-      let acquired = false;
-      const queue = { acquireModuleRun: () => { acquired = true; throw new Error('Nested acquisition'); } };
-      await admit(false, true, null, queue);
-      assert.equal(acquired, false);
-      await assert.rejects(admit(true, false, null, queue), /requires an orchestrator/);
-      await admit(true, false, 'board', queue);
+      const admit = Function('orchestratorNodeId',
+        `return (async () => { const currentId = 'fixture'; const updateGlobal = () => {}; const EventLogger = { log() {} }; ${pipeline.slice(start, end)} })();`);
+      await assert.rejects(admit(null), /requires an orchestrator/);
+      await admit('board');
     },
   },
   {
@@ -283,7 +284,7 @@ export default [
       assert.equal(second.node.data.careerImportCompilation.status, 'approved');
       // Both real downstream runners skip only nested acquisition, preserving
       // all normal standalone/Board-authority and cancellation checks.
-      assert(source.includes('if (!queueManagedByBoard && !queueManagedExternally) {'));
+      assert(!source.includes('if (!queueManagedByBoard && !queueManagedExternally) {'));
       assert(source.includes('if (!boardManaged && !queueManagedExternally) lease = await moduleRunQueue.acquireModuleRun({'));
     },
   },

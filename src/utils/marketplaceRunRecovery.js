@@ -172,19 +172,21 @@ export function isAutomaticMarketplaceResolveIntent(recovery) {
     && recovery.manualPause?.status !== 'manual-required';
 }
 
-export function marketplacePhotoInputKey(imagePaths, imageIdentities = null) {
-  const normalizedPaths = (Array.isArray(imagePaths) ? imagePaths : [])
+function normalizePhotoPaths(imagePaths) {
+  return (Array.isArray(imagePaths) ? imagePaths : [])
     .filter(path => typeof path === 'string' && path.trim())
     .map(path => path.trim());
+}
+
+export function marketplacePhotoInputKey(imagePaths, imageIdentities = null) {
+  const normalizedPaths = normalizePhotoPaths(imagePaths);
   return Array.isArray(imageIdentities)
     ? JSON.stringify({ imagePaths: normalizedPaths, imageIdentities })
     : JSON.stringify(normalizedPaths);
 }
 
 export function marketplacePhotoInputMatches(recovery, imagePaths) {
-  const normalizedPaths = (Array.isArray(imagePaths) ? imagePaths : [])
-    .filter(path => typeof path === 'string' && path.trim())
-    .map(path => path.trim());
+  const normalizedPaths = normalizePhotoPaths(imagePaths);
   const identities = Array.isArray(recovery?.input?.imageIdentities)
     ? recovery.input.imageIdentities
     : null;
@@ -326,14 +328,6 @@ export function mergeMarketplaceStatusPrepared(recovery, payload) {
   };
 }
 
-export function completeMarketplaceStatusRecoveryPlatform(recovery, platformId) {
-  if (!isRestorableMarketplaceStatusRecovery(recovery)) return recovery;
-  const remainingPlatformIds = recovery.remainingPlatformIds.filter(id => id !== platformId);
-  const preparedByPlatform = { ...(recovery.preparedByPlatform || {}) };
-  delete preparedByPlatform[platformId];
-  return { ...recovery, remainingPlatformIds, preparedByPlatform, updatedAt: Date.now() };
-}
-
 export function recordMarketplaceStatusResult(recovery, platformId, result, { retryable = false } = {}) {
   if (!isRestorableMarketplaceStatusRecovery(recovery) || !recovery.input.platformIds.includes(platformId)) return recovery;
   const completedResults = { ...(recovery.completedResults || {}), [platformId]: result };
@@ -351,5 +345,3 @@ export function marketplaceStatusInputMatches(recovery, platformIds, watchUrlsBy
     && recovery.inputKey === JSON.stringify(input)
     && JSON.stringify(recovery.input) === JSON.stringify(input);
 }
-
-export { RECOVERY_VERSION as MARKETPLACE_RECOVERY_VERSION };

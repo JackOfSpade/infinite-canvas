@@ -101,21 +101,6 @@ function ShortcutRow({ id, binding, onSave, isCapturing, onStartCapture, onCance
 }
 
 /**
- * Per-platform marketplace monitor block. Two responsibilities per platform:
- *
- *   1. Log in to that marketplace so subsequent status checks can read pages
- *      that require auth (dashboards, notification centers). Reuses the
- *      existing `openLoginWindow` IPC, which persists cookies in the stealth
- *      browser's userDataDir — one login lasts until cookies expire.
- *
- *   2. Add platform-wide "watch URLs" the Marketplace Status Module scans once
- *      per check. These are typically:
- *        - the seller dashboard / active-listings page
- *        - a notifications / activity feed
- *        - a sold-items tab
- *      All configured pages feed one consolidated account-wide scan.
- */
-/**
  * Three-state session pill shared by the marketplace-monitor and job-board
  * login rows: in-flight verification → connected (re-login) → logged out.
  * One home so the two sections render login state identically and can't drift.

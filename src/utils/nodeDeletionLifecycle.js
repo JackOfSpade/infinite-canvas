@@ -207,34 +207,40 @@ export function isClearCanvasDeletionFenceIntact(
     && initialConnections.every((record, index) => record === liveConnections[index]);
 }
 
-export function markJobWorkflowDeletionPending(nodes) {
+function markPending(counts, nodes, types) {
   const ids = new Set();
   visitNodeTree(nodes, (node) => {
-    if ((node?.type === 'jobhub' || node?.type === 'jobboard') && node.id) {
-      ids.add(node.id);
-    }
+    if (types.includes(node?.type) && node.id) ids.add(node.id);
   });
   let changed = false;
   for (const id of ids) {
-    const priorCount = pendingJobWorkflowDeletions.get(id) || 0;
-    pendingJobWorkflowDeletions.set(id, priorCount + 1);
+    const priorCount = counts.get(id) || 0;
+    counts.set(id, priorCount + 1);
     if (priorCount === 0) changed = true;
   }
   if (changed) publishDeletionLifecycleChange();
   return [...ids];
 }
 
-export function settleJobWorkflowDeletion(ids) {
+function settlePending(counts, ids) {
   let changed = false;
   for (const id of new Set(Array.isArray(ids) ? ids : [])) {
-    const priorCount = pendingJobWorkflowDeletions.get(id) || 0;
+    const priorCount = counts.get(id) || 0;
     if (priorCount <= 1) {
-      if (pendingJobWorkflowDeletions.delete(id)) changed = true;
+      if (counts.delete(id)) changed = true;
     } else {
-      pendingJobWorkflowDeletions.set(id, priorCount - 1);
+      counts.set(id, priorCount - 1);
     }
   }
   if (changed) publishDeletionLifecycleChange();
+}
+
+export function markJobWorkflowDeletionPending(nodes) {
+  return markPending(pendingJobWorkflowDeletions, nodes, ['jobhub', 'jobboard']);
+}
+
+export function settleJobWorkflowDeletion(ids) {
+  settlePending(pendingJobWorkflowDeletions, ids);
 }
 
 export function isJobWorkflowDeletionPending(nodeId) {
@@ -259,33 +265,11 @@ export function isJobWorkflowDeletionPending(nodeId) {
 const pendingJobWorkflowRelocations = new Map();
 
 export function markJobWorkflowRelocationPending(nodes) {
-  const ids = new Set();
-  visitNodeTree(nodes, (node) => {
-    if ((node?.type === 'jobhub' || node?.type === 'jobboard' || node?.type === 'sellhub') && node.id) {
-      ids.add(node.id);
-    }
-  });
-  let changed = false;
-  for (const id of ids) {
-    const priorCount = pendingJobWorkflowRelocations.get(id) || 0;
-    pendingJobWorkflowRelocations.set(id, priorCount + 1);
-    if (priorCount === 0) changed = true;
-  }
-  if (changed) publishDeletionLifecycleChange();
-  return [...ids];
+  return markPending(pendingJobWorkflowRelocations, nodes, ['jobhub', 'jobboard', 'sellhub']);
 }
 
 export function settleJobWorkflowRelocation(ids) {
-  let changed = false;
-  for (const id of new Set(Array.isArray(ids) ? ids : [])) {
-    const priorCount = pendingJobWorkflowRelocations.get(id) || 0;
-    if (priorCount <= 1) {
-      if (pendingJobWorkflowRelocations.delete(id)) changed = true;
-    } else {
-      pendingJobWorkflowRelocations.set(id, priorCount - 1);
-    }
-  }
-  if (changed) publishDeletionLifecycleChange();
+  settlePending(pendingJobWorkflowRelocations, ids);
 }
 
 export function isJobWorkflowRelocationPending(nodeId) {

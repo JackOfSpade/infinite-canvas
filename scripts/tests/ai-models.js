@@ -1,5 +1,5 @@
 import { CLAUDE_CONTEXT_WINDOW_TOKENS, CLAUDE_PROMPT_TOKEN_BUDGET } from '../../electron/ipc/claudePromptLimit.js';
-import { BATCH_OUTPUT_TOKEN_BUDGET, JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS, JOB_PREFERENCE_RESEARCH_MAX_ITEMS, MAX_LISTING_BATCH, legacyJobScoringMaxTokens } from '../../electron/ipc/resultCaps.js';
+import { BATCH_OUTPUT_TOKEN_BUDGET, JOB_PREFERENCE_RESEARCH_ASSESSMENT_MAX_ITEMS, JOB_PREFERENCE_RESEARCH_MAX_ITEMS, MAX_LISTING_BATCH } from '../../electron/ipc/resultCaps.js';
 // AI task/model sizing — NOT provider routing. Every AI call in the app now
 // goes through the single human copy/paste handoff (electron/ipc/nonApiAi.js,
 // NON_API_AI_TRANSPORT === 'non-api-ai'); there is no Gemini/Claude API call,
@@ -49,9 +49,8 @@ export default [
     run: () => {
       assert(taskMaxTokensFor('job-scoring', { itemCount: 4 }) === 12800
         && taskMaxTokensFor('job-scoring', { itemCount: 23 }) === 1600 + 23 * 2800
-        && taskMaxTokensFor('job-scoring', { itemCount: jobScoringBatchSize() + 1 }) === BATCH_OUTPUT_TOKEN_BUDGET
-        && legacyJobScoringMaxTokens(15) === 10600,
-        'fresh whole-record scoring budgets the complete audit while the explicit legacy formula stays byte-stable');
+        && taskMaxTokensFor('job-scoring', { itemCount: jobScoringBatchSize() + 1 }) === BATCH_OUTPUT_TOKEN_BUDGET,
+        'fresh whole-record scoring budgets the complete audit');
       const largeCohortCap = taskMaxTokensFor('job-compensation-assessment-batch', { cohortCount: 1, itemCount: 100 });
       assert(Number.isInteger(largeCohortCap) && largeCohortCap > 0
         && !getKnownTaskIds().has('job-compensation-assessment')

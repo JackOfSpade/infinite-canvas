@@ -75,7 +75,7 @@ export function createReplayHandler({ store, createReadStream = nodeCreateReadSt
     if (range?.invalid) return new Response(null, { status: 416, headers: { ...headers, 'content-range': `bytes */${entry.size}` } });
     const start = range ? range.start : 0;
     const end = range ? range.end : entry.size - 1;
-    const length = entry.size === 0 ? 0 : end - start + 1;
+    const length = end - start + 1;
     const stream = createReadStream(file, { start, end });
     const body = Readable.toWeb(stream);
     return new Response(body, {

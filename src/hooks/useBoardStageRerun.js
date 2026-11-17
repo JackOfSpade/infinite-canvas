@@ -4,18 +4,12 @@ import { BOARD_STAGE_RUN_PREFIX } from '../utils/jobBoardCareerOverride.js';
 import { isJobWorkflowDeletionPending } from '../utils/nodeDeletionLifecycle.js';
 import { BOARD_STAGES } from '../nodes/jobboard/boardStageRerun.js';
 import { EventLogger } from '../utils/EventLogger.js';
+import { retainedBoardOwner } from './useBoardOfficialPostingRefresh.js';
 
 // Only the salary stage writes through global node updates. Listings and
 // grouping rebuild the Board's tree with this canvas level's React Flow API,
 // so leaving the level must stop them rather than let them write elsewhere.
 const RETAINED_STAGES = new Set(['compensation']);
-
-function retainedBoardOwner(options, canvasFilePath, nodeId) {
-  if (typeof options.getCurrentFile !== 'function' || options.getCurrentFile() !== canvasFilePath
-    || isJobWorkflowDeletionPending(nodeId)) return false;
-  const owner = options.getNode(nodeId);
-  return owner?.type === 'jobboard' && !owner.data?.locked;
-}
 
 /**
  * Re-run ONE Combine stage on the cards a Board already shows. Admission,

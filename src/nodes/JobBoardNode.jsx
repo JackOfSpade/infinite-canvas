@@ -31,6 +31,14 @@ import { EventLogger } from '../utils/EventLogger';
 import { JOB_COMPENSATION_METHOD_VERSION, jobBoardSalaryNeedsRefresh } from '../utils/jobCompensationVersion';
 import { hubCardFilter, isLegacyUnscoredPlaceholder, isUnscoredPlaceholderCard, jobCardClosedAtMostOfficialSource } from '../utils/jobCardFilters';
 import { buildJobTreeNodes, computeJobTreeView } from './jobsearch/buildJobTree';
+import {
+  createPrefixedManualAiRunId,
+  normalizeManualAiCleanupReceipts,
+  rememberBoundedRunId,
+  removeManualAiCleanupReceipt,
+  upsertManualAiCleanupReceipt,
+  waitForRendererCommitFrame,
+} from './jobsearch/manualAiRunReceipts';
 import { deleteChildrenByHubId } from './_shared/hubChildCleanup';
 import { ACTIVE_JOB_SEARCH_STATES, attachCompensationRemoteResidences, unionScoredJobs, moduleCombineFingerprint, moduleFingerprint, combineSignature, normalizeJobMatchScore, staleReason, isLegacyCombineSignature, emptyReplacementIneligibilityReason, shouldKeepCompletedBoardSnapshotVisible } from './jobboard/mergeJobs';
 import { runBoardResearchStage, removedLookupEntry, MAX_BOARD_REMOVED_LOOKUPS } from './jobboard/jobBoardResearchStage.js';
@@ -98,38 +106,7 @@ const SAVED_SCRAPE_MANUAL_AI_RECOVERY_MODES = new Set([
 ]);
 
 function createManualAiRunId(nodeId) {
-  const entropy = globalThis.crypto?.randomUUID?.()
-    || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `job-board:${nodeId}:${entropy}`;
-}
-
-function rememberBoundedRunId(runIds, runId, limit = 32) {
-  if (!(runIds instanceof Set) || !runId) return;
-  runIds.add(runId);
-  while (runIds.size > limit) {
-    runIds.delete(runIds.values().next().value);
-  }
-}
-
-function normalizeManualAiCleanupReceipts(receipts) {
-  if (!Array.isArray(receipts)) return [];
-  const byRunId = new Map();
-  for (const receipt of receipts) {
-    if (typeof receipt?.runId !== 'string' || !receipt.runId) continue;
-    byRunId.set(receipt.runId, { ...(byRunId.get(receipt.runId) || {}), ...receipt });
-  }
-  return [...byRunId.values()].slice(-32);
-}
-
-function upsertManualAiCleanupReceipt(receipts, receipt) {
-  return normalizeManualAiCleanupReceipts([
-    ...normalizeManualAiCleanupReceipts(receipts).filter(item => item.runId !== receipt?.runId),
-    receipt,
-  ]);
-}
-
-function removeManualAiCleanupReceipt(receipts, runId) {
-  return normalizeManualAiCleanupReceipts(receipts).filter(receipt => receipt.runId !== runId);
+  return createPrefixedManualAiRunId('job-board', nodeId);
 }
 
 function hasCancellationPendingManualAiCleanup(data) {
@@ -144,20 +121,7 @@ function hasPendingManualAiRetirement(data) {
 }
 
 function waitForBoardRendererCommitFrame() {
-  return new Promise((resolve) => {
-    let settled = false;
-    let fallbackTimer = null;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      if (fallbackTimer != null) clearTimeout(fallbackTimer);
-      resolve();
-    };
-    fallbackTimer = setTimeout(finish, 50);
-    if (typeof globalThis.requestAnimationFrame === 'function') {
-      globalThis.requestAnimationFrame(finish);
-    }
-  });
+  return waitForRendererCommitFrame();
 }
 
 async function waitForBoardPlanCommit({ getNode, nodeId, boardRunId, matches }) {
@@ -2081,8 +2045,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
     if (!boardRunId && !sourceId && manualAiRunIds.length === 0) return null;
 
     const operationId = existing?.operationId
-      || `job-board-cancel:${id}:${globalThis.crypto?.randomUUID?.()
-        || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`}`;
+      || createPrefixedManualAiRunId('job-board-cancel', id);
     // Do not coerce a malformed/null persisted timestamp to epoch zero: that
     // would make this cancellation artificially outrank every real legacy
     // transaction in timestamp-based recovery arbitration.
@@ -3682,8 +3645,7 @@ export const JobBoardNode = React.memo(function JobBoardNode({ id, data }) {
         clearBoardChildren();
       }
 
-      const finalSourceCounts = {};
-      union.forEach((j) => { finalSourceCounts[j.source] = (finalSourceCounts[j.source] || 0) + 1; });
+      const finalSourceCounts = finalSourceCountsOf(union);
 
       // Publish a durable cleanup-only receipt in the same node update as the
       // visible Board metadata. If the renderer/app is torn down before the

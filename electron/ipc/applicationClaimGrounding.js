@@ -262,9 +262,9 @@ function overlapCount(tokens, body, ctx) {
  */
 export function assessStrengthFamily(familyId, sentence, evidenceBodies, ctx) {
   const claimText = blankOut(sentence, ctx.trustedNames || []);
-  const claim = scanStrengthMentions(claimText, 'claim').filter(m => m.family === familyId && m.self);
-  if (!claim.length) return null;
   const allClaimMentions = scanStrengthMentions(claimText, 'claim').filter(m => m.self);
+  const claim = allClaimMentions.filter(m => m.family === familyId);
+  if (!claim.length) return null;
   const tokens = contentTokens(sentence, allClaimMentions, ctx);
   const threshold = Math.min(2, new Set(tokens.map(lightStem)).size);
   const evidence = evidenceBodies.map(body => ({

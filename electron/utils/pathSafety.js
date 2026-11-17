@@ -233,10 +233,13 @@ function normalizeRendererPrivatePath(value) {
   return normalized;
 }
 
-function isWithinRendererPrivateRoot(root, candidate) {
-  const relative = path.relative(root, candidate);
-  return relative === ''
-    || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+function isWithinRegisteredPrivateRoot(resolvedPath) {
+  if (RENDERER_PRIVATE_APP_ROOTS.size === 0) return false;
+  const candidate = normalizeRendererPrivatePath(resolvedPath);
+  for (const root of RENDERER_PRIVATE_APP_ROOTS) {
+    if (isWithinDirectory(root, candidate)) return true;
+  }
+  return false;
 }
 
 /**
@@ -276,9 +279,7 @@ function matchesAppPrivateStoreComponent(rawPath) {
  */
 export function isRendererPrivateAppPath(resolvedPath) {
   if (!resolvedPath) return false;
-  if (matchesAppPrivateStoreComponent(resolvedPath)) return true;
-  const candidate = normalizeRendererPrivatePath(resolvedPath);
-  return [...RENDERER_PRIVATE_APP_ROOTS].some(root => isWithinRendererPrivateRoot(root, candidate));
+  return matchesAppPrivateStoreComponent(resolvedPath) || isWithinRegisteredPrivateRoot(resolvedPath);
 }
 
 /**
@@ -318,7 +319,5 @@ export function isSystemSensitivePath(resolvedPath) {
 /** Renderer policy: generic filesystem IPC must never enter app userData. */
 export function isRendererSensitivePath(resolvedPath) {
   if (isSensitivePath(resolvedPath)) return true;
-  if (!resolvedPath) return false;
-  const candidate = normalizeRendererPrivatePath(resolvedPath);
-  return [...RENDERER_PRIVATE_APP_ROOTS].some(root => isWithinRendererPrivateRoot(root, candidate));
+  return !!resolvedPath && isWithinRegisteredPrivateRoot(resolvedPath);
 }

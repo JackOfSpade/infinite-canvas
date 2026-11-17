@@ -39,6 +39,7 @@ const LINEAGE_KINDS = new Set([
   'reanalyze-saved-jobs',
   'manual-ai-resume',
 ]);
+const SLOT_PATTERN = /^(?:current|success:[1-3]|checkpoint:[a-f0-9]{24})$/;
 const tails = new Map();
 
 function identifier(value) {
@@ -157,10 +158,6 @@ function receipt(value) {
     ? { operationId, semanticBase: base, revision: value.revision }
     : null;
 }
-function publicReceipt(value) {
-  return receipt(value);
-}
-
 function sameReceipt(left, right) {
   const a = receipt(left);
   const b = receipt(right);
@@ -170,7 +167,7 @@ function sameReceipt(left, right) {
 
 function publication(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const slot = typeof value.slot === 'string' && /^(?:current|success:[1-3]|checkpoint:[a-f0-9]{24})$/.test(value.slot)
+  const slot = typeof value.slot === 'string' && SLOT_PATTERN.test(value.slot)
     ? value.slot
     : null;
   const digest = typeof value.digest === 'string' && /^[a-f0-9]{64}$/.test(value.digest) ? value.digest : null;
@@ -290,12 +287,12 @@ export async function claimJobAnalysisOperationAuthority({ canvasFilePath, hubId
       // An idempotent resume claim is still a lineage assertion. Do not let an
       // operation-id replay omit or substitute the immediate predecessor.
       if (requiresPredecessor(base) && (!requestedPredecessor || !sameReceipt(prior.predecessor, requestedPredecessor))) {
-        return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: publicReceipt(prior) };
+        return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: receipt(prior) };
       }
-      return prior.status === 'active' ? { admitted: true, idempotent: true, receipt: publicReceipt(prior) } : { admitted: false, reason: 'operation-revoked' };
+      return prior.status === 'active' ? { admitted: true, idempotent: true, receipt: receipt(prior) } : { admitted: false, reason: 'operation-revoked' };
     }
     if (expectedRevision != null && (prior?.revision || 0) !== expectedRevision) {
-      return { admitted: false, reason: 'admission-superseded', receipt: publicReceipt(prior) };
+      return { admitted: false, reason: 'admission-superseded', receipt: receipt(prior) };
     }
     // A resume is a one-step capability rebind, not a historical lookup. The
     // caller must name the exact active/revoked receipt it is continuing; a
@@ -303,7 +300,7 @@ export async function claimJobAnalysisOperationAuthority({ canvasFilePath, hubId
     if (requiresPredecessor(base)) {
       if (!prior || prior.semanticBase?.kind === 'clear' || !requestedPredecessor
         || !sameReceipt(prior, requestedPredecessor)) {
-        return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: publicReceipt(prior) };
+        return { admitted: false, reason: 'resume-predecessor-mismatch', receipt: receipt(prior) };
       }
     } else if (requestedPredecessor != null) {
       return { admitted: false, reason: 'unexpected-predecessor' };
@@ -316,10 +313,10 @@ export async function claimJobAnalysisOperationAuthority({ canvasFilePath, hubId
       // promotion. A new claim must not erase the only exact mapping before a
       // reader/reconciliation can validate those bytes.
       pendingPublications: prior?.pendingPublications || null,
-      predecessor: requiresPredecessor(base) ? publicReceipt(prior) : null,
+      predecessor: requiresPredecessor(base) ? receipt(prior) : null,
     };
     await atomicWrite(scopeValue.authorityPath, record);
-    return { admitted: true, receipt: publicReceipt(record) };
+    return { admitted: true, receipt: receipt(record) };
     });
   });
 }
@@ -339,7 +336,7 @@ export async function revokeJobAnalysisOperationAuthority({ canvasFilePath, hubI
     const prior = priorState.record;
     // A stale caller may only revoke the exact receipt it observed.
     if (!prior || prior.operationId !== operation || prior.revision !== revision || !sameBase(prior.semanticBase, base)) {
-      return { revoked: false, superseded: true, receipt: publicReceipt(prior) };
+      return { revoked: false, superseded: true, receipt: receipt(prior) };
     }
     const record = {
       version: VERSION, canvasFilePath: scopeValue.canvasFilePath, hubId: scopeValue.hubId,
@@ -357,7 +354,7 @@ export async function revokeJobAnalysisOperationAuthority({ canvasFilePath, hubI
       predecessor: prior?.predecessor || null,
     };
     await atomicWrite(scopeValue.authorityPath, record);
-    return { revoked: true, receipt: publicReceipt(record) };
+    return { revoked: true, receipt: receipt(record) };
     });
   });
 }
@@ -380,7 +377,7 @@ export async function clearJobAnalysisOperationAuthority({ canvasFilePath, hubId
         predecessor: null,
       };
       await atomicWrite(scopeValue.authorityPath, record);
-      return { cleared: true, receipt: publicReceipt(record) };
+      return { cleared: true, receipt: receipt(record) };
     });
   });
 }
@@ -397,7 +394,7 @@ export async function jobRunResumeOperationAuthority({ canvasFilePath, hubId, ru
       const state = await readState(scopeValue);
       const current = state.invalid ? null : state.record;
       if (!current || current.semanticBase?.kind === 'clear') return null;
-      if (sameReceipt(current, recorded)) return publicReceipt(current);
+      if (sameReceipt(current, recorded)) return receipt(current);
       if (current.status !== 'active'
         || !['resolved-source-continuation', 'crash-resume', 'resume-saved-scrape'].includes(current.semanticBase?.kind)
         || current.semanticBase.runId !== runId
@@ -405,7 +402,7 @@ export async function jobRunResumeOperationAuthority({ canvasFilePath, hubId, ru
         || recorded.semanticBase.careerSnapshotId !== careerSnapshotId
         || (recorded.semanticBase.runId !== null && recorded.semanticBase.runId !== runId)
         || !sameReceipt(current.predecessor, recorded)) return null;
-      return publicReceipt(current);
+      return receipt(current);
     });
   });
 }
@@ -420,7 +417,7 @@ export async function currentJobAnalysisOperationAuthority({ canvasFilePath, hub
     return withLock(scopeValue, async () => {
     const state = await readState(scopeValue);
     if (state.invalid) return false;
-    let current = state.record;
+    const current = state.record;
     return !!current && current.status === 'active' && current.operationId === operation
       && current.revision === revision && sameBase(current.semanticBase, base);
     });
@@ -545,7 +542,7 @@ export async function withCurrentJobAnalysisOperationAuthority({
       ? [...new Set(writeResult.retirePublications)]
       : [];
     if (retireSlots.length > 0) {
-      if (retireSlots.some(slot => typeof slot !== 'string' || !/^(?:current|success:[1-3]|checkpoint:[a-f0-9]{24})$/.test(slot))) {
+      if (retireSlots.some(slot => typeof slot !== 'string' || !SLOT_PATTERN.test(slot))) {
         throw new Error('Invalid scoped publication retirement.');
       }
       const removeMatching = (map) => {
@@ -554,7 +551,7 @@ export async function withCurrentJobAnalysisOperationAuthority({
         for (const slot of retireSlots) {
           // Do not erase a retained predecessor/success publication merely
           // because it shares a slot name with a newer cancelled operation.
-          if (sameReceipt(copy[slot]?.receipt, publicReceipt(current))) delete copy[slot];
+          if (sameReceipt(copy[slot]?.receipt, receipt(current))) delete copy[slot];
         }
         return copy;
       };
@@ -572,9 +569,9 @@ export async function withCurrentJobAnalysisOperationAuthority({
       if (shouldTombstone && mayTombstone(value)) {
         const tombstone = { ...current, status: 'revoked', updatedAt: new Date().toISOString() };
         await atomicWrite(scopeValue.authorityPath, tombstone);
-        return { admitted: true, value, receipt: publicReceipt(tombstone), terminalTombstoned: true };
+        return { admitted: true, value, receipt: receipt(tombstone), terminalTombstoned: true };
       }
-      return { admitted: true, value, receipt: publicReceipt(current) };
+      return { admitted: true, value, receipt: receipt(current) };
     }
     // Phase 2 promotes only after every writer rename returned. A crash before
     // here leaves the fsync'd pending map available for exact-digest recovery.
@@ -583,7 +580,7 @@ export async function withCurrentJobAnalysisOperationAuthority({
       ? { ...committed, status: 'revoked', updatedAt: new Date().toISOString() }
       : committed;
     await atomicWrite(scopeValue.authorityPath, finalRecord);
-    return { admitted: true, value, receipt: publicReceipt(finalRecord), ...(shouldTombstone && mayTombstone(value) ? { terminalTombstoned: true } : {}) };
+    return { admitted: true, value, receipt: receipt(finalRecord), ...(shouldTombstone && mayTombstone(value) ? { terminalTombstoned: true } : {}) };
     });
   });
 }
@@ -618,8 +615,12 @@ export async function retireJobAnalysisOperationPublication({ canvasFilePath, hu
       if (!current) return false;
       const publications = { ...current.publications };
       const pendingPublications = current.pendingPublications ? { ...current.pendingPublications } : null;
-      const changed = delete publications[slot] || (pendingPublications ? delete pendingPublications[slot] : false);
+      // `delete` reports true for an absent key, so presence is checked first
+      // and both maps are always cleared.
+      const changed = Object.hasOwn(publications, slot) || (!!pendingPublications && Object.hasOwn(pendingPublications, slot));
       if (!changed) return false;
+      delete publications[slot];
+      if (pendingPublications) delete pendingPublications[slot];
       await atomicWrite(scopeValue.authorityPath, { ...current, publications, pendingPublications, updatedAt: new Date().toISOString() });
       return true;
     });
@@ -627,19 +628,5 @@ export async function retireJobAnalysisOperationPublication({ canvasFilePath, hu
 }
 
 export function jobAnalysisOperationAuthorityReceipt(value) {
-  if (!value || typeof value !== 'object') return null;
-  const operationId = identifier(value.operationId);
-  const base = semanticBase(value.semanticBase);
-  return operationId && base && Number.isSafeInteger(value.revision) && value.revision > 0
-    ? { operationId, semanticBase: base, revision: value.revision }
-    : null;
+  return receipt(value);
 }
-
-export const __jobAnalysisOperationAuthorityForTests = {
-  current: currentJobAnalysisOperationAuthority,
-  claim: claimJobAnalysisOperationAuthority,
-  revoke: revokeJobAnalysisOperationAuthority,
-  clear: clearJobAnalysisOperationAuthority,
-  published: publishedJobAnalysisOperationAuthority,
-  retirePublication: retireJobAnalysisOperationPublication,
-};

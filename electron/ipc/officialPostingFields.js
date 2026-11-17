@@ -18,7 +18,7 @@ export const OFFICIAL_POSTING_COMPARATIVE_CODES = Object.freeze([
 // The second attempt reached the same doubt, so nothing more will come from retrying.
 // 'retry-paused' marked this before careers-page snapshots carried job-board links from
 // page markup. It stays a known code but means nothing, so those cards get one more try.
-export const OFFICIAL_POSTING_EXHAUSTED_TRAIL = 'lookup-exhausted';
+const OFFICIAL_POSTING_EXHAUSTED_TRAIL = 'lookup-exhausted';
 const RETIRED_RETRY_PAUSED_TRAIL = 'retry-paused';
 export const OFFICIAL_POSTING_TRAIL = Object.freeze([
   OFFICIAL_POSTING_EXHAUSTED_TRAIL, RETIRED_RETRY_PAUSED_TRAIL, 'free-lead', 'careers-page', 'ats-adapter', 'json-ld', 'structured-proof', 'domain-proof',
@@ -216,7 +216,7 @@ const BOARD_LABELS = Object.freeze({
   linkedin: 'LinkedIn', indeed: 'Indeed', ziprecruiter: 'ZipRecruiter', glassdoor: 'Glassdoor', dice: 'Dice',
   google: 'Google', remoteok: 'RemoteOK', weworkremotely: 'WWRemotely',
 });
-const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
+export const BOARD_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/u;
 /** Bounded board links only; scraped identity and page evidence are separate. */
 export function normalizeAlternateListings(value) {
   const links = []; const seen = new Set();
@@ -244,8 +244,8 @@ export function normalizeBoardClosed(value) {
   return { board: value.board, reason: value.reason, at: new Date(instant).toISOString() };
 }
 
-export const LISTING_LIVENESS_VERDICTS = Object.freeze(['open', 'closed', 'pending', 'unclear']);
-export const LISTING_LIVENESS_BASES = Object.freeze(['open-marker', 'structural', 'ai', 'closed-marker', 'neither', 'both']);
+const LISTING_LIVENESS_VERDICTS = Object.freeze(['open', 'closed', 'pending', 'unclear']);
+const LISTING_LIVENESS_BASES = Object.freeze(['open-marker', 'structural', 'ai', 'closed-marker', 'neither', 'both']);
 /** A bounded observation, never a copy of page text or a URL. */
 export function normalizeListingLiveness(value) {
   if (!exactKeys(value, ['verdict', 'basis', 'board', 'at'])
@@ -267,13 +267,13 @@ export function listingStateRank(job) {
   return 2;
 }
 
-// Trail codes meaning the research step did not run, did not finish, or hit a
-// transient failure. A miss carrying any of them is retryable, never a conclusion.
 /** A card's own addresses earlier judges cited: on an unsettled card nothing else remembers them, since such a result is not stored. Leads only. */
 export function officialPostingCitedLeadUrls(posting) {
   return (posting?.alternatives || []).filter(item => item?.title?.startsWith('Unconfirmed · cited')).map(item => item.url).slice(0, 3);
 }
 
+// Trail codes meaning the research step did not run, did not finish, or hit a
+// transient failure. A miss carrying any of them is retryable, never a conclusion.
 export const RESEARCH_UNSETTLED_TRAIL = Object.freeze(['worker-aborted', 'worker-timeout', 'worker-unavailable', 'research-miss',
   'source-unproven',
   ...FETCH_FAILURE_CODES, 'crawl-budget', 'crawl-partial', 'official-text-missing', 'storage-failed', 'failed',
@@ -358,7 +358,7 @@ const INTERRUPTED_RESEARCH_TRAIL = Object.freeze(RESEARCH_UNSETTLED_TRAIL.filter
  * the match, or both searches found nothing to judge. A failed download or an
  * interrupted worker can recover by itself, so it is excluded. A verification
  * still standing counts only once a recheck has failed. */
-export function officialPostingResearchInconclusive(value) {
+function officialPostingResearchInconclusive(value) {
   const posting = normalizeOfficialPosting(value);
   if (!posting || posting.fetchFailures?.length) return false;
   const trail = posting.trail || [];

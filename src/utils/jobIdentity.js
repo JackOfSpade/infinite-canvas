@@ -55,12 +55,6 @@ export function jobTitleCompanyLocationKey(job) {
   return `${jobTitleCompanyKey(job)}|${keyPart(job?.location)}`;
 }
 
-/**
- * Per-listing dedup key for a single source's own gather (see policy above).
- * Both Indeed extractors share this one definition so they can't drift — the
- * browser path previously fell back to title|company and could over-collapse a
- * nationwide search's distinct-location reqs that share a title and company.
- */
 function parsedHttpUrlOrNull(url) {
   try {
     const parsed = new URL(String(url || '').trim());
@@ -106,6 +100,12 @@ function sourceStableUrlKey(url, source = '') {
   return raw;
 }
 
+/**
+ * Per-listing dedup key for a single source's own gather (see policy above).
+ * Both Indeed extractors share this one definition so they can't drift — the
+ * browser path previously fell back to title|company and could over-collapse a
+ * nationwide search's distinct-location reqs that share a title and company.
+ */
 export function sourceJobKey(job) {
   return job?.jobkey
     || sourceStableUrlKey(job?.source === 'google' ? (job?.googleCardUrl || job?.url) : job?.url, job?.source)

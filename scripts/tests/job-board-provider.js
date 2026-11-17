@@ -68,17 +68,6 @@ export default [
     },
   },
   {
-    name: 'Job Search deferral logging is latched per hub, run, and durable Board owner',
-    run() {
-      const source = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
-      assert(source.includes('directSearchDeferralEventsRef.current')
-        && source.includes('const deferralKey = `${id}|${deferralRunId}|${durableBoardOwner.orchestratorNodeId}`')
-        && source.includes('if (!seenDeferrals.has(deferralKey))')
-        && source.includes('while (seenDeferrals.size > 128)'),
-      'one hub/run/owner deferral writes one event, while a bounded set lets later runs and owners retain their own evidence');
-    },
-  },
-  {
     name: 'one collector parks its results panel and shares current detail progress and pause ownership',
     async run() {
       const doms = [];
@@ -1633,14 +1622,15 @@ export default [
         && !connectedSig.includes('queries:')
         && !connectedSig.includes('scrapeWarnings:'),
       'connected module readiness must refresh for relative source order, derived admission, terminal-finalization, cleanup, and exact-recovery inputs without serializing profile, query, or warning content');
+      const receiptHelpers = readFileSync(path.resolve('src/nodes/jobsearch/manualAiRunReceipts.js'), 'utf8');
       const readinessStart = board.indexOf('function moduleSearchReadiness');
       const readinessEnd = board.indexOf('// This is deliberately only a preflight hint.', readinessStart);
       const readiness = board.slice(readinessStart, readinessEnd);
       assert(readinessStart >= 0 && readinessEnd > readinessStart
         && readiness.includes('if (hasCancellationPendingManualAiCleanup(sourceData))')
         && !readiness.includes('(sourceData.manualAiCleanupReceipts || []).some(')
-        && board.includes('if (!Array.isArray(receipts)) return [];')
-        && board.includes("typeof receipt?.runId !== 'string' || !receipt.runId"),
+        && receiptHelpers.includes('if (!Array.isArray(receipts)) return [];')
+        && receiptHelpers.includes("typeof receipt?.runId !== 'string' || !receipt.runId"),
       'readiness must use the canonical cleanup-receipt normalizer so malformed non-arrays and pending receipts without durable run ids cannot throw or change selector state');
       return { recoveryOwnershipInvalidatesSelector: true, ownershipSourceIdsAndOrderingCovered: true, probeOwnershipInvalidates: true, sourceOrderInvalidatesSelector: true, importAdmissionInvalidatesSelector: true, malformedCleanupSafe: true };
     },
@@ -4140,7 +4130,7 @@ export default [
       const search = readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
       const done = readFileSync(new URL('../../src/nodes/jobsearch/JobSearchDoneState.jsx', import.meta.url), 'utf8');
       const legacyAutoStart = search.slice(
-        search.indexOf('const autoStartPath ='),
+        search.indexOf('const legacyFilePath ='),
         search.indexOf('// Handle file drops directly onto this node'),
       );
       const retryStart = search.indexOf('const handleRetryFailed = useCallback');
@@ -4155,8 +4145,7 @@ export default [
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Interrupted-run resume')) {")
         && search.includes("if (!queueManagedByBoard && deferDirectSearchToBoard('Saved-scrape resume')) {")
         && search.includes("'Career-file drop'")
-        && search.includes('if (managedByJobBoard || activeBoardRecoveryOwnerKey) {\n      EventLogger.log(`[JobSearch][${id}] Legacy file auto-start suppressed')
-        && search.includes('This Job Search is reserved by an interrupted Job Board run.')
+        && search.includes('Legacy file auto-start suppressed — searches run only from a Job Board')
         && search.includes('This interrupted Search is reserved by its Job Board.')
         && search.includes('This saved Search recovery is reserved by its Job Board.')
         && search.includes('const boardRecoveryOwnsActions = managedByJobBoard || !!activeBoardRecoveryOwnerKey;')
@@ -4170,16 +4159,10 @@ export default [
         && search.includes('|| manualAiRecoveryBoardOwnerKey\n    ) return;')
         && search.includes('onClearCareerFiles={activeBoardRecoveryOwnerKey ? null : handleClearCareerFiles}')
         && search.includes('boardRecoveryPending={!!activeBoardRecoveryOwnerKey}')
-        && search.includes('An idle Board connection does not own this explicit re-scan.')
-        && search.includes('standaloneBecameBoardRecoveryManaged')
-        && legacyAutoStart.indexOf('if (managedByJobBoard || activeBoardRecoveryOwnerKey)') >= 0
-        && legacyAutoStart.indexOf('autoStartedFilePathRef.current = autoStartPath;') > legacyAutoStart.indexOf('if (managedByJobBoard || activeBoardRecoveryOwnerKey)')
-        && legacyAutoStart.includes("const claimedByBoard = ['paused', 'not-ready'].includes(outcome?.status)")
-        && legacyAutoStart.includes("outcome?.error === 'This Job Search is pending deletion.'")
-        && legacyAutoStart.includes('findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())')
+        && !legacyAutoStart.includes('startProcessing(') && !legacyAutoStart.includes('runPipeline(')
         && legacyAutoStart.includes('if (!recoveryPeekResolved) return;')
         && legacyAutoStart.includes('if (recoveryPeekHasProtectedCheckpoint) {')
-        && legacyAutoStart.includes('[activeBoardRecoveryOwnerKey, data.filePath, deletionLifecycleRevision, getEdges, getNodes, hubState, id, managedByJobBoard, recoveryPeekHasProtectedCheckpoint, recoveryPeekResolved, startProcessing]')
+        && legacyAutoStart.includes('[data.filePath, hubState, id, recoveryPeekHasProtectedCheckpoint, recoveryPeekResolved]')
         && retryStart >= 0 && retryEnd > retryStart
         && retry.indexOf('const supersededCleanupReceipts = normalizeManualAiCleanupReceipts') >= 0
         && retry.indexOf('if (manualRetirement?.runId && manualRetirement.retirementPending)')
@@ -4916,7 +4899,7 @@ export default [
         activeSettlementAt,
       );
       assert(pipelineStart >= 0 && pipelineEnd > pipelineStart
-        && pipeline.includes('if (!queueManagedByBoard && !queueManagedExternally) {\n        lease = await moduleRunQueue.acquireModuleRun')
+        && !pipeline.includes('acquireModuleRun')
         && pipeline.includes("if (!orchestratorNodeId) throw new Error('A board-managed search requires an orchestrator node id.')")
         && childRunnerStart >= 0 && childRunnerEnd > childRunnerStart
         && childRunner.includes('queueManagedByBoard: true')
@@ -5302,21 +5285,14 @@ export default [
       const pipelineStart = search.indexOf('const runPipeline = useCallback');
       const pipelineEnd = search.indexOf('const startProcessing = useCallback', pipelineStart);
       const pipeline = search.slice(pipelineStart, pipelineEnd);
-      const acquireAt = pipeline.indexOf('lease = await moduleRunQueue.acquireModuleRun');
-      const ownershipAt = pipeline.indexOf('findJobSearchBoardActiveRecoveryOwner(currentId, getNodes(), getEdges())', acquireAt);
-      const refusalAt = pipeline.indexOf('if (standaloneBecameBoardRecoveryManaged)', ownershipAt);
-      const queueMarkerClearAt = pipeline.indexOf('updateGlobal(currentId, { queuedModuleRun: null });', refusalAt);
-      const refusalReturnAt = pipeline.indexOf("return searchRunOutcome('paused'", queueMarkerClearAt);
-      const processingStartAt = pipeline.indexOf('processingToken = processingRunsRef.current.start();', refusalReturnAt);
+      const processingStartAt = pipeline.indexOf('processingToken = processingRunsRef.current.start();');
       const destructiveSetupAt = pipeline.indexOf('scrapeWarningsRef.current = [];', processingStartAt);
-      const refusalBlock = pipeline.slice(refusalAt, processingStartAt);
-      assert(acquireAt >= 0 && ownershipAt > acquireAt && refusalAt > ownershipAt
-        && queueMarkerClearAt > refusalAt && refusalReturnAt > queueMarkerClearAt
-        && processingStartAt > refusalReturnAt && destructiveSetupAt > processingStartAt
+      assert(processingStartAt >= 0 && destructiveSetupAt > processingStartAt
         && !pipeline.includes('restoreStandaloneQueueSnapshot')
-        && !refusalBlock.includes('scoredJobs:') && !refusalBlock.includes('hubState:')
-        && pipeline.indexOf('lease?.release();', destructiveSetupAt) > destructiveSetupAt,
-      'a standalone Search claimed by an active Board recovery while queued must clear only its queue marker, preserve every live edit/result, refuse before processing or destructive setup, and still release its lane');
+        && !pipeline.includes('standaloneBecameBoardRecoveryManaged')
+        && !pipeline.includes('let lease')
+        && !pipeline.includes('lease?.release()'),
+      'a Board-managed Search takes its processing token before destructive setup, and runPipeline holds no lane or standalone queue state of its own because the Board owns the lane');
 
       const interruptedResumeStart = search.indexOf('const handleResumeRun = useCallback');
       const interruptedResumeEnd = search.indexOf('resumeInterruptedRunRef.current = handleResumeRun;', interruptedResumeStart);
@@ -5324,8 +5300,7 @@ export default [
       const savedResumeStart = search.indexOf('const handleResumeSavedScrape = useCallback');
       const savedResumeEnd = search.indexOf('resumeSavedScrapeRef.current = handleResumeSavedScrape;', savedResumeStart);
       const savedResume = search.slice(savedResumeStart, savedResumeEnd);
-      assert((pipeline.match(/findJobSearchBoardActiveRecoveryOwner\(currentId, getNodes\(\), getEdges\(\)\)/g) || []).length >= 2
-        && pipeline.indexOf('findJobSearchBoardActiveRecoveryOwner(\n        id,', pipeline.indexOf('const runPipeline'))
+      assert(pipeline.indexOf("return searchRunOutcome('not-ready', { error: 'Searches run only from a Job Board.' });")
           < pipeline.indexOf('const liveData = getNode(id)?.data || data;')
         && (interruptedResume.match(/findJobSearchBoardActiveRecoveryOwner\(/g) || []).length >= 4
         && interruptedResume.includes('This interrupted Search was reserved by its Job Board while queued.')
@@ -5333,16 +5308,15 @@ export default [
         && savedResume.includes('const activeBoardOwner = findJobSearchBoardActiveRecoveryOwner(')
         && savedResume.indexOf('findJobSearchBoardActiveRecoveryOwner(id, getNodes(), getEdges())')
           < savedResume.indexOf('const admissionData = getNode(id)?.data || data;'),
-      'fresh, interrupted-ledger, and saved-scrape direct entrypoints must honor disconnected durable Board reservations before admission and re-elect ownership after their queued lane turn');
+      'a fresh direct run is refused before admission, while interrupted-ledger and saved-scrape direct entrypoints must honor disconnected durable Board reservations before admission and re-elect ownership after their queued lane turn');
 
       const deletionPendingStartChecks = search.match(
         /isJobWorkflowDeletionPending\((?:currentId|id)\)\) throw new Error\('Node deleted'\);/g,
       ) || [];
       const laneCommitBarriers = search.match(/if \(lease\) await waitForRendererCommitFrame\(\);/g) || [];
-      assert(deletionPendingStartChecks.length >= 8
-        && laneCommitBarriers.length >= 7
+      assert(deletionPendingStartChecks.length >= 6
+        && laneCommitBarriers.length >= 6
         && search.includes('if (emptyContinuationLease) await waitForRendererCommitFrame();')
-        && pipeline.includes("node?.data?.queuedModuleRun?.label === 'Job search'")
         && search.includes("node?.data?.queuedModuleRun?.label === 'Resuming job search'")
         && search.includes("node?.data?.queuedModuleRun?.label === 'Re-evaluating saved jobs'")
         && search.includes("node?.data?.queuedModuleRun?.label === 'Resuming saved job search'")
@@ -5677,63 +5651,18 @@ export default [
       const usaStart = search.indexOf('const triggerUSAJobsBackgroundSearch = useCallback');
       const usaEnd = search.indexOf('const handleJobsSettingsChange = useCallback', usaStart);
       const usa = search.slice(usaStart, usaEnd);
-      const usaMarkerAt = usa.indexOf('const clearOwnQueueMarker = () => updateGlobal(currentId, (node) => (');
-      const usaAdmissionAt = usa.indexOf('if (boardConnectionOwnsRefresh())', usaMarkerAt);
-      const usaRecoveryAt = usa.indexOf('const recoveryReservation = () =>', usaAdmissionAt);
-      const usaDuplicateGuardAt = usa.indexOf('if (usaJobsRefreshAdmissionRef.current)', usaRecoveryAt);
-      const usaAdmissionGuardAt = usa.indexOf('if (localQueueAdmissionRef.current)', usaDuplicateGuardAt);
-      const usaAdmissionTokenAt = usa.indexOf('const admissionToken = Symbol(`usajobs-refresh:${currentId}`);', usaAdmissionGuardAt);
-      const usaRefreshClaimAt = usa.indexOf('usaJobsRefreshAdmissionRef.current = admissionToken;', usaAdmissionTokenAt);
-      const usaAdmissionClaimAt = usa.indexOf('localQueueAdmissionRef.current = admissionToken;', usaRefreshClaimAt);
-      const usaLeaseAt = usa.indexOf('lease = await moduleRunQueue.acquireModuleRun', usaAdmissionClaimAt);
-      const usaStartFenceAt = usa.indexOf('if (boardConnectionOwnsRefresh())', usaLeaseAt);
-      const usaClaimedAt = usa.indexOf('if (refreshClaimedByBoard)', usaStartFenceAt);
-      const usaLiveReadAt = usa.indexOf('refreshData = getNode(currentId)?.data || null;', usaClaimedAt);
-      const usaProviderAt = usa.indexOf('window.electronAPI.searchJobsSingleSource', usaLiveReadAt);
-      const usaAdmissionRefusal = usa.slice(usaAdmissionAt, usaRecoveryAt);
-      const usaQueuedRefusal = usa.slice(usaClaimedAt, usaLiveReadAt);
-      const usaFinallyAt = usa.lastIndexOf('} finally {');
-      const usaAdmissionReleaseAt = usa.indexOf(
-        'if (localQueueAdmissionRef.current === admissionToken)',
-        usaFinallyAt,
-      );
-      const usaRefreshReleaseAt = usa.indexOf(
-        'if (usaJobsRefreshAdmissionRef.current === admissionToken)',
-        usaAdmissionReleaseAt,
-      );
       assert(usaStart >= 0 && usaEnd > usaStart
-        && usaMarkerAt >= 0
-        && search.includes('const usaJobsRefreshAdmissionRef = useRef(null);')
         && usa.includes("node?.data?.queuedModuleRun?.label === 'Refreshing USAJobs'")
-        && usaAdmissionAt > usaMarkerAt && usaRecoveryAt > usaAdmissionAt
-        && usaDuplicateGuardAt > usaRecoveryAt
-        && usaAdmissionGuardAt > usaDuplicateGuardAt
-        && usaAdmissionTokenAt > usaAdmissionGuardAt
-        && usaRefreshClaimAt > usaAdmissionTokenAt
-        && usaAdmissionClaimAt > usaRefreshClaimAt
-        && usaLeaseAt > usaAdmissionClaimAt
-        && usaStartFenceAt > usaLeaseAt
-        && usaClaimedAt > usaStartFenceAt
-        && usaLiveReadAt > usaClaimedAt
-        && usaProviderAt > usaLiveReadAt
-        && usa.slice(usaDuplicateGuardAt, usaAdmissionGuardAt).includes('return;')
-        && usa.slice(usaDuplicateGuardAt, usaAdmissionGuardAt).includes('pendingUSAJobsRefreshRef.current = false;')
-        && usa.slice(usaAdmissionGuardAt, usaAdmissionTokenAt).includes('return;')
-        && usa.slice(usaAdmissionGuardAt, usaAdmissionTokenAt).includes('pendingUSAJobsRefreshRef.current = true;')
-        && usaFinallyAt > usaProviderAt
-        && usaAdmissionReleaseAt > usaFinallyAt
-        && usaRefreshReleaseAt > usaAdmissionReleaseAt
-        && usaAdmissionRefusal.includes('pendingUSAJobsRefreshRef.current = false;')
-        && usaAdmissionRefusal.includes('clearOwnQueueMarker();')
-        && usaQueuedRefusal.includes('pendingUSAJobsRefreshRef.current = false;')
-        && usaQueuedRefusal.includes('clearOwnQueueMarker();')
-        && !usaAdmissionRefusal.includes('scoredJobs:')
-        && !usaAdmissionRefusal.includes('pendingJobs:')
-        && !usaAdmissionRefusal.includes('hubState:')
-        && !usaQueuedRefusal.includes('scoredJobs:')
-        && !usaQueuedRefusal.includes('pendingJobs:')
-        && !usaQueuedRefusal.includes('hubState:'),
-      'USAJobs background refresh must coalesce only its own duplicate admission, preserve the latch behind unrelated local work, drop at both Board-ownership fences, and identity-release without changing results');
+        && usa.includes('pendingUSAJobsRefreshRef.current = false;')
+        && usa.includes('USAJobs background search dropped because searches run only from a Job Board.')
+        && !usa.includes('acquireModuleRun')
+        && !usa.includes('searchJobsSingleSource')
+        && !usa.includes('localQueueAdmissionRef')
+        && !usa.includes('usaJobsRefreshAdmissionRef')
+        && !usa.includes('scoredJobs:')
+        && !usa.includes('pendingJobs:')
+        && !usa.includes('hubState:'),
+      'USAJobs background refresh must drop its latch and clear only its own queue marker, never acquiring a lane, contacting the provider, or changing results');
 
       const usaWakeEffectStart = search.indexOf('// A credentials change may arrive while a recovered Board owns this Search.');
       const usaWakeEffectEnd = search.indexOf('// (Results-cascade filters', usaWakeEffectStart);

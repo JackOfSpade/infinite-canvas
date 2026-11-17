@@ -7,6 +7,7 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores([
     'dist', 'dist-electron',
+    'dist-interview', 'dist-electron-interview', 'release-interview', // interview-helper build output
     '.gemini',                           // private agent scratch state
     '.test-artifacts/*',                 // private probes and copied source snapshots
     '!.test-artifacts/blackbox-run/',     // retain the maintained root harness scripts

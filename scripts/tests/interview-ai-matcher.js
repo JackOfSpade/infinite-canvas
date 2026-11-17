@@ -139,6 +139,9 @@ export default [
         if (current > 1) { await new Promise(resolve => setTimeout(resolve, 40)); recovered(); }
       }, match: () => current === 1 ? new Promise(() => {}) : Promise.resolve(answer()), close() { closes += 1; } };
     } });
+    // The matcher's recovery timer is unref'd, as it must be in the app; hold
+    // the event loop open here so a standalone run does not exit mid-await.
+    const keepAlive = setInterval(() => {}, 1000);
     try {
       await matcher.start();
       assert.equal((await matcher.match('Describe a project.')).reason, 'timeout');
@@ -147,7 +150,7 @@ export default [
       assert.equal(closes, 1);
       assert.equal((await matcher.match('Describe a project.')).source, 'ai');
       assert.equal(creations, 2);
-    } finally { await matcher.close(); }
+    } finally { clearInterval(keepAlive); await matcher.close(); }
   } },
   { name: 'interview AI matcher: failed background recovery retries once and closes without a respawn loop', async run() {
     let creations = 0;

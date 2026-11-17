@@ -20,7 +20,7 @@ const MAX_URL_CHARS = 2048;
 const SAFE_GOOGLE_DOCUMENT_ID = /^[A-Za-z0-9._:-]{1,512}={0,2}$/u;
 const SAFE_GOOGLE_LOCALE = /^[a-z]{2}(?:-[A-Z]{2})?$/u;
 
-function hasControl(value) {
+export function hasControl(value) {
   return [...String(value || '')].some(character => {
     const code = character.codePointAt(0);
     return code <= 0x1F || (code >= 0x7F && code <= 0x9F) || /\p{Cf}/u.test(character);

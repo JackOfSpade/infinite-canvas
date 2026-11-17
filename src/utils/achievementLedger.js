@@ -359,6 +359,8 @@ function checkClaimFigureLeak(item, metric, arithmetic) {
 // ---------------------------------------------------------------------------
 
 function checkEvidence(item, sections, fullText) {
+  // `sections`/`fullText` arrive already whitespace-normalised (computeLedger
+  // does it once), so each quote is a plain substring test.
   const evidenceList = Array.isArray(item?.evidence)
     ? item.evidence.filter((ev) => ev && typeof ev === 'object')
     : [];
@@ -379,10 +381,10 @@ function checkEvidence(item, sections, fullText) {
       continue;
     }
     const namedSection = getNamedSection(sections, fileName);
-    if (namedSection && normalizeQuoteText(namedSection).includes(quote)) continue; // strongest case: named file matches
+    if (namedSection && namedSection.includes(quote)) continue; // strongest case: named file matches
 
     evidenceOk = false;
-    if (normalizeQuoteText(fullText).includes(quote)) {
+    if (fullText.includes(quote)) {
       if (fileName) {
         // Real quote, wrong document — a mis-derivation worth catching, which
         // is what makes `file` load-bearing rather than decorative (design
@@ -421,8 +423,10 @@ function dedupeFlags(flags) {
  * @returns {{ledger: Array, gaps: Array, stats: {mined:number, demotedByCheck:number, evidenceMisses:number, dateMisses:number, directionMisses:number, claimFigureLeaks:number}}}
  */
 export function computeLedger(raw, careerData) {
-  const sections = splitCareerDataByFile(careerData);
   const fullText = typeof careerData === 'string' ? careerData : '';
+  const sections = splitCareerDataByFile(careerData);
+  const normalizedSections = new Map([...sections].map(([name, text]) => [name, normalizeQuoteText(text)]));
+  const normalizedFullText = normalizeQuoteText(fullText);
   const corpusSpan = extractDateSpan(fullText);
 
   const achievements = Array.isArray(raw?.achievements) ? raw.achievements : [];
@@ -454,7 +458,7 @@ export function computeLedger(raw, careerData) {
     }
 
     // 2. Evidence presence
-    const evidenceCheck = checkEvidence(item, sections, fullText);
+    const evidenceCheck = checkEvidence(item, normalizedSections, normalizedFullText);
     flags.push(...evidenceCheck.flags);
     if (evidenceCheck.hasMiss) {
       confidence = 'low';

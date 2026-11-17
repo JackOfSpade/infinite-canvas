@@ -135,16 +135,26 @@ function parseToolReply(text) {
   try { return { payload: JSON.parse(body) }; } catch { return {}; }
 }
 
-/** One anonymous Parallel MCP tool call, or null on any failure (network, non-ok, tool error, bad JSON). */
-async function callTool({ name, args, fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = SEARCH_TIMEOUT_MS, now = Date.now }) {
-  if (signal?.aborted || parallelBlocked(now())) return null;
+/** Runs `run(abortSignal)` under the caller's abort signal and a timeout; both are released afterwards. */
+async function withAbortAndTimeout({ signal, timeoutMs }, run) {
   const controller = new AbortController();
   const abort = () => controller.abort();
   signal?.addEventListener?.('abort', abort, { once: true });
   const timer = setTimeout(abort, Math.max(1, Number(timeoutMs) || SEARCH_TIMEOUT_MS));
   try {
+    return await run(controller.signal);
+  } catch { return null; } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener?.('abort', abort);
+  }
+}
+
+/** One anonymous Parallel MCP tool call, or null on any failure (network, non-ok, tool error, bad JSON). */
+async function callTool({ name, args, fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = SEARCH_TIMEOUT_MS, now = Date.now }) {
+  if (signal?.aborted || parallelBlocked(now())) return null;
+  return withAbortAndTimeout({ signal, timeoutMs }, async (abortSignal) => {
     const response = await fetchImpl(PARALLEL_MCP_URL, {
-      method: 'POST', signal: controller.signal,
+      method: 'POST', signal: abortSignal,
       headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: { ...args, session_id: SESSION_ID } } }),
     });
@@ -153,10 +163,7 @@ async function callTool({ name, args, fetch: fetchImpl = globalThis.fetch, signa
     const { payload, error } = parseToolReply(text);
     if (error !== undefined) noteParallelLimit({ text: error }, now());
     return payload ?? null;
-  } catch { return null; } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.('abort', abort);
-  }
+  });
 }
 
 const KEY_REJECTED = Symbol('parallel key rejected');
@@ -164,13 +171,9 @@ const KEY_REJECTED = Symbol('parallel key rejected');
 /** One REST call with the API key, the payload object, null on any failure, or KEY_REJECTED on a 401/403. */
 async function callRest({ path, body, key, fetch: fetchImpl = globalThis.fetch, signal, timeoutMs = SEARCH_TIMEOUT_MS, now = Date.now }) {
   if (signal?.aborted || parallelBlocked(now())) return null;
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  signal?.addEventListener?.('abort', abort, { once: true });
-  const timer = setTimeout(abort, Math.max(1, Number(timeoutMs) || SEARCH_TIMEOUT_MS));
-  try {
+  return withAbortAndTimeout({ signal, timeoutMs }, async (abortSignal) => {
     const response = await fetchImpl(`${PARALLEL_REST_URL}${path}`, {
-      method: 'POST', signal: controller.signal,
+      method: 'POST', signal: abortSignal,
       headers: { 'content-type': 'application/json', 'x-api-key': key },
       body: JSON.stringify({ ...body, session_id: SESSION_ID }),
     });
@@ -179,10 +182,7 @@ async function callRest({ path, body, key, fetch: fetchImpl = globalThis.fetch, 
     if (status === 401 || status === 403) { keyRejectedUntil = Math.max(keyRejectedUntil, now() + COOLDOWN_MS); return KEY_REJECTED; }
     if (!response?.ok) { noteParallelLimit({ status, text }, now()); return null; }
     try { const payload = JSON.parse(text); return payload && typeof payload === 'object' ? payload : null; } catch { return null; }
-  } catch { return null; } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.('abort', abort);
-  }
+  });
 }
 
 /** One search or fetch: the REST API when a usable key is given, otherwise (or after the key is rejected) the anonymous MCP. */

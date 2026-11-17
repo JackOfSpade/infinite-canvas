@@ -1,3 +1,5 @@
+import { UNSCORED_PLACEHOLDER_REASONS } from './jobBatchReconcile.js';
+
 // Bounded, report-safe scoring evidence. The scorer runs independent batches,
 // so large score deltas between effectively identical postings can otherwise be
 // impossible to diagnose after the saved prompt snapshot is gone.
@@ -10,7 +12,7 @@ const ADJUSTMENT_LIMIT = 4;
 // These are the only deterministic fallback reasons emitted by
 // jobBatchReconcile.buildScoredJob. Keep their rows in bounded diagnostics even
 // when a large run would otherwise push them past the ordinary first-N sample.
-const PLACEHOLDER_REASONS = new Set(['AI format error', 'Unable to score']);
+const PLACEHOLDER_REASONS = new Set(UNSCORED_PLACEHOLDER_REASONS);
 
 function normalizedText(value) {
   return String(value || '')
@@ -149,20 +151,25 @@ export function buildScoringAudit(batchRows, { limit = AUDIT_LIMIT } = {}) {
 
 /** Reattach original batch numbers after reconciliation/sorting. */
 export function scoringAuditRowsFromBatches(batches, scoredJobs) {
-  const remaining = Array.isArray(scoredJobs) ? [...scoredJobs] : [];
   // Title/company/location alone can collide for two genuinely different
   // postings (e.g. a company running near-duplicate reqs) when neither has a
-  // captured URL. `remaining` is seeded from scoredJobs sorted by score, so a
+  // captured URL. The lookup is seeded from scoredJobs sorted by score, so a
   // collision on this key would bind the wrong batch's score to a lookalike
   // posting. Fold in the description text — already read the same way below
   // — so distinct postings keep distinct keys even without a URL.
   const keyFor = job => String(job?.url || '').trim()
     || `${normalizedText(job?.title)}|${normalizedText(job?.company)}|${normalizedText(job?.location)}|${normalizedText(job?.snippet || job?.description || '')}`;
+  // Same-key jobs are consumed in scoredJobs order, one per original.
+  const remainingByKey = new Map();
+  for (const candidate of Array.isArray(scoredJobs) ? scoredJobs : []) {
+    const key = keyFor(candidate);
+    const queue = remainingByKey.get(key);
+    if (queue) queue.push(candidate);
+    else remainingByKey.set(key, [candidate]);
+  }
   return (Array.isArray(batches) ? batches : []).flatMap((batch, batchIndex) =>
     (Array.isArray(batch) ? batch : []).map(original => {
-      const key = keyFor(original);
-      const foundAt = remaining.findIndex(candidate => keyFor(candidate) === key);
-      const job = foundAt >= 0 ? remaining.splice(foundAt, 1)[0] : original;
+      const job = remainingByKey.get(keyFor(original))?.shift() ?? original;
       return { batch: batchIndex + 1, job };
     }),
   );

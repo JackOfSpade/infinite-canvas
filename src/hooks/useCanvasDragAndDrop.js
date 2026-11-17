@@ -186,7 +186,7 @@ export function useCanvasDragAndDrop({
         takeSnapshot();
         const newNode = NODE_FACTORIES.link(position, { url: trimmedText });
         insertNodes([newNode]);
-      } else if (trimmedText.length > 0) {
+      } else {
         takeSnapshot();
         // Insert as a TextNode if it doesn't match a URL format.
         // createTextNode only accepts position, so we patch the text field

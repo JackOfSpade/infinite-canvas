@@ -228,10 +228,7 @@ async function atomicWriteJson(filePath, obj) {
     await handle.close();
     handle = null;
     await fs.promises.rename(tmp, filePath);
-    const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
-    if (directory) {
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
+    await fsyncDirectory(path.dirname(filePath));
   } finally {
     // A failed write/rename must not accumulate sidecars forever. If rename
     // succeeded the temporary no longer exists, so ENOENT is expected here.
@@ -268,32 +265,26 @@ async function appendStagingDurably(filePath, text) {
 // stale manifest and clobber each other's updates — and a late stale write can
 // even revert `stage` back to 'searching'. Keyed by path so different canvases
 // never block one another. Same dependency-free pattern as sharedProfileLock.
-const _manifestTails = new Map();
-function withManifestLock(filePath, fn) {
-  const prev = _manifestTails.get(filePath) || Promise.resolve();
-  const result = prev.then(fn, fn); // run regardless of the prior op's outcome
-  const tail = result.then(() => {}, () => {});
-  _manifestTails.set(filePath, tail);
-  return result.finally(() => {
-    // Canvas paths are unbounded over a long app session. Remove an idle key
-    // without disturbing a newer operation that queued behind this one.
-    if (_manifestTails.get(filePath) === tail) _manifestTails.delete(filePath);
-  });
+function createPathLock() {
+  const tails = new Map();
+  return (filePath, fn) => {
+    const prev = tails.get(filePath) || Promise.resolve();
+    const result = prev.then(fn, fn); // run regardless of the prior op's outcome
+    const tail = result.then(() => {}, () => {});
+    tails.set(filePath, tail);
+    return result.finally(() => {
+      // Canvas paths are unbounded over a long app session. Remove an idle key
+      // without disturbing a newer operation that queued behind this one.
+      if (tails.get(filePath) === tail) tails.delete(filePath);
+    });
+  };
 }
+const withManifestLock = createPathLock();
 
 // Receipt writes are normally made from the manifest-locked completion
 // transaction below. Keep an independent path mutex for report/test callers
 // too, so an out-of-band read/update cannot tear a JSON receipt.
-const _receiptTails = new Map();
-function withReceiptLock(filePath, fn) {
-  const prev = _receiptTails.get(filePath) || Promise.resolve();
-  const result = prev.then(fn, fn);
-  const tail = result.then(() => {}, () => {});
-  _receiptTails.set(filePath, tail);
-  return result.finally(() => {
-    if (_receiptTails.get(filePath) === tail) _receiptTails.delete(filePath);
-  });
-}
+const withReceiptLock = createPathLock();
 
 // A save/rename changes the full-path hash used in every modern sidecar name.
 // Keep the durable work with the canvas rather than treating a spelling change
@@ -503,7 +494,7 @@ function receiptNumber(value, fallback = 0) {
   return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
 }
 
-function receiptTimestamp(value, fallback = null) {
+function manifestTimestamp(value, fallback = null) {
   // Completion ordering is provenance, unlike display-only counters. Keep it
   // a real Date.now()-style number so strings/booleans cannot become a
   // plausible terminal instant before the board-clear report boundary sees it.
@@ -526,8 +517,8 @@ export function sanitizeJobRunCollectionDiagnostics(value) {
   const count = data.unfinishedSourceCount;
   return {
     disposition: COLLECTION_DIAGNOSTIC_DISPOSITIONS.has(data.disposition) ? data.disposition : 'unknown',
-    startedAt: receiptTimestamp(data.startedAt),
-    completedAt: receiptTimestamp(data.completedAt),
+    startedAt: manifestTimestamp(data.startedAt),
+    completedAt: manifestTimestamp(data.completedAt),
     unfinishedSourceCount: typeof count === 'number'
       && Number.isSafeInteger(count) && count >= 0 && count <= MAX_COLLECTION_DIAGNOSTIC_SOURCES
       ? count : null,
@@ -636,7 +627,8 @@ function sanitizeReceiptSourceCaps(caps) {
   return safe;
 }
 
-function sanitizeReceiptSource(source = {}) {
+function sanitizeReceiptSource(rawSource) {
+  const source = rawSource && typeof rawSource === 'object' ? rawSource : {};
   const warning = source.warning && typeof source.warning === 'object'
     ? {
         ...(receiptToken(source.warning.code) ? { code: receiptToken(source.warning.code) } : {}),
@@ -754,7 +746,7 @@ export function sanitizeLastRunReceipt(receipt = {}) {
   const terminalOutcome = ['zero', 'populated', 'collection-only', 'preference-filtered', 'incomplete', 'unknown'].includes(receipt?.terminal?.outcome)
     ? receipt.terminal.outcome
     : 'unknown';
-  const completedAt = receiptTimestamp(receipt.completedAt);
+  const completedAt = manifestTimestamp(receipt.completedAt);
   const careerSnapshotId = normalizeCareerSnapshotId(receipt.careerSnapshotId);
   // This is a compact host-issued capability receipt, never the authority
   // sidecar. Keeping it in the terminal receipt makes a post-cleanup retry
@@ -824,9 +816,9 @@ export function sanitizeLastRunReceipt(receipt = {}) {
     ...(careerSnapshotId ? { careerSnapshotId } : {}),
     ...(operationAuthority ? { operationAuthority } : {}),
     collectionDiagnostics: sanitizeJobRunCollectionDiagnostics(receipt.collectionDiagnostics),
-    startedAt: receiptTimestamp(receipt.startedAt),
+    startedAt: manifestTimestamp(receipt.startedAt),
     completedAt,
-    updatedAt: receiptTimestamp(receipt.updatedAt, completedAt),
+    updatedAt: manifestTimestamp(receipt.updatedAt, completedAt),
     terminal: {
       status: terminalStatus,
       outcome: terminalOutcome,
@@ -866,34 +858,6 @@ async function readLegacyReceiptForNode(canvasFilePath, nodeId) {
   }
 }
 
-function readLegacyReceiptForNodeSync(canvasFilePath, nodeId) {
-  // Synchronous report assembly cannot await the collision check. Refuse the
-  // old basename fallback whenever both spellings exist; current hashed paths
-  // are read before this helper.
-  const scope = jobRunPathScopeForCanvas(canvasFilePath);
-  if (!scope) return null;
-  for (const candidate of [path.join(scope.dir, scope.base), path.join(scope.dir, `${scope.base}.json`)]) {
-    if (candidate !== scope.canvasPath && fs.existsSync(candidate)) return null;
-  }
-  const priorScopedPath = priorScopedLastRunReceiptPathForCanvas(canvasFilePath, nodeId);
-  if (priorScopedPath) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(priorScopedPath, 'utf8'));
-      if (normalizeNodeId(parsed?.nodeId) === nodeId) return parsed;
-    } catch { /* fall through to baseline singleton */ }
-  }
-  const legacyPath = lastRunReceiptPathForCanvas(canvasFilePath);
-  if (!legacyPath) return null;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const recordedOwner = normalizeNodeId(parsed.nodeId);
-    return !recordedOwner || recordedOwner === nodeId ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
 async function readLastRunReceiptRaw(canvasFilePath, nodeIdOrOptions = null) {
   const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions);
   if (!filePath) return null;
@@ -921,39 +885,6 @@ async function readLastRunReceiptRaw(canvasFilePath, nodeIdOrOptions = null) {
       const matches = names.filter(name => name.startsWith(`${scope.base}.jobs-last-run.${scope.canvasHash}.`) && name.endsWith('.json'));
       if (matches.length === 1) {
         const parsed = JSON.parse(await fs.promises.readFile(path.join(scope.dir, matches[0]), 'utf8'));
-        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
-      }
-    } catch { /* no usable unambiguous receipt */ }
-    return null;
-  }
-}
-
-/** Synchronous companion for bug-report assembly, which is intentionally sync. */
-export function readLastRunReceiptSync(canvasFilePath, nodeIdOrOptions = null) {
-  const filePath = lastRunReceiptPathForCanvas(canvasFilePath, nodeIdOrOptions);
-  if (!filePath) return null;
-  try {
-    if (!normalizeNodeId(nodeIdOrOptions)) {
-      const scope = jobRunPathScopeForCanvas(canvasFilePath);
-      if (scope && [path.join(scope.dir, scope.base), path.join(scope.dir, `${scope.base}.json`)]
-        .some(candidate => candidate !== scope.canvasPath && fs.existsSync(candidate))) {
-        throw new Error('ambiguous-basename-legacy-receipt');
-      }
-    }
-    const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    const nodeId = normalizeNodeId(nodeIdOrOptions);
-    return !nodeId || normalizeNodeId(parsed.nodeId) === nodeId ? parsed : null;
-  } catch {
-    const nodeId = normalizeNodeId(nodeIdOrOptions);
-    if (nodeId) return readLegacyReceiptForNodeSync(canvasFilePath, nodeId);
-    try {
-      const scope = jobRunPathScopeForCanvas(canvasFilePath);
-      if (!scope) return null;
-      const matches = fs.readdirSync(scope.dir)
-        .filter(name => name.startsWith(`${scope.base}.jobs-last-run.${scope.canvasHash}.`) && name.endsWith('.json'));
-      if (matches.length === 1) {
-        const parsed = JSON.parse(fs.readFileSync(path.join(scope.dir, matches[0]), 'utf8'));
         return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
       }
     } catch { /* no usable unambiguous receipt */ }
@@ -1192,15 +1123,6 @@ const JOB_SEARCH_WINDOW_CAP_REASONS = new Set([
   'older-than-max-lookback',
   'legacy-max-age-days',
 ]);
-
-function manifestTimestamp(value) {
-  return typeof value === 'number'
-    && Number.isSafeInteger(value)
-    && value > 0
-    && Number.isFinite(new Date(value).getTime())
-    ? value
-    : null;
-}
 
 /** Keep the durable collection outcome to a fixed, non-provider-controlled enum. */
 export function normalizeJobRunCollectionDisposition(value) {
@@ -1488,14 +1410,10 @@ function sameOperationAuthorityReceipt(left, right) {
   return !!a && a === b;
 }
 
-function sameAuthorityReceipt(left, right) {
-  return sameOperationAuthorityReceipt(left, right);
-}
-
 function checkpointPublicationForReceipt(authorityRecord, slot, digest, expectedReceipt) {
   const candidates = [authorityRecord?.publications?.[slot], authorityRecord?.pendingPublications?.[slot]];
   return candidates.some(candidate => candidate?.digest === digest
-    && sameAuthorityReceipt(candidate?.receipt, expectedReceipt));
+    && sameOperationAuthorityReceipt(candidate?.receipt, expectedReceipt));
 }
 
 function checkpointMatchesRun(snapshot, { canvasFilePath, nodeId, runId, careerSnapshotId } = {}) {
@@ -1520,10 +1438,7 @@ async function writeCheckpointAtomically(filePath, snapshot) {
       await handle.sync();
     } finally { await handle.close(); }
     await fs.promises.rename(temporary, filePath);
-    const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
-    if (directory) {
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
+    await fsyncDirectory(path.dirname(filePath));
   } finally { await fs.promises.unlink(temporary).catch(() => {}); }
 }
 
@@ -1599,13 +1514,13 @@ async function adoptRunCheckpoint({
     ?? checkpoint.snapshotContext?.operationAuthority);
   const digest = crypto.createHash('sha256').update(serialized, 'utf8').digest('hex');
 
-  if (sameAuthorityReceipt(actualAuthority, currentAuthority)) {
+  if (sameOperationAuthorityReceipt(actualAuthority, currentAuthority)) {
     if (!checkpointPublicationForReceipt(currentAuthorityRecord, slot, digest, currentAuthority)) {
       return { ok: false, reason: 'checkpoint-unsealed' };
     }
     return { ok: true, idempotent: true };
   }
-  if (!sameAuthorityReceipt(actualAuthority, predecessorAuthority)
+  if (!sameOperationAuthorityReceipt(actualAuthority, predecessorAuthority)
     || !checkpointPublicationForReceipt(currentAuthorityRecord, slot, digest, predecessorAuthority)) {
     return { ok: false, reason: 'checkpoint-predecessor-mismatch' };
   }
@@ -1671,7 +1586,7 @@ export async function rebindRunOperationAuthority(canvasFilePath, {
     // helper validates this at admission, but this also rejects a forged
     // direct caller and makes the S1->S3 skip rule local to the rebind.
     const immediatePredecessor = predecessor || currentAuthorityRecord.predecessor;
-    if (!immediatePredecessor || (predecessor && !sameAuthorityReceipt(currentAuthorityRecord.predecessor, predecessor))) {
+    if (!immediatePredecessor || (predecessor && !sameOperationAuthorityReceipt(currentAuthorityRecord.predecessor, predecessor))) {
       return { ok: false, reason: 'authority-predecessor-mismatch' };
     }
     const immediatePredecessorRunMatches = immediatePredecessor.semanticBase?.runId === expectedRunId
@@ -1688,7 +1603,7 @@ export async function rebindRunOperationAuthority(canvasFilePath, {
       // When callers omit the optional predecessor argument, the durable S2
       // record is still the authoritative immediate predecessor. Compare the
       // manifest against that resolved receipt—not the null optional input.
-      if (!sameAuthorityReceipt(recorded, authority) && !sameAuthorityReceipt(recorded, immediatePredecessor)) {
+      if (!sameOperationAuthorityReceipt(recorded, authority) && !sameOperationAuthorityReceipt(recorded, immediatePredecessor)) {
         return { ok: false, reason: 'manifest-predecessor-mismatch' };
       }
       const checkpoint = await adoptRunCheckpoint({
@@ -1696,7 +1611,7 @@ export async function rebindRunOperationAuthority(canvasFilePath, {
         currentAuthorityRecord, currentAuthority: authority, predecessorAuthority: immediatePredecessor, stagePublication,
       });
       if (!checkpoint.ok) return checkpoint;
-      if (sameAuthorityReceipt(recorded, authority)) return { ok: true, idempotent: true, checkpoint, manifest };
+      if (sameOperationAuthorityReceipt(recorded, authority)) return { ok: true, idempotent: true, checkpoint, manifest };
       manifest.inputs = { ...manifest.inputs, operationAuthority: authority };
       await atomicWriteJson(files.manifest, manifest);
       return { ok: true, rebound: true, checkpoint, manifest };
@@ -2189,28 +2104,6 @@ async function readRunStateRaw(canvasFilePath, now = null, nodeIdOrOptions = nul
   // sole modern hub's staging file during a migration.
   const stagedJobs = await readStagedJobsFromFiles(located.files, manifest);
   return { manifest, stagedJobs, incomplete, ageMs, resumable: incomplete && recent, legacy: located.legacy === true };
-}
-
-/**
- * 1-based page a URL-paginated source should resume from, given its manifest
- * ledger. Fast-forwards to min(lastPage)+1 ONLY when every query of the run
- * recorded at least one page — buildJobTasks applies ONE start page to EVERY
- * query of the source, and a query that crashed before flushing its first page
- * has no ledger entry, so fast-forwarding past page min(...) would silently
- * skip that query's early pages. Any unrecorded query ⇒ restart at page 1
- * (the cross-source dedup absorbs the re-scraped overlap).
- *
- * @param {object} sourceLedger  manifest.sources[sid] ({ queries: { [q]: { lastPage } } })
- * @param {number} totalQueryCount  how many queries the run scrapes per source
- * @returns {number} 1-based start page
- */
-export function computeResumeStartPage(sourceLedger, totalQueryCount) {
-  const qmap = sourceLedger?.queries || {};
-  const pages = Object.values(qmap)
-    .map(q => q?.lastPage)
-    .filter(n => typeof n === 'number' && n >= 0);
-  const allQueriesRecorded = pages.length >= Math.max(1, totalQueryCount | 0);
-  return (pages.length && allQueriesRecorded) ? Math.min(...pages) + 1 : 1;
 }
 
 /**

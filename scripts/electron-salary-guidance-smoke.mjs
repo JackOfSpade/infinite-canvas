@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { closeDisposableElectron } from './close-disposable-electron.mjs';
+import { makeSmokeDir, smokeEnv, reportSmokeFailure } from './lib/electron-smoke.mjs';
 
 // Exercise the built renderer in its own hidden profile and scratch canvases.
 // These are saved display fixtures: no searches, providers, AI or live app.
-const root = await fs.realpath(await fs.mkdtemp(path.join(process.platform === 'darwin' ? '/private/tmp' : os.tmpdir(), 'ic-salary-guidance-')));
-const env = { ...process.env, INFINITE_CANVAS_E2E: '1', INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-delete env.ELECTRON_RUN_AS_NODE;
+const root = await makeSmokeDir('ic-salary-guidance-', { real: true });
+const env = smokeEnv();
 const pin = 'a'.repeat(64);
 const marketRange = { min: 100000, max: 200000, currency: 'CAD', period: 'annual' };
 const explanation = 'Your documented system ownership and relevant platform experience support this portion of the researched market.';
@@ -162,11 +161,7 @@ try {
   assert.deepEqual(errors, [], 'salary guidance must render without uncaught runtime errors');
   console.log('PASS: built renderer shows collapsed desired salary and full market context; Copy sends a numeric-only payload and shows success; outdated answers retain clearly labeled previous values; market estimates retain the full range with low confidence.');
 } catch (error) {
-  const page = application?.windows()[0];
-  if (page) {
-    console.error((await page.locator('body').innerText()).slice(0, 6000));
-    await page.screenshot({ path: '/tmp/ic-salary-guidance-smoke-error.png' });
-  }
+  await reportSmokeFailure(application, '/tmp/ic-salary-guidance-smoke-error.png', 6000);
   throw error;
 } finally {
   try { await closeDisposableElectron(application); }

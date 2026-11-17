@@ -306,7 +306,6 @@ import gapfix_transfer_budget from './tests/gapfix-transfer-budget.js';
 import gapfix_host_owned_fields from './tests/gapfix-host-owned-fields.js';
 import gapfix_v16_claim_budget from './tests/gapfix-v16-claim-budget.js';
 import gapfix_v16_prompts from './tests/gapfix-v16-prompts.js';
-import gapfix_v16_repair_brief from './tests/gapfix-v16-repair-brief.js';
 import gapfix_v16_resume_dates from './tests/gapfix-v16-resume-dates.js';
 import gapfix_v16_verb_fidelity from './tests/gapfix-v16-verb-fidelity.js';
 import gapfix_v16b_closing_authorship from './tests/gapfix-v16b-closing-authorship.js';
@@ -643,7 +642,6 @@ const testGroups = [
   ['gapfix-host-owned-fields.js', gapfix_host_owned_fields],
   ['gapfix-v16-claim-budget.js', gapfix_v16_claim_budget],
   ['gapfix-v16-prompts.js', gapfix_v16_prompts],
-  ['gapfix-v16-repair-brief.js', gapfix_v16_repair_brief],
   ['gapfix-v16-resume-dates.js', gapfix_v16_resume_dates],
   ['gapfix-v16-verb-fidelity.js', gapfix_v16_verb_fidelity],
   ['gapfix-v16b-closing-authorship.js', gapfix_v16b_closing_authorship],

@@ -1001,6 +1001,7 @@ export async function retireTerminalJobContinuations(canvasFilePath, {
       return { ok: false, reason: 'terminal-receipt-mismatch' };
     }
     const filePath = continuationPath(record.canvasFilePath, nodeId);
+    if (!filePath) return { ok: false, reason: 'missing-ownership' };
     return withLock(filePath, async () => {
       const store = await readStore(filePath, nodeId);
       const retained = store.intents.filter(intent => !(intent.parentRunId === runId
@@ -1075,16 +1076,25 @@ export async function rebindJobContinuationOwners(oldCanvasFilePath, newCanvasFi
       // retaining the same authority receipt. Leaving the old digest here
       // would make every migrated continuation permanently unclaimable.
       const reboundIntents = [];
-      for (const rawIntent of parsed.intents) {
-        const intent = normalizeIntent(rawIntent, nodeId);
-        if (!intent) throw new Error('sidecar-ownership-mismatch');
-        if (intent.parentArtifactSlot !== 'current') throw new Error('unsupported-parent-artifact-slot');
+      // Every intent in one sidecar seals the same current artifact: read and
+      // parse it once, not once per intent.
+      let currentArtifact = null;
+      const readCurrentArtifact = async () => {
+        if (currentArtifact) return currentArtifact;
         const artifactPath = getJobAnalysisPaths(newScope.canvasPath, null, nodeId)?.jsonPath;
         const artifactBytes = artifactPath ? await readBoundedNoFollowRegularFile(artifactPath) : null;
         if (!artifactBytes) throw new Error('parent-artifact-unavailable');
         const digest = crypto.createHash('sha256').update(artifactBytes).digest('hex');
         let snapshot;
         try { snapshot = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(artifactBytes)); } catch { throw new Error('parent-artifact-invalid'); }
+        currentArtifact = { digest, snapshot };
+        return currentArtifact;
+      };
+      for (const rawIntent of parsed.intents) {
+        const intent = normalizeIntent(rawIntent, nodeId);
+        if (!intent) throw new Error('sidecar-ownership-mismatch');
+        if (intent.parentArtifactSlot !== 'current') throw new Error('unsupported-parent-artifact-slot');
+        const { digest, snapshot } = await readCurrentArtifact();
         const snapshotReceipt = jobAnalysisOperationAuthorityReceipt(snapshot?.operationAuthority ?? snapshot?.snapshotContext?.operationAuthority);
         if (snapshot?.nodeId !== nodeId || snapshot?.sourceHubId !== nodeId
           || snapshot?.runId !== intent.parentRunId || snapshot?.careerSnapshotId !== intent.careerSnapshotId

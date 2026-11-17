@@ -2,6 +2,7 @@
  * Verbatim speech-to-text for the interview recording (ElevenLabs Scribe).
  * Words keep fillers and false starts: `no_verbatim` stays false.
  */
+import nodeFs from 'node:fs';
 import { classifyFailure, voiceError, redact } from './dialogueVoice.js';
 
 export const SCRIBE_URL = 'https://api.elevenlabs.io/v1/speech-to-text';
@@ -62,7 +63,7 @@ export function wordsFromResponse(body) {
  * @param {object} [options.fs] node:fs compatible module
  */
 export async function transcribeVerbatim({
-  path: filePath, fetch = globalThis.fetch, key, fs, url = SCRIBE_URL, signal,
+  path: filePath, fetch = globalThis.fetch, key, fs = nodeFs, url = SCRIBE_URL, signal,
 } = {}) {
   if (!key) throw voiceError('voice-auth', 'no ElevenLabs API key');
   const bytes = await readBytes(fs, filePath);

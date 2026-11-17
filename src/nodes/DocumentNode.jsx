@@ -126,7 +126,13 @@ function useMediaFade(mediaRef, isActive) {
       el.removeEventListener('seeking', fadeOut);
       el.removeEventListener('seeked',  onSeeked);
       el.removeEventListener('ended',   fadeOut);
-      // ctx persists in audioGraphCache — element may be reused across hook re-runs.
+      // A still-attached element is reused by the next hook run (StrictMode
+      // re-setup), so its graph stays cached. A detached one is gone for good:
+      // close its context, or every collapse leaks a running AudioContext.
+      if (!el.isConnected) {
+        audioGraphCache.delete(el);
+        ctx.close().catch(() => { /* already closed */ });
+      }
     };
   // mediaRef is stable; only re-run when isActive flips.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -322,12 +328,17 @@ const TextPreview = React.memo(function TextPreview({ filePath, filename, isLock
 
   useEffect(() => textDocumentSessions.attach(filePath, setSessionState), [filePath]);
 
+  // Mirrors the committed size so the node-data write below runs once per
+  // change, in the event handler, instead of inside a state updater (which React
+  // may run during render, or twice under StrictMode, updating another component).
+  const fontSizeRef = useRef(fontSize);
   const setFontSize = useCallback((updater) => {
-    setFontSizeLocal(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : updater;
-      onFontSizeChange?.(next);
-      return next;
-    });
+    const prev = fontSizeRef.current;
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (next === prev) return;
+    fontSizeRef.current = next;
+    setFontSizeLocal(next);
+    onFontSizeChange?.(next);
   }, [onFontSizeChange]);
   const handleZoomIn = useCallback((e) => { e?.stopPropagation(); setFontSize(prev => Math.min(prev + 2, 48)); }, [setFontSize]);
   const handleZoomOut = useCallback((e) => { e?.stopPropagation(); setFontSize(prev => Math.max(prev - 2, 8)); }, [setFontSize]);
@@ -489,8 +500,6 @@ export const DocumentNode = React.memo(function DocumentNode({ id, data, selecte
       window.electronAPI.stopFileWatch(data.filePath);
     };
   }, [data.filePath, isImage, isText]);
-
-  // ── Customize dialog trigger ───────────────────────────────────────────────
 
   // ── Media src management ───────────────────────────────────────────────────
   // Effect 1: Enforce src on mount / file-change (fixes React 18 StrictMode quirk).

@@ -38,6 +38,8 @@ function canonicalJson(value) {
   return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
 }
 
+const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+
 function sha256(text) {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
@@ -332,7 +334,7 @@ export function consideredEvidenceForTarget(ledger, pageIndex, targetKey) {
 }
 
 export function settledStateDigest(ledger) {
-  const targets = [...ledger.targets.values()].sort((a, b) => a.pageIndex - b.pageIndex || (a.targetKey < b.targetKey ? -1 : a.targetKey > b.targetKey ? 1 : 0))
+  const targets = [...ledger.targets.values()].sort((a, b) => a.pageIndex - b.pageIndex || compareText(a.targetKey, b.targetKey))
     .map(record => ({ pageIndex: record.pageIndex, targetKey: record.targetKey, valueJson: record.current?.valueJson ?? null,
       consideredEvidenceSegmentIds: [...record.consideredEvidenceSegmentIds].sort() }));
   return sha256(canonicalJson(targets));
@@ -349,7 +351,7 @@ function settledRecordsForEdit(ledger, pageIndex, edit) {
     const prefix = `${edit.group}\u0000${edit.entityId}\u0000`;
     return [...ledger.targets.values()]
       .filter(record => record.pageIndex === pageIndex && record.current && record.targetKey.startsWith(prefix))
-      .sort((left, right) => (left.targetKey < right.targetKey ? -1 : left.targetKey > right.targetKey ? 1 : 0));
+      .sort((left, right) => compareText(left.targetKey, right.targetKey));
   }
   const record = ledger.targets.get(ledgerKey(pageIndex, editTargetKey(edit)));
   return record?.current ? [record] : [];
@@ -450,13 +452,13 @@ export function findConflictingEdits(entries) {
   return [...groups.values()]
     .filter(group => new Set(group.entries.map(entry => canonicalEditValue(entry.edit))).size > 1)
     .sort((left, right) => (left.pageIndex - right.pageIndex)
-      || (left.targetKey < right.targetKey ? -1 : left.targetKey > right.targetKey ? 1 : 0));
+      || compareText(left.targetKey, right.targetKey));
 }
 
 export function decisionsForPage(ledger, pageIndex) {
   return [...ledger.targets.values()]
     .filter(record => record.pageIndex === pageIndex && record.current)
-    .sort((left, right) => (left.targetKey < right.targetKey ? -1 : left.targetKey > right.targetKey ? 1 : 0))
+    .sort((left, right) => compareText(left.targetKey, right.targetKey))
     .map(({ current }) => ({
       id: current.id,
       groupId: decisionGroupId(current),
@@ -471,7 +473,7 @@ export function decisionsForPage(ledger, pageIndex) {
 export function serializeDecisionLedger(ledger) {
   const targets = [...ledger.targets.values()]
     .sort((left, right) => (left.pageIndex - right.pageIndex)
-      || (left.targetKey < right.targetKey ? -1 : left.targetKey > right.targetKey ? 1 : 0));
+      || compareText(left.targetKey, right.targetKey));
   return canonicalJson({ version: 1, targets });
 }
 

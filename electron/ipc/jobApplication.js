@@ -922,28 +922,6 @@ export function applicationVariantAttrsForJob(job = {}) {
   return attrs.join(' ');
 }
 
-/**
- * One step of SKILL.md §5's page-count algorithm, as a pure state → action
- * decision — no rendering, no LLM call, just "given what's already been
- * tried, what should happen next."
- *
- * SKILL.md gates compact density on overflow SIZE ("~1-9 lines, or the final
- * page <30% full"). `pdf-lib` gives a page count, not final-page occupancy,
- * so a one-page overrun remains genuinely ambiguous: it can be one line or an
- * almost-full second page. We use compact first in that ambiguous case because
- * it is deterministic and free. More than one whole page beyond target is
- * unambiguously large from the count alone, so it skips straight to the one
- * content revision instead of wasting a compact render that cannot close it.
- *
- * @param {object} args
- * @param {number} args.pageCount     the just-rendered page count
- * @param {number} args.target        target page count (targetPageCountForJob or an override)
- * @param {boolean} args.compactTried    whether data-density="compact" has already been applied+rendered
- * @param {number} [args.revisionAttempts] number of prior length revisions
- * @param {boolean} [args.fontsLoaded=true] whether the render window actually loaded the design
- *   system's web fonts (renderPdf reports this)
- * @returns {{action: 'ship'|'compact'|'revise', reason: string}}
- */
 // Plain percentage formatter. There is no minimum utilization to compare
 // against, so this only rounds for display.
 export function formatTypeAreaUtilization(utilization) {
@@ -1694,8 +1672,7 @@ function resumeCheckDetail(observations) {
  * Reject only high-confidence backward references here; broader antecedent
  * ambiguity remains an editorial review concern.
  */
-export function checkResumeBulletSelfContainment(mainHtml) {
-  const evidence = extractResumeEvidence(mainHtml);
+export function checkResumeBulletSelfContainment(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
@@ -1785,8 +1762,7 @@ function indexedInventoryTail(value, items) {
 }
 
 /** Keeps each résumé highlight focused on one principal achievement. */
-export function checkResumeBulletFocus(mainHtml) {
-  const evidence = extractResumeEvidence(mainHtml);
+export function checkResumeBulletFocus(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const items = resumeSkillItems(evidence);
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
@@ -1813,8 +1789,7 @@ export function checkResumeBulletFocus(mainHtml) {
 export const RESUME_BULLET_CHARACTER_BUDGET = 180;
 export const RESUME_TRADEOFF_CHARACTER_BUDGET = 100;
 
-export function checkResumeBulletLength(mainHtml) {
-  const evidence = extractResumeEvidence(mainHtml);
+export function checkResumeBulletLength(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     const label = role.company || role.title || `role ${roleIndex + 1}`;
@@ -1849,10 +1824,8 @@ export function checkResumeBulletLength(mainHtml) {
 // that move against the very check meant to let it through.
 export const RESUME_ROLE_BULLET_CEILING = 6;
 export const MAX_RESUME_BULLET_OPENING_REPETITIONS = 2;
-export const RESUME_BULLET_OPENING_VARIETY_RULE = `within one role, no opening action word begins more than ${MAX_RESUME_BULLET_OPENING_REPETITIONS} bullets. Choose the most exact source-supported verb for each accomplishment; vary the verb only where the underlying action differs, and never invent a result merely to create variety`;
 
-export function checkResumeRoleBulletBudget(mainHtml) {
-  const evidence = extractResumeEvidence(mainHtml);
+export function checkResumeRoleBulletBudget(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     const label = role.company || role.title || `role ${roleIndex + 1}`;
@@ -1867,8 +1840,7 @@ export function checkResumeRoleBulletBudget(mainHtml) {
 }
 
 /** Rejects the high-confidence “Built … Built … Built …” résumé pattern. */
-export function checkResumeBulletOpeningVariety(mainHtml) {
-  const evidence = extractResumeEvidence(mainHtml);
+export function checkResumeBulletOpeningVariety(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     const openings = new Map();
@@ -1912,11 +1884,11 @@ export function evaluateResumeProseChecks(mainHtml, { activeOnly = false } = {})
     ...(Array.isArray(role.bullets) ? role.bullets.map(bullet => bullet.text) : []),
   ]).filter(Boolean);
   const checks = [
-    ['resume-bullet-self-containment', () => checkResumeBulletSelfContainment(mainHtml)],
-    ['resume-bullet-focus', () => checkResumeBulletFocus(mainHtml)],
-    ['resume-bullet-length', () => checkResumeBulletLength(mainHtml)],
-    ['resume-role-bullet-budget', () => checkResumeRoleBulletBudget(mainHtml)],
-    ['resume-bullet-opening-variety', () => checkResumeBulletOpeningVariety(mainHtml)],
+    ['resume-bullet-self-containment', () => checkResumeBulletSelfContainment(mainHtml, evidence)],
+    ['resume-bullet-focus', () => checkResumeBulletFocus(mainHtml, evidence)],
+    ['resume-bullet-length', () => checkResumeBulletLength(mainHtml, evidence)],
+    ['resume-role-bullet-budget', () => checkResumeRoleBulletBudget(mainHtml, evidence)],
+    ['resume-bullet-opening-variety', () => checkResumeBulletOpeningVariety(mainHtml, evidence)],
     ['compound-hyphenation', () => checkCompoundHyphenation(prose)],
     ['parallel-structure', () => checkParallelStructure(prose)],
     ['reference-clarity', () => checkReferenceClarity(prose)],

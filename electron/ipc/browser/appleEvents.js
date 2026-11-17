@@ -46,7 +46,19 @@ async function findUserChromePid() {
 }
 
 let userChromePid = null;
-async function userChromePidOrLaunch() {
+let userChromePidLookup = null;
+// Concurrent callers share one lookup, so a Chrome that is not running is
+// opened once rather than once per caller.
+function userChromePidOrLaunch() {
+  if (!userChromePidLookup) {
+    const lookup = findOrLaunchUserChromePid().finally(() => {
+      if (userChromePidLookup === lookup) userChromePidLookup = null;
+    });
+    userChromePidLookup = lookup;
+  }
+  return userChromePidLookup;
+}
+async function findOrLaunchUserChromePid() {
   if (userChromePid) {
     try { process.kill(userChromePid, 0); return userChromePid; } catch { userChromePid = null; }
   }

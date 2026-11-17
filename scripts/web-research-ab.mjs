@@ -1113,6 +1113,7 @@ async function abMain(opts, journal) {
   const heartbeat = journal ? setInterval(() => journal.update({ rows: researchJournalRows(calls) }, { force: true }), 60_000) : null;
   heartbeat?.unref?.();
 
+  try {
   if (opts.task === 'preference') {
     const profile = effectiveProfile(profiles.claudeTaskProfile(PREFERENCE_TASK), opts.profile);
     if (!profile) throw new Error(`No Claude task profile for ${PREFERENCE_TASK}.`);
@@ -1137,6 +1138,9 @@ async function abMain(opts, journal) {
     const researcher = createResearcher({ app, profile, stage, tavily, parallel: parallelSearch, second: opts.second, taskProcessor: opts.taskProcessor, tavilyKey: key, task: COMPENSATION_TASK,
       begin: compensationBegin, end: compensationEnd, parse: (raw, ids) => jobsModule.parseCompensationResearchSections(raw, ids), limit, calls, cacheDir: path.join(opts.out, 'research-cache') });
     await runCompensation({ opts, rows, researcher, output, log, extract: tavilyExtractor({ key, log }), buildPrompt: jobsModule.buildCompensationResearchPrompt });
+  }
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
   return 0;
 }

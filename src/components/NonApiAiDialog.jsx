@@ -49,6 +49,20 @@ const writeApplicationDraft = payload => trackApplicationDraftWrite(
   applicationDraftKey(payload),
 );
 
+// Functional-update helpers: hand back the SAME object when the key is absent
+// so React skips the re-render.
+const withoutSetItem = (set, item) => {
+  if (!set.has(item)) return set;
+  const next = new Set(set);
+  next.delete(item);
+  return next;
+};
+const withoutKey = (record, key) => {
+  if (!(key in record)) return record;
+  const { [key]: _omitted, ...remaining } = record;
+  return remaining;
+};
+
 const stringifyValidationError = (value) => {
   if (Array.isArray(value)) return value.filter(Boolean).join('\n');
   if (typeof value === 'string') return value;
@@ -850,47 +864,14 @@ export function NonApiAiDialog() {
       // A settled handoff that hands focus to a real request is a handoff
       // selection, so the Modules tab must not keep drawing over it.
       if (selection.selectedRequestId) setModulesTabSelected(false);
-      setDrafts(previous => {
-        if (!(requestId in previous)) return previous;
-        const { [requestId]: _removed, ...remaining } = previous;
-        return remaining;
-      });
-      setErrors(previous => {
-        if (!(requestId in previous)) return previous;
-        const { [requestId]: _removed, ...remaining } = previous;
-        return remaining;
-      });
-      setSubmittingRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
-      setSteppingBackRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
-      setCancellingRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
-      setAcceptedRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setDrafts(previous => withoutKey(previous, requestId));
+      setErrors(previous => withoutKey(previous, requestId));
+      setSubmittingRequestIds(previous => withoutSetItem(previous, requestId));
+      setSteppingBackRequestIds(previous => withoutSetItem(previous, requestId));
+      setCancellingRequestIds(previous => withoutSetItem(previous, requestId));
+      setAcceptedRequestIds(previous => withoutSetItem(previous, requestId));
       setCopiedRequestId(previous => previous === requestId ? null : previous);
-      setFullPromptRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setFullPromptRequestIds(previous => withoutSetItem(previous, requestId));
     };
 
     const receiveRequest = (incoming) => {
@@ -957,12 +938,7 @@ export function NonApiAiDialog() {
       }
       if (validationError) {
         setErrors(previous => ({ ...previous, [incoming.requestId]: validationError }));
-        setAcceptedRequestIds(previous => {
-          if (!previous.has(incoming.requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(incoming.requestId);
-          return next;
-        });
+        setAcceptedRequestIds(previous => withoutSetItem(previous, incoming.requestId));
       }
     };
 
@@ -1020,12 +996,7 @@ export function NonApiAiDialog() {
       // pass that publishes it (see the subscription below).
       // An explicit ask from the card outranks a prior Dismiss: the person is
       // pointing at this exact bundle, so put it back in the queue.
-      setDismissedBrokenRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setDismissedBrokenRequestIds(previous => withoutSetItem(previous, requestId));
       if (applicationItemsRef.current.some(item => item.requestId === requestId)) {
         pendingFocusJobIdsRef.current.delete(jobId);
         awaitingSuccessorRef.current = null;
@@ -1053,28 +1024,11 @@ export function NonApiAiDialog() {
 
       const clearRequestEphemeralState = (requestId, { keepDraft = false } = {}) => {
         if (!keepDraft) {
-          setDrafts(previous => {
-            if (!(requestId in previous)) return previous;
-            const { [requestId]: _cleared, ...remaining } = previous;
-            return remaining;
-          });
+          setDrafts(previous => withoutKey(previous, requestId));
         }
-        setErrors(previous => {
-          if (!(requestId in previous)) return previous;
-          const { [requestId]: _cleared, ...remaining } = previous;
-          return remaining;
-        });
-        setAcceptedRequestIds(previous => {
-          if (!previous.has(requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(requestId);
-          return next;
-        });
-        setBrokenApplicationMessages(previous => {
-          if (!(requestId in previous)) return previous;
-          const { [requestId]: _cleared, ...remaining } = previous;
-          return remaining;
-        });
+        setErrors(previous => withoutKey(previous, requestId));
+        setAcceptedRequestIds(previous => withoutSetItem(previous, requestId));
+        setBrokenApplicationMessages(previous => withoutKey(previous, requestId));
         // The full-prompt reveal answers ONE anchored round (see the comment
         // above showingFullRestartPrompt). Without this, a reveal opened on
         // e.g. a résumé-stage correction stayed set through this same stable
@@ -1082,12 +1036,7 @@ export function NonApiAiDialog() {
         // would open on "Full stage prompt" instead of that round's
         // correction, and the amber fix-count chip (gated on
         // !showingFullRestartPrompt) would stay hidden behind it.
-        setFullPromptRequestIds(previous => {
-          if (!previous.has(requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(requestId);
-          return next;
-        });
+        setFullPromptRequestIds(previous => withoutSetItem(previous, requestId));
       };
 
       for (const item of items) {
@@ -1139,25 +1088,10 @@ export function NonApiAiDialog() {
         // job that is already gone must not resurrect a file the person just
         // watched disappear.
         clearRequestEphemeralState(prior.requestId);
-        setSubmittingRequestIds(previous => {
-          if (!previous.has(prior.requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(prior.requestId);
-          return next;
-        });
-        setDiscardingRequestIds(previous => {
-          if (!previous.has(prior.requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(prior.requestId);
-          return next;
-        });
+        setSubmittingRequestIds(previous => withoutSetItem(previous, prior.requestId));
+        setDiscardingRequestIds(previous => withoutSetItem(previous, prior.requestId));
         setCopiedRequestId(previous => previous === prior.requestId ? null : previous);
-        setDismissedBrokenRequestIds(previous => {
-          if (!previous.has(prior.requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(prior.requestId);
-          return next;
-        });
+        setDismissedBrokenRequestIds(previous => withoutSetItem(previous, prior.requestId));
         const timers = applicationDraftTimersRef.current;
         const pendingTimer = timers.get(prior.requestId);
         if (pendingTimer) {
@@ -1436,12 +1370,7 @@ export function NonApiAiDialog() {
         }));
       } finally {
         actionRequestIdsRef.current.delete(requestId);
-        setSubmittingRequestIds(previous => {
-          if (!previous.has(requestId)) return previous;
-          const next = new Set(previous);
-          next.delete(requestId);
-          return next;
-        });
+        setSubmittingRequestIds(previous => withoutSetItem(previous, requestId));
       }
       return;
     }
@@ -1482,12 +1411,7 @@ export function NonApiAiDialog() {
       }));
     } finally {
       actionRequestIdsRef.current.delete(requestId);
-      setSubmittingRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setSubmittingRequestIds(previous => withoutSetItem(previous, requestId));
     }
   }, [activeRequest, activeRequestId, activeResponse, flushApplicationDraftSave, isAccepted, isApplicationRequest, isCancelling, isDiscarding, isSteppingBack, isSubmitting, mergedRequests, recordSubmittedResponse, responseCrossPasteBlocked]);
 
@@ -1524,12 +1448,7 @@ export function NonApiAiDialog() {
       }));
     } finally {
       actionRequestIdsRef.current.delete(requestId);
-      setSteppingBackRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setSteppingBackRequestIds(previous => withoutSetItem(previous, requestId));
     }
   }, [activeRequest, activeRequestId, isAccepted, isCancelling, isSteppingBack, isSubmitting]);
 
@@ -1572,12 +1491,7 @@ export function NonApiAiDialog() {
       }));
     } finally {
       actionRequestIdsRef.current.delete(requestId);
-      setCancellingRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setCancellingRequestIds(previous => withoutSetItem(previous, requestId));
     }
   }, []);
 
@@ -1667,12 +1581,7 @@ export function NonApiAiDialog() {
       }));
     } finally {
       actionRequestIdsRef.current.delete(requestId);
-      setDiscardingRequestIds(previous => {
-        if (!previous.has(requestId)) return previous;
-        const next = new Set(previous);
-        next.delete(requestId);
-        return next;
-      });
+      setDiscardingRequestIds(previous => withoutSetItem(previous, requestId));
     }
   }, []);
 
@@ -1684,11 +1593,7 @@ export function NonApiAiDialog() {
   const dismissBrokenApplication = useCallback(() => {
     if (!activeRequestId) return;
     const requestId = activeRequestId;
-    setBrokenApplicationMessages(previous => {
-      if (!(requestId in previous)) return previous;
-      const { [requestId]: _cleared, ...remaining } = previous;
-      return remaining;
-    });
+    setBrokenApplicationMessages(previous => withoutKey(previous, requestId));
     setDismissedBrokenRequestIds(previous => {
       if (previous.has(requestId)) return previous;
       const next = new Set(previous);

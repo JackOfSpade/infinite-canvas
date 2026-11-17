@@ -20,6 +20,14 @@ function fragmentParams(url) {
   return new URLSearchParams(raw);
 }
 
+function decodedHash(url) {
+  try {
+    return decodeURIComponent(url?.hash || '');
+  } catch {
+    return '';
+  }
+}
+
 function compactSearchQuery(job) {
   const parts = [job?.title, job?.company, job?.location]
     .map(value => String(value || '').replace(/\s+/g, ' ').trim())
@@ -39,7 +47,7 @@ export function isGoogleJobsInternalUrl(value) {
     return !!(
       url.searchParams.get('htidocid')
       || fragment.get('htidocid')
-      || /(?:^|\/)docid=/i.test(decodeURIComponent(url.hash || ''))
+      || /(?:^|\/)docid=/i.test(decodedHash(url))
       || url.searchParams.get('ibp') === 'htl;jobs'
       || url.searchParams.get('udm') === '8'
       || fragment.get('htivrt') === 'jobs'
@@ -54,13 +62,8 @@ function googleDocumentId(url) {
   const fragment = fragmentParams(url);
   const direct = url.searchParams.get('htidocid') || fragment.get('htidocid');
   if (direct) return direct;
-  try {
-    const decoded = decodeURIComponent(url.hash || '');
-    const match = decoded.match(/(?:^|\/)docid=([^&/]+)/i);
-    return match?.[1] || '';
-  } catch {
-    return '';
-  }
+  const match = decodedHash(url).match(/(?:^|\/)docid=([^&/]+)/i);
+  return match?.[1] || '';
 }
 
 /** Return Google's opaque Jobs-card id when `value` is a genuine Google URL. */

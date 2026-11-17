@@ -4,8 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createOfficialPostingStore } from '../../electron/ipc/officialPostingStore.js';
 import { officialPostingChunks, officialPostingRequestId } from '../../electron/ipc/officialPostingResolver.js';
-import { cappedHandoff, OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS, getOfficialPostingView as readPostingView, officialPostingDedup, resolveOfficialPostings as resolvePostings, partitionOfficialPostingRows } from '../../electron/ipc/officialPostingService.js';
-import { officialPostingAliases } from '../../electron/ipc/officialPostingStore.js';
+import { cappedHandoff, OFFICIAL_POSTING_HANDOFF_ASSIGNMENT_TIMEOUT_MS, getOfficialPostingView as readPostingView, officialPostingDedup, resolveOfficialPostings as resolvePostings } from '../../electron/ipc/officialPostingService.js';
 import { officialPostingSemanticInputHash } from '../../electron/ipc/officialPostingSemantic.js';
 import { _resetOfficialPostingDiscoveryDiagnosticsForTests, getOfficialPostingDiscoveryDiagnosticsSnapshot } from '../../electron/ipc/officialPostingDiscoveryDiagnostics.js';
 
@@ -89,26 +88,6 @@ export default [
           });
         } finally { _resetOfficialPostingDiscoveryDiagnosticsForTests(); }
       }
-    },
-  },
-  {
-    name: 'semantic cache partition rechecks pre-upgrade misses despite matching input hashes without rewriting saved records',
-    async run() {
-      const jobs = Array.from({ length: 5 }, (_, index) => row(index + 1));
-      const values = [metadata(sourceUrl(1)),
-        { level: 'L5', outcome: 'not-found', employer: jobs[1].company, trail: ['bridge-research'] },
-        metadata(sourceUrl(3), { trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(jobs[2]), sourceHash: 'b'.repeat(64) } }),
-        { level: 'L5', outcome: 'not-found', employer: jobs[3].company, trail: ['bridge-research', 'semantic-match-v1'],
-          semanticMatch: { version: 1, inputHash: officialPostingSemanticInputHash(jobs[3]) } },
-        metadata(sourceUrl(5), { trail: ['semantic-match-v1'], semanticMatch: { version: 1, inputHash: 'a'.repeat(64) } })];
-      jobs.forEach((job, index) => { job.officialPosting = values[index]; });
-      const records = jobs.map((job, index) => ({ aliases: officialPostingAliases(job), savedAt: Date.now(), officialPosting: values[index] }));
-      const before = JSON.stringify({ jobs, records });
-      const store = { find: async job => records[jobs.indexOf(job)], save: () => { throw new Error('Partition must not rewrite records'); } };
-      const partition = await partitionOfficialPostingRows(jobs, { store });
-      assert.deepEqual(partition.unresolvedIndices, [0, 1, 3, 4], 'the prior semantic input hash does not waive ownership-discovery migration');
-      assert.equal(partition.settledTelemetry.total, 1);
-      assert.equal(JSON.stringify({ jobs, records }), before);
     },
   },
   {

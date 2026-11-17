@@ -506,7 +506,7 @@ export function validateInterviewAnswerBank(value, context = {}, { droppedQuesti
     return { ...card, ...(Object.hasOwn(card, 'extensions') ? { extensions: sanitizeInterviewExtensions(card, projection) } : {}), consistency: consistency && text(consistency.resumeQuote, 2400)
       ? consistency : { consistentWithResume: false, resumeQuote: '' } };
   }) : value.cards;
-  const used = checkCards(cards, projection, { resume: context.bundle.applicationPositioning?.resume, verifyResume: true, selectionEvidence: projection, roleThemes: context.brief.roleThemes });
+  const used = checkCards(cards, projection, { resume: context.bundle.applicationPositioning?.resume, verifyResume: true, selectionEvidence: projection });
   const bank = { version: 2, inputs, cards: structuredClone(cards), evidence: projection.filter(item => used.has(item.id)),
     ...(droppedQuestions.length ? { droppedQuestions: [...droppedQuestions] } : {}) };
   if (!isInterviewAnswerBank(bank)) throw new Error('Prepared interview answers could not be validated.');
@@ -553,7 +553,7 @@ export function isInterviewAnswerBank(bank, bindings = {}) {
       if (!bindings.snapshot || !bindings.brief || bindings.brief.inputs?.careerSnapshotId !== bank.inputs.careerSnapshotId) return false;
       const current = new Map(buildInterviewAnswerEvidence(bindings).map(item => [item.id, item]));
       if (!bank.evidence.every(item => stable(current.get(item.id)) === stable(item))) return false;
-      checkCards(bank.cards, bank.evidence, { selectionEvidence: [...current.values()], roleThemes: bindings.brief.roleThemes });
+      checkCards(bank.cards, bank.evidence, { selectionEvidence: [...current.values()] });
     }
     if (bindings.bundle?.digests && sha(stable(bindings.bundle.digests)) !== bank.inputs.applicationArtifactDigest) return false;
     return true;

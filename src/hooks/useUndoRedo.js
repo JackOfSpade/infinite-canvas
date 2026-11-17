@@ -85,7 +85,6 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
     // history session, so older, larger entries remain covered after deletion.
     constrainHistory();
     pastRef.current = pastRef.current.slice(-(historyLimitRef.current - 1));
-    futureRef.current = [];
     const snap = captureState();
     lastFingerprintRef.current = fp;
     pastRef.current = [...pastRef.current, snap];

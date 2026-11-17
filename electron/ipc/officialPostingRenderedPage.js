@@ -11,7 +11,6 @@ import { withSharedProfileLock } from './sharedProfileLock.js';
 // user's logins and the plain download's public-address rule for its requests. Chrome resolves addresses itself, so what
 // actually answered is checked too, and a page that reached a non-public address returns nothing.
 
-export const RENDER_FAILURES = Object.freeze(['aborted', 'blocked', 'browser-unavailable', 'busy', 'empty', 'load-failed', 'unsafe-address']);
 const LOCK_WAIT_MS = 90_000;
 const BUSY_COOLDOWN_MS = 5 * 60_000;
 const VISIT_MS = 45_000;

@@ -148,11 +148,6 @@ export function classifyJobBoardSourceAdmission(source) {
   return { kind: 'intermediate-or-setup' };
 }
 
-/** True only for an ordinary terminal Board input, never recovery cleanup. */
-export function isReusableTerminalJobBoardSource(source) {
-  return classifyJobBoardSourceAdmission(source).kind === 'reuse-terminal';
-}
-
 /**
  * Verify the exact terminal input a Board recorded before it starts Combine.
  * Run id/disposition are not enough: saved job rows can change while retaining

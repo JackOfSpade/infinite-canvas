@@ -1,19 +1,9 @@
-import crypto from 'node:crypto';
 import { approvedCareerEvidenceCatalog, CAREER_SNAPSHOT_STATUS_APPROVED, isCareerSkillIndexEligible, projectLegacyCareerProfile, vettedCareerSkillInventory } from './careerSnapshot.js';
 import { expectedExactlyClause } from './hostOwnedText.js';
 import { verifyCareerCleanText } from './careerCleanLayer.js';
+import { authorityDigest as digest, canonicalAuthorityValue as canonical } from './applicationAuthorityWorkflow.js';
 
 const privateState = new WeakMap();
-
-function canonical(value) {
-  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
-  return JSON.stringify(value);
-}
-
-function digest(value) {
-  return crypto.createHash('sha256').update(canonical(value), 'utf8').digest('hex');
-}
 
 function requiredId(value, label) {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} needs a stable nonempty id.`);
@@ -244,14 +234,6 @@ export function buildApplicationCareerAuthority(snapshot) {
   return Object.freeze(authority);
 }
 
-function skillBoundToRole(state, skill, roleId) {
-  const role = state.rolesById.get(roleId);
-  if (!skill || !role) return false;
-  if (!(skill.roleIds || []).includes(roleId) || !(role.skillIds || []).includes(skill.id)) return false;
-  const workSegments = state.roleSegmentsById.get(roleId);
-  return skillAttributionSegments(skill).some(segmentId => workSegments?.has(segmentId));
-}
-
 /**
  * Whether an approved skill is attributable to a role: the two link each other
  * AND the skill's own evidence lies in that role's work (its header, its
@@ -259,9 +241,12 @@ function skillBoundToRole(state, skill, roleId) {
  * states it is evidence of a different role, and citing it under this one
  * would attribute that other employer's work here.
  */
-export function isAuthoritySkillBoundToRole(authority, skillId, roleId) {
-  const state = stateOf(authority);
-  return skillBoundToRole(state, state.skillsById.get(skillId), roleId);
+function skillBoundToRole(state, skill, roleId) {
+  const role = state.rolesById.get(roleId);
+  if (!skill || !role) return false;
+  if (!(skill.roleIds || []).includes(roleId) || !(role.skillIds || []).includes(skill.id)) return false;
+  const workSegments = state.roleSegmentsById.get(roleId);
+  return skillAttributionSegments(skill).some(segmentId => workSegments?.has(segmentId));
 }
 
 export function resolveAuthorityEvidence(authority, id, quote = undefined) {
