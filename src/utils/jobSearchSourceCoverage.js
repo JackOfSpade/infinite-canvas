@@ -15,6 +15,7 @@ import {
   resolveJobSearchDateWindow,
 } from './jobSearchDateWindow.js';
 import { normalizeCompletionTimestamp } from './completionTimestamp.js';
+import { getCountryApplicableJobSourceIds } from './jobSourceCountryScope.js';
 
 const PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -123,6 +124,22 @@ export function partitionSourcesByRescrapeAge(data, sourceIds, now = Date.now())
   return { due, fresh };
 }
 
+/**
+ * The platforms whose bookmarks decide how far back a scan reaches.
+ *
+ * A platform that cannot serve the search's country (Dice and USAJobs on a
+ * Canada search) is skipped by every run, so its bookmark can never move. Left
+ * in, that frozen date became the start of every later scan and the card kept
+ * naming the platform as "catching up". It keeps its bookmark, so it resumes
+ * from there if the country later changes. When no platform applies, the
+ * selection is returned unchanged and the run's own preflight reports it.
+ */
+export function coverageSourceIdsForLocation(sourceIds, searchLocationText) {
+  const ids = uniqueSourceIds(sourceIds);
+  const applicable = getCountryApplicableJobSourceIds(ids, String(searchLocationText || '').trim());
+  return applicable.length > 0 ? applicable : ids;
+}
+
 /** Prefer a platform's own bookmark; otherwise fall back to the hub anchor. */
 export function jobSearchSourceAnchor(data, nodeId, sourceId) {
   if (isSafeSourceId(sourceId)) {
@@ -175,6 +192,79 @@ export function resolveJobSearchSourceWindows(
   return { sourceWindows, runWindow, runAnchor };
 }
 
+const MAX_FINISHED_QUERIES_PER_SOURCE = 200;
+const MAX_FINISHED_QUERY_LENGTH = 300;
+
+function finishedQueryList(value) {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const query of value) {
+    if (typeof query !== 'string' || !query || query.length > MAX_FINISHED_QUERY_LENGTH || seen.has(query)) continue;
+    seen.add(query);
+    out.push(query);
+    if (out.length >= MAX_FINISHED_QUERIES_PER_SOURCE) break;
+  }
+  return out;
+}
+
+/**
+ * Normalize the saved per-platform query progress at the trust boundary.
+ *
+ * A platform blocked part-way through its queries keeps the ones it finished:
+ * `finishedQueries` are the exact query texts, `bookmarkAt` is the platform's
+ * bookmark those walks started from (null when it had none), `oldestStartedAt`
+ * is the earliest run start among the walks that finished them, and
+ * `locationKey` is the search location they were run for.
+ */
+export function normalizeSourceQueryProgress(raw) {
+  const normalized = {};
+  if (!isPlainRecord(raw)) return normalized;
+  for (const sourceId of Object.keys(raw)) {
+    if (!isSafeSourceId(sourceId)) continue;
+    const entry = raw[sourceId];
+    if (!isPlainRecord(entry)) continue;
+    const finishedQueries = finishedQueryList(entry.finishedQueries);
+    const oldestStartedAt = normalizeCompletionTimestamp(entry.oldestStartedAt);
+    if (finishedQueries.length === 0 || oldestStartedAt == null) continue;
+    normalized[sourceId] = {
+      finishedQueries,
+      oldestStartedAt,
+      bookmarkAt: normalizeCompletionTimestamp(entry.bookmarkAt),
+      locationKey: typeof entry.locationKey === 'string' ? entry.locationKey : '',
+    };
+  }
+  return normalized;
+}
+
+/** Saved progress that still belongs to the platform's current bookmark. */
+function currentSourceQueryProgress(data) {
+  const progress = normalizeSourceQueryProgress(data?.sourceQueryProgress);
+  const sourceCoverage = normalizeSourceCoverage(data?.sourceCoverage);
+  const current = {};
+  for (const sourceId of Object.keys(progress)) {
+    const bookmarkAt = hasOwn(sourceCoverage, sourceId) ? sourceCoverage[sourceId].coverageStartedAt : null;
+    if (progress[sourceId].bookmarkAt === bookmarkAt) current[sourceId] = progress[sourceId];
+  }
+  return current;
+}
+
+/**
+ * Queries each platform already finished since its bookmark, for the next run
+ * to skip. Only progress recorded for the same search location counts, and
+ * only for the platforms taking part in this run.
+ */
+export function sourceFinishedQueriesForRun(data, sourceIds, searchLocationText) {
+  const locationKey = String(searchLocationText || '').trim();
+  const progress = currentSourceQueryProgress(data);
+  const out = {};
+  for (const sourceId of uniqueSourceIds(sourceIds)) {
+    if (!hasOwn(progress, sourceId) || progress[sourceId].locationKey !== locationKey) continue;
+    out[sourceId] = [...progress[sourceId].finishedQueries];
+  }
+  return out;
+}
+
 /**
  * Build the next `sourceCoverage` map for a completed (or capped) run.
  *
@@ -190,6 +280,8 @@ export function buildSourceCoverageCommitPatch(
     collectionCompletedAt,
     completedSourceIds,
     knownSourceIds,
+    sourceQueryProgress,
+    locationKey,
   },
   nodeId,
 ) {
@@ -197,6 +289,8 @@ export function buildSourceCoverageCommitPatch(
   if (start == null) return {};
   const completed = normalizeCompletionTimestamp(collectionCompletedAt) ?? start;
   const next = normalizeSourceCoverage(data?.sourceCoverage);
+  // Read against the PRE-commit bookmarks, before any of them move below.
+  const priorProgress = currentSourceQueryProgress(data);
 
   const hubAnchor = jobSearchHistoricalAnchor(data, nodeId).timestamp;
   if (hubAnchor != null) {
@@ -212,16 +306,76 @@ export function buildSourceCoverageCommitPatch(
   }
 
   const advanceRunId = typeof runId === 'string' && runId.length > 0 ? runId : null;
-  for (const sourceId of uniqueSourceIds(completedSourceIds)) {
+  const completedIds = uniqueSourceIds(completedSourceIds);
+  for (const sourceId of completedIds) {
     const existing = hasOwn(next, sourceId) ? next[sourceId] : null;
+    // Some of this platform's queries may have finished in an earlier, blocked
+    // run and been skipped here. They were only read up to THAT run's start, so
+    // the bookmark moves to the oldest of the starts, never past it.
+    const coveredFrom = hasOwn(priorProgress, sourceId)
+      ? Math.min(start, priorProgress[sourceId].oldestStartedAt)
+      : start;
     next[sourceId] = {
-      coverageStartedAt: Math.max(existing?.coverageStartedAt ?? -Infinity, start),
+      coverageStartedAt: Math.max(existing?.coverageStartedAt ?? -Infinity, coveredFrom),
       completedAt: Math.max(existing?.completedAt ?? -Infinity, completed),
       runId: advanceRunId,
     };
   }
 
-  return { sourceCoverage: next };
+  // A finished platform starts clean. An unfinished one adds the queries this
+  // run finished to those it already had, so the next run skips them all.
+  const nextProgress = { ...priorProgress };
+  for (const sourceId of completedIds) delete nextProgress[sourceId];
+  const reported = isPlainRecord(sourceQueryProgress) ? sourceQueryProgress : {};
+  for (const sourceId of Object.keys(reported)) {
+    if (!isSafeSourceId(sourceId) || completedIds.includes(sourceId)) continue;
+    const finished = finishedQueryList(reported[sourceId]?.finishedQueries);
+    if (finished.length === 0) continue;
+    const prior = hasOwn(priorProgress, sourceId) ? priorProgress[sourceId] : null;
+    const sameLocation = prior && prior.locationKey === String(locationKey || '').trim();
+    nextProgress[sourceId] = {
+      finishedQueries: finishedQueryList([...(sameLocation ? prior.finishedQueries : []), ...finished]),
+      oldestStartedAt: sameLocation ? Math.min(prior.oldestStartedAt, start) : start,
+      bookmarkAt: null,
+      locationKey: String(locationKey || '').trim(),
+    };
+  }
+  // An unfinished platform's bookmark does not move in this commit, though the
+  // seeding above may have just written it down for the first time. Tie every
+  // kept entry to the bookmark as it now stands so it is still recognised next run.
+  for (const sourceId of Object.keys(nextProgress)) {
+    nextProgress[sourceId] = {
+      ...nextProgress[sourceId],
+      bookmarkAt: hasOwn(next, sourceId) ? next[sourceId].coverageStartedAt : null,
+    };
+  }
+  const hadProgress = Object.keys(normalizeSourceQueryProgress(data?.sourceQueryProgress)).length > 0;
+  return {
+    sourceCoverage: next,
+    ...(hadProgress || Object.keys(nextProgress).length > 0 ? { sourceQueryProgress: nextProgress } : {}),
+  };
+}
+
+/**
+ * Platforms that took part in a run and whose date will NOT move forward when
+ * the staged result is committed. Each one re-reads the same days next scan,
+ * so the caller warns loudly instead of letting it repeat unnoticed. A platform
+ * whose date moves at all (even only to an earlier blocked run's start) made
+ * progress and is not listed. `resumesFrom` is the date its next scan starts at.
+ */
+export function sourcesWithoutDateProgress(data, pendingSourceCoverage, nodeId, knownSourceIds = []) {
+  const participating = uniqueSourceIds(pendingSourceCoverage?.participatingSourceIds);
+  if (participating.length === 0) return [];
+  const patch = buildSourceCoverageCommitPatch(data, { ...pendingSourceCoverage, knownSourceIds }, nodeId);
+  if (!patch.sourceCoverage) return [];
+  const before = normalizeSourceCoverage(data?.sourceCoverage);
+  const after = patch.sourceCoverage;
+  const afterData = { ...data, ...patch };
+  return participating
+    .filter(sourceId => !hasOwn(after, sourceId) || !hasOwn(before, sourceId)
+      ? !uniqueSourceIds(pendingSourceCoverage?.completedSourceIds).includes(sourceId)
+      : after[sourceId].coverageStartedAt <= before[sourceId].coverageStartedAt)
+    .map(sourceId => ({ sourceId, resumesFrom: jobSearchSourceAnchor(afterData, nodeId, sourceId).timestamp }));
 }
 
 /**
@@ -255,7 +409,7 @@ export function buildCollectionEvidenceCommitPatch(data, evidence, nodeId, known
   const patch = {};
   if (Array.isArray(evidence.completedSourceIds) && evidence.completedSourceIds.length > 0) {
     const before = normalizeSourceCoverage(data?.sourceCoverage);
-    const { sourceCoverage } = buildSourceCoverageCommitPatch(data, {
+    const { sourceCoverage, sourceQueryProgress: progressAfter } = buildSourceCoverageCommitPatch(data, {
       runId,
       collectionStartedAt: startedAt,
       collectionCompletedAt: completedAt,
@@ -267,7 +421,10 @@ export function buildCollectionEvidenceCommitPatch(data, evidence, nodeId, known
       || sourceCoverage[sourceId].coverageStartedAt > before[sourceId].coverageStartedAt
       || sourceCoverage[sourceId].completedAt > before[sourceId].completedAt
     ));
-    if (moved) patch.sourceCoverage = sourceCoverage;
+    if (moved) {
+      patch.sourceCoverage = sourceCoverage;
+      if (progressAfter) patch.sourceQueryProgress = progressAfter;
+    }
   }
   if (evidence.disposition === 'full') {
     const previousCompletedAt = normalizeCompletionTimestamp(data?.lastCompletedRunAt);
@@ -280,13 +437,19 @@ export function buildCollectionEvidenceCommitPatch(data, evidence, nodeId, known
   return Object.keys(patch).length > 0 ? patch : null;
 }
 
-/** Newest normalized completion recorded at the hub or on any platform. */
-export function latestSourceCompletedAt(data) {
+/**
+ * Newest normalized completion recorded at the hub or on any platform. With
+ * `sourceIds`, only those platforms count, so a platform that is switched off
+ * cannot supply the date the card shows.
+ */
+export function latestSourceCompletedAt(data, sourceIds = null) {
   const timestamps = [];
   const hubCompletedAt = normalizeCompletionTimestamp(data?.lastCompletedRunAt);
   if (hubCompletedAt != null) timestamps.push(hubCompletedAt);
   const sourceCoverage = normalizeSourceCoverage(data?.sourceCoverage);
+  const shown = Array.isArray(sourceIds) ? new Set(sourceIds) : null;
   for (const sourceId of Object.keys(sourceCoverage)) {
+    if (shown && !shown.has(sourceId)) continue;
     timestamps.push(sourceCoverage[sourceId].completedAt);
   }
   return timestamps.length === 0 ? null : Math.max(...timestamps);

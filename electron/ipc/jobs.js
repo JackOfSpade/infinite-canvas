@@ -3927,6 +3927,20 @@ async function saveDescriptionRecoverySnapshotIfCurrent(snapshot, { nodeId, jobR
     nodeId,
   );
   const { dir, jsonPath, lastSuccessJsonPath, promptPath } = paths;
+  // The saved scrape's collection record is copied onto every Solve rewrite.
+  // Copy it BEFORE the continuation digest below is taken: that digest must
+  // name the exact bytes this save writes. Taken from the object without the
+  // record, it named bytes that never reach disk, so the continuation refused
+  // its own next save in the same pass ("checkpoint failed") and the recovered
+  // rows were withheld from the card.
+  if (!(snapshot?.collectionEvidence?.runId === snapshot?.runId && snapshot?.runId)) {
+    try {
+      const carried = collectionEvidenceForSnapshot(
+        snapshot, null, JSON.parse(await fs.promises.readFile(jsonPath, 'utf8')),
+      );
+      if (carried) snapshot = { ...snapshot, collectionEvidence: carried };
+    } catch { /* no readable saved scrape: the publish step reports that */ }
+  }
   const publish = async (stagePublication, authorityRecord) => {
     const checkpoint = await saveDescriptionRecoveryCheckpoint(snapshot, { stagePublication });
     if (!checkpoint.saved) return checkpoint;
@@ -6666,6 +6680,7 @@ const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
   'description-detail-session-reset',
   'description-listing-unavailable',
   'description-panel-http-error',
+  'description-panel-unresponsive',
   'description-rate-limited',
   'description-recovery-not-ready',
   'description-recovery-persist-failed',
@@ -6774,6 +6789,29 @@ export function recordSourceResolvedAfterGather(sourceId) {
       resolvedAfterGather,
     }
     : { ...pipeline, pendingSources: remaining, resolvedAfterGather };
+  return true;
+}
+
+// The same stale stage after a Skip: the user finished the run without the
+// blocked sources, the terminal receipt is written and cleanup is done, yet the
+// gather stage still read `sources-blocked` and every later report called the
+// finished run INDETERMINATE. Terminal completion of the SAME hub and run
+// retires the stage and keeps which sources the run finished without.
+export function recordRunCompletedWithUnfinishedSources(nodeId, runId) {
+  const pipeline = jobsTelemetry.pipeline;
+  if (!pipeline || pipeline.phase !== 'sources-blocked') return false;
+  if (!ownsCurrentJobTelemetry(nodeId, runId)) return false;
+  const finishedWithoutSources = Array.isArray(pipeline.pendingSources)
+    ? pipeline.pendingSources.filter(id => typeof id === 'string' && id)
+    : [];
+  jobsTelemetry.pipeline = {
+    ...pipeline,
+    phase: 'completed',
+    ts: Date.now(),
+    active: false,
+    pendingSources: [],
+    finishedWithoutSources,
+  };
   return true;
 }
 
@@ -9083,7 +9121,7 @@ export const __fetchHttpSourcesForTests = (...args) => fetchHttpSources(...args)
  * Fetch API-based sources in parallel (no Puppeteer needed).
  * @returns {{ sourceId: string, jobs: object[], error?: string }[]}
  */
-async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null, maxAgeDaysBySource = null) {
+async function fetchHttpSources(queries, sender, signal = null, nodeId = null, maxAgeDays = DEFAULT_MAX_AGE_DAYS, preferredLocation = '', onlySources = null, emit = null, stageSource = null, collectionLimits = null, beforeSourceDispatch = null, afterProviderResult = null, maxAgeDaysBySource = null, queriesBySource = null) {
   // Route progress through the caller's recorder (emitProgress) so the five
   // pure-HTTP sources appear in jobsTelemetry.sourceEvents — without this they
   // bypassed the trail and were invisible in bug reports (exactly the sources
@@ -9120,7 +9158,9 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
   // concurrent with each other AND with the serialized browser driver. Indeed is
   // NOT here (it is browser-based and runs in the search-jobs browser driver).
   const apiTasks = [
-    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(queries, s, daysForSource('linkedin'), location, ({ completed, count, detail }) => {
+    // LinkedIn alone may be given fewer queries: the ones a blocked earlier run
+    // already finished are left out (see carriedFinishedQueries in search-jobs).
+    { sourceId: 'linkedin',      fn: (s) => fetchLinkedInJobs(Array.isArray(queriesBySource?.linkedin) ? queriesBySource.linkedin : queries, s, daysForSource('linkedin'), location, ({ completed, count, detail }) => {
       // Intermediate heartbeat during LinkedIn's multi-minute paced walk — without
       // this the pre-loop 'searching' stamp below is the only event LinkedIn ever
       // emits until it fully resolves, which reads as a stale/hung task in a bug
@@ -9216,6 +9256,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
       const truncated = Array.isArray(result) ? false : !!result?.truncated;
       const crossQueryDuplicates = Array.isArray(result) ? 0 : (Number(result?.crossQueryDuplicates) || 0);
       const stopReasons = Array.isArray(result) ? [] : (result?.stopReasons || []);
+      const finishedQueries = Array.isArray(result) || !Array.isArray(result?.finishedQueries) ? [] : result.finishedQueries;
       const sourceCap = Array.isArray(result) ? null : (result?.cap ?? null);
       const sourceCaps = Array.isArray(result) ? [] : (Array.isArray(result?.caps) ? result.caps : []);
       const pagesFetched = Array.isArray(result) ? 0 : Math.max(0, Number(result?.pagesFetched) || 0);
@@ -9254,7 +9295,7 @@ async function fetchHttpSources(queries, sender, signal = null, nodeId = null, m
             && remoteFeedProvenance.some(entry => entry?.fanoutStopped === true));
         await stageSource({ sourceId, jobs, warning, retryablePartial });
       }
-      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace, walkGuards, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
+      return { sourceId, jobs, warning, gathered, providerGathered, providerTotal, truncated, capDropped, crossQueryDuplicates, stopReasons, finishedQueries, sourceCap, sourceCaps, pagesFetched, relevanceDropped, sponsoredDropped, preCapRelevanceDropped, relevanceRejected, remoteFeedProvenance, relevanceTrace, walkGuards, ...(pageShapeFailures > 0 ? { pageShapeFailures } : {}) };
     } catch (error) {
       // Ownership loss is pipeline-wide, not a source-level provider error.
       // Let the search handler return its stable resumeRunMissing/mismatch
@@ -12085,7 +12126,7 @@ Return a JSON object with four arrays of search query strings:
   });
 
   // ── Search Jobs (Multi-Source Phase 2) ────────────────────────────────────
-  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, careerSnapshotId, operationAuthority = null, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, sourceSearchWindows = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, providerPhaseOnly: requestedProviderPhaseOnly = false, boardRecoveryClaim = null, profileFingerprint = null, manualAiPreSearchRecovery = null, runOrigin, profileInputMode }, signal) => {
+  handleSafe('search-jobs', async (event, { queries: rawQueries, nodeId, careerSnapshotId, operationAuthority = null, lastCompletedRunAt = null, initialLookbackDays = null, searchWindow: requestedSearchWindow = null, sourceSearchWindows = null, canvasFilePath, preferredLocation, rawLocation, collectionLimits, enabledSourceIds, jobPreferences = '', jobPreferencePlan = null, jobPreferencesInterpretation = null, countryScope = '', resume = false, resumeRunId = null, finishWithStaged = false, providerPhaseOnly: requestedProviderPhaseOnly = false, boardRecoveryClaim = null, profileFingerprint = null, manualAiPreSearchRecovery = null, sourceFinishedQueries = null, runOrigin, profileInputMode }, signal) => {
     // Provider collection deliberately has no raw profile argument.  Still
     // validate the pinned approved snapshot at this final admission boundary:
     // a deleted/replaced snapshot cannot keep an old query bundle running.
@@ -12818,9 +12859,35 @@ Return a JSON object with four arrays of search query strings:
     // Keep the blocked source's first provider URL even though it receives no
     // task. Its card can then offer a privacy-safe "Open sign-in page" action
     // without guessing an account URL or retaining any session detail.
+    // Queries a platform already finished in an earlier run that was blocked
+    // part-way (the card sends them only while that platform's date has not
+    // moved). A fresh run leaves them out and starts at the first query that
+    // never finished, so a block on query 1 cannot keep the later queries from
+    // ever running. Crash recovery has its own exact per-page ledger instead.
+    const carriedQueriesBySource = {};
+    let carriedQueryPlans = null;
+    if (!resume && !resumeStartPages && !recoveredPreSearchWindow && !backgroundBoardProviderBootstrap
+      && !skipProviderCollection && sourceFinishedQueries && typeof sourceFinishedQueries === 'object') {
+      for (const sourceId of activeSourceIds) {
+        if (sourceId !== 'linkedin' && !BROWSER_SCRAPE_ORDER.includes(sourceId)) continue;
+        if (!Object.hasOwn(sourceFinishedQueries, sourceId) || !Array.isArray(sourceFinishedQueries[sourceId])) continue;
+        const finished = new Set(sourceFinishedQueries[sourceId].filter(query => typeof query === 'string' && query));
+        const remaining = queries.filter(query => !finished.has(query));
+        // Nothing to skip, or nothing left to run: walk every query as usual.
+        if (remaining.length === 0 || remaining.length === queries.length) continue;
+        if (sourceId === 'linkedin') carriedQueriesBySource.linkedin = remaining;
+        else {
+          (carriedQueryPlans ||= {})[sourceId] = queries.map(query => ({
+            startPage: 1, durable: false, terminal: finished.has(query),
+          }));
+        }
+        logger.info(`[Jobs][${nodeId}] ${sourceId}: skipping ${queries.length - remaining.length} of ${queries.length} queries an earlier blocked run already finished`);
+      }
+    }
+    const queryPlans = resumeStartPages || carriedQueryPlans;
     const candidateTasks = buildJobTasks(queries, ageDays, {
       onlySources: requestedRunnableSourceScope,
-      ...(resumeStartPages ? { startPageBySourceQuery: resumeStartPages } : {}),
+      ...(queryPlans ? { startPageBySourceQuery: queryPlans } : {}),
       collectionStartTimestamp: activeSearchWindow.startTimestamp,
       maxAgeDaysBySource: ageDaysBySource(),
       collectionStartTimestampBySource: postedSinceBySource(),
@@ -13059,7 +13126,17 @@ Return a JSON object with four arrays of search query strings:
     // The process-global manual-browser telemetry is reset only when this run
     // owns the shared-profile lock below. Resetting here would let a second hub
     // wipe the first hub's in-flight diagnostics while it waits in the FIFO.
+    // Rows a query returned without a readable description. Such a query has
+    // been walked but not fully read, so it is not reported as finished.
+    const unreadRowsByQuery = {};
     const stageOnPage = async ({ sourceId, query, queryIndex = null, page, jobs, terminal = false }) => {
+      if (Number.isSafeInteger(queryIndex) && Array.isArray(jobs)) {
+        const unread = jobs.filter(job => job?.descriptionDeferredReason || !hasResolvedJobDescription(job)).length;
+        if (unread > 0) {
+          const key = `${sourceId}#${queryIndex}`;
+          unreadRowsByQuery[key] = (unreadRowsByQuery[key] || 0) + unread;
+        }
+      }
       await assertSearchCurrent();
       await beforeSearchStageWrite({ phase: 'before-page-stage', sourceId, nodeId, runId: activeRunId });
       await assertSearchCurrent();
@@ -13168,7 +13245,7 @@ Return a JSON object with four arrays of search query strings:
     // source, so interleaving is safe (all sequential inside the one profile lock).
     const runIndeed = async () => {
       await assertSearchCurrent();
-      const indeedPlan = selectIndeedResumePlan(queries, resumeStartPages?.indeed, normalizedCollectionLimits);
+      const indeedPlan = selectIndeedResumePlan(queries, queryPlans?.indeed, normalizedCollectionLimits);
       const activeIndeedIndexes = indeedPlan.indexes;
       // An interrupted source can contain only already-terminal query slots.
       // Do not acquire/launch Chrome just to rediscover them.
@@ -13320,7 +13397,7 @@ Return a JSON object with four arrays of search query strings:
           // Keep the dispatch ledger truthful too: an all-terminal Indeed
           // recovery has no provider work and must not look like it launched.
           const allIndeedQueriesTerminal = queries.length > 0
-            && queries.every((_query, index) => resumeStartPages?.indeed?.[index]?.terminal === true);
+            && queries.every((_query, index) => queryPlans?.indeed?.[index]?.terminal === true);
           if (!allIndeedQueriesTerminal) recordJobSourceDispatch(sid, activeRunId);
           indeedResult = await runIndeed();
           await assertSearchCurrent();
@@ -13421,7 +13498,7 @@ Return a JSON object with four arrays of search query strings:
           }, async (sourceId, result) => {
             await afterSearchProviderResult(sourceId, result);
             await assertSearchCurrent();
-          }, ageDaysBySource()),
+          }, ageDaysBySource(), carriedQueriesBySource),
         ];
         [browserOut, httpResults] = await Promise.all(gatherBranches);
       }
@@ -15114,6 +15191,10 @@ Return a JSON object with four arrays of search query strings:
     // mismatched manifest yields no completions — the next run then keeps the run
     // window for every platform rather than trusting an unproven boundary.
     let completedSourceIds = [];
+    // For a platform that did NOT finish: the queries it did finish, so the
+    // next run can skip them. Only a run that walked its providers in this
+    // process knows which queries were fully read.
+    const sourceQueryProgress = {};
     if (canvasFilePath) {
       try {
         const finalState = await readRunState(canvasFilePath, Date.now(), { nodeId });
@@ -15130,9 +15211,26 @@ Return a JSON object with four arrays of search query strings:
             loginBlockedSourceIds,
             countryApplicableSourceIds,
           });
+          if (!resume && !skipProviderCollection) {
+            for (const sourceId of activeSourceIds) {
+              if (completedSourceIds.includes(sourceId)) continue;
+              let finished = [];
+              if (sourceId === 'linkedin') {
+                const linkedIn = (Array.isArray(httpResults) ? httpResults : []).find(result => result?.sourceId === 'linkedin');
+                finished = Array.isArray(linkedIn?.finishedQueries) ? linkedIn.finishedQueries : [];
+              } else if (BROWSER_SCRAPE_ORDER.includes(sourceId)) {
+                const ledger = finalState.manifest.sources?.[sourceId]?.queries || {};
+                finished = queries.filter((_query, index) => ledger[`#${index}`]?.terminal === true
+                  && !(unreadRowsByQuery[`${sourceId}#${index}`] > 0));
+              }
+              finished = finished.filter(query => typeof query === 'string' && query);
+              if (finished.length > 0) sourceQueryProgress[sourceId] = { finishedQueries: finished };
+            }
+          }
         }
       } catch {
         completedSourceIds = [];
+        for (const sourceId of Object.keys(sourceQueryProgress)) delete sourceQueryProgress[sourceId];
       }
     }
     // `setJobRunStage` owns the exact authority→manifest transaction.
@@ -15224,6 +15322,7 @@ Return a JSON object with four arrays of search query strings:
       intentionallyUnfinishedSourceIds,
       sourceSearchWindows: activeSourceSearchWindows,
       completedSourceIds,
+      sourceQueryProgress,
     };
     } catch (error) {
       if (isJobOperationSupersededError(error)) return searchSupersededResult();
@@ -15602,6 +15701,9 @@ Return a JSON object with four arrays of search query strings:
           terminalCompletedAt: completion.receipt?.completedAt,
         })
       : null;
+    if (completion?.ok === true && completion?.cleared === true) {
+      recordRunCompletedWithUnfinishedSources(nodeId, runId);
+    }
     const continuationCleanup = completion?.ok === true && completion?.cleared === true
       ? await retireTerminalJobContinuations(canvasFilePath, {
           nodeId, runId, careerSnapshotId: suppliedCareerSnapshotId,
@@ -18324,6 +18426,13 @@ Return a JSON object with four arrays of search query strings:
             ...consumedQueue.state,
           });
         } catch (error) {
+          logger.warn(`[Jobs][${nodeId}] ${recoveryLabel} resolve could not persist the remaining blocked-query order: ${error?.message || error}`);
+          // This pass returns no rows, so its count of rows handed to the
+          // card is zero. Left at the pre-failure value, the report's completion
+          // check counts rows the card never received as recovered.
+          if (canWriteTelemetry() && jobsTelemetry.resolves?.[sourceId]) {
+            jobsTelemetry.resolves[sourceId] = { ...jobsTelemetry.resolves[sourceId], resolved: false, kept: 0 };
+          }
           const warning = descriptionRecoveryPersistenceWarning(
             recoveryLabel,
             error,

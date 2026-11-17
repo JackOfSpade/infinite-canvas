@@ -5212,9 +5212,16 @@ export function formatPipelineState(pipeline = {}) {
     const afterSolve = (Array.isArray(pipeline.resolvedAfterGather) ? pipeline.resolvedAfterGather : [])
       .filter(id => typeof id === 'string' && /^[a-z][a-z0-9-]{0,63}$/u.test(id))
       .slice(0, 10);
-    return afterSolve.length > 0
-      ? `✅ complete (after Solve: ${afterSolve.join(', ')})`
-      : '✅ complete';
+    // Likewise a run the user finished by skipping blocked sources: complete,
+    // but not with every source.
+    const finishedWithout = (Array.isArray(pipeline.finishedWithoutSources) ? pipeline.finishedWithoutSources : [])
+      .filter(id => typeof id === 'string' && /^[a-z][a-z0-9-]{0,63}$/u.test(id))
+      .slice(0, 10);
+    const notes = [
+      afterSolve.length > 0 ? `after Solve: ${afterSolve.join(', ')}` : '',
+      finishedWithout.length > 0 ? `finished without: ${finishedWithout.join(', ')}` : '',
+    ].filter(Boolean);
+    return notes.length > 0 ? `✅ complete (${notes.join('; ')})` : '✅ complete';
   }
   if (phase === 'aborted' || phase === 'cancelled') return '⏹️ cancelled';
   if (phase.includes('fail') || phase === 'error') return '❌ failed';
@@ -5720,6 +5727,7 @@ const SOURCE_RUN_RESOLVE_WARNING_CODES = new Set([
   'description-detail-session-reset',
   'description-listing-unavailable',
   'description-panel-http-error',
+  'description-panel-unresponsive',
   'description-rate-limited',
   'description-recovery-not-ready',
   'description-recovery-persist-failed',

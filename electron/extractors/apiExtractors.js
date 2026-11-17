@@ -385,6 +385,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
   // Per-query walk outcomes, so a ceiling-truncated source is distinguishable
   // from an exhausted one in the bug report (see the return value below).
   const queryStopReasons = [];
+  // Queries whose walk ran to its own end with nothing blocking it. A run
+  // blocked part-way reports these so the next run can skip them and start at
+  // the first query that never finished.
+  const finishedQueries = [];
   // Walks stopped by this source's own pager signals, one entry per stop. jobs.js
   // merges these per source so a short gather is never mistaken for an exhausted one.
   const walkGuards = [];
@@ -420,6 +424,8 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     // Freshness is tracked per query; `seenUrls` remains the run-wide OUTPUT
     // dedup so the same posting is never returned twice across queries.
     const seenInThisQuery = new Set();
+    const warningBeforeQuery = warning;
+    let firstPageUnanswered = false;
     let stopReason = null;
     let unproductiveStreak = 0;
     // No user page/row cap is plumbed into this source, so this walk is always
@@ -480,7 +486,12 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
 
       const html = r.text;
       if (start === 0 && !r.warning) firstPagesAnswered++;
-      if (!html || html.trim().length < 50) { stopReason = 'empty-response'; break; }
+      if (!html || html.trim().length < 50) {
+        // An empty FIRST page may be a soft block rather than "no results".
+        if (start === 0) firstPageUnanswered = true;
+        stopReason = 'empty-response';
+        break;
+      }
 
       // Parse HTML snippets with regex — LinkedIn returns <li> cards
       // Each card has: title in <h3>, company in <h4>, location, link, datetime
@@ -608,6 +619,10 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
       }
     }
     if (stopReason) queryStopReasons.push({ query, stopReason });
+    if (!signal?.aborted && warning === warningBeforeQuery && !firstPageUnanswered
+      && stopReason !== 'blocked' && stopReason !== 'aborted') {
+      finishedQueries.push(query);
+    }
   }
 
   // `gathered` is the pre-user-limit match count. jobs.js applies the persisted
@@ -623,6 +638,7 @@ export async function fetchLinkedInJobs(queries, signal = null, maxAgeDays = nul
     cancelled: !!signal?.aborted,
     gathered: allJobs.length,
     stopReasons: queryStopReasons,
+    finishedQueries,
     walkGuards,
     cap: null,
     ...(mostFirstPagesUnreadable({ firstPages: firstPagesAnswered, unreadable: firstPagesUnreadable }) ? { pageShapeFailures: firstPagesUnreadable } : {}),

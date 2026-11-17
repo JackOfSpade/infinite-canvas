@@ -12,6 +12,7 @@ import { buildJobHubScrapeClearPatch } from '../../src/utils/jobSearchSplitClear
 import { redactNodeForIssueReport } from '../../src/utils/issueReportRedaction.js';
 import { cloneNode } from '../../src/utils/nodeFactory.js';
 import { sanitizeNodesForSave } from '../../src/utils/serializationUtils.js';
+import { buildSourceCoverageCommitPatch, sourcesWithoutDateProgress } from '../../src/utils/jobSearchSourceCoverage.js';
 
 const SNAPSHOT = 'a'.repeat(64);
 const OLD = Date.UTC(2026, 9, 6, 5, 30);
@@ -29,6 +30,7 @@ function renderer(initial = {}) {
     } },
     result: { ok: true, cleared: true },
     calls: 0,
+    toasts: [],
   };
   const context = {
     useCallback: fn => fn, id: harness.node.id, canvasFilePath: '/fixture/canvas.json',
@@ -43,6 +45,10 @@ function renderer(initial = {}) {
     terminalResultDisposition: value => value,
     setResumeOffer: () => {}, setActiveResumeCheckpoint: () => {},
     EventLogger: { error() {} },
+    addToast: toast => { harness.toasts.push(toast); },
+    buildSourceCoverageCommitPatch, sourcesWithoutDateProgress,
+    ALL_JOB_SOURCE_IDS: ['indeed', 'linkedin', 'google'],
+    JOB_SOURCE_BY_ID: { linkedin: { name: 'LinkedIn' }, indeed: { name: 'Indeed' }, google: { name: 'Google' } },
     window: { electronAPI: { completeJobRun: async () => { harness.calls++; return harness.result; } } },
   };
   const source = fs.readFileSync(new URL('../../src/nodes/JobSearchNode.jsx', import.meta.url), 'utf8');
@@ -83,6 +89,32 @@ export default [
       assert.equal(entry.nextCompletedAt, END);
       assert.equal(entry.collectionDisposition, 'full');
       assert.equal(entry.collectionCompletedAt, END);
+    },
+  },
+  {
+    name: 'Job date diagnostics: a platform whose date did not move raises the dismiss-required popup once the scan finishes',
+    async run() {
+      const blocked = renderer();
+      blocked.collect({
+        hasUnfinishedSources: true, completedSourceIds: ['indeed'],
+        participatingSourceIds: ['indeed', 'linkedin'],
+        sourceQueryProgress: { linkedin: { finishedQueries: ['a'] } }, sourceQueryLocationKey: 'Canada',
+      });
+      assert.equal(blocked.toasts.length, 0, 'nothing is shown while the scan is still running');
+      await blocked.finish();
+      assert.equal(blocked.toasts.length, 1);
+      const [toast] = blocked.toasts;
+      assert.equal(toast.title, 'Scan date did not move: LinkedIn');
+      assert.equal(toast.type, 'error');
+      assert.equal(toast.duration, 0, 'it stays until dismissed');
+      assert.equal(blocked.node.data.sourceCoverage.indeed.coverageStartedAt, START, 'the finished platform still moves');
+      assert.deepEqual(blocked.node.data.sourceQueryProgress.linkedin.finishedQueries, ['a'],
+        'and the blocked platform keeps the queries it finished');
+
+      const clean = renderer();
+      clean.collect({ completedSourceIds: ['indeed', 'linkedin'], participatingSourceIds: ['indeed', 'linkedin'] });
+      await clean.finish();
+      assert.equal(clean.toasts.length, 0, 'a scan where every platform moved shows nothing');
     },
   },
   {

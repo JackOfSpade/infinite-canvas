@@ -117,6 +117,9 @@ import {
   resolveJobSearchSourceWindows,
   serializeJobSearchWindow,
   sourcesBehindLatest,
+  coverageSourceIdsForLocation,
+  sourceFinishedQueriesForRun,
+  sourcesWithoutDateProgress,
 } from '../utils/jobSearchSourceCoverage';
 import { backgroundJobResumeRequest } from '../utils/workspaceStartupRecovery';
 import {
@@ -1637,7 +1640,34 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           + ` reason=${result?.reason || 'terminal-not-finalized'}`,
         );
       } else {
+        // Read before the commit below clears the staged result. A platform
+        // whose date does not move re-reads the same days on every scan; say
+        // so in the popup the user must dismiss, never silently.
+        const dataBeforeCommit = getNode(id)?.data;
+        const stagedCoverage = dataBeforeCommit?.pendingSourceCoverage;
+        const stalledSources = terminalStatus === 'completed' && stagedCoverage?.runId === runId
+          ? sourcesWithoutDateProgress(dataBeforeCommit, stagedCoverage, id, ALL_JOB_SOURCE_IDS)
+          : [];
         recordFinalizationState(false);
+        if (stalledSources.length > 0) {
+          const dateText = timestamp => (timestamp == null
+            ? 'the start of this search'
+            : new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(new Date(timestamp)));
+          const names = stalledSources.map(entry => JOB_SOURCE_BY_ID[entry.sourceId]?.name || entry.sourceId);
+          EventLogger.error(
+            `[JobSearch][${id}] Scan date did not move run=${runId}: `
+            + stalledSources.map(entry => `${entry.sourceId} resumes ${entry.resumesFrom == null ? 'unset' : new Date(entry.resumesFrom).toISOString()}`).join(', '),
+          );
+          addToast({
+            title: `Scan date did not move: ${names.join(', ')}`,
+            description: `${stalledSources.length === 1 ? 'This platform' : 'These platforms'} did not finish, so the next scan reads the same days again (${
+              stalledSources.map((entry, index) => `${names[index]} from ${dateText(entry.resumesFrom)}`).join(', ')
+            }). Send a bug report so the cause can be fixed.`,
+            type: 'error',
+            duration: 0,
+            dedupeKey: `job-scan-date-stalled:${id}:${runId}`,
+          });
+        }
         // Keep a recovery offer visible through any failed Resume attempt,
         // then retire it only once this exact terminal cleanup confirms that
         // the sidecars are gone. A stale banner after a clean completion is
@@ -1652,7 +1682,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
       EventLogger.error(`[JobSearch][${id}] Job-run completion receipt/cleanup failed run=${runId}:`, error);
       return null;
     }
-  }, [canvasFilePath, getNode, id, operationAuthorityFor, updateGlobal]);
+  }, [addToast, canvasFilePath, getNode, id, operationAuthorityFor, updateGlobal]);
   // Stage the scrape interval, but do not advance either durable timestamp
   // until this exact run finishes its full terminal
   // transaction. Scoring or finalization can still fail after collection; if
@@ -1721,6 +1751,11 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             collectionStartedAt: partialCollectionStartedAt,
             collectionCompletedAt: partialCollectionCompletedAt,
             completedSourceIds: searchResult.completedSourceIds,
+            // Queries the unfinished platforms did finish, kept so their next
+            // run starts at the first query that never finished.
+            sourceQueryProgress: searchResult.sourceQueryProgress || null,
+            locationKey: searchResult.sourceQueryLocationKey || '',
+            participatingSourceIds: searchResult.participatingSourceIds || null,
           }
           : null;
         updateGlobal(id, (node) => {
@@ -1783,6 +1818,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
             collectionStartedAt,
             collectionCompletedAt,
             completedSourceIds: searchResult.completedSourceIds,
+            sourceQueryProgress: searchResult.sourceQueryProgress || null,
+            locationKey: searchResult.sourceQueryLocationKey || '',
+            participatingSourceIds: searchResult.participatingSourceIds || null,
           },
         }
         : {}),
@@ -1987,12 +2025,21 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   // instead of trusting the render that enqueued the request.
   const platformsVerifyingRef = useRef(platformsVerifying);
   platformsVerifyingRef.current = platformsVerifying;
-  const lastCompletedRunAtText = formatCompletionTimestamp(latestSourceCompletedAt(data));
   // Per-platform bookmarks let one platform lag the hub's newest completion
   // (it was blocked, or switched off for a run). Name those platforms and the
   // oldest of their resume dates: that is the day the next run re-scrapes them
   // from, and everything else simply continues from its own newer bookmark.
-  const behindSources = sourcesBehindLatest(data, id, enabledSourceIds);
+  // Platforms that cannot serve this search's country never run, so their
+  // frozen bookmarks must not set the scan start or be named as catching up.
+  // Start from the platforms the next run would really use: an unchecked
+  // platform, or one switched off by the current breadth settings, is equally
+  // out of the run and must not be named or set a date either.
+  const coverageSourceIds = coverageSourceIdsForLocation(
+    activeEnabledSourceIds,
+    locationToLegacyText(getSearchLocation(data)),
+  );
+  const lastCompletedRunAtText = formatCompletionTimestamp(latestSourceCompletedAt(data, coverageSourceIds));
+  const behindSources = sourcesBehindLatest(data, id, coverageSourceIds);
   const catchUpText = (() => {
     if (behindSources.length === 0) return null;
     const names = behindSources.map(entry => JOB_SOURCE_BY_ID[entry.sourceId]?.name || entry.sourceId);
@@ -2012,7 +2059,7 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
   const upcomingSourceWindows = resolveJobSearchSourceWindows(
     data,
     id,
-    enabledSourceIds,
+    coverageSourceIds,
     new Date(),
     initialJobSearchLookbackDays(data),
   );
@@ -4142,6 +4189,16 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           error: 'Select at least one job platform before running the search.',
         });
       }
+      // The card shows a platform that cannot serve this country as unchecked
+      // while keeping the saved preference, so it returns if the country
+      // changes. The run must match what the card shows: leave those platforms
+      // out, so they raise no "skipped" notice and are never named. When
+      // nothing else is selected the list is kept and the run explains why.
+      {
+        const runCountryLocation = locationToLegacyText(runLocationSnapshot.searchLocation);
+        runActiveEnabledSourceIds = coverageSourceIdsForLocation(runActiveEnabledSourceIds, runCountryLocation);
+        runEnabledSourceIds = coverageSourceIdsForLocation(runEnabledSourceIds, runCountryLocation);
+      }
       // A platform whose last COMPLETED scrape is younger than the interval
       // must not be re-walked: its rows are already on this hub and would
       // mostly be filtered by seen history. Only the due platforms take part
@@ -4212,13 +4269,28 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         : resolveJobSearchSourceWindows(
           laneTurnData,
           currentId,
-          runActiveEnabledSourceIds,
+          // The main process skips platforms that cannot serve this country;
+          // their never-moving bookmarks must not widen this run's window.
+          coverageSourceIdsForLocation(
+            runActiveEnabledSourceIds,
+            locationToLegacyText(runLocationSnapshot.searchLocation),
+          ),
           new Date(),
           initialJobSearchLookbackDays(laneTurnData),
         );
       const runSourceSearchWindows = resolvedSourceWindows
         ? resolvedSourceWindows.sourceWindows
         : null;
+      const runSourceQueryLocationKey = locationToLegacyText(runLocationSnapshot.searchLocation);
+      const runSourceFinishedQueries = recoveredPreSearchContext
+        ? null
+        : sourceFinishedQueriesForRun(laneTurnData, runActiveEnabledSourceIds, runSourceQueryLocationKey);
+      if (runSourceFinishedQueries && Object.keys(runSourceFinishedQueries).length > 0) {
+        EventLogger.log(
+          `[JobSearch][${currentId}] Skipping queries finished by an earlier blocked run: `
+          + Object.entries(runSourceFinishedQueries).map(([sourceId, list]) => `${sourceId} ${list.length}`).join(', '),
+        );
+      }
       const completionAnchor = recoveredPreSearchContext
         ? {
           timestamp: recoveredPreSearchContext.searchWindow.anchorTimestamp,
@@ -4794,6 +4866,9 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
         // Per-platform resume points for this fresh run. Recovery replays the
         // frozen hub window instead, so it sends nothing here.
         sourceSearchWindows: runSourceSearchWindows,
+        // Queries each platform finished in an earlier run that was blocked
+        // part-way, for this run to skip. Fresh runs only, like the windows.
+        sourceFinishedQueries: runSourceFinishedQueries,
         runOrigin,
         profileInputMode: paths.length > 0 ? 'fresh-files' : 'stored-profile',
         ...(providerPhaseOnly ? { providerPhaseOnly: true } : {}),
@@ -4861,6 +4936,12 @@ export const JobSearchNode = React.memo(function JobSearchNode({ id, data }) {
           reason: 'awaiting-explicit-ai-continue',
         });
       }
+      // The location these queries were run for travels with the result so
+      // saved query progress is only reused for the same search location.
+      searchResult.sourceQueryLocationKey = runSourceQueryLocationKey;
+      // The platforms this run really used, so a date that fails to move is
+      // reported only for them (not for unchecked or still-fresh platforms).
+      searchResult.participatingSourceIds = runActiveEnabledSourceIds;
       recordCollectionCompletion(searchResult, cancelled, pinnedCareerSnapshotId, analysisOperation);
       const searchWarnings = Array.isArray(searchResult.scrapeWarnings) ? searchResult.scrapeWarnings : [];
       // Reconcile the backend's stale final list with source actions that

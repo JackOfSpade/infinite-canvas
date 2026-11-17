@@ -6,9 +6,17 @@ import { collectionEvidenceForSnapshot } from '../../electron/ipc/jobs.js';
 import { sanitizeJobRunCollectionDiagnostics } from '../../electron/ipc/jobRunStaging.js';
 import { sanitizeJobSearchDateDiagnostics } from '../../src/utils/jobSearchDateDiagnostics.js';
 import fs from 'node:fs';
+import { didDetailBlockReprobeRecover } from '../../electron/ipc/browser/manualScraper.js';
+import { formatPipelineState } from '../../electron/ipc/bugReport/jobsSnapshot.js';
+import {
+  __resetJobsTelemetryForTests,
+  getJobsTelemetry,
+  recordRunCompletedWithUnfinishedSources,
+} from '../../electron/ipc/jobs.js';
 import {
   buildCollectionEvidenceCommitPatch,
   buildSourceCoverageCommitPatch,
+  coverageSourceIdsForLocation,
   JOB_SOURCE_RESCRAPE_INTERVAL_MS,
   jobSearchSourceAnchor,
   latestSourceCompletedAt,
@@ -16,7 +24,9 @@ import {
   partitionSourcesByRescrapeAge,
   resolveJobSearchSourceWindows,
   serializeJobSearchWindow,
+  sourceFinishedQueriesForRun,
   sourcesBehindLatest,
+  sourcesWithoutDateProgress,
 } from '../../src/utils/jobSearchSourceCoverage.js';
 
 const localDate = (year, month, day, hour = 0, minute = 0) => new Date(year, month - 1, day, hour, minute);
@@ -548,6 +558,174 @@ export default [
       assert(/completedSourceIds,\n\s+\},\n\s+\}\);\n\s+await assertSearchCurrent\(\);/.test(jobs)
         && /snapshot = await attachCollectionEvidence\(snapshot, jsonPath\);/.test(jobs),
       'the host writes the finished-platform list at the gathered stage and into the saved scrape');
+    },
+  },
+  {
+    name: 'Job Search source coverage ignores platforms that cannot serve the search country',
+    run() {
+      // Dice and USAJobs are skipped by every Canada run, so their bookmarks
+      // never move. They must not set the scan start or be named as behind.
+      const now = localDate(2026, 11, 17, 3);
+      const stale = localDate(2026, 10, 31, 20, 20).getTime();
+      const recent = localDate(2026, 11, 15, 4, 20).getTime();
+      const newest = localDate(2026, 11, 17, 0, 23).getTime();
+      const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
+      const data = {
+        lastCompletedRunAt: recent,
+        lastSearchCoverageStartedAt: recent,
+        sourceCoverage: {
+          dice: entry(stale), usajobs: entry(stale), google: entry(recent), indeed: entry(newest),
+        },
+      };
+      const selected = ['google', 'indeed', 'dice', 'usajobs'];
+
+      const canada = coverageSourceIdsForLocation(selected, 'Canada');
+      assert(JSON.stringify(canada) === JSON.stringify(['google', 'indeed']),
+        `a Canada search leaves out the U.S.-only platforms, got ${JSON.stringify(canada)}`);
+      const { runAnchor } = resolveJobSearchSourceWindows(data, 'hub', canada, now);
+      assert(runAnchor.timestamp === recent, `the scan starts from the oldest platform that can actually run, got ${runAnchor.timestamp}`);
+      assert(JSON.stringify(sourcesBehindLatest(data, 'hub', canada).map(row => row.sourceId)) === JSON.stringify(['google']),
+        'only a platform that can run is named as catching up');
+
+      const unitedStates = coverageSourceIdsForLocation(selected, 'United States');
+      assert(unitedStates.includes('dice') && unitedStates.includes('usajobs'),
+        'a U.S. search keeps them, and their kept bookmarks resume from where they stopped');
+      assert(resolveJobSearchSourceWindows(data, 'hub', unitedStates, now).runAnchor.timestamp === stale,
+        'their old bookmark then sets the scan start again');
+
+      assert(JSON.stringify(coverageSourceIdsForLocation(['dice', 'usajobs'], 'Canada')) === JSON.stringify(['dice', 'usajobs']),
+        'when nothing applies the selection is unchanged, so the run preflight reports it');
+    },
+  },
+  {
+    name: 'Panels that stop loading mid-walk pause detail reads instead of ending the platform',
+    run() {
+      // The walk itself needs a live browser page; this pins the two contracts
+      // the fix rests on.
+      assert(didDetailBlockReprobeRecover({ expandedCount: 2 }) === true
+        && didDetailBlockReprobeRecover({ expandedCount: 2, descWarning: { code: 'description-panel-unresponsive' } }) === false,
+      'an unresponsive panel keeps the detail cooldown armed, like a rate limit');
+      const scraper = fs.readFileSync('electron/ipc/browser/manualScraper.js', 'utf8');
+      const guard = scraper.indexOf('if (!panelInterrupt && panelProvenThisWalk) {');
+      assert(guard > 0 && guard < scraper.indexOf("'stale-desc-selectors',\n            panelInterrupt?.status"),
+        'the proven-panel deferral is decided before the selector-failure abort');
+    },
+  },
+  {
+    name: 'A platform blocked part-way keeps its finished queries and its date moves once all have finished',
+    run() {
+      const bookmark = localDate(2026, 11, 15, 4).getTime();
+      const run1 = localDate(2026, 11, 17, 0).getTime();
+      const run2 = localDate(2026, 11, 18, 0).getTime();
+      const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
+      let data = { sourceCoverage: { linkedin: entry(bookmark), indeed: entry(bookmark) } };
+
+      // Run 1: LinkedIn is blocked after finishing two of its queries.
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000,
+        completedSourceIds: ['indeed'],
+        sourceQueryProgress: { linkedin: { finishedQueries: ['a', 'b'] } },
+        locationKey: 'Canada',
+      }, 'hub'));
+      assert(data.sourceCoverage.linkedin.coverageStartedAt === bookmark, 'the blocked platform keeps its date');
+      assert(JSON.stringify(sourceFinishedQueriesForRun(data, ['linkedin', 'indeed'], 'Canada')) === JSON.stringify({ linkedin: ['a', 'b'] }),
+        'the next run is told which queries to skip');
+      assert(Object.keys(sourceFinishedQueriesForRun(data, ['linkedin'], 'Toronto, Ontario, Canada')).length === 0,
+        'a different search location starts every query again');
+      assert(Object.keys(sourceFinishedQueriesForRun(data, ['indeed'], 'Canada')).length === 0,
+        'only platforms taking part in the run are told anything');
+
+      // Run 2: blocked again, one more query finished.
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r2', collectionStartedAt: run2, collectionCompletedAt: run2 + 1000,
+        completedSourceIds: [],
+        sourceQueryProgress: { linkedin: { finishedQueries: ['c'] } },
+        locationKey: 'Canada',
+      }, 'hub'));
+      assert(JSON.stringify(sourceFinishedQueriesForRun(data, ['linkedin'], 'Canada').linkedin) === JSON.stringify(['a', 'b', 'c']),
+        'finished queries add up across blocked runs');
+
+      // Run 3: the rest finish. The date moves to the OLDEST contributing run.
+      const run3 = localDate(2026, 11, 19, 0).getTime();
+      Object.assign(data, buildSourceCoverageCommitPatch(data, {
+        runId: 'r3', collectionStartedAt: run3, collectionCompletedAt: run3 + 1000,
+        completedSourceIds: ['linkedin'], locationKey: 'Canada',
+      }, 'hub'));
+      assert(data.sourceCoverage.linkedin.coverageStartedAt === run1,
+        `queries finished in run 1 were only read up to run 1, so the date moves there, got ${data.sourceCoverage.linkedin.coverageStartedAt}`);
+      assert(Object.keys(data.sourceQueryProgress).length === 0 && Object.keys(sourceFinishedQueriesForRun(data, ['linkedin'], 'Canada')).length === 0,
+        'a finished platform starts clean');
+
+      // A platform with no bookmark yet keeps its progress after the commit seeds one.
+      let fresh = { lastCompletedRunAt: bookmark, lastSearchCoverageStartedAt: bookmark };
+      Object.assign(fresh, buildSourceCoverageCommitPatch(fresh, {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1,
+        completedSourceIds: [], knownSourceIds: ['google'],
+        sourceQueryProgress: { google: { finishedQueries: ['a'] } }, locationKey: 'Canada',
+      }, 'hub'));
+      assert(JSON.stringify(sourceFinishedQueriesForRun(fresh, ['google'], 'Canada')) === JSON.stringify({ google: ['a'] }),
+        'progress survives the first write of a seeded bookmark');
+
+      // Progress tied to a bookmark that has since moved is ignored.
+      const moved = { sourceCoverage: { linkedin: entry(run2) }, sourceQueryProgress: {
+        linkedin: { finishedQueries: ['a'], oldestStartedAt: run1, bookmarkAt: bookmark, locationKey: 'Canada' } } };
+      assert(Object.keys(sourceFinishedQueriesForRun(moved, ['linkedin'], 'Canada')).length === 0,
+        'progress from before the date moved is not reused');
+    },
+  },
+  {
+    name: 'A platform whose date does not move after a scan is reported for the dismiss-required popup',
+    run() {
+      const bookmark = localDate(2026, 11, 15, 4).getTime();
+      const run1 = localDate(2026, 11, 17, 0).getTime();
+      const entry = at => ({ coverageStartedAt: at, completedAt: at, runId: null });
+      const data = { sourceCoverage: { linkedin: entry(bookmark), indeed: entry(bookmark), dice: entry(bookmark - 1000) } };
+      const staged = {
+        runId: 'r1', collectionStartedAt: run1, collectionCompletedAt: run1 + 1000,
+        completedSourceIds: ['indeed'], participatingSourceIds: ['indeed', 'linkedin', 'google'],
+      };
+      const stalled = sourcesWithoutDateProgress(data, staged, 'hub');
+      assert(JSON.stringify(stalled.map(row => row.sourceId)) === JSON.stringify(['linkedin', 'google']),
+        `only platforms that took part and did not finish are reported, got ${JSON.stringify(stalled)}`);
+      assert(stalled[0].resumesFrom === bookmark, 'the popup names the date the next scan starts from');
+      assert(sourcesWithoutDateProgress(data, { ...staged, completedSourceIds: ['indeed', 'linkedin', 'google'] }, 'hub').length === 0,
+        'nothing is reported when every platform that took part moved forward');
+      assert(sourcesWithoutDateProgress(data, { ...staged, participatingSourceIds: null }, 'hub').length === 0,
+        'an older staged result without the participant list reports nothing');
+
+      // Finishing with the help of an earlier blocked run still moves the date.
+      const withProgress = { ...data, sourceQueryProgress: {
+        linkedin: { finishedQueries: ['a'], oldestStartedAt: bookmark + 60_000, bookmarkAt: bookmark, locationKey: '' } } };
+      assert(sourcesWithoutDateProgress(withProgress, { ...staged, completedSourceIds: ['indeed', 'linkedin'], participatingSourceIds: ['indeed', 'linkedin'] }, 'hub').length === 0,
+        'a date that moves only to an earlier run start is still progress');
+
+      const node = fs.readFileSync('src/nodes/JobSearchNode.jsx', 'utf8');
+      const popup = node.slice(node.indexOf('title: `Scan date did not move: '), node.indexOf('dedupeKey: `job-scan-date-stalled:'));
+      assert(popup.includes("type: 'error'") && popup.includes('duration: 0'),
+        'the warning uses the error popup that stays until dismissed');
+    },
+  },
+  {
+    name: 'A run finished by skipping blocked sources stops reading as blocked',
+    run() {
+      __resetJobsTelemetryForTests();
+      try {
+        const telemetry = getJobsTelemetry();
+        telemetry.nodeId = 'hub';
+        telemetry.pipeline = { phase: 'sources-blocked', runId: 'run-1', active: false, pendingSources: ['google', 'glassdoor'] };
+        assert(recordRunCompletedWithUnfinishedSources('hub', 'run-2') === false
+          && recordRunCompletedWithUnfinishedSources('other-hub', 'run-1') === false
+          && getJobsTelemetry().pipeline.phase === 'sources-blocked',
+        'another run or another hub cannot retire this stage');
+        assert(recordRunCompletedWithUnfinishedSources('hub', 'run-1') === true, 'the same hub and run retires it');
+        const pipeline = getJobsTelemetry().pipeline;
+        assert(pipeline.phase === 'completed' && pipeline.pendingSources.length === 0
+          && JSON.stringify(pipeline.finishedWithoutSources) === JSON.stringify(['google', 'glassdoor']),
+        'the stage is completed and keeps which sources it finished without');
+        assert(formatPipelineState(pipeline) === '✅ complete (finished without: google, glassdoor)',
+          `the report says so, got ${formatPipelineState(pipeline)}`);
+        assert(recordRunCompletedWithUnfinishedSources('hub', 'run-1') === false, 'a repeat completion changes nothing');
+      } finally { __resetJobsTelemetryForTests(); }
     },
   },
 ];

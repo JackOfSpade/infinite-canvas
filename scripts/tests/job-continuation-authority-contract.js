@@ -160,7 +160,14 @@ export async function runSourceRecoveryPublicationContract() {
         jobs: [row], descriptionRecoveryJobs: [row], profile: {}, careerData: {}, careerSnapshotId,
         operationAuthority, nodeId: 'hub', snapshotContext: { sourceHubId: 'hub', runId: 'run', canvasFilePath },
       }).snapshot;
-      await __saveJobAnalysisSnapshotForTests(snapshot);
+      // A gathered run's saved scrape carries its collection record, while the
+      // recovery pool a Solve rebuilds from does not. Every Solve save copies
+      // that record across, so the saved bytes differ from the rebuilt object.
+      const collectionEvidence = {
+        runId: 'run', disposition: 'unfinished-sources', startedAt: 1_700_000_000_000,
+        completedAt: 1_700_000_600_000, unfinishedSourceCount: 1, completedSourceIds: ['indeed'],
+      };
+      await __saveJobAnalysisSnapshotForTests({ ...snapshot, collectionEvidence });
       assert.equal((await __createDescriptionRecoveryCheckpointForTests(snapshot)).saved, true);
       const begun = await beginJobContinuation(canvasFilePath, {
         nodeId: 'hub', parentRunId: 'run', profileFingerprint: 'c'.repeat(64),

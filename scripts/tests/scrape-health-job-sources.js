@@ -170,6 +170,13 @@ export default [
       const healthy = await withFetch(() => respond(cards(25)), () => fetchLinkedInJobs(['software engineer'], controller.signal, 7, 'Toronto', ({ detail }) => { if (/p1$/u.test(detail)) controller.abort(); }));
       assert.equal(healthy.items.length, 25);
       assert.equal(healthy.pageShapeFailures, undefined);
+      // Only a query whose walk ran to its own end is reported as finished, so
+      // the next run can skip it. None of these did.
+      assert.deepEqual(healthy.finishedQueries, [], 'a cancelled walk finished nothing');
+      assert.deepEqual((await run('')).finishedQueries, [], 'an empty first page may be a soft block, so the query is not finished');
+      const throttled = await withFetch(() => new Response('', { status: 429 }), () => fetchLinkedInJobs(['a', 'b'], null, 7, 'Toronto', null));
+      assert.equal(throttled.warning?.code, 'http-429');
+      assert.deepEqual(throttled.finishedQueries, [], 'a query stopped by a rate limit is not finished, and later queries never ran');
     },
   },
   {

@@ -84,6 +84,28 @@ export default [
     },
   },
   {
+    name: 'job search source windows: queries an earlier blocked run finished get no task, the rest keep their slot',
+    run: () => {
+      // The plan shape search-jobs builds from the card's finished queries.
+      const queries = ['alpha', 'beta', 'gamma'];
+      const finished = new Set(['alpha']);
+      const plan = queries.map(query => ({ startPage: 1, durable: false, terminal: finished.has(query) }));
+      const tasks = buildJobTasks(queries, 30, {
+        collectionStartTimestamp: NOW_MS - 3 * DAY,
+        startPageBySourceQuery: { google: plan, glassdoor: plan },
+      }, '', null, '');
+      for (const sourceId of ['google', 'glassdoor']) {
+        const mine = tasks.filter(task => task.sourceId === sourceId);
+        assert(JSON.stringify(mine.map(task => task.query)) === JSON.stringify(['beta', 'gamma']),
+          `${sourceId} skips the finished query and starts at the first unfinished one, got ${JSON.stringify(mine.map(task => task.query))}`);
+        assert(JSON.stringify(mine.map(task => task.queryIndex)) === JSON.stringify([1, 2]),
+          `${sourceId} keeps each remaining query in its original slot`);
+      }
+      assert(tasks.filter(task => task.sourceId === 'ziprecruiter').length === 3,
+        'a platform with nothing carried over walks every query');
+    },
+  },
+  {
     name: 'job search source windows: capPlatformJobsAfterWindow honours a per-source boundary resolver',
     run: () => {
       const fiveDaysOld = new Date(NOW_MS - 5 * DAY).toISOString();

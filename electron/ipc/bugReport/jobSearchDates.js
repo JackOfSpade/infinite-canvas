@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { sanitizeJobSearchDateDiagnostics } from '../../../src/utils/jobSearchDateDiagnostics.js';
-import { normalizeSourceCoverage } from '../../../src/utils/jobSearchSourceCoverage.js';
+import { normalizeSourceCoverage, normalizeSourceQueryProgress } from '../../../src/utils/jobSearchSourceCoverage.js';
 import { completionTimestampIso } from '../../../src/utils/completionTimestamp.js';
 
 function identifier(value) {
@@ -47,6 +47,16 @@ export function buildJobSearchDateHistory(nodes) {
       if (coverageSourceIds.length) {
         lines.push(`  - Per-platform bookmarks: ${coverageSourceIds
           .map(sourceId => `${sourceId} coverage start ${timestamp(sourceCoverage[sourceId].coverageStartedAt)} · completed ${timestamp(sourceCoverage[sourceId].completedAt)}`)
+          .join('; ')}.`);
+      }
+      // Why a held-back platform's date has not moved, and how close it is:
+      // counts and dates only, never the query text.
+      const queryProgress = normalizeSourceQueryProgress(data.sourceQueryProgress);
+      const progressSourceIds = Object.keys(queryProgress).sort();
+      if (progressSourceIds.length) {
+        lines.push(`  - Queries finished by blocked runs (skipped next run): ${progressSourceIds
+          .map(sourceId => `${sourceId} ${queryProgress[sourceId].finishedQueries.length} finished · oldest run start ${timestamp(queryProgress[sourceId].oldestStartedAt)} · ${
+            queryProgress[sourceId].bookmarkAt === (sourceCoverage[sourceId]?.coverageStartedAt ?? null) ? 'current' : 'stale (date has moved)'}`)
           .join('; ')}.`);
       }
       if (!history.length) {

@@ -132,6 +132,12 @@ export function detailBlockCooldownMs(reprobesSoFar) {
   return DETAIL_BLOCK_COOLDOWNS_MS[Math.min(index, DETAIL_BLOCK_COOLDOWNS_MS.length - 1)];
 }
 const DETAIL_BLOCK_MAX_REPROBES = 3;
+// Warnings that pause detail reads for a cooldown while the list walk goes on.
+const DETAIL_BLOCK_WARNING_CODES = Object.freeze([
+  'description-rate-limited',
+  'description-panel-http-error',
+  'description-panel-unresponsive',
+]);
 // Per-episode re-probes above bound ONE block; a walk that recovers and blocks
 // again can re-arm them for every page, which is what made a long source sit on
 // cooldowns until the walk ran out of pages. This is the per-SOURCE budget: once
@@ -871,8 +877,7 @@ export function didDetailBlockReprobeRecover(result = {}) {
   // resolver) is the same terminal proof as one retired outright.
   const unavailable = Math.max(0, Number(result.unavailableDetailDropped) || 0)
     + Math.max(0, Number(result.boardClosedDetailKept) || 0);
-  const reBlocked = ['description-rate-limited', 'description-panel-http-error']
-    .includes(result.descWarning?.code);
+  const reBlocked = DETAIL_BLOCK_WARNING_CODES.includes(result.descWarning?.code);
   return (expanded > 0 || unavailable > 0) && !result.descError && !reBlocked;
 }
 
@@ -5741,6 +5746,11 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
 
       if (gotDescription) {
         consecutivePanelTimeouts = 0;
+        // Shared across this platform's pages: proof the panel selectors work
+        // in this walk, read by the timeout streak below.
+        if (walkPlan?.detailPacing) {
+          walkPlan.detailPacing.panelReads = (walkPlan.detailPacing.panelReads || 0) + 1;
+        }
       } else {
         panelTimeoutCount++;
         rememberCardWalkFailure(i + 1, key, selectionAssessment.selectionMismatch ? 'detail-title-mismatch' : 'panel-timeout');
@@ -5761,6 +5771,35 @@ async function expandDescriptions(page, jobs, sourceId, overlayBase, totalSoFar,
             await new Promise(r => setTimeout(r, humanDelay(400)));
           }
           const panelInterrupt = interruptStopText(panelInspection, consecutivePanelTimeouts, 'panel-timeout');
+          // Broken selectors never read a single panel. When this walk has
+          // already read panels with the same selectors, a run of timeouts is
+          // the board no longer answering (a throttle often shows as a panel
+          // that never loads, with no 429 to match), not a code fault. Ending
+          // the platform here threw away every remaining query; defer the
+          // unread rows instead, so the list walk continues and the detail
+          // cooldown re-probes later.
+          const panelProvenThisWalk = expandedCount > 0 || (walkPlan?.detailPacing?.panelReads || 0) > 0;
+          if (!panelInterrupt && panelProvenThisWalk) {
+            const firstUnread = Math.max(0, i - (consecutivePanelTimeouts - 1));
+            for (let unresolvedIndex = firstUnread; unresolvedIndex < enhanced.length; unresolvedIndex++) {
+              enhanced[unresolvedIndex] = {
+                ...enhanced[unresolvedIndex],
+                descriptionDeferredReason: 'description-panel-unresponsive',
+              };
+            }
+            logger.warn(`[BrowserScraper] ${sourceId}: ${consecutivePanelTimeouts} consecutive panel-read timeouts after panels were read earlier in this walk — deferring ${enhanced.length - firstUnread} row(s) and continuing the list walk`);
+            descWarning ||= {
+              code: 'description-panel-unresponsive', severity: 'block',
+              evidence: `${consecutivePanelTimeouts} job detail panels in a row did not load for ${sourceId}, after panels loaded normally earlier in this walk. The scraper stopped opening panels and kept the list rows.`,
+              suggestion: 'Wait a few minutes, then click Solve to retry the unread descriptions. Deferred listings are not recorded as seen, so a later run can still collect them.',
+            };
+            await updateOverlay(page, {
+              ...overlayBase,
+              count: totalSoFar,
+              status: 'Detail panels stopped loading — keeping list results and pausing description clicks.',
+            }).catch(() => {});
+            break;
+          }
           await abortWithError(
             panelInterrupt?.evidence
               ?? `${consecutivePanelTimeouts} consecutive panel-read timeouts for ${sourceId} — panel selector matched nothing or click no longer triggers panel update`,
@@ -8805,7 +8844,7 @@ export async function scrapeManualSources(tasks, onResult, signal, onPageJobs = 
               ? descWarning
               : mergeDescriptionDetailMissWarning(sourceSiteChangedWarning, descWarning);
           }
-          if (['description-rate-limited', 'description-panel-http-error'].includes(descWarning?.code)) {
+          if (DETAIL_BLOCK_WARNING_CODES.includes(descWarning?.code)) {
             // Stamping the clock on every arm is what re-arms a failed
             // cooldown re-probe: the probe clears the code before attempting,
             // so landing back here restarts the wait instead of retrying every
