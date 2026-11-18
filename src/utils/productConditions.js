@@ -22,6 +22,8 @@
  * route to, so the AI (and the user) can reason about how our grade translates
  * when listing. Sources: each platform's own seller/condition help pages.
  */
+import { escapeRegExp } from './regexEscape.js';
+
 export const PRODUCT_CONDITIONS = [
   {
     value: 'New',
@@ -147,10 +149,6 @@ const CONDITION_TITLE_ALIASES = {
   'Used - Fair': ['fair'],
   'For Parts': ['poor'],
 };
-
-function escapeRegExp(value) {
-  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 /**
  * Generated listing titles identify the item; condition belongs in the separate

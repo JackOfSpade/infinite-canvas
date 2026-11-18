@@ -3,6 +3,7 @@
 // usable from the Node smoke suite and from the application pipeline.
 import { enDashIsRange } from './dashRanges.js';
 import { careerRoleDateInputs, parseCareerDate } from './jobFitAssessment.js';
+import { escapeRegExp } from '../../src/utils/regexEscape.js';
 
 const MIN_EVIDENCE_SHINGLE_WORDS = 5;
 const MIN_EVIDENCE_TOKEN_OVERLAP = 0.6;
@@ -3457,10 +3458,6 @@ export const STACK_TOOL_LEXICON = Object.freeze([
   'Datadog', 'Stripe', 'Twilio', 'SharePoint', 'Salesforce', 'Jest', 'Cypress', 'Playwright', 'Puppeteer',
   'Selenium',
 ]);
-
-function escapeRegExp(value) {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 // Longest-first alternation so “Docker Compose” consumes both of its words and
 // is not counted a second time as “Docker”. Letter/number lookarounds rather
@@ -7398,8 +7395,11 @@ function paragraphJobNeedQuotes(plan) {
 //              (the check id and how many observations there were; the
 //              observation text is not persisted) and the writer prompt may
 //              still describe the check as guidance;
-//   'off'      the check is not run by production callers. The function stays
-//              exported and tested; partitionCheckResults drops its rows.
+//   'off'      the check is not run by production callers (they pass
+//              activeOnly), so it runs only in tests and when called by hand.
+//              The function stays exported and tested; a recorded check id
+//              and the dispositions table still name it, and
+//              partitionCheckResults drops its rows.
 //
 // An id this table does not list is a GATE: a check added without being
 // classified fails closed, as every check did before there was a table, until

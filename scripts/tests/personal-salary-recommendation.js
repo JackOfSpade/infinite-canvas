@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import {
   buildPersonalSalaryEvidence,
   normalizePersonalSalaryRecommendation,
-  personalSalaryEvidenceFingerprint,
   PERSONAL_SALARY_GUIDANCE_PROMPT,
   validatePersonalSalaryRecommendation,
 } from '../../electron/ipc/personalSalaryRecommendation.js';
@@ -260,15 +259,6 @@ export default [
       const foreignGeneral = normalizePersonalSalaryRecommendation(undefined, { ...options, offered: { ...offered, currency: 'USD' }, evidence: packet(job(), { careerData: '' }) });
       assert.equal(foreignGeneral.desiredSalary, 150000);
       assert.equal(normalizePersonalSalaryRecommendation(answer(), { ...options, offered: { ...offered, usable: false } }).status, 'personalized', 'an unusable salary must not constrain the application target');
-    },
-  },
-  {
-    name: 'Personal salary evidence fingerprints change with grounded career facts and snapshot identity',
-    run: () => {
-      const current = packet();
-      assert.equal(personalSalaryEvidenceFingerprint(current), personalSalaryEvidenceFingerprint(packet()));
-      assert.notEqual(personalSalaryEvidenceFingerprint(current), personalSalaryEvidenceFingerprint({ ...current, careerSnapshotId: 'b'.repeat(64) }));
-      assert.notEqual(personalSalaryEvidenceFingerprint(current), personalSalaryEvidenceFingerprint({ ...current, evidence: [] }));
     },
   },
   {

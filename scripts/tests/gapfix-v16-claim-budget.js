@@ -428,7 +428,7 @@ export default [
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'claim-budget-mutation-'));
       try {
         // Sibling imports are rewritten to absolute URLs so the copy can live outside the repository.
-        const toAbsolute = text => text.replace(/from '(\.\/[^']+)'/gu, (_, relative) => `from '${pathToFileURL(path.resolve('electron/ipc', relative)).href}'`);
+        const toAbsolute = text => text.replace(/from '(\.{1,2}\/[^']+)'/gu, (_, relative) => `from '${pathToFileURL(path.resolve('electron/ipc', relative)).href}'`);
         const load = async (name, mutate) => {
           const file = path.join(dir, `${name}.mjs`);
           fs.writeFileSync(file, toAbsolute(mutate(source)), 'utf8');

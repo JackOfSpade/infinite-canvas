@@ -98,7 +98,10 @@ export default [{
     const nameFence = 'if (NAME_CONTRACTIONS.has(String(piece).toLowerCase().replace(APOSTROPHES, "\'"))) return false;';
     assert.ok(nameSource.includes(nameFence));
     const dependencyUrl = new URL('../../electron/ipc/coverLetterChecks.js', import.meta.url).href;
-    const copiedNameSource = nameSource.replace("from './coverLetterChecks.js'", `from '${dependencyUrl}'`);
+    const escapeUrl = new URL('../../src/utils/regexEscape.js', import.meta.url).href;
+    const copiedNameSource = nameSource
+      .replace("from './coverLetterChecks.js'", `from '${dependencyUrl}'`)
+      .replace("from '../../src/utils/regexEscape.js'", `from '${escapeUrl}'`);
     const sabotagedName = await import(`data:text/javascript;base64,${Buffer.from(copiedNameSource.replace(nameFence, '')).toString('base64')}`);
     assert.ok(!namedTermFindings("For this role, I've maintained records.", ['I maintained records.'], nameCtx).some(item => item.term === "I've"));
     assert.ok(sabotagedName.namedTermFindings("For this role, I've maintained records.", ['I maintained records.'], nameCtx).some(item => item.term === "I've"));

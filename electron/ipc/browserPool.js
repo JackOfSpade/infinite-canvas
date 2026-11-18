@@ -20,7 +20,7 @@ import {
 } from './stealthBrowser.js';
 import { randomUUID } from 'crypto';
 import { logger } from '../logger.js';
-import { READINESS, resolveBudget, recordReady, recordBodySize, getBodyBaseline } from './scrapeBudget.js';
+import { READINESS, resolveBudget, recordSample, getBodyBaseline } from './scrapeBudget.js';
 import {
   extractDomain,
   isCoolingDown,
@@ -116,6 +116,7 @@ export function pauseBrowserPool(reason = 'manual') {
   };
 }
 
+// A read-only view of the queue, used by tests and available for diagnostics.
 export function getBrowserPoolQueueState() {
   return {
     active: activeCount,
@@ -277,9 +278,10 @@ export async function enrichTimeoutError(page, error) {
  * @param {number} args.expectedMinItems
  * @param {string} args.sourceKey - budget/rate-limiter/label key
  * @param {object|null} args.yieldStats
+ * @param {{bodyChars?:number}} [args.sample] - receives the body size of a clean read
  * @returns {Promise<object|null>} the warning, or null on a clean read
  */
-async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, itemsExtracted, expectedMinItems, sourceKey, yieldStats }) {
+async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, itemsExtracted, expectedMinItems, sourceKey, yieldStats, sample }) {
   let warning = null;
   try {
     // Clamp to what's left of the budget (minus a small margin) so a stuck
@@ -301,9 +303,10 @@ async function runAntiBotCheck({ page, startTs, budgetMs, url, pageResponse, ite
     if (warning) {
       logger.warn(`[BrowserPool] Anti-bot signal on ${url}: ${warning.code} — ${warning.evidence}`);
     } else if (itemsExtracted > 0 && html) {
-      // Clean response with real items — feed the body-size baseline so
-      // future suspicious-empty checks are judged against this source's norm.
-      recordBodySize(sourceKey, String(html).length);
+      // Clean response with real items — hand the body size back so the caller
+      // can feed the baseline, which future suspicious-empty checks are judged
+      // against, in the same store write as the timing sample.
+      if (sample) sample.bodyChars = String(html).length;
     }
   } catch (e) {
     logger.warn('[BrowserPool] Anti-bot detector failed (non-fatal):', e?.message || String(e));
@@ -571,6 +574,7 @@ async function executeScrape(url, extractorJS, options = {}) {
         const itemCount = __wrapped
           ? extractorResult.items.length
           : (Array.isArray(extractorResult) ? extractorResult.length : null);
+        const budgetSample = {};
         const warning = await runAntiBotCheck({
           page,
           startTs: scrapeStart,
@@ -581,15 +585,17 @@ async function executeScrape(url, extractorJS, options = {}) {
           expectedMinItems: options.expectedMinItems,
           sourceKey,
           yieldStats,
+          sample: budgetSample,
         });
 
         // Feed the budget learner: a positive-count stabilization that wasn't
         // flagged as a hard block is a clean "this is how long success takes"
         // sample. Blocks/throttles/empties are intentionally excluded so the
         // EMA tracks healthy timing, not stall duration.
-        if (stableElapsedMs != null && warning?.severity !== 'block') {
-          recordReady(sourceKey, stableElapsedMs);
-        }
+        recordSample(sourceKey, {
+          elapsedMs: stableElapsedMs != null && warning?.severity !== 'block' ? stableElapsedMs : null,
+          bytes: budgetSample.bodyChars,
+        });
 
         // Resolve a deferred SITE_CHANGED throw now that anti-bot detection has
         // run on the same page. If the 0-card page is actually a hard block

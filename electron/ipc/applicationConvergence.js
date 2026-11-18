@@ -12,37 +12,3 @@ export function expectedApplicationQualityDecision({ priorHash = '', currentHash
 export function applicationConvergenceInstruction({ revisionAttempt = 1, unchangedSignal = 'return the current document byte-for-byte unchanged' } = {}) {
   return `Measured revision ${revisionAttempt}. There is no fixed revision limit.${revisionAttempt > 1 ? ' A prior revision remained unsatisfied; make a material correction rather than a cosmetic paraphrase.' : ''} If no material correction remains without weakening stronger job-specific evidence, ${unchangedSignal} as the diminishing-returns signal.`;
 }
-
-// One convergence policy serves both generation routes. A document can keep
-// iterating for as long as the editor returns a novel candidate. Returning the
-// current document unchanged is the editor's explicit diminishing-returns
-// signal; returning any earlier candidate is a convergence cycle and stops the
-// loop for the same reason. There is no engineered maximum-attempt cap here:
-// the only other way this loop stops is an external abort of the manual
-// handoff itself (the user cancelling, or the window closing), not a billing
-// or quota failure — every call is a free human copy/paste handoff now.
-function assessApplicationRevision({ currentHash = '', candidateHash = '', seenHashes = [] } = {}) {
-  if (candidateHash === currentHash) {
-    return { accept: false, diminishingReturns: true, reason: 'the revision was byte-for-byte unchanged' };
-  }
-  if (seenHashes instanceof Set ? seenHashes.has(candidateHash) : Array.from(seenHashes || []).includes(candidateHash)) {
-    return { accept: false, diminishingReturns: true, reason: 'the revision repeated a previously measured document' };
-  }
-  return { accept: true, diminishingReturns: false, reason: 'the revision is a novel document candidate' };
-}
-
-export function createApplicationConvergenceTracker(initialHash = '') {
-  let currentHash = initialHash;
-  const seenHashes = new Set(initialHash ? [initialHash] : []);
-  return {
-    assess(candidateHash = '') {
-      const result = assessApplicationRevision({ currentHash, candidateHash, seenHashes });
-      if (result.accept) {
-        currentHash = candidateHash;
-        seenHashes.add(candidateHash);
-      }
-      return result;
-    },
-    get currentHash() { return currentHash; },
-  };
-}

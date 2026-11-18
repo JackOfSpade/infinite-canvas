@@ -20,7 +20,6 @@ const transcript = [
 const callRecord = {
   callId: 'call-3_A', nodeId: 'node-1', startedAt: '2026-11-08T10:00:00.000Z', endedAt: '2026-11-08T10:00:40.000Z', durationMs: 40000,
   persona: 'Warm hiring manager', transcript,
-  toneNotes: [{ atMs: 15000, note: 'voice dropped' }],
   toneSamples: [{ atMs: 5000, arousal: 0.4, dominance: 0.5, valence: 0.6 }, { atMs: 25000, arousal: 0.5, dominance: 0.6, valence: 0.4 }],
   candidateProsody: [{ startMs: 12000, endMs: 20000, speechMs: 6000, wordsPerMinute: 130, pauses: [{ startMs: 16000, endMs: 19000 }] }], voiceBaseline: { wordsPerMinute: 120 },
 };
@@ -71,7 +70,6 @@ export default [
         'headline: Checkout engineer.',
         'example: At Acme I led the migration.',
         'scribe verbatim: I um',
-        'voice dropped',
         'arousal 0.4 dominance 0.5 valence 0.6',
         '"endMs": 19000',
         'Never invent a number that is not in the metrics',
@@ -91,7 +89,7 @@ export default [
       ]);
       assert.deepEqual(analysis.chapters.map(chapter => chapter.markers.map(marker => `${marker.kind}:${marker.atMs}`)), [
         [],
-        ['moment:12000', 'tone:15000', 'pause:16000'],
+        ['moment:12000', 'pause:16000'],
         ['filler:23000', 'interruption:24000', 'chat:31000'],
         [],
       ]);
@@ -99,7 +97,7 @@ export default [
       assert.ok(markers.some(marker => marker.kind === 'pause' && marker.atMs === 16000), 'long pause marker');
       assert.ok(markers.some(marker => marker.kind === 'interruption' && marker.atMs === 24000), 'interruption marker');
       assert.ok(markers.some(marker => marker.kind === 'interruption' && marker.label === 'Talked over the interviewer'), 'interruption label follows beforeQuestionFinished');
-      assert.ok(markers.some(marker => marker.kind === 'tone' && marker.label === 'voice dropped'), 'tone note marker');
+      assert.ok(markers.every(marker => marker.kind !== 'tone'), 'no tone markers: nothing records live tone notes');
       assert.ok(markers.some(marker => marker.kind === 'moment' && marker.atMs === 12000), 'flagged moment marker');
       assert.ok(markers.some(marker => marker.kind === 'filler' && marker.atMs === 23000), 'filler moment marker');
       assert.ok(markers.some(marker => marker.kind === 'chat' && marker.atMs === 31000), 'typed chat marker');
@@ -172,7 +170,7 @@ export default [
   } },
   { name: 'practice call analysis: chapters are pure and ignore anchors that are not interviewer turns', async run() {
     const snapshot = structuredClone(transcript);
-    const input = { transcript, reviewChapters: [{ questionTurnIndex: 1, title: 'Not a question' }, { questionTurnIndex: 4, title: 'Motivation' }, { questionTurnIndex: 4, title: 'Duplicate' }, { questionTurnIndex: 2, title: 'Background' }, { questionTurnIndex: 77, title: 'Missing' }], moments: [], metrics: {}, toneNotes: [], durationMs: 40000 };
+    const input = { transcript, reviewChapters: [{ questionTurnIndex: 1, title: 'Not a question' }, { questionTurnIndex: 4, title: 'Motivation' }, { questionTurnIndex: 4, title: 'Duplicate' }, { questionTurnIndex: 2, title: 'Background' }, { questionTurnIndex: 77, title: 'Missing' }], moments: [], metrics: {}, durationMs: 40000 };
     const chapters = buildChapters(input);
     assert.deepEqual(chapters.map(chapter => [chapter.title, chapter.startMs, chapter.endMs, chapter.questionTurnIndex]), [
       ['Opening', 0, 7500, null], ['Background', 7500, 20500, 2], ['Motivation', 20500, 33000, 4], ['Closing', 33000, 40000, null],
@@ -196,9 +194,9 @@ export default [
     assert.match(checkReview({ ...review, moments: [{ turnIndex: 2, label: 'x', kind: 'rant' }] }, transcript).error, /kind must be one of/u);
     assert.match(checkReview(null, transcript).error, /not a JSON object/u);
     assert.deepEqual(checkReview(review, transcript).review.chapters, [{ questionTurnIndex: 4, title: 'Motivation' }, { questionTurnIndex: 2, title: 'Background' }]);
-    const prompt = buildReviewPrompt({ callRecord: { ...callRecord, toneSamples: [], toneNotes: [] }, plan: { cards: [] }, metrics: {}, wordsByTurn: { 3: [{ text: 'um' }] } });
+    const prompt = buildReviewPrompt({ callRecord: { ...callRecord, toneSamples: [] }, plan: { cards: [] }, metrics: {}, wordsByTurn: { 3: [{ text: 'um' }] } });
     assert.match(prompt, /\(no prepared answers were part of this call\)/u);
-    assert.match(prompt, /\(no tone notes were taken during the call\)/u);
+    assert.doesNotMatch(prompt, /TONE NOTES|tone notes/u, 'the always-empty live tone notes section is gone');
     assert.match(prompt, /\(no tone samples\)/u);
     assert.match(prompt, /scribe verbatim: um/u, 'words reach the prompt per answer');
     assert.deepEqual(wordsByAnswer(transcript, words), { 3: [words[0], words[1]], 5: [words[2]] });

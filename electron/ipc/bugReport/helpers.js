@@ -1,4 +1,4 @@
-import crypto from 'crypto';
+import { sha256Hex } from '../../utils/sha256Hex.js';
 
 // Shared utilities for bug-report markdown generation. Each is used by at
 // least two snapshot builders (jobs, marketplace, persisted-workspace), so
@@ -99,7 +99,7 @@ export function projectReportDiagnostic(value, fallback = 'not recorded', max = 
 }
 
 /** URLs, then local paths, then credential forms, then opaque ids. */
-export function redactReportText(value) {
+ function redactReportText(value) {
   return redactReportOpaqueIds(redactReportLogSecrets(redactReportLocalPathsInText(redactReportUrlsInText(value))));
 }
 
@@ -220,6 +220,16 @@ export function clipReportText(value, max) {
   return text.length > max ? `${text.slice(0, Math.max(1, max - 1))}…` : text;
 }
 
+// The window's inner size line for the viewport block, or '' when the renderer did not report a usable size.
+export function buildWindowSizeLine(frontEndState) {
+  const w = frontEndState?.windowInnerWidth;
+  const h = frontEndState?.windowInnerHeight;
+  if (typeof w === 'number' && typeof h === 'number' && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+    return `- Window: ${Math.round(w)}×${Math.round(h)} (inner, CSS px)`;
+  }
+  return '';
+}
+
 // Human age ("32s ago" / "5m ago" / "2h14m ago" / "never") for a timestamp —
 // shared by the marketplace module/status rollups' check-recency columns.
 export function formatAge(ts) {
@@ -257,14 +267,11 @@ export function visitCanvasNodes(nodes, fn) {
 }
 
 // Renders the model that actually served an AI stage (recorded per stage via the
-// LLM layer's `meta` out-param — always the literal string 'non-api-ai' on the
-// manual-handoff transport, since there is exactly one transport and no model
-// selection). `fallback` (optional, `{ attempts, reason, counts, preferredModel }`)
-// is a holdover from the retired provider-cascade era: nothing populates it
-// anymore, so the "weak fallback"/"fell back" branches below are permanently
-// dormant. Kept rather than deleted because several bug-report call sites still
-// pass a `fallback` argument through this shape; ripping it out here without
-// touching every caller would just move the dead field, not remove it.
+// LLM layer's `meta` out-param). `fallback` (optional, `{ attempts, reason,
+// counts, preferredModel }`) describes earlier models that failed before this one
+// served the call. Job scoring still fills it from the call's `meta.fallback`;
+// marketplace records saved by earlier versions may carry it too, and a missing
+// `fallback` simply renders the bare model.
 export const modelTag = (model, fallback) => {
   if (!model) return '';
   const preferredModel = fallback?.preferredModel || '';
@@ -290,9 +297,12 @@ export const modelTag = (model, fallback) => {
 // job, or run token that can be joined back to local state.  Keep this here so
 // every report renderer uses the same stable, one-way label rather than
 // accidentally reintroducing a UUID prefix.
+// The ten-hex-character digest behind every such label. It always hashes its
+// input, so an empty string still gives a digest.
+export const reportDigestHex = value => sha256Hex(value).slice(0, 10);
 export const reportCorrelationDigest = (value, fallback = 'not recorded') => {
   if (typeof value !== 'string' || !value) return fallback;
-  return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
+  return `#${reportDigestHex(value)}`;
 };
 
 // Decides whether a pipeline's telemetry belongs to the current canvas window
@@ -434,7 +444,6 @@ export const renderSessionTraceBlocks = (platforms, cache) => platforms.map(p =>
           check.finalUrl ? redactReportUrl(check.finalUrl) : null,
           check.softWallMatch ? 'softWall=detected' : null,
           check.antiBot ? `antiBot=${check.antiBot}` : null,
-          check.sessionCookieCount != null ? `cookies=${check.sessionCookieCount}` : null,
           check.error ? 'error=recorded' : null,
         ].filter(Boolean);
         lines.push(`    - ${clipReportText(parts.join(' | ').replace(/`/g, "'"), 320)}`);

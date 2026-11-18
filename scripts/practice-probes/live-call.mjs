@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { wavHeader } from '../../electron/practiceCall/audio/wavFormat.js';
 
 const [repo, outDir, steering = ''] = process.argv.slice(2);
 const userData = path.join(os.homedir(), 'Library/Application Support/infinite-canvas');
@@ -30,13 +31,6 @@ function createFakeHelper({ onEvent }) {
   let t0 = 0; let fd = null; let tick = null; let written = 0; let stopped = false;
   const utter = new Map();
   const at = () => Math.max(0, Math.round(performance.now() - t0));
-  const header = dataBytes => {
-    const h = Buffer.alloc(44);
-    h.write('RIFF', 0); h.writeUInt32LE(36 + dataBytes, 4); h.write('WAVE', 8); h.write('fmt ', 12);
-    h.writeUInt32LE(16, 16); h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(16000, 24);
-    h.writeUInt32LE(32000, 28); h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write('data', 36); h.writeUInt32LE(dataBytes, 40);
-    return h;
-  };
   const emit = event => { setTimeout(() => { if (!stopped || event.type === 'recording') onEvent(event); }, 15); };
   const durationMs = u => (u.bytes / 2 / u.rate) * 1000;
   const position = u => {
@@ -58,7 +52,7 @@ function createFakeHelper({ onEvent }) {
     start({ recordingPath }) {
       t0 = performance.now();
       fd = fs.openSync(recordingPath, 'w');
-      fs.writeSync(fd, header(0));
+      fs.writeSync(fd, wavHeader(0, 16000));
       tick = setInterval(() => {
         const need = Math.floor(at() * 16) * 2 - written;
         if (need > 0) { fs.writeSync(fd, Buffer.alloc(need)); written += need; }
@@ -102,7 +96,7 @@ function createFakeHelper({ onEvent }) {
       for (const u of utter.values()) clear(u);
       const need = Math.floor(at() * 16) * 2 - written;
       if (need > 0) { fs.writeSync(fd, Buffer.alloc(need)); written += need; }
-      fs.writeSync(fd, header(written), 0, 44, 0);
+      fs.writeSync(fd, wavHeader(written, 16000), 0, 44, 0);
       fs.closeSync(fd);
       setTimeout(() => emit({ type: 'recording', state: 'closed', durationMs: Math.round(written / 32) }), 20);
       return { status: 'stopped' };
@@ -181,7 +175,6 @@ service.onEvent(event => {
   if (event?.type === 'overlay') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   >>> SPOKEN OVER by ${event.speakerId}: ${event.text}`);
   if (event?.type === 'ended') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   === call ended: ${event.reason}${event.cause ? ` (${event.cause})` : ''} ===`);
   if (event?.type === 'pad') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s]   === pad ${event.open ? `opened (${event.lang})` : 'closed'} ===`);
-  if (event?.kind === 'participant-joined') say(`[${((performance.now() - t00) / 1000).toFixed(1)}s] JOINED ${event.id} ${event.name}`);
   if (event?.kind === 'caption' && event.final) {
     // On a panel call the line is labelled with the interviewer who spoke last in it.
     const who = (service.getState().participants || []).find(item => item.id === event.speakerId);

@@ -160,8 +160,7 @@ async function writeCollisionFreeReport(dir, date, content) {
 // generate-bug-report-markdown handler) needs that failure to trigger its
 // inline-fallback path rather than silently reporting success with nothing
 // on disk.
-export async function writeSavedBugReport(markdown, meta = {}) {
-  void meta; // reserved for future provenance (e.g. reportWindowId); unused today
+export async function writeSavedBugReport(markdown) {
   // Never race the startup prune — see the `inFlightStartupPrune` comment above.
   if (inFlightStartupPrune) await inFlightStartupPrune.catch(() => {});
 

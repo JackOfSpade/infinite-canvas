@@ -8,6 +8,7 @@ import { OFFICIAL_LEVELS, TEXT_LEVELS, normalizeOfficialPosting } from './offici
 import { coreTitle, locationsCompatible } from './officialPostingMatch.js';
 import { officialPostingConsolidatedMemberShapes, officialPostingSemanticProofMatches } from './officialPostingSemantic.js';
 import { strictEmployerEqual } from './officialSourceHosts.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 const TEXT_BYTE_LIMIT = 3 * 1024 * 1024;
 const RECORD_BYTE_LIMIT = 2 * 1024 * 1024;
@@ -16,7 +17,7 @@ const CONTENT_HASH_RE = /^[a-f0-9]{64}$/u;
 const DURABLE_OUTCOMES = new Set(['found', 'link-only', 'unreadable']);
 const missingTextAttempts = new WeakMap();
 
-const sha256 = value => crypto.createHash('sha256').update(value).digest('hex');
+const sha256 = sha256Hex;
 const identityPart = value => String(value ?? '').normalize('NFKC').replace(/\s+/gu, ' ').trim().toLowerCase();
 function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;

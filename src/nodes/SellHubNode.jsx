@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect, useCallback, useContext, useMemo } 
 import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
-import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
+import { usePlatformsVerifyingProgress } from '../contexts/usePlatformsVerifyingProgress';
+import { isTerminalSourceStatus } from '../utils/sourceProgress';
 import { HubContainer } from '../components/HubContainer';
 import { Camera } from 'lucide-react';
 import { ACTIVE_COMP_SOURCES, SELL_PLATFORMS } from '../utils/constants';
@@ -41,6 +42,7 @@ import {
 } from '../utils/priceDropReminder';
 import { getConnectedHubCards } from '../utils/connectedHubCards';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { useMarketplaceRecoveryPeek } from '../hooks/useMarketplaceRecoveryPeek';
 import { useRenderStorm } from '../hooks/useRenderStorm';
 import {
   isAutomaticMarketplaceResolveIntent,
@@ -81,7 +83,6 @@ function isOversizedImageError(message) {
 // Purely visual: synthesis/pricing already ran independently, so this never
 // gates the AI analysis. Blocked/errored/warned cards stay actionable.
 const COMP_CARD_DISMISS_GRACE_MS = 10_000;
-const TERMINAL_COMP_STATUSES = new Set(['done', 'error', 'skipped']);
 
 function formatPriceDropLogPrice(value) {
   const price = Number(value);
@@ -123,7 +124,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   const initialDropAcceptedRef = useRef(false);
   const autoResumedRunRef = useRef(null);
   const autoResumedResolveRef = useRef(null);
-  const recoveryPeekScopeRef = useRef(null);
   const terminalAppliedThisProcessRef = useRef(new Set());
   const marketplaceRecoveryRef = useRef(data.marketplaceRunResume || null);
   const isMountedRef = useIsMountedRef();
@@ -300,7 +300,6 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   // ops (marketplaceBrowserLock); a queued op emits queuedBehind>0, then 0 once
   // it acquires the shared browser.
   const [queueWait, setQueueWait] = useState(0);
-  const [recoveryHydrated, setRecoveryHydrated] = useState(false);
   const [resolveQueueWait, setResolveQueueWait] = useState(0);
 
   const syncResolveWorkCount = useCallback(() => {
@@ -486,7 +485,7 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
         : persistedCleanTerminal
           ? persisted
           : (live || persisted);
-      return !!effective && TERMINAL_COMP_STATUSES.has(effective.status);
+      return !!effective && isTerminalSourceStatus(effective.status);
     });
     if (allVisibleCardsTerminal) {
       scheduleCleanCompCardDismiss();
@@ -620,67 +619,20 @@ export const SellHubNode = React.memo(function SellHubNode({ id, data }) {
   }, [startAnalysis]);
 
   // Hydrate the renderer mirror from the canonical main-process sidecar before
-  // any restart effect is allowed to run. This closes the debounce window where
-  // the sidecar reached disk but the canvas JSON did not.
-  useEffect(() => {
-    const scope = `${canvasFilePath || '(unsaved)'}\u0000${id}`;
-    if (recoveryPeekScopeRef.current === scope) return;
-    recoveryPeekScopeRef.current = scope;
-    setRecoveryHydrated(false);
-    let disposed = false;
-    let hydrated = false;
-    void (async () => {
-      try {
-        if (!canvasFilePath || !window.electronAPI?.peekMarketplaceRecovery) return;
-        const result = await window.electronAPI.peekMarketplaceRecovery({
-          canvasFilePath, nodeId: id, kind: 'sellhub',
-        });
-        if (disposed || !result?.success) return;
-        if (!result.found) {
-          const local = marketplaceRecoveryRef.current;
-          if (['abandoned', 'completed'].includes(result.status)
-            && local?.runId === result.runId
-            && local?.inputKey === result.inputKey) {
-            marketplaceRecoveryRef.current = null;
-            updateGlobal(id, { marketplaceRunResume: null });
-          }
-          return;
-        }
-        if (!isRestorableMarketplaceRecovery(result.recovery)) return;
-        if (marketplaceTerminalReceiptApplied(result.recovery, marketplaceRecoveryRef.current)) {
-          const acknowledgement = await window.electronAPI?.acknowledgeMarketplaceRecovery?.({
-            canvasFilePath,
-            nodeId: id,
-            kind: 'sellhub',
-            runId: result.recovery.runId,
-            inputKey: result.recovery.inputKey,
-            appliedProcessEpoch: marketplaceRecoveryRef.current?.terminalApplied?.appliedProcessEpoch,
-            reason: 'exact-terminal-result-observed-after-restart',
-          });
-          if (!disposed && acknowledgement?.success && acknowledgement?.completed) {
-            updateGlobal(id, { marketplaceRunResume: null });
-          }
-          return;
-        }
-        updateGlobal(id, {
-          marketplaceRunResume: { ...result.recovery, receiptObservedProcessEpoch: result.processEpoch },
-        });
-      } catch (error) {
-        EventLogger.error(`[SellHub][${id}] Recovery hydration failed:`, error);
-      } finally {
-        if (!disposed) {
-          hydrated = true;
-          setRecoveryHydrated(true);
-        }
-      }
-    })();
-    return () => {
-      disposed = true;
-      // The disposed pass never reports hydration, so the next pass must peek
-      // again rather than skip on the scope it left behind.
-      if (!hydrated && recoveryPeekScopeRef.current === scope) recoveryPeekScopeRef.current = null;
-    };
-  }, [canvasFilePath, id, updateGlobal]);
+  // any restart effect is allowed to run.
+  const recoveryHydrated = useMarketplaceRecoveryPeek({
+    id,
+    canvasFilePath,
+    kind: 'sellhub',
+    resumeKey: 'marketplaceRunResume',
+    logTag: 'SellHub',
+    recoveryRef: marketplaceRecoveryRef,
+    updateGlobal,
+    isRestorable: isRestorableMarketplaceRecovery,
+    applyRestorable: (result) => updateGlobal(id, {
+      marketplaceRunResume: { ...result.recovery, receiptObservedProcessEpoch: result.processEpoch },
+    }),
+  });
 
   // A restart in 'comps-ready' restores the warnings but NOT the comp cards.
   // The save sanitizer drops comp-source cards whose hub was still transient

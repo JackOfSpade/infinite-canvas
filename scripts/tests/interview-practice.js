@@ -5,7 +5,7 @@ import path from 'node:path';
 import { bundleComponent, withDom } from './fixtures/practice-connector/mountComponent.js';
 import { withTimeout } from './fixtures/practice-connector/harness.js';
 import { INTERVIEW_PRACTICE_FEEDBACK_SCHEMA, PRACTICE_CALL_ID_RE, PRACTICE_CODE_RE, newPracticeCode, orderPracticeQuestions, practiceCodeHash, validatePracticeFeedback } from '../../electron/ipc/interviewQaPractice.js';
-import { findInterviewPracticeSession, listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
+import { listInterviewPracticeSessions, loadInterviewPractice, recordInterviewPracticeFeedback, saveInterviewPractice, saveInterviewPracticeSession } from '../../electron/ipc/interviewQaStore.js';
 import { createInterviewPracticeRegistry } from '../../electron/ipc/interviewPracticeRegistry.js';
 
 async function userData(run) {
@@ -64,9 +64,9 @@ export default [
       assert.equal(await loadInterviewPractice({ userDataPath: dir, nodeId: 'nobody' }), null);
       const hash = practiceCodeHash('PRACTICE-A');
       await saveInterviewPracticeSession({ userDataPath: dir, nodeId: 'h', session: { codeHash: hash, status: 'armed', armedAt: new Date().toISOString(), company: 'Discord' } });
-      const found = await findInterviewPracticeSession({ userDataPath: dir, codeHash: hash });
+      const found = (await listInterviewPracticeSessions({ userDataPath: dir })).find(item => item.session.codeHash === hash);
       assert.equal(found.nodeId, 'h'); assert.equal(found.session.status, 'armed');
-      assert.equal(await findInterviewPracticeSession({ userDataPath: dir, codeHash: practiceCodeHash('PRACTICE-B') }), null);
+      assert.equal((await listInterviewPracticeSessions({ userDataPath: dir })).find(item => item.session.codeHash === practiceCodeHash('PRACTICE-B')), undefined);
       await recordInterviewPracticeFeedback({ userDataPath: dir, nodeId: 'h', feedback: validatePracticeFeedback(feedbackPayload('x')), receivedAt: '2026-10-30T01:00:00.000Z' });
       await recordInterviewPracticeFeedback({ userDataPath: dir, nodeId: 'h', feedback: { ...validatePracticeFeedback(feedbackPayload('x')), overall: { score: 9, summary: 'Better.' } }, receivedAt: '2026-10-30T02:00:00.000Z' });
       saved = await loadInterviewPractice({ userDataPath: dir, nodeId: 'h' });

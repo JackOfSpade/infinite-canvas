@@ -1,4 +1,4 @@
-import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, filterHistoryForResume, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, tagJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
+import { PLATFORM_LOGIN_URLS, PRICE_SYNTHESIS_SCHEMA, RESUMABLE_MAX_AGE_MS, SELL_PLATFORMS, appendJobsHistory, assert, buildFinalListingTitle, buildItemQuery, buildMarketplacePipelineSnapshot, buildRefreshResearchItems, buildResearchItems, bundleSynergyForPrices, classifyCompScrapeFailure, classifyUnparseableSalary, clearRun, computeBundleTotal, computeMissingLogins, computeResumeStartPagesByQuery, createAggregatingProgress, createNonOverlappingRunner, dedupAgainstHistory, dedupKeysFor, deriveBundlePricingResult, fs, getBrowserPoolQueueState, getMarketplaceBrowserQueueDepth, getMarketplaceHubStatusLabel, getMarketplaceTelemetry, getRequiredCompLoginPlatformIds, getSellMonitorConfig, getSharedProfileLockSnapshot, getSoftLoginWallMatch, getStatusCheckQueueDepth, hasMojibake, isConfirmedDisconnectedVerdict, isTrustedNativeLoginResult, loadJobsHistory, looksLikeMoney, markSourceStatus, modelTag, mojibakeExcerpt, normalizeBundlePricingResult, normalizePricingNotes, os, overPricedSoldFlag, parseSalaryToNumeric, path, pauseBrowserPool, queueScrape, readPageContentBounded, readRunState, readStagedJobs, recordSourcePage, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, selectRestorableStatuses, setStage, startRun, summarizeJobLanguages, taskMaxTokensFor, withMarketplaceBrowserLock, withSharedProfileLock, withStatusCheckLock } from '../test-dependencies.js';
 import { isMarketplaceSourceLifecycleAbort, packBatchPriceSynthesisItems, validateBatchPriceSynthesisSubmission, validateMarketplaceBatchExecution } from '../../electron/ipc/marketplace.js';
 import { BATCH_OUTPUT_TOKEN_BUDGET, priceSynthesisBatchFits, priceSynthesisBatchMaxComps } from '../../electron/ipc/resultCaps.js';
 import { collectMarketplaceRecoveryOwners } from '../../src/utils/canvasInteractions.js';
@@ -154,15 +154,13 @@ export default [
     },
   },
 {
-    name: 'tagJobLanguages + summarizeJobLanguages: tags non-English, leaves English untouched',
+    name: 'summarizeJobLanguages: counts tagged non-English rows with a bounded sample',
     run: () => {
       const jobs = [
         { title: 'Data Engineer', snippet: 'We are looking for an engineer to join our team and build pipelines with SQL and Python.', source: 'ziprecruiter', location: 'Toronto, ON' },
         { title: 'Développeur', snippet: "Nous recherchons un développeur pour rejoindre notre équipe et travailler sur des applications avec une bonne expérience du poste.", source: 'glassdoor', location: 'Montréal, QC' },
       ];
-      tagJobLanguages(jobs);
-      assert(jobs[0].language === undefined, `English job stays untagged, got ${jobs[0].language}`);
-      assert(jobs[1].language === 'fr', `French job tagged fr, got ${jobs[1].language}`);
+      jobs[1].language = 'fr';
       const sum = summarizeJobLanguages(jobs);
       assert(sum.total === 2 && sum.nonEnglish === 1 && sum.byLang.fr === 1, `summary: 2 total, 1 fr → ${JSON.stringify(sum)}`);
       assert(/Montréal/.test(sum.samples.fr?.label || ''), `fr sample names the listing → ${JSON.stringify(sum.samples.fr)}`);
@@ -1095,6 +1093,28 @@ export default [
     },
   },
 {
+    name: 'comp progress aggregator: flush releases a source the last item never reported, and only once',
+    run: () => {
+      const events = [];
+      const factory = createAggregatingProgress({ totalItems: 2, send: (p) => events.push(p) });
+      const first = factory(0);
+      first('ebay-sold', { status: 'searching', count: 0 });
+      first('ebay-sold', { status: 'done', count: 4 });
+      first('reverb', { status: 'searching', count: 0 });
+      first('reverb', { status: 'done', count: 2 });
+      const last = factory(1);
+      last('reverb', { status: 'done', count: 3 });     // the last item never reports ebay-sold
+      assert(!events.some(e => e.sourceId === 'ebay-sold' && e.status === 'done'), 'before the flush the missed source is still held back');
+      factory.flush();
+      const released = events.filter(e => e.sourceId === 'ebay-sold' && e.status === 'done');
+      assert(released.length === 1 && released[0].count === 4, `flush releases the held source with its cumulative count — got ${JSON.stringify(released)}`);
+      assert(events.filter(e => e.sourceId === 'reverb' && e.status === 'done').length === 1, 'a source the last item reported is not released twice');
+      factory.flush();
+      assert(events.filter(e => e.status === 'done').length === 2, 'a second flush sends nothing more');
+      return { ok: true };
+    },
+  },
+{
     name: 'comp progress aggregator: block in any item → terminal error; single item passes straight through',
     run: () => {
       // Bundle: blocked in item 0, fine in item 1 → final terminal is error (sticky warning).
@@ -1753,43 +1773,6 @@ export default [
       const terminalSibling = computeResumeStartPagesByQuery({ queries: { '#0': { lastPage: 3, terminal: true }, '#1': { lastPage: 1 } } }, ['first', 'second']);
       assert(terminalSibling[0]?.terminal === true && terminalSibling[1]?.terminal === false,
         'a completed query has a durable terminal marker independent of an interrupted sibling cursor');
-      return { ok: true };
-    },
-  },
-{
-    // Regression: search-jobs appends kept jobs to history BEFORE scoring, so a
-    // crash in the scoring window left every staged job already "seen" — the
-    // resume recovered them from staging and dedupAgainstHistory then deleted
-    // the entire recovery (~0 jobs from an hour of scraping).
-    name: 'filterHistoryForResume: exempts the crashed run\'s own rows, keeps older history',
-    run: () => {
-      const T_RUN = Date.parse('2026-06-10T08:00:00Z');
-      const recovered = [
-        { title: 'Eng', company: 'Acme', location: 'Denver', url: 'https://jobs/eng' },
-        { title: 'PM', company: 'Beta', location: '', url: 'https://jobs/pm' },
-      ];
-      const history = [
-        // Written by the crashed run itself (same day, matching keys) → exempt.
-        { seen_date: '2026-06-10', source: 'indeed', company: 'Acme', title: 'Eng', location: 'Denver', url: 'https://jobs/eng' },
-        { seen_date: '2026-06-10', source: 'dice', company: 'Beta', title: 'PM', location: '', url: 'https://jobs/pm' },
-        // Same day but NOT among the recovered jobs (another hub's completed run) → kept.
-        { seen_date: '2026-06-10', source: 'lever', company: 'Other', title: 'Designer', location: '', url: 'https://jobs/dsn' },
-        // Older run's row for one of the SAME jobs → kept (the original run
-        // would have dropped this job too; resume must behave identically).
-        { seen_date: '2026-06-01', source: 'indeed', company: 'Acme', title: 'Eng', location: 'Denver', url: 'https://jobs/eng' },
-      ];
-      const filtered = filterHistoryForResume(history, recovered, T_RUN);
-      assert(filtered.length === 2, `exempts exactly the run's own rows (kept ${filtered.length})`);
-      assert(filtered.some(r => r.title === 'Designer'), 'same-day row for a non-recovered job is kept');
-      assert(filtered.some(r => r.seen_date === '2026-06-01'), 'older-run row for the same job is kept');
-      // End-to-end: the recovered Eng job is STILL dropped (older history hit),
-      // but PM survives — its only history row was the crashed run's own write.
-      const { kept, removed } = dedupAgainstHistory(recovered, filtered);
-      assert(kept.length === 1 && kept[0].title === 'PM' && removed === 1,
-        'resume keeps the recovery except genuinely-seen-before jobs');
-      // Guards: no recovery / no timestamp → untouched.
-      assert(filterHistoryForResume(history, [], T_RUN).length === history.length, 'no recovered jobs → no exemption');
-      assert(filterHistoryForResume(history, recovered, NaN).length === history.length, 'no run timestamp → no exemption');
       return { ok: true };
     },
   },

@@ -34,15 +34,6 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-export function buildWindowSizeLine(frontEndState) {
-  const w = frontEndState?.windowInnerWidth;
-  const h = frontEndState?.windowInnerHeight;
-  if (typeof w === 'number' && typeof h === 'number' && Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
-    return `- Window: ${Math.round(w)}×${Math.round(h)} (inner, CSS px)`;
-  }
-  return '';
-}
-
 function safeOccluder(value) {
   if (typeof value !== 'string') return 'an element (description withheld)';
   if (SAFE_OCCLUDER_PATTERN.test(value)) return value;

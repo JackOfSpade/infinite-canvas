@@ -362,7 +362,7 @@ export default [
       assert(source.split(declaration).length === 2, 'the relevance number is declared once, so the mutation changes the one declaration');
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevance-trap-'));
       try {
-        const toAbsolute = text => text.replace(/from '(\.\/[^']+)'/gu, (_, relative) => `from '${pathToFileURL(path.resolve('electron/ipc', relative)).href}'`);
+        const toAbsolute = text => text.replace(/from '(\.{1,2}\/[^']+)'/gu, (_, relative) => `from '${pathToFileURL(path.resolve('electron/ipc', relative)).href}'`);
         const file = path.join(dir, 'old.mjs');
         fs.writeFileSync(file, toAbsolute(source.replace(declaration, 'export const MAX_EXPLICIT_RELEVANCE_PARAGRAPHS = 99;')), 'utf8');
         const old = await import(`${pathToFileURL(file).href}?v=old`);
@@ -438,7 +438,7 @@ export default [
       assert(source.split(declaration).length === 2, 'the constant is declared once, so the mutation changes the one number');
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'relevance-budget-mutation-'));
       try {
-        const toAbsolute = text => text.replace(/from '(\.\/[^']+)'/gu, (_, relative) => `from '${pathToFileURL(path.resolve('electron/ipc', relative)).href}'`);
+        const toAbsolute = text => text.replace(/from '(\.{1,2}\/[^']+)'/gu, (_, relative) => `from '${pathToFileURL(path.resolve('electron/ipc', relative)).href}'`);
         const load = async (name, mutate) => {
           const file = path.join(dir, `${name}.mjs`);
           fs.writeFileSync(file, toAbsolute(mutate(source)), 'utf8');

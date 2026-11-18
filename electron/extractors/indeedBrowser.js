@@ -432,23 +432,6 @@ function summarizeIndeedEnrichmentAttempts(jobs) {
   return { rowsWithAttempts, attempted, enriched, empty, challenge, unavailable, error, stages };
 }
 
-// An expired detail URL is neither a missing description nor a bot wall.  In
-// particular, retrying it cannot recover score evidence, so keep this narrow
-// and require Indeed's own unavailable-page wording rather than matching a
-// phrase that could appear in a legitimate job description.
-export function classifyIndeedUnavailablePage({ title = '', body = '' } = {}) {
-  const text = `${title}\n${body}`.replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, ' ').trim().toLowerCase();
-  if (!text) return null;
-  if (
-    text.includes("we can't find this page") &&
-    (text.includes("this page doesn't exist") || text.includes("isn't available right now"))
-  ) return 'page-unavailable';
-  if (text.includes('this job is no longer available') || text.includes('job is no longer available')) {
-    return 'job-unavailable';
-  }
-  return null;
-}
-
 // Scroll card into view + real mouse move + click — mirrors the probe step 5/6 approach
 // that generated the mouse-event sequence Cloudflare behavioral scoring expects.
 // The card is found by its job key at click time, because the list can change between reads.

@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { updateModalCount } from './modalStack';
+import { useModalFocusTrap } from './useModalFocusTrap';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { InterviewQaBadges } from './InterviewQaBadges';
 import { InterviewCardPreview, InterviewQaMatchTester, inputClass } from './InterviewQaCardPreview';
@@ -99,20 +99,8 @@ function QaDialog({ qa, error, loading, reload, mutate, busy, readOnly, onClose 
   const ref = useRef(null);
   const closeRef = useRef(null);
   const titleId = useId();
-  useEffect(() => {
-    updateModalCount(1);
-    const previous = document.activeElement;
-    closeRef.current?.focus();
-    return () => { updateModalCount(-1); if (previous instanceof HTMLElement && document.contains(previous)) previous.focus(); };
-  }, []);
+  const trap = useModalFocusTrap(ref, closeRef);
   useEscapeToClose(event => { event.preventDefault(); if (!busy) onClose(); }, { capture: true });
-  const trap = event => {
-    if (event.key !== 'Tab') return;
-    const elements = [...ref.current.querySelectorAll('button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], summary')];
-    const first = elements[0]; const last = elements.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-  };
   return createPortal(<div className="nodrag nowheel fixed inset-0 z-[10000] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm" onMouseDown={event => { if (event.target === event.currentTarget && !busy) onClose(); }}>
     <div ref={ref} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onKeyDown={trap} className="flex max-h-[90vh] w-[720px] max-w-full flex-col rounded-xl border border-white/15 bg-[#1d1a26] text-white shadow-2xl">
       <header className="flex items-center justify-between border-b border-white/15 p-4"><h2 id={titleId} className="text-base font-semibold">Edit Q&A</h2><button ref={closeRef} type="button" className={buttonClass} disabled={busy} onClick={onClose}>Close</button></header>

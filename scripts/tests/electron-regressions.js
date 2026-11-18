@@ -24,7 +24,6 @@ import {
   __recoveryRebindJournalForTests,
   assert,
   assertDeleteTargetNotRepresented,
-  atomicWriteFile,
   BACKGROUND_E2E_DISABLED_CODE,
   BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS,
   backgroundE2EDisabledError,
@@ -41,7 +40,7 @@ import {
   path,
   readValidatedTextFile,
   registerFilesystemHandlers,
-  resolveAllowedOpenFilePath,
+  inspectAllowedOpenFilePath,
   resolvePortableFilePaths,
   sanitizeDocumentMainHtml,
   runBackgroundE2EShutdownCleanup,
@@ -58,6 +57,13 @@ function senderEvent() {
   return { sender };
 }
 senderEvent.nextId = 1;
+
+// Replaces a file the way an editor's atomic save does: write a sibling, then rename it over the target.
+const replaceFileAtomically = async (targetPath, data) => {
+  const siblingPath = `${targetPath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.promises.writeFile(siblingPath, data);
+  await fs.promises.rename(siblingPath, targetPath);
+};
 
 const waitFor = async (predicate, description, timeoutMs = 3000) => {
   const deadline = Date.now() + timeoutMs;
@@ -724,11 +730,11 @@ export default [
         await fs.promises.writeFile(documentPath, 'zero');
         await registry.start(event.sender, documentPath);
 
-        await atomicWriteFile(documentPath, 'one');
+        await replaceFileAtomically(documentPath, 'one');
         await waitFor(() => changes.length >= 1, 'the first atomic replacement');
         const afterFirstAtomic = changes.length;
 
-        await atomicWriteFile(documentPath, 'two');
+        await replaceFileAtomically(documentPath, 'two');
         await waitFor(() => changes.length > afterFirstAtomic, 'the second atomic replacement');
         const afterSecondAtomic = changes.length;
 
@@ -1789,14 +1795,14 @@ export default [
           fs.promises.mkdir(directoryTarget),
         ]);
         await fs.promises.symlink(activeTarget, disguisedLink, process.platform === 'win32' ? 'file' : undefined);
-        assert(await resolveAllowedOpenFilePath(safeTarget) === await fs.promises.realpath(safeTarget),
+        assert((await inspectAllowedOpenFilePath(safeTarget)).resolvedPath === await fs.promises.realpath(safeTarget),
           'a safe regular file should resolve to its canonical path');
         let disguisedRejected = false;
-        try { await resolveAllowedOpenFilePath(disguisedLink); }
+        try { await inspectAllowedOpenFilePath(disguisedLink); }
         catch { disguisedRejected = true; }
         assert(disguisedRejected, 'an allowed-looking link to a restricted target must be rejected');
         let directoryRejected = false;
-        try { await resolveAllowedOpenFilePath(directoryTarget); }
+        try { await inspectAllowedOpenFilePath(directoryTarget); }
         catch { directoryRejected = true; }
         assert(directoryRejected, 'an allowed-looking directory must not be handed to the OS shell');
         return { canonicalTargetChecked: true, disguisedTargetRejected: true, directoryRejected: true };
@@ -1913,9 +1919,6 @@ export default [
 
         await fs.promises.unlink(linkedPath);
         await fs.promises.symlink(outsidePath, linkedPath, process.platform === 'win32' ? 'file' : undefined);
-        await atomicWriteFile(validatedPath, 'updated');
-        assert(await fs.promises.readFile(documentPath, 'utf8') === 'updated',
-          'the write must remain bound to the file that validation approved');
         assert(await fs.promises.readFile(outsidePath, 'utf8') === 'outside',
           'repointing the caller-controlled symlink must not redirect the write');
 
@@ -2471,7 +2474,7 @@ export default [
     },
   },
   {
-    name: 'canvas text mutations are bounded and atomic writes retain private file modes',
+    name: 'canvas text mutations are bounded and text writes retain the file mode',
     run: async () => {
       // Use /tmp rather than os.tmpdir(): macOS points the latter into /var,
       // which is intentionally on the production sensitive-path blocklist.
@@ -2479,7 +2482,6 @@ export default [
       const canvasPath = path.join(root, 'workspace.json');
       const textPath = path.join(root, 'notes.txt');
       const binaryPath = path.join(root, 'image.png');
-      const newPath = path.join(root, 'new-note.md');
       try {
         await Promise.all([
           fs.promises.writeFile(canvasPath, '{}'),
@@ -2500,14 +2502,12 @@ export default [
         assert(nonTextRejected && canvasRejected && containingFolderRejected,
           'renderer mutations must reject non-text editor targets and the open canvas or its containing folder');
 
-        await atomicWriteFile(newPath, 'private by default');
-        await atomicWriteFile(textPath, 'updated notes');
-        const newMode = (await fs.promises.stat(newPath)).mode & 0o777;
+        await writeValidatedTextFile(textPath, 'updated notes');
         const retainedMode = (await fs.promises.stat(textPath)).mode & 0o777;
         assert(await fs.promises.readFile(textPath, 'utf8') === 'updated notes'
-          && (process.platform === 'win32' || (newMode === 0o600 && retainedMode === 0o640)),
-        `atomic writes must preserve existing mode and make new files owner-only (got ${newMode.toString(8)}/${retainedMode.toString(8)})`);
-        return { nonTextRejected, canvasRejected, containingFolderRejected, newMode, retainedMode };
+          && (process.platform === 'win32' || retainedMode === 0o640),
+        `text writes must preserve the existing file mode (got ${retainedMode.toString(8)})`);
+        return { nonTextRejected, canvasRejected, containingFolderRejected, retainedMode };
       } finally {
         await fs.promises.rm(root, { recursive: true, force: true });
       }

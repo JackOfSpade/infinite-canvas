@@ -77,7 +77,6 @@ export { __applicationSyncStatePathForTests, __captureApplicationSyncWorkspaceId
 export { formatOriginalJobListingMarkdown, sanitizeApplicationBundlePart } from '../electron/ipc/applicationBundle.js';
 export { APPLICATION_PDF_PAGINATION_GEOMETRY_REVISION, GENERATION_AUDIT_VERSION, RESUME_ROLE_BULLET_CEILING, applicationVariantAttrsForJob, assertRetainedResumeRoleBullets, checkResumeBulletFocus, checkResumeBulletLength, checkResumeBulletOpeningVariety, checkResumeRoleBulletBudget, careerDataRoleLocation, evaluateResumeProseChecks, extractResumeEvidence, formatTypeAreaUtilization, inspectApplicationExport, inspectGeneratedApplicationPdf, isPendingApplicationWorkspaceSaveInFlight, normalizeApplicationAdditionalNotes, readRegisteredApplicationArtifact, registerJobApplicationHandlers, registerPendingApplicationWorkspace, resumeProjectProvenanceFailures, resumeRoleBlockSample, resumeRoleLocationFailures, retainedResumeRolesWithoutBullets, getApplicationTelemetry, recordApplicationTelemetry, resolvePendingApplicationWorkspaceForOwner, targetPageCountForJob, resumeTypeAreaUtilization, withUnregisteredApplicationWorkspacePruneClaim } from '../electron/ipc/jobApplication.js';
 export { projectContactChannels, projectTrustedIdentity, renderStructuredApplicationResume, ROLE_BULLET_EVIDENCE_EXCLUSIVITY_RULE, STRUCTURED_RESUME_SCHEMA_VERSION, validateStructuredApplicationResume } from '../electron/ipc/structuredResume.js';
-export { createApplicationConvergenceTracker } from '../electron/ipc/applicationConvergence.js';
 export { LOCAL_AI_APPLICATION_VERSION, assertSourceQuoteLinksFinalText, pasteAttributionScopeErrors, sanitizeQualityReview, buildLocalGenerationAuditArtifact, getLocalApplicationHandoff, discardLocalApplicationJob, discoverLocalApplicationJobs, localApplicationStatus, importLocalApplicationJob, registerLocalAiApplicationHandlers, resolveLocalOutputBundleRoot, submitLocalApplicationHandoff, validateLocalApplicationResult, withLocalAiJobPruneClaim, __writeVerifyRenderPhaseForTests, __holdWriteVerifyRenderForTests, __readWriteVerifyRenderHoldForTests, __setLocalAiRenderPdfForTests, __pasteFailedCheckErrorsForTests, __pasteUnitGroundingErrorsForTests, __validateAuthorityResumeArtifactsForTests, __setApplicationV2PagePngForTests } from '../electron/ipc/localAiApplication.js';
 import { __queueLegacyLocalApplicationFixtureForTests } from '../electron/ipc/localAiApplication.js';
 
@@ -88,7 +87,7 @@ export const queueLocalApplicationJob = __queueLegacyLocalApplicationFixtureForT
 export { LOCAL_AI_FALLBACK_IDLE_STATUSES, LOCAL_AI_CARD_POLL_IDLE_STATUSES, LOCAL_AI_JOB_INTEGRITY_ERROR_CODE, brokenLocalAiJobDriveState, jobIntegrityFailureMessage, registerMountedJobCard, unregisterMountedJobCard, isJobCardMounted, selectFallbackLocalAiJobs, selectOrphanedLocalAiJobs, failedOrphanRetireDecision, LOCAL_AI_FAILED_ORPHAN_RETIRE_MS } from '../src/utils/localAiFallback.js';
 export { canRegenerateLocalApplication, canSaveImportedLocalApplication, queuedLocalApplicationSettlement, replacedLocalApplicationForCleanup } from '../src/utils/localAiApplicationLifecycle.js';
 export { collectNodesDeep } from '../src/utils/navigationUtils.js';
-export { backgroundJobResumeRequest, collectNestedStartupRecoveryGraph, createWorkspaceStartupRecoveryCoordinator, hasNestedStartupRecoveryCandidate, isNestedStartupRecoveryCandidate, terminalMarketplaceReplayDisposition } from '../src/utils/workspaceStartupRecovery.js';
+export { backgroundJobResumeRequest, collectNestedStartupRecoveryGraph, createWorkspaceStartupRecoveryCoordinator, isNestedStartupRecoveryCandidate, terminalMarketplaceReplayDisposition } from '../src/utils/workspaceStartupRecovery.js';
 export { replaceApplicationBundleAtomically } from '../electron/ipc/applicationFileTransaction.js';
 export { LEDGER_CAP, MINING_TARGET, splitCareerDataByFile, normalizeQuoteText, computeLedger, applyRefuteVerdicts, ledgerById, derivationTooltip } from '../src/utils/achievementLedger.js';
 export { createEmptySkillOpportunityHistogram, normalizeOpportunityName, assertValidSkillOpportunityHistogram, migrateSkillOpportunityHistogram, mergeSkillOpportunityAnalysis, replaceSkillOpportunityAnalysis } from '../src/utils/skillOpportunityHistogram.js';
@@ -117,7 +116,6 @@ export { FILE_CATEGORIES, getFileCategoryInfo, toLocalFileUrl } from '../src/uti
 export { isProductImageExtension } from '../src/utils/fileExtensions.js';
 export { parsePostedDate, filterJobsByAge, filterJobsByPostedSince, POSTED_DATE_PATTERN } from '../electron/ipc/jobDateFilter.js';
 export {
-  JOB_SEARCH_MAX_LOOKBACK_DAYS,
   JOB_SEARCH_DEFAULT_INITIAL_LOOKBACK_DAYS,
   JOB_SEARCH_MIN_INITIAL_LOOKBACK_DAYS,
   JOB_SEARCH_MAX_INITIAL_LOOKBACK_DAYS,
@@ -128,7 +126,6 @@ export {
   jobSearchCompletionAnchor,
   jobSearchHistoricalAnchor,
   jobSearchNextAnchor,
-  jobSearchRescanAnchor,
   normalizeJobSearchInitialLookbackDays,
 } from '../src/utils/jobSearchDateWindow.js';
 export {
@@ -159,7 +156,7 @@ export { makeJobPageStop, STOP_STREAK, MIN_DATED_EVIDENCE } from '../electron/ip
 export { parseAiJson } from '../electron/ipc/jsonRepair.js';
 export { assertResponseMatchesSchema, assertResponseSchemaVocabularySupported, auditResponseSchemaVocabulary, canonicalizeResponseSchemaEnums, describeSchemaErrors, validateResponseSchema } from '../electron/ipc/schemaValidation.js';
 export { selectCorrectionDetails, validationFailure, validationFailureCollector, VALIDATION_DETAIL_LIMIT, VALIDATION_RULE_ID_RE, VALIDATION_SUMMARY_RULE_ID } from '../electron/ipc/validationFailure.js';
-export { applyProfileEditsWithRules, checkFindingAgainstLedgerWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../electron/ipc/careerProfileEdits.js';
+export { applyProfileEditsWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../electron/ipc/careerProfileEdits.js';
 export { __careerPageValidationDiagnosticForTests } from '../electron/ipc/careerSnapshot.js';
 export { JOB_GAP_REVIEW_SCHEMA, validateGapReviewSubmission } from '../electron/ipc/jobGapReview.js';
 export * as w4Jobs from '../electron/ipc/jobs.js';
@@ -176,7 +173,7 @@ export { withMarketplaceBrowserLock, getMarketplaceBrowserQueueDepth } from '../
 export { createAggregatingProgress } from '../electron/ipc/compProgressAggregator.js';
 export { buildFinalListingTitle, buildRefreshResearchItems, buildResearchItems, computeBundleTotal, recoverRefreshExtraItems, selectBundleHeadline, selectListingPriceTiers, buildItemQuery, bundleSynergyForPrices, deriveBundlePricingResult, normalizeBundlePricingResult } from '../src/utils/bundlePricing.js';
 export { clearMissingPreviewRelinkCache, clearMissingPreviewRelinkDiagnostics, clearMissingPreviewSearchRoots, findExactFilenameBelow, getMissingPreviewRelinkDiagnostics, rememberMissingPreviewSearchRoot, resolveMissingPreviewPath } from '../electron/ipc/missingPreviewRelink.js';
-export { __recoveryRebindJournalForTests, assertDeleteTargetNotRepresented, atomicWriteFile, cleanupStaleOwnedTempFiles, createFileWatchRegistry, readValidatedTextFile, registerFilesystemHandlers, resolveAllowedOpenFilePath, resolvePortableFilePaths, resolvePortableImagePath, isAllowedOpenFileExt, syncTextParentDirectory, validateMutablePath, writeValidatedTextFile } from '../electron/ipc/filesystem.js';
+export { __recoveryRebindJournalForTests, assertDeleteTargetNotRepresented, cleanupStaleOwnedTempFiles, createFileWatchRegistry, readValidatedTextFile, inspectAllowedOpenFilePath, registerFilesystemHandlers, resolvePortableFilePaths, resolvePortableImagePath, isAllowedOpenFileExt, syncTextParentDirectory, validateMutablePath, writeValidatedTextFile } from '../electron/ipc/filesystem.js';
 export { __compactErrorStackForTests, __runWithIpcRequestContextForTests, abortNodeTasks, abortNodeTasksAndWait, handleSafe, snapshotActiveNodeTasks } from '../electron/ipc/ipcUtils.js';
 export { isTrustedCanvasNavigation } from '../electron/canvasNavigation.js';
 export { decodeLocalFileRequestPath } from '../electron/localFileProtocol.js';
@@ -193,7 +190,7 @@ import {
   markSourceStatus as markSourceStatusRaw,
   setStage as setStageRaw,
   markProviderGathered as markProviderGatheredRaw,
-  readStagedJobs, readRunState, clearRun, clearRunWithResult,
+  readStagedJobs, readRunState, clearRunWithResult,
   completeRunWithReceipt as completeRunWithReceiptRaw,
   computeResumeStartPagesByQuery, jobRunPathScopeForCanvas,
   lastRunReceiptPathForCanvas, readLastRunReceipt, normalizeJobRunProfileFingerprint,
@@ -265,16 +262,16 @@ export const completeRunWithReceipt = async (canvasFilePath, receipt, options = 
     ? { ...options, expectedCareerSnapshotId: receiptPin }
     : legacyStagingFixtureOption(options));
 };
-export { readStagedJobs, readRunState, clearRun, clearRunWithResult, computeResumeStartPagesByQuery, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, readLastRunReceipt, normalizeJobRunProfileFingerprint, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, writeLastRunReceipt, pauseRunForManualResume, isJobRunAutomaticRecoveryEligible, RESUMABLE_MAX_AGE_MS };
+export { readStagedJobs, readRunState, clearRunWithResult, computeResumeStartPagesByQuery, jobRunPathScopeForCanvas, lastRunReceiptPathForCanvas, readLastRunReceipt, normalizeJobRunProfileFingerprint, sanitizeJobPreferencePlan, sanitizeJobPreferences, sanitizeLastRunReceipt, writeLastRunReceipt, pauseRunForManualResume, isJobRunAutomaticRecoveryEligible, RESUMABLE_MAX_AGE_MS };
 export { blankJobPreferencePlan, evaluateJobPreferences, hasJobPreferences, interpretJobPreferences, isValidJobPreferencePlanSubmission, listingIdsForRootBatch, normalizeJobPreferencePlan, resolveSearchRoles, screenJobRolesByTitle, validateJobPreferenceListingSubmission, validateJobPreferencePlanSubmission, validateJobRoleAuditSubmission } from '../electron/ipc/jobPreferences.js';
-export { dedupAgainstHistory, dedupKeysFor, filterHistoryForResume, appendJobsHistory, loadJobsHistory } from '../electron/ipc/jobsHistory.js';
+export { dedupAgainstHistory, dedupKeysFor, appendJobsHistory, loadJobsHistory } from '../electron/ipc/jobsHistory.js';
 export { clipReportText, modelTag, overPricedSoldFlag, redactReportEventHistoryLine, redactReportUrlsInText, renderSessionTraceBlocks, visitCanvasNodes } from '../electron/ipc/bugReport/helpers.js';
 export { looksLikeMoney, classifyUnparseableSalary, mojibakeExcerpt } from '../electron/ipc/bugReport/jobQualityChecks.js';
 export { buildMarketplacePipelineSnapshot } from '../electron/ipc/bugReport/marketplaceSnapshot.js';
 export { buildJobCompletionAssessment, buildJobRecoverySnapshot, buildJobsPipelineSnapshot, buildNonApiAiHandoffLifecycleMarkdown, collapseConsecutiveIdentical, formatChallengeTextEvidence, formatSourceEvent, formatGlassdoorCacheProvenance, formatPipelineState, postPipelineRecoveryAttemptCount } from '../electron/ipc/bugReport/jobsSnapshot.js';
 export { getJobAnalysisPaths } from '../electron/ipc/jobAnalysisPaths.js';
 export { buildNativeChallengeHistoryEvidence, generateMarkdown, registerBugReportHandlers } from '../electron/ipc/bugReport.js';
-export { formatJsonLdSalary, extractZipRecruiterDomSalaryText, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, glassdoorDateFilterReapplyUrl, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, validateGlassdoorLocationPick, glassdoorCachedLocationUsable, upgradeGlassdoorCountryRootCache, glassdoorLookupAttemptIsTransient, classifyGlassdoorLookupFailure, summarizeGlassdoorLookupAttempts, describeGlassdoorLocationFailure, reconcileZipRecruiterDomSalary, mergeExpandedJobDetail, extractGlassdoorPanelResponseDetail, mergeGlassdoorPanelDetail, glassdoorPanelResponseIdentity, normalizeDetailNavigationUrl, pinGlassdoorDetailUrlToListHost, ADVANCE_CONTROL_LABEL_PATTERNS, isDetachedDetailFrameError, hasManualVerificationText, hasManualHardBlockText, classifyManualChallengeSignals, CHALLENGE_INTERSTITIAL_MAX_CHARS, challengeHeartbeatIntervalMs, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, shouldNavigateForDescription, descriptionNavigationDecision, isZipRecruiterClosedDetailRedirect, isUnavailableDetailPage, zipRecruiterRetryAfterMs, isAppcastTemporaryRestriction, zipRecruiterAppcastRestrictionBackoffMs, isZipRecruiterDetailErrorShell, zipRecruiterDetailErrorShellBackoffMs, resolveManualSourceStopReason, browserClosedWarning, manualPageCapForTasks, didDetailBlockReprobeRecover, composeDetailBlockReprobeResult, recordIssuedManualQuery, recordManualScraperTelemetry, getManualScraperTelemetry, resetManualScraperTelemetry, recordActivityBeat, setActivitySink, scrapeManualSources, isIgnorableManualBrowserTelemetry, mergeDescriptionDetailMissWarning, extractGoogleApplyCandidatesFromDocument, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, selectGoogleApplyUrl, inspectDescriptionCardTargetAvailability, readDescriptionCardDomKey, readDescriptionPanelText, assessDetailSelection, assessDescriptionPanelUpdate, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, readActiveGoogleDetailTitle, inspectGlassdoorOpportunityModal } from '../electron/ipc/browser/manualScraper.js';
+export { formatJsonLdSalary, extractZipRecruiterDomSalaryText, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, glassdoorDateFilterReapplyUrl, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, validateGlassdoorLocationPick, glassdoorCachedLocationUsable, upgradeGlassdoorCountryRootCache, glassdoorLookupAttemptIsTransient, classifyGlassdoorLookupFailure, summarizeGlassdoorLookupAttempts, describeGlassdoorLocationFailure, reconcileZipRecruiterDomSalary, mergeExpandedJobDetail, extractGlassdoorPanelResponseDetail, mergeGlassdoorPanelDetail, glassdoorPanelResponseIdentity, normalizeDetailNavigationUrl, pinGlassdoorDetailUrlToListHost, ADVANCE_CONTROL_LABEL_PATTERNS, isDetachedDetailFrameError, hasManualVerificationText, hasManualHardBlockText, classifyManualChallengeSignals, CHALLENGE_INTERSTITIAL_MAX_CHARS, challengeHeartbeatIntervalMs, resolveManualChallengeTransition, resolveManualDetailChallengeDisposition, shouldNavigateForDescription, descriptionNavigationDecision, isZipRecruiterClosedDetailRedirect, isUnavailableDetailPage, zipRecruiterRetryAfterMs, isAppcastTemporaryRestriction, zipRecruiterAppcastRestrictionBackoffMs, isZipRecruiterDetailErrorShell, zipRecruiterDetailErrorShellBackoffMs, resolveManualSourceStopReason, browserClosedWarning, manualPageCapForTasks, didDetailBlockReprobeRecover, composeDetailBlockReprobeResult, recordIssuedManualQuery, recordManualScraperTelemetry, recordChallengeDetectedTelemetry, getManualScraperTelemetry, resetManualScraperTelemetry, recordActivityBeat, setActivitySink, scrapeManualSources, isIgnorableManualBrowserTelemetry, mergeDescriptionDetailMissWarning, extractGoogleApplyCandidatesFromDocument, buildDescriptionCardTargets, buildPhysicalCardWalkPlan, descriptionExpansionStrategy, descriptionPanelPacing, descriptionPanelRetryAllowed, selectGoogleApplyUrl, inspectDescriptionCardTargetAvailability, readDescriptionCardDomKey, readDescriptionPanelText, assessDetailSelection, assessDescriptionPanelUpdate, isGlassdoorPanelRateLimitResponse, isGoogleDescriptionPanelRateLimitResponse, readActiveGoogleDetailTitle, inspectGlassdoorOpportunityModal } from '../electron/ipc/browser/manualScraper.js';
 export { buildOverlayScript } from '../electron/ipc/browser/scraperOverlay.js';
 export { acceptIndeedScoreSafeDescription, classifyIndeedSessionPreflight, describeIndeedQueryOutcomes, indeedHostForLocation, indeedQueryPageEnd, isIndeedScoreSafeDescription, needsIndeedDescriptionRetry, recordIndeedEnrichmentAttempt, resolveIndeedPageBudgets, shouldHandoffIndeedChallengeToNative } from '../electron/extractors/indeedBrowser.js';
 export { classifyCompScrapeFailure, computeMissingLogins, getMarketplaceTelemetry, normalizePricingNotes } from '../electron/ipc/marketplace.js';
@@ -283,7 +280,7 @@ export { nativeLoginUsesScraperBuild, nativeLoginAppleScriptTarget, canAuthCooki
 export { APPLICATION_COVER_LETTER_SCHEMA, APPLICATION_DIRECT_COVER_LETTER_SCHEMA, JOB_TAXONOMY_CLASSIFY_SCHEMA, JOB_TAXONOMY_PLAN_SCHEMA, JOB_SCORING_SCHEMA, LETTER_GROUNDING_AUDIT_SCHEMA, LETTER_NEEDS_SCHEMA, LETTER_PLAN_SCHEMA, PRICE_SYNTHESIS_SCHEMA } from '../electron/ipc/aiSchemas.js';
 export { JOB_TAXONOMY_CHUNK_SIZE, buildJobTaxonomyPlanSummary, inspectJobTaxonomyRoleIndexes, normalizeJobTaxonomyPlan, validateJobTaxonomyPlan, runBoundedJobTaxonomy } from '../electron/ipc/jobTaxonomy.js';
 export { deriveLocationParam, summarizeLocationAdherence, filterProvablyOutsideCountryScope, pickGlassdoorLocation, describeLocationTreatment, LOCATION_TREATMENT } from '../src/utils/jobLocation.js';
-export { detectLanguage, englishShare, filterNonEnglishJobs, tagJobLanguage, tagJobLanguages, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
+export { detectLanguage, englishShare, filterNonEnglishJobs, summarizeJobLanguages } from '../src/utils/jobLanguage.js';
 export { reconcileGlassdoorSalaryFromDescription } from '../src/utils/jobSalaryReconciliation.js';
 export { repairMojibake, hasMojibake, repairJobsMojibake, normalizeJobMarkup, normalizeJobsMarkup, decodeHtmlEntities, stripHtmlToText } from '../src/utils/textEncoding.js';
 export { foldVerificationSample, orderByVerification, verificationScore } from '../src/utils/scrapeOrder.js';
@@ -326,7 +323,7 @@ export { clamp } from '../src/utils/mathUtils.js';
 export { LANGUAGE_LABELS, languageLabel } from '../src/utils/jobLanguageLabels.js';
 export { getEnvValue, parseScopeEnvBoolean } from '../src/utils/sourceScopeShared.js';
 export { pickEdgeHandles, structuralEdge } from '../src/nodes/_shared/edgeHelpers.js';
-export { PLAIN_TEXT_EXT, readPlainTextDocument } from '../electron/ipc/docUtils.js';
+export { readPlainTextDocumentWithReason } from '../electron/ipc/docUtils.js';
 export { CODE_EXT_RE, PRODUCT_IMAGE_EXT_RE } from '../src/utils/fileExtensions.js';
 export { cancelNodeTasksRecursively } from '../src/utils/canvasInteractions.js';
 export { deriveTimeoutBudget } from '../electron/ipc/scrapeBudget.js';
@@ -364,3 +361,6 @@ export { CAREERS as w5Careers, unitResume as w5UnitResume, authorityKit as w5Aut
 
 export * as w5Policy from '../electron/ipc/applicationWriteVerify.js';
 export { APPLICATION_V2_LIMITS as w5Limits } from '../electron/ipc/applicationV2Limits.js';
+
+// A test convenience over clearRunWithResult: true only when the sidecars were removed.
+export const clearRun = async (canvasFilePath, options = {}) => (await clearRunWithResult(canvasFilePath, options)).cleared === true;

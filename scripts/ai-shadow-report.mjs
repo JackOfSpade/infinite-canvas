@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isPathInside, resolveThroughExistingParentSync } from './lib/outside-repo.mjs';
 
 const Z_95 = 1.645; // one-sided 95%
 const Z_WILSON = 1.96; // two-sided 95% interval
@@ -200,9 +201,7 @@ export function renderMarkdown(summary) {
 
 /** True when `dir` is the repository root or inside it (symlinks resolved when the path exists). */
 export function isInsideRepo(dir, repoRoot) {
-  const real = target => { try { return fs.realpathSync(target); } catch { return path.resolve(target); } };
-  const rel = path.relative(real(repoRoot), real(dir));
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  return isPathInside(resolveThroughExistingParentSync(dir), resolveThroughExistingParentSync(repoRoot));
 }
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');

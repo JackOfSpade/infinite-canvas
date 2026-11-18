@@ -44,18 +44,26 @@ import { generateInterviewGlanceCues, needsGlanceCue } from './interviewAnswerCu
 import { generateInterviewApproaches } from './interviewAnswerApproach.js';
 import { addInterviewQaCard, deleteInterviewQaCard, fillInterviewQaApproaches, fillInterviewQaCues, fillInterviewQaFromPreparation, isFoundationQuestion, loadInterviewQa, saveInterviewPractice, saveInterviewQaCard } from './interviewQaStore.js';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
-import { isRendererPrivateAppPath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
+import {
+  INTERVIEW_ANSWER_BINDING_STORE_DIR,
+  INTERVIEW_ARTIFACT_STORE_DIR,
+  INTERVIEW_PREPARED_BRIEF_STORE_DIR,
+  isRendererPrivateAppPath,
+  registerRendererPrivateAppRoot,
+} from '../utils/pathSafety.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
+import { INTERVIEW_RUN_ID_RE } from '../../src/utils/interviewRunIdGrammar.js';
 
 const { app } = electronPkg;
 
-const ARTIFACT_DIR = 'interview-helper-artifacts';
+const ARTIFACT_DIR = INTERVIEW_ARTIFACT_STORE_DIR;
 const ARTIFACT_SCHEMA_VERSION = 1;
 // Briefs are separately content-addressed because the compact renderer copy is
 // useful cache/UI state, not an authority.  Only this main-process store may
 // authorize a brief for the live helper window.
-const PREPARED_BRIEF_DIR = 'interview-helper-prepared-briefs';
+const PREPARED_BRIEF_DIR = INTERVIEW_PREPARED_BRIEF_STORE_DIR;
 const PREPARED_BRIEF_SCHEMA_VERSION = 1;
-const ANSWER_BINDING_DIR = 'interview-helper-answer-bindings';
+const ANSWER_BINDING_DIR = INTERVIEW_ANSWER_BINDING_STORE_DIR;
 const AUDIT_SCHEMA = 'infinite-canvas-generation-audit';
 const AUDIT_VERSION = 1;
 const MAX_JOB_URL_CHARS = 2048;
@@ -69,7 +77,7 @@ const MAX_BRIEF_ITEMS = 8;
 const MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
 const MAX_PREPARED_BRIEF_BYTES = 512 * 1024;
 const ID_RE = /^[a-f0-9]{64}$/u;
-const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+const RUN_ID_RE = INTERVIEW_RUN_ID_RE;
 const EXPECTED_FILES = Object.freeze({
   html: 'Application.html',
   listing: 'Original Job Listing.md',
@@ -78,7 +86,7 @@ const EXPECTED_FILES = Object.freeze({
   coverPdf: 'Cover Letter.pdf',
 });
 
-function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+const sha256 = sha256Hex;
 function throwIfAborted(signal) {
   if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Interview preparation was cancelled.');
 }
@@ -347,8 +355,8 @@ const JOB_FROM_LISTING = 'job details read from the saved listing';
 // A typed source has no application bundle: only a listing, read from a live
 // posting page ('typed-posting') or written by the AI as a stand-in
 // ('typed-generated'). These statuses say so plainly everywhere they show.
-export const TYPED_POSTING_STATUS = 'typed-posting';
-export const TYPED_GENERATED_STATUS = 'typed-generated';
+ const TYPED_POSTING_STATUS = 'typed-posting';
+ const TYPED_GENERATED_STATUS = 'typed-generated';
 const TYPED_STATUSES = Object.freeze([TYPED_POSTING_STATUS, TYPED_GENERATED_STATUS]);
 function isTypedStatus(status) { return TYPED_STATUSES.includes(status); }
 const ABSENT_PDF_NAMES = new Map([['resume-pdf', EXPECTED_FILES.resumePdf], ['cover-letter-pdf', EXPECTED_FILES.coverPdf]]);
@@ -824,7 +832,7 @@ const GENERATED_LISTING_WARNING = "The job listing used here is an AI-generated 
  * What the bundle's listing really is, stated to the model next to the listing
  * ('' for a captured application bundle, whose wording is unchanged).
  */
-export function interviewListingSourceNote(bundle) {
+ function interviewListingSourceNote(bundle) {
   const status = bundle?.verification?.status;
   if (status === TYPED_GENERATED_STATUS) return "SOURCE OF THE LISTING: the listing below is an AI-generated stand-in listing, not the employer's text; do not treat its specifics as facts about the employer. No application documents exist for this job. The canonical job URL is the employer's careers or official site, not a page for this listing, so a difference between that page and this listing is expected; research the company and the real role instead.";
   if (status === TYPED_POSTING_STATUS) return 'SOURCE OF THE LISTING: the listing below was read from the job posting page; no application documents were submitted for this job.';
@@ -859,7 +867,7 @@ const positioningItemSchema = Object.freeze({
     evidenceQuote: boundedStringSchema,
   },
 });
-export const INTERVIEW_BRIEF_SCHEMA = Object.freeze({
+ const INTERVIEW_BRIEF_SCHEMA = Object.freeze({
   type: 'object', additionalProperties: false, required: ['role', 'roleThemes', 'companyFacts', 'recentContext', 'likelyQuestions', 'questionsToAsk', 'applicationPositioning', 'warnings'],
   properties: {
     role: { type: 'object', additionalProperties: false, required: ['title', 'company', 'location', 'summary'], properties: { title: boundedStringSchema, company: boundedStringSchema, location: boundedStringSchema, summary: { type: 'string', maxLength: MAX_BRIEF_TEXT } } },

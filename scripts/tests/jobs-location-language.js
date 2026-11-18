@@ -1,4 +1,4 @@
-import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, englishShare, explicitSalaryCurrency, filterNonEnglishJobs, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorDateFilterReapplyUrl, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeJobLanguages, summarizeLocationAdherence, tagJobLanguage, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
+import { LOCATION_TREATMENT, PLATFORM_AUTH_COOKIES, assert, buildJobsPipelineSnapshot, classifyGlassdoorLookupFailure, decodeHtmlEntities, deriveLocationParam, describeGlassdoorLocationFailure, describeLocationTreatment, detectLanguage, englishShare, explicitSalaryCurrency, filterNonEnglishJobs, filterProvablyOutsideCountryScope, foldVerificationSample, formatSalaryCurrencyLabel, getJobsTelemetry, getSellMonitorConfig, glassdoorCachedLocationUsable, glassdoorDateFilterReapplyUrl, glassdoorLookupAttemptIsTransient, glassdoorRequestedCountry, glassdoorUrlHasLocationId, glassdoorLocationProof, isGlassdoorCanonicalResultsUrl, parseClaimedResultTotal, zipRecruiterSearchPageNumber, shouldTryZipRecruiterDirectContinuation, REVEAL_STABLE_PASSES, hasMojibake, indeedHostForLocation, inferSalaryCurrency, normalizeJobMarkup, normalizeJobsMarkup, orderByVerification, pickGlassdoorLocation, recordJobsSourceScope, repairJobsMojibake, repairMojibake, stripHtmlToText, summarizeGlassdoorLookupAttempts, summarizeJobLanguages, summarizeLocationAdherence, upgradeGlassdoorCountryRootCache, validateGlassdoorLocationPick, verificationScore } from '../test-dependencies.js';
 import { normalizeCountry, normalizeLocationInput } from '../../src/utils/jobLocation.js';
 
 // Synthetic sections long enough to stand alone as a language-detection chunk.
@@ -870,37 +870,6 @@ export default [
       const bounded = englishShare(`${ENGLISH_JOB_SECTION} `.repeat(40) + FRENCH_JOB_SECTION.repeat(80));
       assert(bounded.share === 1 && bounded.dominant === null, 'description analysis is capped before the distant tail');
       return { bounded: true };
-    },
-  },
-{
-    name: 'tagJobLanguage: refreshed English content clears a stale non-English card chip',
-    run: () => {
-      const job = {
-        title: 'Développeur logiciel',
-        snippet: 'Nous recherchons un développeur expérimenté pour concevoir des applications et collaborer avec notre équipe produit.',
-      };
-      tagJobLanguage(job);
-      assert(job.language === 'fr', `French initial scrape must be tagged, got ${job.language}`);
-
-      // Detail recovery can replace a localized teaser with the employer's
-      // English job description. A retained `fr` field would render a false
-      // language chip even though the latest, richer evidence is English.
-      job.title = 'Software Engineer';
-      job.snippet = 'Join our engineering team to build reliable software, improve developer workflows, and collaborate with product partners.';
-      job.description = 'You will design services, review code, ship product improvements, and work closely with a collaborative team of engineers and designers.';
-      tagJobLanguage(job);
-      assert(job.language === undefined, `English refresh must remove stale language, got ${job.language}`);
-
-      // A sparse post-detail state is inconclusive, not evidence that the old
-      // French label remains valid. The detector deliberately defaults weak
-      // signals to English, which means no chip should be rendered.
-      job.language = 'fr';
-      job.title = 'VP';
-      job.snippet = '';
-      job.description = '';
-      tagJobLanguage(job);
-      assert(job.language === undefined, `inconclusive refresh must remove stale language, got ${job.language}`);
-      return { ok: true };
     },
   },
 {

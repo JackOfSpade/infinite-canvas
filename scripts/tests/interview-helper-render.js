@@ -940,7 +940,7 @@ export default [
           assert(readyPanel.textContent.includes('Confirm this career source matches the application you submitted.')
             && readyPanel.textContent.includes('This bundle is a captured copy; replace it after editing the documents.'), 'ready copy must explain application alignment and how to refresh frozen document content');
           assert(readyPanel.textContent.includes('Submitted wording — reference, not career evidence'), 'submitted application wording must stay visibly separate from approved career evidence');
-          assert(window.document.querySelector('[aria-label="4. Interview preparation"]')
+          assert(window.document.querySelector('[aria-label="3. Interview preparation"]')
             && !text(window).includes('Worker preparation'), 'the setup section must use interview terminology');
           await bundle.module.act(async () => { launch.click(); await flush(); });
           assert(launches.length === 1 && launches[0].nodeId === 'interview-helper' && launches[0].snapshotId === SNAPSHOT_A && launches[0].jobUrl === JOB_URL && launches[0].brief.briefId === ready.briefId, 'launch must bind the narrow window to the current canonical job URL');

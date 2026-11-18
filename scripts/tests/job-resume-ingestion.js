@@ -9,7 +9,7 @@ import { compileSyntheticCareerSnapshot } from './careerIncrementalFixture.mjs';
 import { normalizeJobsMarkup, repairJobsMojibake } from '../../src/utils/textEncoding.js';
 import { careerFilesCleanupNeedsWarning, isJobAnalysisSnapshotAfterClear, nextJobAnalysisClearWatermark, normalizeJobAnalysisClearRunId, normalizeJobAnalysisClearWatermark } from '../../src/utils/jobAnalysisRecovery.js';
 import { getJobDescriptionRecoveryCheckpointPath } from '../../electron/ipc/jobAnalysisPaths.js';
-import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __registerJobsHandlersForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers, scoringPromptFitsEnvelopeForTests } from '../../electron/ipc/jobs.js';
+import { __assertCareerInputDescriptorsStillMatchForTests, __extractCareerFileSectionsForTests, __pruneStaleCareerInputStagesForTests, __recordJobSourceResumeAttemptForTests, __registerJobsHandlersForTests, __resolvePinnedScoringInputForTests, __stageCareerInputFilesForTests, buildJobAnalysisSnapshot, getJobsResumeAttributionForReport, getJobsTelemetryHubCountForReport, registerJobsHandlers, scoringPromptFitsEnvelope } from '../../electron/ipc/jobs.js';
 import { finishRunWithSavedListings, isRunCollectionFinishedWithSavedListings } from '../../electron/ipc/jobRunStaging.js';
 import { receiptTime } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { discardDeletedJobAnalysisSnapshots, discardDeletedJobRuns } from '../../src/utils/canvasInteractions.js';
@@ -339,10 +339,10 @@ export default [
   {
     name: 'pinned scoring measures the complete UTF-8 prompt envelope rather than only career-page characters',
     run: () => {
-      const safe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'rubric', prompt: 'job plus page' });
+      const safe = scoringPromptFitsEnvelope({ cachedPrefix: 'rubric', prompt: 'job plus page' });
       // Each 'é' is two UTF-8 bytes, so half the limit plus one character exceeds it.
-      const { limit } = scoringPromptFitsEnvelopeForTests({ cachedPrefix: '', prompt: '' });
-      const unsafe = scoringPromptFitsEnvelopeForTests({ cachedPrefix: 'é'.repeat(Math.floor(limit / 2) + 1), prompt: 'job' });
+      const { limit } = scoringPromptFitsEnvelope({ cachedPrefix: '', prompt: '' });
+      const unsafe = scoringPromptFitsEnvelope({ cachedPrefix: 'é'.repeat(Math.floor(limit / 2) + 1), prompt: 'job' });
       assert(safe.fits && !unsafe.fits && unsafe.bytes > unsafe.limit,
         'the scoring envelope counts UTF-8 rubric/prefix/job/schema material and rejects an actual oversized complete prompt');
       return { safeBytes: safe.bytes, rejectedBytes: unsafe.bytes, limit: unsafe.limit };

@@ -25,6 +25,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { logger } from '../logger.js';
 import { dedupKeysFor } from '../../src/utils/jobListingIdentity.js';
+import { createKeyedLock } from './asyncMutex.js';
 export { dedupKeysFor } from '../../src/utils/jobListingIdentity.js';
 
 // "Already seen" retention window for suppressing re-shown jobs. Deliberately a
@@ -204,18 +205,8 @@ async function loadJobsHistoryUnlocked(canvasFilePath, stats = null, { requireRe
 // the last rename wins — silently dropping the other's rows from the "never
 // re-show a job" dedup record. Keyed by path so different canvases never block
 // one another. Same dependency-free pattern as jobRunStaging's manifest lock.
-const _historyTails = new Map();
-function withHistoryLock(filePath, fn) {
-  const prev = _historyTails.get(filePath) || Promise.resolve();
-  const result = prev.then(fn, fn); // run regardless of the prior op's outcome
-  const tail = result.then(() => {}, () => {});
-  _historyTails.set(filePath, tail);
-  return result.finally(() => {
-    // Canvas paths are unbounded over a long app session. Remove an idle key
-    // without disturbing a newer operation that queued behind this one.
-    if (_historyTails.get(filePath) === tail) _historyTails.delete(filePath);
-  });
-}
+const withHistoryLock = createKeyedLock();
+const _historyTails = withHistoryLock.tails;
 
 /**
  * Read after every admitted history transition has settled. Board display
@@ -452,46 +443,6 @@ async function appendJobsHistoryLocked(canvasFilePath, filePath, jobs) {
     logger.warn('[JobsHistory] Append failed:', err?.message || String(err));
     return { written: 0, pruned: 0, error: err?.message || String(err) };
   }
-}
-
-/**
- * Drop the history rows a CRASHED run wrote about its own gathered jobs, so
- * resuming that run doesn't dedup-away everything it recovers from staging.
- *
- * search-jobs appends kept jobs to history BEFORE returning (deliberate: an
- * aborted run still marks them seen for FUTURE runs). But a resume of that
- * same run recovers those very jobs from the staging sidecar — left alone,
- * dedupAgainstHistory would collapse the entire recovery to ~0. A history row
- * is exempted only when BOTH hold:
- *   - its seen_date is on/after the resumed run's start day (rows are stamped
- *     at day resolution, so this is the tightest available time scope), AND
- *   - it matches a recovered staged job's dedup key (so a different hub's
- *     same-day completed run keeps suppressing ITS jobs).
- * Jobs the original run itself dropped against OLDER history still carry only
- * pre-run-day rows → still dropped on resume, exactly like the original run.
- * Worst case (an earlier SAME-DAY run had shown one of these jobs) is a single
- * over-show — the stated lesser evil for this pipeline.
- *
- * @param {object[]} historyRows   loadJobsHistory output
- * @param {object[]} recoveredJobs jobs recovered from the run's staging sidecar
- * @param {number}   runStartedAt  the resumed run's manifest.startedAt (ms)
- * @returns {object[]} historyRows minus the resumed run's own appends
- */
-export function filterHistoryForResume(historyRows, recoveredJobs, runStartedAt) {
-  const rows = Array.isArray(historyRows) ? historyRows : [];
-  if (!Number.isFinite(runStartedAt) || !Array.isArray(recoveredJobs) || recoveredJobs.length === 0) {
-    return rows;
-  }
-  const runDay = new Date(runStartedAt).toISOString().slice(0, 10);
-  const recoveredKeys = new Set();
-  for (const j of recoveredJobs) {
-    for (const k of dedupKeysFor(j)) recoveredKeys.add(k);
-  }
-  return rows.filter(r => {
-    const sameRunWindow = String(r?.seen_date || '') >= runDay; // YYYY-MM-DD sorts lexicographically
-    if (!sameRunWindow) return true;
-    return !dedupKeysFor(r).some(k => recoveredKeys.has(k));
-  });
 }
 
 export function dedupAgainstHistory(jobs, historyRows) {

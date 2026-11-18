@@ -8,13 +8,13 @@ import { runInNewContext } from 'node:vm';
 import { isJobBoardUserCancellation, isLegacyUnbucketedJobBoard, validateJobBoardTaxonomy } from '../../src/utils/jobBoardAiProvider.js';
 import { attachCompensationRemoteResidences, combineSignature, emptyReplacementIneligibilityReason, isLegacyCombineSignature, moduleCombineFingerprint, moduleFingerprint, normalizeJobMatchScore, parseCombineSignature, shouldKeepCompletedBoardSnapshotVisible, staleReason, unionScoredJobs } from '../../src/nodes/jobboard/mergeJobs.js';
 import { buildJobTreeNodes, compareJobsByFitAndPreference } from '../../src/nodes/jobsearch/buildJobTree.js';
-import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardCancellablePausedSourceOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobSearchBoardPausedContinuationBlocked, isJobSearchConnectedToBoard, jobBoardModuleReadiness, jobBoardSelectionPresentation, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, remapCopiedJobBoardSelections, remapCopiedJobModuleReferences, toggleSelectedJobSearchId } from '../../src/utils/jobBoardSearchSelection.js';
+import { allocateJobBoardAdmissionOrder, findJobSearchBoardActiveRecoveryOwner, findJobSearchBoardCancellablePausedSourceOwner, findJobSearchBoardPausedContinuationOwner, findJobSearchBoardRecoveryOwner, getConnectedJobSearchIds, getSelectedConnectedJobSearchIds, isJobSearchBoardPausedContinuationBlocked, isJobSearchConnectedToBoard, jobBoardModuleReadiness, jobBoardSelectionPresentation, moveJobSearchExecutionOrder, normalizeJobBoardAdmissionOrder, normalizeJobBoardRecoveryTimestamp, orderJobSearchIds, remapCopiedJobModuleReferences, toggleSelectedJobSearchId } from '../../src/utils/jobBoardSearchSelection.js';
 import { createModuleRunQueue } from '../../src/utils/moduleRunQueue.js';
 import { createJobSearchCoordinatorRegistry } from '../../src/utils/jobSearchCoordinatorRegistry.js';
 import { exactPausedSourceContinuation, exactPausedSourceTerminalOutcome, isMergeableTerminalJobSearchOutcome, resolveExactPausedJobBoardTerminal, terminalJobSearchOutcome } from '../../src/utils/jobBoardPausedSourceContinuation.js';
 import { effectiveJobSourceCardRunId } from '../../src/utils/jobSourceWarningPolicy.js';
 import { sanitizeNodesForSave } from '../../src/utils/serializationUtils.js';
-import { applyManualAiRetirementReceiptsToNodes, collectDeletedBoardChildClaims, collectDeletedManualAiWorkflowNodes, retireDeletedManualAiRuns } from '../../src/utils/canvasInteractions.js';
+import { applyManualAiRetirementReceiptsToNodes, collectDeletedManualAiWorkflowNodes, retireDeletedManualAiRuns } from '../../src/utils/canvasInteractions.js';
 import { collectJobBoardsAffectedByDeletion, getActiveJobBoardSearchReferenceIds, getClearCanvasRetainedNodes, getJobWorkflowDeletionLifecycleRevision, isClearCanvasDeletionFenceIntact, isJobWorkflowDeletionPending, jobBoardHasCancellableRecovery, markJobWorkflowDeletionPending, settleJobWorkflowDeletion, subscribeJobWorkflowDeletionLifecycle } from '../../src/utils/nodeDeletionLifecycle.js';
 import { boundedCombinedSourceRuns } from '../../src/utils/jobBoardProvenance.js';
 import { exactInterruptedRecoveryAdmission, exactInterruptedRecoveryBackendFailure, hasCheckpointedPostCollectionAnalysis } from '../../src/utils/jobBoardRecoveryAdmission.js';
@@ -1932,11 +1932,9 @@ export default [
           boardCancellation: { sourceIds: ['search-b', 'search-c'] },
         },
       };
-      const fanoutClaims = collectDeletedBoardChildClaims([fanoutBoard]);
       const fanoutReferences = getActiveJobBoardSearchReferenceIds(fanoutBoard).sort();
-      assert(JSON.stringify(fanoutClaims.map(claim => claim.sourceId).sort()) === JSON.stringify(['search-a', 'search-b'])
-        && JSON.stringify(fanoutReferences) === JSON.stringify(['search-a', 'search-b', 'search-c']),
-      'deletion fallbacks must claim each live fan-out child while ownership detection includes plural active and cancellation sources');
+      assert(JSON.stringify(fanoutReferences) === JSON.stringify(['search-a', 'search-b', 'search-c']),
+        'ownership detection includes plural active and cancellation sources');
       const clearActions = readFileSync(new URL('../../src/hooks/useCanvasActions.js', import.meta.url), 'utf8');
       const osDeletion = readFileSync(new URL('../../src/hooks/useCanvasOSDeletion.js', import.meta.url), 'utf8');
       assert(clearActions.includes('...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : [])')
@@ -2270,7 +2268,7 @@ export default [
         { source: 'board-subset', target: 'search-a' },
         { source: 'search-b', target: 'board-subset' },
       ];
-      const remapped = remapCopiedJobBoardSelections(originals, clones, idMap, copiedEdges);
+      const remapped = remapCopiedJobModuleReferences(originals, clones, idMap, copiedEdges);
       const subset = remapped.find(node => node.id === 'copy-board-subset');
       const none = remapped.find(node => node.id === 'copy-board-none');
       const defaultAll = remapped.find(node => node.id === 'copy-board-default');
@@ -2287,7 +2285,7 @@ export default [
       assert(!Object.prototype.hasOwnProperty.call(defaultAll.data, 'selectedSearchModuleIds'),
         'a missing Board allow-list must remain missing so legacy/default-all behavior is preserved');
 
-      const boardOnly = remapCopiedJobBoardSelections(
+      const boardOnly = remapCopiedJobModuleReferences(
         [{ id: 'board-only', type: 'jobboard', data: { selectedSearchModuleIds: ['old-search'], searchExecutionOrder: ['old-search'] } }],
         [{ id: 'copy-board-only', type: 'jobboard', data: {} }],
         new Map([['board-only', 'copy-board-only']]),
@@ -2298,7 +2296,7 @@ export default [
       assert(!Object.prototype.hasOwnProperty.call(boardOnly.data, 'searchExecutionOrder'),
         'a Board copied without a connected Search must not retain execution ids pointing at the original canvas');
 
-      const unselectedConnection = remapCopiedJobBoardSelections(
+      const unselectedConnection = remapCopiedJobModuleReferences(
         [
           { id: 'board-with-a', type: 'jobboard', data: { selectedSearchModuleIds: ['search-b-not-copied'] } },
           { id: 'search-a-only', type: 'jobhub', data: {} },
@@ -2314,7 +2312,7 @@ export default [
         && unselectedConnection.data.selectedSearchModuleIds.length === 0,
       'a copied edge to an explicitly unselected Search must remain unselected instead of reverting to default-all');
 
-      const temporarilyDisconnectedSelection = remapCopiedJobBoardSelections(
+      const temporarilyDisconnectedSelection = remapCopiedJobModuleReferences(
         [
           { id: 'board-reconnect', type: 'jobboard', data: { selectedSearchModuleIds: ['search-b-reconnect'] } },
           { id: 'search-a-reconnect', type: 'jobhub', data: {} },

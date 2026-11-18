@@ -9,6 +9,7 @@ import { buildInterviewerInstructions } from '../electron/interviewPracticeCallP
 import {
   CLASSIFIER_CASES, CLASSIFIER_INSTRUCTIONS, SCENARIOS, SYNTHETIC_BRIEF, SYNTHETIC_PLAN, classifierMessage,
 } from './fixtures/interview-practice-scenarios.mjs';
+import { isPathInside, resolveThroughExistingParent } from './lib/outside-repo.mjs';
 
 const USAGE = `Usage: node scripts/interview-practice-benchmark.mjs --out <private dir outside the repo>
   [--models opus,sonnet,haiku] [--efforts low,medium,high] [--ultracode on,off]
@@ -75,20 +76,7 @@ const mean = values => {
 /** Refuses an output directory inside the repository (symlinks resolved through the nearest existing parent). */
 export async function assertExternalOutput(target, repoRoot = path.resolve(import.meta.dirname, '..')) {
   const repo = await fs.realpath(repoRoot);
-  let probe = path.resolve(target);
-  const rest = [];
-  for (;;) {
-    try { probe = await fs.realpath(probe); break; }
-    catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      const parent = path.dirname(probe);
-      if (parent === probe) break;
-      rest.unshift(path.basename(probe)); probe = parent;
-    }
-  }
-  const resolved = path.join(probe, ...rest);
-  const relative = path.relative(repo, resolved);
-  if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+  if (isPathInside(await resolveThroughExistingParent(target), repo)) {
     throw new Error('--out must be a private directory outside the repository.');
   }
 }

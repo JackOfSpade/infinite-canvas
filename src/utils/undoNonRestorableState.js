@@ -1,5 +1,6 @@
 import { TRANSIENT_PROCESSING_HUB_STATES } from './persistenceTransientState.js';
 import { hasActiveJobBoardCareerOverrideRun } from './jobBoardCareerOverride.js';
+import { INTERVIEW_RUN_ID_RE, MAX_RETIREMENT_RECEIPTS } from './interviewRunIdGrammar.js';
 
 // External-lifecycle data must not participate in undo. It is stripped from
 // fingerprints and merged from the live nodes on restore so Undo cannot revive
@@ -71,8 +72,8 @@ const INTERVIEW_HELPER_EXTERNAL_FIELDS = [
 // Keep this recovery-record grammar synchronized with InterviewHelperNode.
 // These are UI-owned receipts, not generic "has a run id" flags: malformed
 // canvas data must not permanently fence Undo/navigation.
-const INTERVIEW_HELPER_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
-const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = 32;
+const INTERVIEW_HELPER_RUN_ID_RE = INTERVIEW_RUN_ID_RE;
+const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = MAX_RETIREMENT_RECEIPTS;
 // Keep navigation/Undo from recursing through corrupt imported group data.
 // A tree outside this envelope is treated as externally active so callers
 // keep the current canvas rather than restoring/deleting through an unknown

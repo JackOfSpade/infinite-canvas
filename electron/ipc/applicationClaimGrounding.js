@@ -30,6 +30,7 @@
  * Nothing in this module reads the filesystem or any host state; callers inject
  * the token function whose stop-word list they already use.
  */
+import { escapeRegExp } from '../../src/utils/regexEscape.js';
 
 // ---------------------------------------------------------------------------
 // Text helpers
@@ -39,7 +40,6 @@ const APOSTROPHES = /[’‘ʼ]/gu;
 const WORD_RE = /[\p{L}\p{N}]+/gu;
 
 const wordsOf = text => String(text ?? '').toLowerCase().match(WORD_RE) || [];
-const escapeRegExp = value => String(value).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
 function stemToken(word) {
   const lower = String(word).toLowerCase().replace(/'s$/u, '');
@@ -217,7 +217,7 @@ function classifyMention(text, mention) {
 }
 
 /** Every strength mention of a text, tagged with its family, rank, level (0 shared, 1 full) and whether the candidate made it. */
-export function scanStrengthMentions(rawText, side) {
+ function scanStrengthMentions(rawText, side) {
   const text = String(rawText ?? '').replace(APOSTROPHES, "'");
   const found = [];
   for (const spec of MENTION_SPECS) {
@@ -676,7 +676,7 @@ function boundOf(text, start, end) {
 }
 
 /** Counts a text states. `permissive` (evidence side) keeps every number; the claim side keeps only those that read as a count of something. */
-export function extractQuantities(rawText, { permissive = false, skipPopulationNouns = false } = {}) {
+ function extractQuantities(rawText, { permissive = false, skipPopulationNouns = false } = {}) {
   const text = normalizeRanges(String(rawText ?? '').replace(APOSTROPHES, "'"));
   const found = [];
   const push = (raw, value, start, end, extra = {}) => {
@@ -873,7 +873,7 @@ function intervalBindsCount(text, start) {
 }
 
 /** Rate intervals ("per hour", "each quarter") the cited quotes never state. */
-export function intervalFindings(sentence, bodies) {
+ function intervalFindings(sentence, bodies) {
   const matches = intervalMatches(sentence, { evidenceSide: false });
   if (!matches.length) return [];
   const claimed = new Set(matches.map(entry => entry.unit));
@@ -1201,7 +1201,7 @@ export function statedYears(rawText) {
 }
 
 /** Years the sentence dates its work with that no quote states and no approved role's own dates state. */
-export function yearFindings(sentence, bodies, ctx) {
+ function yearFindings(sentence, bodies, ctx) {
   const claimed = statedYears(sentence);
   if (!claimed.length) return [];
   const quoteYears = new Set(bodies.flatMap(body => [...String(body).matchAll(new RegExp(`(?<![\\p{L}\\p{N}])(${YEAR_RE})(?![\\p{L}\\p{N}])`, 'gu'))].map(match => Number(match[1]))));
@@ -1214,7 +1214,7 @@ export function yearFindings(sentence, bodies, ctx) {
 const CLAUSE_SPLIT = /;|,?\s+(?:and|but|while|then|so)\s+(?=(?:I|we)\b|[\p{L}]+(?:ed|ing)\b)|,\s+(?=[\p{L}]+ing\b)|,\s+(?:which|where|thereby|resulting|allowing|enabling)\b/gu;
 
 /** A coordinated or trailing clause that shares nothing with the quotes is appended work, not a restatement of the cited work. */
-export function clauseFindings(sentence, bodies, ctx) {
+ function clauseFindings(sentence, bodies, ctx) {
   const parts = String(sentence ?? '').split(CLAUSE_SPLIT).map(part => part.trim()).filter(Boolean);
   if (parts.length < 2) return [];
   const available = new Set(bodies.flatMap(body => ctx.meaningful(body)).map(lightStem));

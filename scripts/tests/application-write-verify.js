@@ -996,7 +996,7 @@ export default [
       const source = fs.readFileSync(moduleUrl, 'utf8');
       assert.ok(source.includes('export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;'), 'the default declaration is present for sabotage');
       const sabotaged = source.replace('export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;', 'export const WRITE_VERIFY_DEFAULT_CANDIDATES = 3;')
-        .replace(/from '(\.\/[^']+)'/gu, (_, relative) => `from '${new URL(relative, moduleUrl).href}'`);
+        .replace(/from '(\.{1,2}\/[^']+)'/gu, (_, relative) => `from '${new URL(relative, moduleUrl).href}'`);
       const mutant = await import(`data:text/javascript;base64,${Buffer.from(sabotaged).toString('base64')}`);
       assert.equal(mutant.writeVerifyCandidateCount(), 3, 'the sabotage actually changes the default');
       assert.throws(() => assert.equal(mutant.initialWriteVerifyState().candidates.length, 5), /3 !== 5/u,

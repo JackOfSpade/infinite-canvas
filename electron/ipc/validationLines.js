@@ -1,4 +1,5 @@
 import { validationFailure } from './validationFailure.js';
+import { escapeRegExp } from '../../src/utils/regexEscape.js';
 
 // Code-authored teaching sentences. Variable values are formatted below.
 export const VALIDATION_TEMPLATES = Object.freeze({
@@ -229,7 +230,6 @@ export function collector() {
   return api;
 }
 
-const escapeRegex = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export function diagnoseMarkedSections(raw, {
   expectedIds = [], label, idPattern = '[a-f0-9]{24}', trimLines = false,
   caseInsensitive = true, outsideTextAllowed = false, ordered = false, decoratedLookalikes = false,
@@ -238,10 +238,10 @@ export function diagnoseMarkedSections(raw, {
   const normalize = id => caseInsensitive ? String(id).toLowerCase() : String(id);
   const expected = expectedIds.map(normalize);
   const flags = caseInsensitive ? 'i' : '';
-  const exact = new RegExp(`^(BEGIN|END) ${escapeRegex(label)} (${idPattern})$`, flags);
+  const exact = new RegExp(`^(BEGIN|END) ${escapeRegExp(label)} (${idPattern})$`, flags);
   const lookalike = decoratedLookalikes
-    ? new RegExp(`^[ \\t>*#\\x60~_-]*(?:BEGIN|END)\\s+${escapeRegex(label)}\\b[^\\n]*$`, 'i')
-    : new RegExp(`^(?:BEGIN|END) ${escapeRegex(label)}\\b`, flags);
+    ? new RegExp(`^[ \\t>*#\\x60~_-]*(?:BEGIN|END)\\s+${escapeRegExp(label)}\\b[^\\n]*$`, 'i')
+    : new RegExp(`^(?:BEGIN|END) ${escapeRegExp(label)}\\b`, flags);
   let input = String(raw || '').replace(/\r\n?/g, '\n');
   if (outsideTextAllowed) input = input.trim();
   const problems = collector();

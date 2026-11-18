@@ -1,5 +1,9 @@
-import { _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, CODE_EXT_RE, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, CONDITION_VALUES, decryptSecret, dedupAgainstHistory, deepAddElements, deepUpdateNode, DEFAULT_CONDITION, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, FINGERPRINT_PROFILES, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, LANGUAGE_LABELS, languageLabel, LEDGER_CAP, ledgerById, loadJobsHistory, MARKETPLACE_STATUS_GRID, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, markManualSolveRequired, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeRendererJobsSettingsUpdate, mergeSettingsSection, mergeSourceIntoComps, MINING_TARGET, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, PDFDocument, PDFLib, pickEdgeHandles, PLAIN_TEXT_EXT, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, publishMarketplaceStatusCheckingIds, readPlainTextDocument, recordLaunchCollision, recordOutcome, rendererJobsSettingsSnapshot, rendererJobsSettingsUpdate, rendererStoreSnapshot, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, taskModelRoutingSnapshot, TIMINGS, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
+import { _resetLaunchCollisions, _resetRateLimiter, appendJobsHistory, applyRefuteVerdicts, assert, atsSafePdfFontExpression, autosaveDebounceMs, beginMarketplaceStatusRun, bestMarketplaceStatusColumnCount, buildCoverLetterDocument, buildResumeDocument, buildScoredJob, cancelNodeTasksRecursively, cancelTimeout, clamp, CODE_EXT_RE, collectMarketplaceListings, completeMarketplaceStatusPlatform, computeLedger, CONDITION_VALUES, decryptSecret, dedupAgainstHistory, deepAddElements, deepUpdateNode, DEFAULT_CONDITION, derivationTooltip, deriveTimeoutBudget, detectAntiBotSignal, detectApiAntiBotSignal, docSaveDebounceMs, effectiveConcurrency, electronPkg, encryptSecret, extractDomain, filterJobsByAge, FINGERPRINT_PROFILES, finishMarketplaceStatusRun, formatConditionForPricingPrompt, formatConditionGuideForPrompt, fs, generateId, getCanonicalDomain, getCanvasData, getConditionDef, getEnvValue, getKnownTaskIds, getLaunchCollisions, getMarketplaceStatusActiveRuns, getNodeDims, getNodesBounds, getRandomUA, getRateLimiterSnapshot, getSessionProfile, isAllowedOpenFileExt, isCoolingDown, isExistingFile, isProfileLockCollision, isSensitivePath, isWithinDirectory, LANGUAGE_LABELS, languageLabel, LEDGER_CAP, ledgerById, loadJobsHistory, MARKETPLACE_STATUS_GRID, marketplaceListingsSignature, marketplaceStatusCheckingIds, marketplaceStatusNodeWidth, markManualSolveRequired, matchesNoResultsSentinel, maxUndoHistory, mergeMarketplaceStatusResults, mergeRendererJobsSettingsUpdate, mergeSettingsSection, mergeSourceIntoComps, MINING_TARGET, normalizeQuoteText, normalizeRoleFamilyExperienceBandCache, os, parseAiJson, parsePostedDate, parseScopeEnvBoolean, path, PDFDocument, PDFLib, pickEdgeHandles, PRODUCT_CONDITIONS, PRODUCT_IMAGE_EXT_RE, publishMarketplaceStatusCheckingIds, readPlainTextDocumentWithReason, recordLaunchCollision, recordOutcome, rendererJobsSettingsSnapshot, rendererJobsSettingsUpdate, rendererStoreSnapshot, replaceTimeout, resetManualSolveTracking, retryWarningRequiringAction, roleFamilyExperienceBandCacheEntry, splitCareerDataByFile, stripConditionFromGeneratedTitle, strokePoints, structuralEdge, subscribeMarketplaceStatusCheckingIds, taskModelRoutingSnapshot, TIMINGS, updateResolvedSourceWarning, wasManualSolveRequired, wrapUntrustedText } from '../test-dependencies.js';
 import { NON_API_AI_TRANSPORT } from '../test-dependencies.js';
+import Store from 'electron-store';
+import { getBodyBaseline, getBudgetSnapshot, recordSample } from '../../electron/ipc/scrapeBudget.js';
+
+const readPlainTextDocument = async (filePath, options) => (await readPlainTextDocumentWithReason(filePath, options)).text;
 
 export default [
   {
@@ -887,8 +891,10 @@ export default [
         return file;
       };
       try {
-        assert(PLAIN_TEXT_EXT.has('.md') && PLAIN_TEXT_EXT.has('.txt') && !PLAIN_TEXT_EXT.has('.pdf'),
-          'only genuinely plain-text extensions are read directly');
+        assert((await readPlainTextDocument(write('ext.md', 'Hello'))) === 'Hello'
+          && (await readPlainTextDocument(write('ext.txt', 'Hello'))) === 'Hello'
+          && (await readPlainTextDocument(write('ext.pdf', 'Hello'))) === null,
+        'only genuinely plain-text extensions are read directly');
 
         // A .txt is returned byte-for-byte: the achievement miner requires a
         // quote to appear in the career data exactly as written.
@@ -1279,6 +1285,34 @@ export default [
           `task "${t}" routes through the single manual transport (got ${JSON.stringify(snapshot.tasks[t])})`);
       }
       return { ok: true, tasks: tasks.size };
+    },
+  },
+{
+    name: 'scrapeBudget: a timing and a body-size sample cost one store write, not two',
+    run: () => {
+      const realSet = Store.prototype.set;
+      let budgetWrites = 0;
+      Store.prototype.set = function countingSet(key, ...rest) {
+        if (key === 'budgets') budgetWrites += 1;
+        return realSet.call(this, key, ...rest);
+      };
+      try {
+        recordSample('write-count-probe', { elapsedMs: 2000, bytes: 50000 });
+        assert(budgetWrites === 1, `one write for a combined sample (got ${budgetWrites})`);
+        const stats = getBudgetSnapshot()['write-count-probe'];
+        assert(stats.ema === 2000 && stats.samples === 1 && stats.last === 2000, 'timing fields recorded');
+        assert(stats.bodyEma === 50000 && stats.bodySamples === 1, 'body fields recorded');
+        recordSample('write-count-probe', { elapsedMs: 0, bytes: null });
+        recordSample('', { elapsedMs: 100 });
+        assert(budgetWrites === 1, 'an empty or keyless sample writes nothing');
+        recordSample('write-count-probe', { bytes: 50000 });
+        recordSample('write-count-probe', { bytes: 50000 });
+        assert(getBodyBaseline('write-count-probe') === 50000, 'baseline trusted after enough clean body samples');
+        assert(getBudgetSnapshot()['write-count-probe'].samples === 1, 'a body-only sample leaves the timing fields alone');
+      } finally {
+        Store.prototype.set = realSet;
+      }
+      return { ok: true };
     },
   },
 {

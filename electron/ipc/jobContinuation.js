@@ -30,6 +30,8 @@ import {
   jobAnalysisOperationAuthorityReceipt,
   withCurrentJobAnalysisOperationAuthority,
 } from './jobAnalysisOperationAuthorityStore.js';
+import { fsyncDirectory } from '../utils/pathSafety.js';
+import { stableJson } from '../../src/utils/stableJson.js';
 
 const VERSION = 1;
 const PROCESS_EPOCH = crypto.randomBytes(24).toString('hex');
@@ -180,18 +182,6 @@ async function removeContinuationSidecar(filePath) {
     if (error?.code !== 'ENOENT') throw error;
   });
   await fsyncDirectory(path.dirname(filePath));
-}
-
-async function fsyncDirectory(directory) {
-  const handle = await fs.promises.open(directory, 'r').catch(() => null);
-  if (!handle) return;
-  try { await handle.sync(); } finally { await handle.close(); }
-}
-
-function stableJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
 }
 
 function normalizeTerminalResult(value, operation) {
@@ -568,8 +558,7 @@ async function atomicWrite(filePath, store) {
     handle = null;
     await fs.promises.rename(tmp, filePath);
     try {
-      const dir = await fs.promises.open(path.dirname(filePath), 'r');
-      try { await dir.sync(); } finally { await dir.close(); }
+      await fsyncDirectory(path.dirname(filePath));
     } catch { /* directory fsync is best effort on filesystems that reject it */ }
   } finally {
     try { await handle?.close(); } catch { /* noop */ }

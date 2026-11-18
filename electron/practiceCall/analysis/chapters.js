@@ -63,7 +63,7 @@ function chapterFor(chapters, atMs) {
   return last && atMs >= last.endMs ? last : null;
 }
 
-export function buildChapters({ transcript = [], reviewChapters = [], moments = [], metrics = {}, toneNotes = [], candidateProsodyByTurn = {}, durationMs = 0 } = {}) {
+export function buildChapters({ transcript = [], reviewChapters = [], moments = [], metrics = {}, candidateProsodyByTurn = {}, durationMs = 0 } = {}) {
   const turns = list(transcript);
   const total = ms(durationMs) ?? turns.reduce((max, turn) => Math.max(max, ms(turn?.endMs) ?? 0), 0);
   const anchors = [];
@@ -96,7 +96,6 @@ export function buildChapters({ transcript = [], reviewChapters = [], moments = 
     ...pauseMarkers(candidateProsodyByTurn),
     ...interruptionMarkers(metrics),
     ...list(metrics?.fillerMoments).map(entry => ({ atMs: ms(entry?.atMs), kind: 'filler', label: label(entry?.label) || 'Filler' })),
-    ...list(toneNotes).map(note => ({ atMs: ms(note?.atMs), kind: 'tone', label: label(note?.note) || 'Tone note' })),
     ...list(moments).map(moment => {
       const turn = turns[number(moment?.turnIndex)] ?? null;
       return { atMs: turn ? ms(turn.startMs) : null, kind: moment?.kind === 'filler' ? 'filler' : 'moment', label: label(moment?.label) || 'Flagged moment' };

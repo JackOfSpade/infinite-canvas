@@ -1,5 +1,5 @@
 import os from 'node:os';
-import { cleanupEmptyApplicationFolders, pruneEmptyApplicationParents } from '../../electron/utils/emptyApplicationFolders.js';
+import { pruneEmptyApplicationParents } from '../../electron/utils/emptyApplicationFolders.js';
 import { assert, collectOrphanTextDocumentPaths, collectRemainingTextDocumentPaths, collectSurvivingRepresentedPaths, collectTrashEligiblePaths, fs, path } from '../test-dependencies.js';
 
 export default [
@@ -34,16 +34,17 @@ export default [
         const fakeMetadata = path.join(output, 'MetadataLink');
         fs.mkdirSync(fakeMetadata);
         fs.symlinkSync(path.join(location, 'notes.md'), path.join(fakeMetadata, '.DS_Store'));
-        const cleaned = await cleanupEmptyApplicationFolders(output);
-        assert(cleaned.length === 2 && !fs.existsSync(path.dirname(empty)), 'maintenance removes empty descendants bottom-up');
-        assert(fs.readFileSync(path.join(location, 'notes.md'), 'utf8') === 'keep'
-          && fs.existsSync(hidden) && fs.lstatSync(linked).isSymbolicLink()
+        const pruned = await pruneEmptyApplicationParents(path.join(empty, 'Role'), root);
+        assert(pruned.length === 2 && !fs.existsSync(path.dirname(empty)), 'empty ancestors holding only Finder metadata are removed');
+        fs.mkdirSync(path.join(hidden, 'Place'));
+        assert((await pruneEmptyApplicationParents(path.join(hidden, 'Place', 'Role'), root)).length === 1 && fs.existsSync(hidden),
+          'hidden content keeps its folder');
+        fs.mkdirSync(path.join(fakeMetadata, 'Place'));
+        assert((await pruneEmptyApplicationParents(path.join(fakeMetadata, 'Place', 'Role'), root)).length === 1
           && fs.lstatSync(path.join(fakeMetadata, '.DS_Store')).isSymbolicLink(),
-          'documents, hidden content and symbolic links survive');
-        assert((await cleanupEmptyApplicationFolders(output)).length === 0, 'cleanup is idempotent');
-        let refused = false;
-        try { await cleanupEmptyApplicationFolders(linked); } catch { refused = true; }
-        assert(refused, 'a symlink root cannot redirect maintenance');
+        'a symbolic link named like Finder metadata keeps its folder');
+        assert(fs.readFileSync(path.join(location, 'notes.md'), 'utf8') === 'keep' && fs.lstatSync(linked).isSymbolicLink(),
+          'documents and symbolic links survive');
       } finally { fs.rmSync(root, { recursive: true, force: true }); }
     },
   },

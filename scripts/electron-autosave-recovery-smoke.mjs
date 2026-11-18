@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { _electron as electron } from 'playwright';
 import { closeDisposableElectron } from './close-disposable-electron.mjs';
-import { makeSmokeDir, smokeEnv, seedLastOpenedWorkspace } from './lib/electron-smoke.mjs';
+import { makeSmokeDir, pollUntil, smokeEnv, seedLastOpenedWorkspace } from './lib/electron-smoke.mjs';
 
 // Real permission errors in a disposable app/profile. Never writes a user's canvas.
 const root = await makeSmokeDir('ic-autosave-recovery-');
@@ -11,11 +11,7 @@ const canvas = path.join(root, 'canvas.json');
 const env = smokeEnv();
 let application;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-async function until(predicate, label, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) { if (await predicate()) return; await sleep(100); }
-  throw new Error(`Timed out: ${label}`);
-}
+const until = (predicate, label, timeoutMs = 30000) => pollUntil(predicate, Boolean, label, { timeoutMs, format: text => `Timed out: ${text}` });
 const savedText = async () => JSON.parse(await fs.readFile(canvas, 'utf8')).nodes.find(node => node.id === 'autosave-note').data.text;
 try {
   await fs.writeFile(canvas, JSON.stringify({ schemaVersion: 1, nodes: [

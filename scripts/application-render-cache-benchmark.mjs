@@ -3,9 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
-import { build } from 'esbuild';
-import electron from 'electron';
+import { runInlineElectronEntry } from './lib/electron-smoke.mjs';
 import { applicationRendererSourceDigest } from '../electron/ipc/applicationV2RendererVersion.js';
 
 // Synthetic production-render workload in a separate, disposable Electron profile.
@@ -81,20 +79,10 @@ try {
       app.exit(0);
     })().catch(error => { console.error(error); app.exit(1); });
   `;
-  const outfile = path.join(root, 'main.cjs');
-  await build({ stdin: { contents: entry, resolveDir: process.cwd(), sourcefile: 'application-render-cache-benchmark.mjs' },
-    outfile, bundle: true, platform: 'node', format: 'cjs', packages: 'external',
-    define: { __APPLICATION_RENDERER_SOURCE_SHA256__: JSON.stringify(applicationRendererSourceDigest()) } });
-  const env = { ...process.env, INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-  delete env.ELECTRON_RUN_AS_NODE;
-  await new Promise((resolve, reject) => {
-    const child = spawn(electron, [outfile], { cwd: process.cwd(), env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let outputText = '';
-    child.stdout.on('data', chunk => { outputText += chunk; process.stdout.write(chunk); });
-    child.stderr.on('data', chunk => { outputText += chunk; process.stderr.write(chunk); });
-    const timer = setTimeout(() => child.kill('SIGKILL'), 300_000);
-    child.once('error', error => { clearTimeout(timer); reject(error); });
-    child.once('exit', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error('Isolated render benchmark failed: ' + code + '\n' + outputText.slice(-5000))); });
+  await runInlineElectronEntry({
+    source: entry, sourcefile: 'application-render-cache-benchmark.mjs', resolveDir: process.cwd(),
+    outfile: path.join(root, 'main.cjs'), timeoutMs: 300_000, echo: true, failureLabel: 'Isolated render benchmark',
+    define: { __APPLICATION_RENDERER_SOURCE_SHA256__: JSON.stringify(applicationRendererSourceDigest()) },
   });
   const results = JSON.parse(await fs.readFile(output, 'utf8'));
   const mean = mode => results.filter(row => row.mode === mode).reduce((sum, row) => sum + row.wallMs, 0) / 2;

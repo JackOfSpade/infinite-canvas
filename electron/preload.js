@@ -181,6 +181,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Grounded cash-pay research follows fit scoring. Payload: { nodeId, processed, total }.
   onCompensationProgress: createListener('compensation-progress'),
   getScrapeAlarms: () => ipcRenderer.invoke('get-scrape-alarms'),
+  // Must match SCRAPE_ALARMS_CHANGED_CHANNEL in electron/ipc/scrapeAlarms.js (a test pins it).
   onScrapeAlarmsChanged: createListener('scrape-alarms-changed'),
   resolveJobSource: (args) => ipcRenderer.invoke('resolve-job-source', args),
   resumeJobSource:  (args) => ipcRenderer.invoke('resume-job-source', args),

@@ -6,11 +6,9 @@ import {
   JOB_SEARCH_MAX_INITIAL_LOOKBACK_DAYS,
   JOB_SEARCH_MIN_INITIAL_LOOKBACK_DAYS,
   filterJobsByPostedSince,
-  JOB_SEARCH_MAX_LOOKBACK_DAYS,
   jobSearchCompletionAnchor,
   jobSearchHistoricalAnchor,
   jobSearchNextAnchor,
-  jobSearchRescanAnchor,
   legacyJobRunStartedAt,
   normalizeJobSearchInitialLookbackDays,
   parsePostedDate,
@@ -89,18 +87,12 @@ export default [
         'a malformed legacy suffix fails closed');
 
       const coverageStartedAt = localDate(2026, 10, 1, 23, 50).getTime();
-      const covered = jobSearchRescanAnchor(coverageStartedAt, completedAt, runId, nodeId);
-      assert(covered.timestamp === coverageStartedAt && covered.source === 'last-coverage-start',
-        'a successful run start wins as the conservative coverage watermark across midnight');
       const overnightWindow = resolveJobSearchDateWindow(
-        covered.timestamp,
+        coverageStartedAt,
         localDate(2026, 10, 2, 0, 10),
       );
       assert(overnightWindow.startTimestamp === localDate(2026, 10, 1).getTime(),
         'an overnight completed run must rescan from the prior local date so finished sources have no gap');
-      const malformedCoverage = jobSearchRescanAnchor('not-a-time', completedAt, runId, nodeId);
-      assert(malformedCoverage.timestamp === completedAt && malformedCoverage.source === 'last-completed',
-        'a malformed dedicated coverage watermark safely falls back to actual completion history');
       const durable = jobSearchCompletionAnchor(completedAt, runId, nodeId);
       assert(durable.timestamp === completedAt && durable.source === 'last-completed',
         'the successful completion instant wins over the older run-start fallback');
@@ -118,9 +110,8 @@ export default [
     run: () => {
       const now = localDate(2026, 10, 22, 12, 30);
       const window = resolveJobSearchDateWindow(null, now);
-      assert(JOB_SEARCH_DEFAULT_INITIAL_LOOKBACK_DAYS === 21
-        && JOB_SEARCH_MAX_LOOKBACK_DAYS === JOB_SEARCH_MAX_AUTOMATIC_HISTORY_LOOKBACK_DAYS,
-      'the default first scan and independent history safety cap are explicit');
+      assert(JOB_SEARCH_DEFAULT_INITIAL_LOOKBACK_DAYS === 21 && JOB_SEARCH_MAX_AUTOMATIC_HISTORY_LOOKBACK_DAYS === 365,
+        'the default first scan and independent history safety cap are explicit');
       assert(window.startDate.getTime() === localDate(2026, 10, 1).getTime(), 'first run starts at local midnight 21 days ago');
       assert(window.startTimestamp === window.startDate.getTime(), 'timestamp and date identify the same exact boundary');
       assert(window.anchorTimestamp === window.startTimestamp, 'effective anchor is the exact boundary');

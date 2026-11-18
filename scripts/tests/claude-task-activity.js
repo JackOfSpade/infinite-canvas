@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { describeClaudeSdkMessage } from '../../electron/ipc/claudeApplicationSdkStage.js';
+import { describeClaudeSdkMessage } from '../../electron/ipc/claudeTaskActivity.js';
 import { clearClaudeUsageLimit, claudeUsageLimit, claudeUsageWaitMs, drainClaudeCalls, holdClaude, trackClaudeCall, releaseClaude, reportClaudeUsageLimit, waitForClaudeRelease, waitForClaudeUsage } from '../../electron/ipc/claudePause.js';
 import { createClaudeTaskActivity } from '../../electron/ipc/claudeTaskActivity.js';
 import { createClaudeTaskWorker } from '../../electron/ipc/claudeTaskWorker.js';

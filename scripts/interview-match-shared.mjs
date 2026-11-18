@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { isPathInside, resolveThroughExistingParent } from './lib/outside-repo.mjs';
 
 export const CASE_KINDS = ['paraphrase', 'lead-in', 'multi-part', 'follow-up', 'none', 'not-question', 'noisy'];
 export const PROMPT_VERSION = 2;
@@ -106,18 +107,7 @@ export async function writePrivateJson(file, value) {
 // put private case/result artifacts inside this checkout.
 export async function assertExternalOutput(target) {
   const repo = await fs.realpath(path.resolve(import.meta.dirname, '..'));
-  let parent = path.resolve(target);
-  const suffix = [];
-  for (;;) {
-    try { parent = path.join(await fs.realpath(parent), ...suffix.reverse()); break; }
-    catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      suffix.push(path.basename(parent));
-      parent = path.dirname(parent);
-    }
-  }
-  const relative = path.relative(repo, parent);
-  if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
+  if (isPathInside(await resolveThroughExistingParent(target), repo)) {
     throw new Error('Keep private bank-derived outputs outside the repository.');
   }
 }

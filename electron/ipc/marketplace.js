@@ -1757,6 +1757,8 @@ If the photos show MORE THAN ONE distinct product (a bundle/lot), pick the SINGL
       Object.assign(samplesBySource, res.samplesBySource);
       sourceCount = res.sourceCount;
     }
+    // Release any source the last item never reported, so no card keeps spinning.
+    progressFactory.flush();
 
     // Union the per-item warnings by sourceId — a source blocked in ANY item
     // surfaces ONE blocked card (Solve/Skip then apply across all items).

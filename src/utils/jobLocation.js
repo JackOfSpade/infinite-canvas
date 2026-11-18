@@ -11,6 +11,8 @@
 // of the kept jobs actually sit in the target area (a Denver search that surfaces
 // a Miami role should be visible, not hidden).
 
+import { escapeRegExp } from './regexEscape.js';
+
 // Canonical, board-friendly country names. The query-gen model infers a country
 // as FREE TEXT — "US" / "USA" / "U.S." / "America" / "United States of America"
 // all mean one place — but a board's location FILTER needs ONE consistent string.
@@ -453,7 +455,7 @@ const REMOTE_BOARD_SOURCES = new Set(
 // query — USAJobs is the US federal government's own board. Used solely to resolve
 // a PLACELESS location on a United-States country search (see
 // summarizeLocationAdherence); it never overrides a stated place.
-export const US_ONLY_SOURCES = new Set(['usajobs']);
+ const US_ONLY_SOURCES = new Set(['usajobs']);
 
 // Administrative placeholders that occupy a location field while naming no place:
 // USAJobs' own "Location Negotiable After Selection" / "Multiple Locations" values.
@@ -463,15 +465,6 @@ export const US_ONLY_SOURCES = new Set(['usajobs']);
 // the remote check upstream claims it first.)
 const REMOTE_LOCATION_RE = /\b(remote|anywhere|work from home|wfh|distributed)\b/;
 const PLACELESS_LOCATION_RE = /negotiable after selection|(?:multiple|various)\s+locations?/i;
-
-// Escape a string for literal use inside a `new RegExp(...)` pattern. Hoisted
-// here because pickGlassdoorLocation / buildStateRegex / buildCountryRegex /
-// buildForeignRegexes below each build ad-hoc location-matching regexes and all
-// need this — a single copy keeps the escaped-character set from drifting out
-// of sync between them.
-function escapeRegExp(s) {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 /**
  * Pick the right Glassdoor location from its autocomplete results

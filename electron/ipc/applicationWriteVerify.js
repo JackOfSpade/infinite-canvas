@@ -7,6 +7,7 @@ import { isCareerSkillIndexEligible } from './careerSnapshot.js';
 import { cleanCareerSkillNames } from './careerCleanLayer.js';
 import { applicationSkillPermittedForPosting } from './applicationCareerAuthority.js';
 import { writeVerifyLetterCapacityLine } from './applicationV2LengthBudget.js';
+import { escapeRegExp } from '../../src/utils/regexEscape.js';
 export const WRITE_VERIFY_PROTOCOL = 'write-then-verify.v2';
 export const WRITE_VERIFY_DEFAULT_CANDIDATES = 5;
 export const WRITE_VERIFY_MAX_CORRECTIONS = 3;
@@ -40,7 +41,7 @@ const WRITE_VERIFY_QUOTE_SENTENCE = WRITE_VERIFY_BRIEF.slice(WRITE_VERIFY_BRIEF.
 const WRITE_VERIFY_LETTER_SENTENCES = WRITE_VERIFY_BRIEF.slice(WRITE_VERIFY_BRIEF.indexOf('Open on a thesis'), WRITE_VERIFY_BRIEF.indexOf('Use a name, acronym')).trim();
 export const WRITE_VERIFY_RESUME_BRIEF = `Write the best honest one-page résumé. ${WRITE_VERIFY_STYLE_SENTENCE} ${WRITE_VERIFY_QUOTE_SENTENCE}`;
 export const WRITE_VERIFY_COVER_BRIEF = `Write the cover letter as a persuasive essay to the hiring manager. ${WRITE_VERIFY_STYLE_SENTENCE} ${WRITE_VERIFY_LETTER_SENTENCES} ${WRITE_VERIFY_QUOTE_SENTENCE}`;
-export function writeVerifyBriefFor(documentScope) {
+ function writeVerifyBriefFor(documentScope) {
   return documentScope === 'resume' ? WRITE_VERIFY_RESUME_BRIEF : documentScope === 'cover' ? WRITE_VERIFY_COVER_BRIEF : WRITE_VERIFY_BRIEF;
 }
 const scopedShortlistStep = documentScope => {
@@ -160,7 +161,6 @@ export function writeVerifySkillIndex({ profile, catalog, listingEvidence, caree
 }
 
 const skillKey = name => String(name ?? '').normalize('NFKC').trim().toLocaleLowerCase();
-const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 
 /**
  * Index-eligible skill names the writer's plain-text résumé lists under its
@@ -343,7 +343,7 @@ export function writeVerifyFactFindingErrors(findings, documents) {
   return careerFactFindingErrors(findings, id => writeVerifyUnitText(documents, id));
 }
 
-export const WRITE_VERIFY_REJECTION_ROWS_MAX = 8;
+ const WRITE_VERIFY_REJECTION_ROWS_MAX = 8;
 export function appendWriteVerifyRejection(rows, row) {
   return [...(Array.isArray(rows) ? rows : []), row].slice(-WRITE_VERIFY_REJECTION_ROWS_MAX);
 }

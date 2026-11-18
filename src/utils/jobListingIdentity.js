@@ -54,23 +54,3 @@ export function jobAndVariantKeys(item) {
   const variants = Array.isArray(item?.postingVariants) ? item.postingVariants : [];
   return [...new Set([item, ...variants].flatMap(dedupKeysFor))];
 }
-
-export function filterDismissedBoardJobs(jobs, dismissedKeys) {
-  const dismissed = new Set(Array.isArray(dismissedKeys) ? dismissedKeys : []);
-  return (Array.isArray(jobs) ? jobs : []).filter(job =>
-    !jobAndVariantKeys(job).some(key => dismissed.has(key))
-  );
-}
-
-// Older Boards predate the dismissal ledger. Only an exact source signature
-// proves that every candidate belonged to the previously displayed result set.
-// In that case a source listing missing from live cards was dismissed.
-export function recoverBoardDismissedKeys(jobs, cards, exactSourceSignature) {
-  if (!exactSourceSignature) return [];
-  const visible = new Set((Array.isArray(cards) ? cards : []).flatMap(card =>
-    jobAndVariantKeys(card?.data || card)
-  ));
-  return [...new Set((Array.isArray(jobs) ? jobs : [])
-    .filter(job => !jobAndVariantKeys(job).some(key => visible.has(key)))
-    .flatMap(jobAndVariantKeys))];
-}

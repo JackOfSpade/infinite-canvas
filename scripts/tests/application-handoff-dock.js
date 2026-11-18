@@ -23,7 +23,6 @@ import {
   assignApplicationOrdinals,
   countActiveApplicationHandoffs,
   getApplicationHandoffs,
-  isApplicationRequestId,
   mergeDockQueue,
   publishApplicationHandoffs,
   retainUnreadableApplicationItems,
@@ -235,11 +234,9 @@ const dockTests = [
       const id = applicationRequestId('job-1');
       assert(id === 'application:job-1', `unexpected request id ${id}`);
       assert(applicationRequestId('job-1') === id, 'the id must be stable across refreshes');
-      assert(isApplicationRequestId(id), 'an application id must be recognised');
       // Push transport ids are opaque, but none of them start with this prefix,
       // so a merged queue can key drafts and chips off requestId alone.
-      assert(!isApplicationRequestId('a1b2c3d4'), 'a push request id must not read as an application');
-      assert(!isApplicationRequestId(null) && !isApplicationRequestId(undefined), 'absent ids are not applications');
+      assert(id.startsWith('application:') && !'a1b2c3d4'.startsWith('application:'), 'an application id carries its own prefix');
     },
   },
   {

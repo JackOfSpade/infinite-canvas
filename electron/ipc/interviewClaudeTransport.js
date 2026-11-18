@@ -42,15 +42,12 @@ import { handoffMessages, offloadTextCall } from './offloadTextCall.js';
 
 // Parallel search/fetch turns: enough to read several briefs' worth of pages in one session.
 export const INTERVIEW_RESEARCH_MAX_TURNS = 24;
-export const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
+ const INTERVIEW_CLAUDE_MAX_ATTEMPTS = 3;
 const MAX_REJECTION_CHARS = 6000;
 const SHADOW_STAGES = Object.freeze(['qa-brief', 'qa-write']);
 
-/** Kept for callers and tests from when credit exhaustion blocked offload; a routed stage now simply fails. */
-export function resetInterviewOffloadBlock() {}
-
 /** The stages that search the web through Parallel: Prepare research and the typed-job company research. */
-export function isInterviewResearchStage(stage) {
+ function isInterviewResearchStage(stage) {
   return stage === 'qa-research' || stage === 'typed-job-research';
 }
 

@@ -123,30 +123,14 @@ export function resolveBudget(key, seedTimeoutMs) {
   return { timeoutMs, firstBeatMs, learned: true };
 }
 
-/**
- * Record one clean "time to ready" sample. Call ONLY for healthy outcomes:
- * a positive-count stabilization (browser path) or a successful fetch+parse
- * (API path). Do NOT call for empty/blocked/timed-out/ceiling-hit outcomes —
- * the EMA must track how long *success* takes, not how long blocks stall.
- *
- * @param {string} key        stable source id
- * @param {number} elapsedMs  wall-clock ms from start to ready
- */
-export function recordReady(key, elapsedMs) {
-  if (!key || !(elapsedMs > 0)) return;
-  const prev = statsFor(key);
+// Folds one timing sample into a source's stats. Spreads prev so the body-size
+// fields survive a timing write.
+function withReadySample(prev, elapsedMs) {
   const ema = prev?.ema > 0
     ? prev.ema * (1 - EMA_ALPHA) + elapsedMs * EMA_ALPHA
     : elapsedMs;
   const samples = (prev?.samples || 0) + 1;
-  // Spread prev so body-size fields (and vice-versa) survive a timing write.
-  writeStats(key, { ...(prev || {}), ema: Math.round(ema), samples, last: Math.round(elapsedMs), updated: Date.now() });
-
-  // Log the transition from "seeded" to "learned" once, so the budget system
-  // leaves a diagnostic trail in bug reports without spamming every scrape.
-  if (samples === MIN_SAMPLES) {
-    logger.info(`[ScrapeBudget] '${key}' now learned: ema=${Math.round(ema)}ms over ${samples} samples`);
-  }
+  return { ...(prev || {}), ema: Math.round(ema), samples, last: Math.round(elapsedMs), updated: Date.now() };
 }
 
 // ── Per-source response-body baseline ─────────────────────────────────────────
@@ -159,15 +143,45 @@ export function recordReady(key, elapsedMs) {
 const BODY_EMA_ALPHA = 0.2;   // slower than timing — page weight is fairly stable
 const MIN_BODY_SAMPLES = 3;   // require a few clean reads before trusting it
 
-/** Record a clean response's body size (chars). */
-export function recordBodySize(key, bytes) {
-  if (!key || !(bytes > 0)) return;
-  const prev = statsFor(key);
+// Folds one body-size sample into a source's stats, keeping the timing fields.
+function withBodySample(prev, bytes) {
   const bodyEma = prev?.bodyEma > 0
     ? prev.bodyEma * (1 - BODY_EMA_ALPHA) + bytes * BODY_EMA_ALPHA
     : bytes;
   const bodySamples = (prev?.bodySamples || 0) + 1;
-  writeStats(key, { ...(prev || {}), bodyEma: Math.round(bodyEma), bodySamples, bodyUpdated: Date.now() });
+  return { ...(prev || {}), bodyEma: Math.round(bodyEma), bodySamples, bodyUpdated: Date.now() };
+}
+
+/**
+ * Record a timing sample, a body-size sample, or both for one source with a
+ * single store write (the store rewrites its whole file on every set). Each
+ * field is applied only when it is a positive number.
+ *
+ * Pass elapsedMs ONLY for healthy outcomes: a positive-count stabilization
+ * (browser path) or a successful fetch+parse (API path), never for empty,
+ * blocked, timed-out or ceiling-hit outcomes, because the EMA must track how
+ * long success takes, not how long blocks stall. Pass bytes ONLY for a clean
+ * response (items extracted, no block warning) so the baseline reflects healthy
+ * pages, not block skeletons.
+ *
+ * @param {string} key
+ * @param {{elapsedMs?:number|null, bytes?:number|null}} sample
+ */
+export function recordSample(key, { elapsedMs = null, bytes = null } = {}) {
+  if (!key) return;
+  const hasTiming = elapsedMs > 0;
+  const hasBody = bytes > 0;
+  if (!hasTiming && !hasBody) return;
+  let stats = statsFor(key);
+  if (hasTiming) stats = withReadySample(stats, elapsedMs);
+  if (hasBody) stats = withBodySample(stats, bytes);
+  writeStats(key, stats);
+
+  // Log the transition from "seeded" to "learned" once, so the budget system
+  // leaves a diagnostic trail in bug reports without spamming every scrape.
+  if (hasTiming && stats.samples === MIN_SAMPLES) {
+    logger.info(`[ScrapeBudget] '${key}' now learned: ema=${stats.ema}ms over ${stats.samples} samples`);
+  }
 }
 
 /**

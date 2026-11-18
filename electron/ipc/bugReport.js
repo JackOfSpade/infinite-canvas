@@ -4,7 +4,6 @@ const { dialog, app } = electronPkg;
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import crypto from 'crypto';
 
 import { handleSafe, snapshotActiveNodeTasks } from './ipcUtils.js';
 import { getSellMonitorPlatforms, getJobLoginPlatforms, getSharedProfileReservationInfo, getStealthBrowserInfo, getBrowserProfileDiagnostics } from './stealthBrowser.js';
@@ -21,7 +20,7 @@ import { getBudgetSnapshot } from './scrapeBudget.js';
 import { getRateLimiterSnapshot } from './rateLimiter.js';
 import { getKnownTaskIds, taskModelRoutingSnapshot } from './llm.js';
 import { getNonApiAiHandoffLifecycle } from './nonApiAi.js';
-import { closeReportDiagnostic, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
+import { buildWindowSizeLine, closeReportDiagnostic, reportCorrelationDigest, redactReportLogSecrets, redactReportPath, redactReportLocalPathsInText, redactReportOpaqueIds, redactReportUrl, redactReportUrlsInText, redactReportEventHistoryLine, renderSessionRows, renderSessionTraceBlocks } from './bugReport/helpers.js';
 import { buildMainProcessLogsMarkdown, buildReverseChronologicalLogBlock, eventHistoryHeading, enforceClipboardMarkdownCap } from './bugReport/clipboardCap.js';
 import { buildFilterSummaryMarkdown, codeIncludesFull } from './bugReport/filterSummary.js';
 import { codeIncludesApplicationOutput } from './bugReport/applicationOutput.js';
@@ -39,7 +38,7 @@ import { applicationCorrectionDiagnosticsMarkdown, applicationRejectionTextRows 
 import { buildApplicationRejectionTextMarkdown, codeIncludesApplicationRejections } from './bugReport/applicationRejections.js';
 import { claudePauseDiagnosticsMarkdown } from './claudePauseDiagnostics.js';
 import { claudeUsageLimit } from './claudePause.js';
-import { buildWindowSizeLine, buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
+import { buildPointerProbeMarkdown } from './bugReport/pointerProbeMarkdown.js';
 import { writeSavedBugReport, buildClipboardPointer } from './bugReport/reportFile.js';
 import { resolveNodePresence } from '../../src/utils/nodePresence.js';
 import { canAttemptJobSourceResolve, isJobSourceWarningGating } from '../../src/utils/jobSourceWarningPolicy.js';
@@ -77,11 +76,6 @@ function truncateDiagnosticText(value, max) {
   const text = String(value || '');
   if (text.length <= max) return text;
   return `${text.slice(0, Math.max(0, max - 1))}…`;
-}
-
-function reportCorrelationDigest(value, fallback = 'not recorded') {
-  if (typeof value !== 'string' || !value) return fallback;
-  return `#${crypto.createHash('sha256').update(value).digest('hex').slice(0, 10)}`;
 }
 
 // Keep Node Diagnostics aligned with JobCardNode's Open Listing action. The
@@ -712,7 +706,7 @@ function buildScraperAdaptationSnapshot() {
 
   const budgetLines = [];
   // These stats have EXACTLY ONE writer: browserPool.js's scrapeMultiple
-  // (recordReady/recordBodySize), whose only caller is marketplace.js. The job
+  // (recordSample), whose only caller is marketplace.js. The job
   // browser scraper (manualScraper.js) imports neither browserPool nor
   // scrapeBudget, so any job-source key here is a fossil left by the retired
   // scrapeMultiple job path and describes NOTHING about how a job scrape ran
@@ -2952,7 +2946,7 @@ export function registerBugReportHandlers() {
     const description = safePayload.description;
 
     try {
-      const saved = await writeSavedBugReport(full.markdown, { reportWindowId: event.sender?.id ?? null });
+      const saved = await writeSavedBugReport(full.markdown);
       return {
         delivery: 'file-pointer',
         clipboardText: buildClipboardPointer({

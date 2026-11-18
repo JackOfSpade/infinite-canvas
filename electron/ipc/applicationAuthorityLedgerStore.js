@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { canonicalAuthorityValue as stable } from './applicationAuthorityWorkflow.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 // The store intentionally has no application-schema knowledge.  It is the
 // durable append-only substrate for requirements now and match/review receipts
@@ -13,9 +14,9 @@ import { canonicalAuthorityValue as stable } from './applicationAuthorityWorkflo
 // proved from one peak in logarithmic reads.  v1 roots remain readable and
 // writable with their historical reverse-chain lookup; they are deliberately
 // never silently rewritten because their digest is part of existing jobs.
-export const AUTHORITY_LEDGER_STORE_VERSION = 2;
+ const AUTHORITY_LEDGER_STORE_VERSION = 2;
 const AUTHORITY_LEDGER_STORE_LEGACY_VERSION = 1;
-export const AUTHORITY_LEDGER_STORE_PAGE_BYTES = 256 * 1024;
+ const AUTHORITY_LEDGER_STORE_PAGE_BYTES = 256 * 1024;
 // A held journal atomically binds both bounded root snapshots. It is not a
 // receipt page, so permit those two roots plus fixed metadata while retaining
 // a small, explicit denial-of-service envelope on every read and write.
@@ -24,7 +25,7 @@ const AUTHORITY_LEDGER_STORE_MAX_INDEX_PEAKS = 53;
 const AUTHORITY_LEDGER_STORE_MUTATION_LOCK_BYTES = 4 * 1024;
 const AUTHORITY_LEDGER_STORE_OPEN_SNAPSHOT_ATTEMPTS = 4;
 
-const hash = value => crypto.createHash('sha256').update(typeof value === 'string' ? value : stable(value)).digest('hex');
+const hash = value => sha256Hex(typeof value === 'string' ? value : stable(value));
 let faultHook = null;
 export function __setAuthorityLedgerStoreFaultHookForTests(hook) { faultHook = typeof hook === 'function' ? hook : null; }
 let processIdentityHook = null;

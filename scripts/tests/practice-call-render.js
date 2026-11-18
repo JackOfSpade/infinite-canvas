@@ -514,21 +514,10 @@ export default [
     },
   },
   {
-    name: 'practice call render: replay positioning helpers pick chapters, segment geometry and turns and format times',
+    name: 'practice call render: replay positioning helpers pick turns and format times',
     async run() {
       const model = await import(pathToFileURL(path.join(PRACTICE, 'replayModel.js')).href);
-      const { chapterAt, segmentStyles, turnAt, formatTime } = model;
-      assert(chapterAt(REPLAY.chapters, 0) === 0, 'the start of the call is in the first chapter');
-      assert(chapterAt(REPLAY.chapters, 140_000) === 1, 'a position inside a chapter must resolve to it');
-      assert(chapterAt(REPLAY.chapters, 590_000) === 2, 'the last chapter covers the tail of the call');
-      assert(chapterAt(REPLAY.chapters, -1) === -1, 'nothing precedes the start of the call');
-      assert(chapterAt([], 10) === -1, 'an empty chapter list has no chapter');
-      const segments = segmentStyles(REPLAY.chapters, 600_000);
-      assert(segments.length === 3, 'every chapter becomes a segment');
-      assert(segments[0].leftPct === 0 && segments[0].widthPct === 20, 'the first segment spans 0-20%');
-      assert(segments[1].leftPct === 20 && segments[1].widthPct === 50, 'the middle segment spans 20-70%');
-      assert(segments[2].leftPct === 70 && segments[2].widthPct === 30, 'the final segment spans 70-100%');
-      assert(segmentStyles(REPLAY.chapters, 0).length === 0, 'a replay with no duration has no segments');
+      const { turnAt, formatTime } = model;
       assert(turnAt(REPLAY.transcript, 120_000) === 0, 'the interviewer turn owns its start time');
       assert(turnAt(REPLAY.transcript, 140_000) === 1, 'the candidate turn owns its window');
       assert(turnAt(REPLAY.transcript, 10_000) === -1, 'a position before the transcript has no turn');

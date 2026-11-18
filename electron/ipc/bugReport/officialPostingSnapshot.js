@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { reportDigestHex } from './helpers.js';
 import { OFFICIAL_POSTING_LEVELS, OFFICIAL_POSTING_OUTCOMES } from '../officialPostingFields.js';
 import {
   collectOfficialPostingReport, sanitizeOfficialPostingReportRow,
@@ -22,7 +22,7 @@ export function buildOfficialPostingSnapshot(nodes, snapshot = null) {
     `- Shown outcomes: ${summary('outcome', OFFICIAL_POSTING_OUTCOMES)}.`,
   ];
   for (const row of rows) {
-    const id = createHash('sha256').update(row.id).digest('hex').slice(0, 10);
+    const id = reportDigestHex(row.id);
     const fetches = row.fetchFailures.map(failure => `${failure.code}${failure.reason ? `/${failure.reason}` : ''}${failure.statusCode ? `/HTTP-${failure.statusCode}` : ''}`);
     const missingFetchDetails = !fetches.length && row.trail.some(code => OFFICIAL_REPORT_FETCH_CODES.includes(code));
     lines.push(`- card #${id} · record ${row.record} · level ${row.level} · outcome ${row.outcome} · status ${row.state} · retryable ${row.retryable ? 'yes' : 'no'} · miss or closure settled ${row.settled ? 'yes' : 'no'} · semantic proof ${row.semanticProof} · trail ${row.trail.join(', ') || 'not recorded'} · fetch details ${fetches.join(', ') || (row.record === 'valid' && !missingFetchDetails ? 'none' : 'not recorded')}${missingFetchDetails ? ' (failure detail missing)' : ''}`);

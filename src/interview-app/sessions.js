@@ -1,6 +1,8 @@
 // Pure state helpers for the standalone Interview Helper's list of interviews.
 // One interview carries the same fields an Interview Helper node carried.
 
+import { INTERVIEW_RUN_ID_RE } from '../utils/interviewRunIdGrammar.js';
+
 export function emptyInterviewData() {
   return {
     interviewHelperSourceNodeId: null,
@@ -77,7 +79,7 @@ export function importCanvasInterviews(state, interviews, now = Date.now()) {
   return { state: next, added, skipped: (Array.isArray(interviews) ? interviews.length : 0) - added };
 }
 
-export const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+export const RUN_ID_RE = INTERVIEW_RUN_ID_RE;
 
 /** Worker run ids an interview may still own, so deleting it can retire them. */
 export function interviewRunIds(data) {

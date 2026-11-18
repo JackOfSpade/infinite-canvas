@@ -17,6 +17,8 @@ function type(window, input, value) {
 
 async function withBundled(entry, run) {
   return withDom(async window => {
+    // Modules that pull in the event logger poll for this hook until it exists.
+    window.electronAPI = { onSettingsChanged() {} };
     const bundle = await bundleComponent(path.resolve(entry), {});
     const act = async callback => bundle.module.act(async () => { await callback(); await flush(); });
     try { return await run({ window, act, module: bundle.module }); }
@@ -225,4 +227,74 @@ function noteTests() {
   }];
 }
 
-export default [...matchingTests(), ...projectionTests(), ...noteTests(), ...panelTests()];
+function modalFocusTests() {
+  return [{
+    name: 'modal focus trap: Tab wraps inside the dialog, the modal count tracks it and focus returns to the opener',
+    async run() {
+      await withBundled('src/components/ConfirmDialog.jsx', async ({ window, act, module }) => {
+        const opener = window.document.createElement('button');
+        window.document.body.appendChild(opener);
+        opener.focus();
+        const counts = [];
+        window.addEventListener('modal-stack-changed', event => counts.push(event.detail.count));
+        const root = module.createRoot(window.document.getElementById('root'));
+        await act(() => root.render(module.React.createElement(module.ConfirmDialog, { title: 'Delete', message: 'Sure?', confirmLabel: 'Yes', cancelLabel: 'No', onConfirm() {}, onCancel() {} })));
+        const buttons = [...window.document.querySelectorAll('[role="dialog"] button')];
+        assert(buttons.length >= 2, 'the dialog renders its actions');
+        assert(window.document.activeElement.textContent === 'No', 'focus starts on the safe action');
+        const press = (shiftKey) => window.document.activeElement.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Tab', shiftKey, bubbles: true, cancelable: true }));
+        buttons.at(-1).focus();
+        assert(press(false) === false && window.document.activeElement === buttons[0], 'Tab on the last control wraps to the first');
+        assert(press(true) === false && window.document.activeElement === buttons.at(-1), 'Shift+Tab on the first control wraps to the last');
+        await act(() => root.unmount());
+        assert(counts[0] === 1 && counts.at(-1) === 0, `the dialog counts as an open modal while mounted (saw ${JSON.stringify(counts)})`);
+        assert(window.document.activeElement === opener, 'focus returns to the control that opened the dialog');
+      });
+    },
+  }];
+}
+
+function recoveryPeekTests() {
+  const mount = async (peek, { recoveryRef, onApply, acknowledge }) => withBundled('src/hooks/useMarketplaceRecoveryPeek.js', async ({ window, act, module }) => {
+    window.electronAPI = { ...window.electronAPI, peekMarketplaceRecovery: peek, acknowledgeMarketplaceRecovery: acknowledge };
+    const updates = [];
+    const seen = [];
+    const updateGlobal = (nodeId, patch) => updates.push([nodeId, patch]);
+    function Probe() {
+      const hydrated = module.useMarketplaceRecoveryPeek({
+        id: 'n1', canvasFilePath: '/canvas.json', kind: 'sellhub', resumeKey: 'marketplaceRunResume', logTag: 'Probe',
+        recoveryRef, updateGlobal, isRestorable: recovery => recovery?.restorable === true, applyRestorable: onApply,
+      });
+      seen.push(hydrated);
+      return null;
+    }
+    const root = module.createRoot(window.document.getElementById('root'));
+    try { await act(() => root.render(module.React.createElement(Probe))); } finally { await act(() => root.unmount()); }
+    return { updates, seen };
+  });
+  return [{
+    name: 'marketplace recovery peek: reports hydration after the sidecar is read and restores a restorable one',
+    async run() {
+      const applied = [];
+      const { seen } = await mount(async () => ({ success: true, found: true, processEpoch: 'e1', recovery: { restorable: true, runId: 'r1', inputKey: 'k1' } }), {
+        recoveryRef: { current: null }, onApply: result => applied.push(result.processEpoch),
+      });
+      assert(seen[0] === false && seen.at(-1) === true, `hydration starts false and ends true (saw ${JSON.stringify(seen)})`);
+      assert(applied.length === 1 && applied[0] === 'e1', 'a restorable sidecar is handed to the node once');
+    },
+  }, {
+    name: 'marketplace recovery peek: an abandoned sidecar clears only the matching local mirror, and a peek failure still ends hydration',
+    async run() {
+      const matching = { current: { runId: 'r1', inputKey: 'k1' } };
+      const cleared = await mount(async () => ({ success: true, found: false, status: 'abandoned', runId: 'r1', inputKey: 'k1' }), { recoveryRef: matching, onApply() { throw new Error('not restorable'); } });
+      assert(matching.current === null && cleared.updates.some(([, patch]) => patch.marketplaceRunResume === null), 'the matching mirror is cleared');
+      const other = { current: { runId: 'r2', inputKey: 'k1' } };
+      const kept = await mount(async () => ({ success: true, found: false, status: 'abandoned', runId: 'r1', inputKey: 'k1' }), { recoveryRef: other, onApply() {} });
+      assert(other.current?.runId === 'r2' && kept.updates.length === 0, 'a different run keeps its mirror');
+      const failed = await mount(async () => { throw new Error('ipc down'); }, { recoveryRef: { current: null }, onApply() {} });
+      assert(failed.seen.at(-1) === true, 'a failed peek still lets restart effects run');
+    },
+  }];
+}
+
+export default [...recoveryPeekTests(), ...modalFocusTests(), ...matchingTests(), ...projectionTests(), ...noteTests(), ...panelTests()];

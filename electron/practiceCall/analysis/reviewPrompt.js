@@ -148,12 +148,6 @@ function formatTranscript(transcript, wordsByTurn, interviewers = []) {
   }).join('\n');
 }
 
-function formatToneNotes(notes) {
-  const written = Array.isArray(notes) ? notes.filter(note => line(note?.note)) : [];
-  if (!written.length) return '(no tone notes were taken during the call)';
-  return written.map(note => `- ${clock(note?.atMs)} ${line(note.note)}`).join('\n');
-}
-
 function formatToneTimeline(samples) {
   if (!Array.isArray(samples) || !samples.length) return '(no tone samples)';
   return samples.map(sample => `${clock(sample?.atMs)} arousal ${sample?.arousal} dominance ${sample?.dominance} valence ${sample?.valence}`).join('\n');
@@ -169,7 +163,7 @@ function formatMetrics(metrics) {
 
 const RULES = [
   'You are reviewing one recorded mock interview the candidate just finished. This feedback is read, never spoken back during a call.',
-  'Use only what the transcript, the metrics, the tone notes and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value.',
+  'Use only what the transcript, the metrics and the plan below support. Never invent a number that is not in the metrics; when you cite pace, pauses, talk time or words per minute, copy the measured value.',
   '- Fillers: count only non-lexical filler uses in the candidate\'s own words (the sounds people make while thinking). A word that carries meaning in that sentence is not a filler, and quoting a word from the plan is not a filler. Do not use any list of filler words; judge each use in context.',
   '- Write every duration the way a person would say it, in seconds or in minutes and seconds ("about a minute and a half", "01:32"). Never print a raw millisecond count, even though the metrics are in milliseconds.',
   '- Aim for fewer fillers, not zero: fluent speech keeps some. Say what got in the way, not that any filler is a failure.',
@@ -187,8 +181,8 @@ const TYPED_ONLY_NOTE = [
   'Delivery could not be measured because the call was typed. In the delivery section, say that plainly in the summary, and in pace, pauses, fillers and confidence say it could not be measured; leave out fillerCount and wordsPerMinute. Make no claim about pace, pauses, fillers, confidence or tone anywhere in the review.',
 ].join('\n');
 
-export const REVIEW_SCREEN_CAP = 6000;
-export const REVIEW_PAD_CAP = 12000;
+ const REVIEW_SCREEN_CAP = 6000;
+ const REVIEW_PAD_CAP = 12000;
 
 const cut = (text, cap) => (text.length > cap ? `${text.slice(0, cap)}\n(cut: the first ${cap} characters of ${text.length} are shown)` : text);
 
@@ -276,7 +270,6 @@ export function buildReviewPrompt({ callRecord = {}, plan, brief, metrics, words
     ...(hasPad ? [`--- CANDIDATE CODING PAD (final text${line(callRecord.pad?.lang) ? `, language: ${line(callRecord.pad.lang)}` : ''}) ---`, fenced(cut(padText, REVIEW_PAD_CAP))] : []),
     ...(typedOnly ? [] : [
       '--- CANDIDATE PROSODY BY TURN (measured per spoken answer, keyed by transcript turn index: pace, pauses with helper-timeline ms, pitch, loudness; typed turns have none) ---', formatMetrics(measuredProsody),
-      '--- TONE NOTES (taken live during the call) ---', formatToneNotes(callRecord.toneNotes),
       '--- TONE TIMELINE (0-1 arousal, dominance, valence; spoken answers only) ---', formatToneTimeline(callRecord.toneSamples),
     ]),
   ];

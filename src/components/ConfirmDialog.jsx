@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, X } from 'lucide-react';
-import { updateModalCount } from './modalStack';
+import { useModalFocusTrap } from './useModalFocusTrap';
 import { TIMINGS } from '../utils/timings';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 
@@ -44,41 +44,12 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
   const [isResolving, setIsResolving] = useState(false);
   const dialogRef = useRef(null);
   const cancelButtonRef = useRef(null);
-  const previousFocusRef = useRef(null);
   const resolvingRef = useRef(false);
   const resolveTimerRef = useRef(null);
   const titleId = useId();
   const messageId = useId();
 
-  const focusableElements = useCallback(() => {
-    if (!dialogRef.current) return [];
-    return [...dialogRef.current.querySelectorAll(
-      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-    )];
-  }, []);
-
-  const trapFocus = useCallback((event) => {
-    if (event.key !== 'Tab') return;
-    const elements = focusableElements();
-    if (elements.length === 0) {
-      event.preventDefault();
-      dialogRef.current?.focus();
-      return;
-    }
-
-    const first = elements[0];
-    const last = elements[elements.length - 1];
-    if (!dialogRef.current?.contains(document.activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }, [focusableElements]);
+  const trapFocus = useModalFocusTrap(dialogRef, cancelButtonRef);
 
   const resolveOnce = useCallback((action) => {
     if (resolvingRef.current) return;
@@ -89,27 +60,11 @@ export function ConfirmDialog({ title, message, confirmLabel = 'Confirm', cancel
     resolveTimerRef.current = setTimeout(action, TIMINGS.MODAL_RESOLVE_GUARD_MS);
   }, []);
 
-  // Participate in the modal stack so global shortcuts (undo/redo) are suppressed
-  // while a destructive confirm is showing — otherwise Cmd+Z on the canvas
-  // underneath could mutate state mid-confirmation. (Dialog already does this.)
-  useEffect(() => {
-    updateModalCount(1);
-    return () => updateModalCount(-1);
-  }, []);
-
-  // A portal sits at the end of document.body, so focus would otherwise stay
-  // on an obscured canvas control. Start on the safe action and return focus
-  // to the control that opened the dialog after it closes.
-  useEffect(() => {
-    previousFocusRef.current = document.activeElement;
-    cancelButtonRef.current?.focus();
-    return () => {
-      const previousFocus = previousFocusRef.current;
-      if (previousFocus instanceof HTMLElement && document.contains(previousFocus)) {
-        previousFocus.focus();
-      }
-    };
-  }, []);
+  // The dialog counts as an open modal so global shortcuts (undo/redo) stay
+  // suppressed while a destructive confirm is showing, focus starts on the safe
+  // action, and focus returns to the control that opened it (a portal sits at
+  // the end of document.body, so focus would otherwise stay on an obscured
+  // canvas control).
 
   // Close on Escape — Escape always means "no further action", which cancels
   // the dialog (triggers onAbort to undo if available, else falls back to onCancel).

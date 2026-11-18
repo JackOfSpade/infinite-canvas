@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isPathInside, resolveThroughExistingParentSync } from './lib/outside-repo.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const RUN_LOG_DOC = path.join(REPO_ROOT, 'docs', 'ai-test-runs.md');
@@ -31,33 +32,14 @@ Written by the test tools themselves while they run (\`scripts/ai-test-journal.m
 These are raw results, kept whether or not a decision was made. Conclusions go in \`ai-model-selection.md\`, which should cite the run here. Only counts and costs are written; prompts and answers stay in each run's private out dir (default under \`~/Library/Application Support/infinite-canvas/ai-test-runs/\`).
 `;
 
-function realOrResolved(dir) {
-  const resolved = path.resolve(dir);
-  // Resolve the deepest existing ancestor so /tmp -> /private/tmp style links are seen.
-  let current = resolved;
-  const rest = [];
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) return resolved;
-    rest.unshift(path.basename(current));
-    current = parent;
-  }
-  try { return path.join(fs.realpathSync(current), ...rest); } catch { return resolved; }
-}
-
-function isInside(child, parent) {
-  const rel = path.relative(parent, child);
-  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
 /** Why a directory would not survive the session, or null when it is durable. */
 export function ephemeralReason(dir, { tmpRoots = null } = {}) {
-  const target = realOrResolved(dir);
+  const target = resolveThroughExistingParentSync(dir);
   if (/\/scratchpad(?:\/|$)/u.test(target)) return 'it is inside a session scratchpad';
   if (/\/claude-\d+\//u.test(`${target}/`)) return 'it is inside a Claude Code session temp folder';
   const roots = tmpRoots ?? [os.tmpdir(), '/tmp', '/private/tmp', '/var/folders', '/private/var/folders'];
   for (const root of roots) {
-    if (isInside(target, realOrResolved(root))) return 'it is inside a temporary folder';
+    if (isPathInside(target, resolveThroughExistingParentSync(root))) return 'it is inside a temporary folder';
   }
   return null;
 }

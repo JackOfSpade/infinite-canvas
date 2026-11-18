@@ -8,7 +8,7 @@ import { useReactFlow, useStore } from '@xyflow/react';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import { useModuleRunQueue } from '../contexts/useModuleRunQueue';
 import { useJobSearchCoordinator } from '../contexts/useJobSearchCoordinator';
-import { usePlatformsVerifyingProgress } from '../contexts/useSessionStatus';
+import { usePlatformsVerifyingProgress } from '../contexts/usePlatformsVerifyingProgress';
 import { HubContainer } from '../components/HubContainer';
 import { Briefcase } from 'lucide-react';
 import { JOB_SOURCE_BY_ID, ACTIVE_JOB_SOURCES, ALL_JOB_SOURCE_IDS } from '../utils/constants';

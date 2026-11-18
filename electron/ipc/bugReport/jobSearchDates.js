@@ -1,11 +1,11 @@
-import { createHash } from 'node:crypto';
+import { reportDigestHex } from './helpers.js';
 import { sanitizeJobSearchDateDiagnostics } from '../../../src/utils/jobSearchDateDiagnostics.js';
 import { normalizeSourceCoverage, normalizeSourceQueryProgress } from '../../../src/utils/jobSearchSourceCoverage.js';
 import { completionTimestampIso } from '../../../src/utils/completionTimestamp.js';
 
 function identifier(value) {
   return typeof value === 'string' && value
-    ? `#${createHash('sha256').update(value).digest('hex').slice(0, 10)}`
+    ? `#${reportDigestHex(value)}`
     : 'not recorded';
 }
 

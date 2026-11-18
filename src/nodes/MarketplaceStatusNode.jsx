@@ -25,10 +25,10 @@ import {
 } from '../utils/marketplaceStatusProgress';
 import { generateId } from '../utils/idGenerator';
 import { useIsMountedRef } from '../hooks/useIsMountedRef';
+import { useMarketplaceRecoveryPeek } from '../hooks/useMarketplaceRecoveryPeek';
 import { CanvasNavigationContext } from '../contexts/CanvasNavigationContext';
 import {
   isRestorableMarketplaceStatusRecovery,
-  marketplaceTerminalReceiptApplied,
   markMarketplaceTerminalApplied,
   marketplaceStatusInputMatches,
   mergeMarketplaceStatusPrepared,
@@ -100,8 +100,6 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
   const activeCheckRuns = useMemo(() => getMarketplaceStatusActiveRuns(id), [id]);
   const [checkingIds, setCheckingIds] = useState(() => marketplaceStatusCheckingIds(activeCheckRuns));
   const checkingIdsRef = useRef(checkingIds);
-  const [recoveryHydrated, setRecoveryHydrated] = useState(false);
-  const recoveryPeekScopeRef = useRef(null);
   const autoResumedRunRef = useRef(null);
   // True while runCheck awaits retiring a stale recovery, before the run is
   // registered: a second click in that gap must not start a second run.
@@ -137,70 +135,28 @@ export const MarketplaceStatusNode = React.memo(function MarketplaceStatusNode({
     return () => { cancelled = true; cleanup?.(); };
   }, []);
 
-  useEffect(() => {
-    const scope = `${canvasFilePath || '(unsaved)'}\u0000${id}`;
-    if (recoveryPeekScopeRef.current === scope) return;
-    recoveryPeekScopeRef.current = scope;
-    setRecoveryHydrated(false);
-    let disposed = false;
-    let hydrated = false;
-    void (async () => {
-      try {
-        if (!canvasFilePath || !window.electronAPI?.peekMarketplaceRecovery) return;
-        const result = await window.electronAPI.peekMarketplaceRecovery({
-          canvasFilePath, nodeId: id, kind: 'marketplace-status',
-        });
-        if (disposed || !result?.success) return;
-        if (!result.found) {
-          const local = recoveryRef.current;
-          if (['abandoned', 'completed'].includes(result.status)
-            && local?.runId === result.runId
-            && local?.inputKey === result.inputKey) {
-            recoveryRef.current = null;
-            updateGlobal(id, { marketplaceStatusRunResume: null });
-          }
-          return;
-        }
-        if (!isRestorableMarketplaceStatusRecovery(result.recovery)) return;
-        const recovered = result.recovery;
-        const completed = recovered.completedResults || {};
-        const alreadyApplied = marketplaceTerminalReceiptApplied(recovered, recoveryRef.current);
-        if (alreadyApplied) {
-          const ack = await window.electronAPI?.acknowledgeMarketplaceRecovery?.({
-            canvasFilePath, nodeId: id, kind: 'marketplace-status', runId: recovered.runId,
-            inputKey: recovered.inputKey,
-            appliedProcessEpoch: recoveryRef.current?.terminalApplied?.appliedProcessEpoch,
-            reason: 'exact-terminal-result-observed-after-restart',
-          });
-          if (!disposed && ack?.success && ack?.completed) {
-            updateGlobal(id, { marketplaceStatusRunResume: null });
-          }
-          return;
-        }
-        const rendererRecovery = recovered.phase === 'status-result'
-          ? markMarketplaceTerminalApplied(recovered, result.processEpoch)
-          : recovered;
-        recoveryRef.current = rendererRecovery;
-        updateGlobal(id, (node) => ({
-          marketplaceStatusRunResume: rendererRecovery,
-          platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, completed),
-        }));
-      } catch (error) {
-        EventLogger.error(`[MarketplaceStatus][${id}] Recovery hydration failed:`, error);
-      } finally {
-        if (!disposed) {
-          hydrated = true;
-          setRecoveryHydrated(true);
-        }
-      }
-    })();
-    return () => {
-      disposed = true;
-      // The disposed pass never reports hydration, so the next pass must peek
-      // again rather than skip on the scope it left behind.
-      if (!hydrated && recoveryPeekScopeRef.current === scope) recoveryPeekScopeRef.current = null;
-    };
-  }, [canvasFilePath, id, updateGlobal]);
+  const recoveryHydrated = useMarketplaceRecoveryPeek({
+    id,
+    canvasFilePath,
+    kind: 'marketplace-status',
+    resumeKey: 'marketplaceStatusRunResume',
+    logTag: 'MarketplaceStatus',
+    recoveryRef,
+    updateGlobal,
+    isRestorable: isRestorableMarketplaceStatusRecovery,
+    applyRestorable: (result) => {
+      const recovered = result.recovery;
+      const completed = recovered.completedResults || {};
+      const rendererRecovery = recovered.phase === 'status-result'
+        ? markMarketplaceTerminalApplied(recovered, result.processEpoch)
+        : recovered;
+      recoveryRef.current = rendererRecovery;
+      updateGlobal(id, (node) => ({
+        marketplaceStatusRunResume: rendererRecovery,
+        platformStatus: mergeMarketplaceStatusResults(node?.data?.platformStatus, completed),
+      }));
+    },
+  });
 
   const platformStatus = useMemo(() => data.platformStatus || {}, [data.platformStatus]);
 

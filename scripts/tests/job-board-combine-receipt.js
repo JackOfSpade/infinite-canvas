@@ -21,7 +21,7 @@ import {
   jobSearchOutcomeReceiptMatches,
 } from '../../src/utils/jobBoardSourceAdmission.js';
 import { terminalJobSearchOutcome } from '../../src/utils/jobBoardPausedSourceContinuation.js';
-import { filterDismissedBoardJobs, jobAndVariantKeys, recoverBoardDismissedKeys } from '../../src/utils/jobListingIdentity.js';
+import { jobAndVariantKeys } from '../../src/utils/jobListingIdentity.js';
 import { planJobCardDeletionCleanup } from '../../src/utils/jobCardDeletionCleanup.js';
 import { discardDeletedJobAnalysisSnapshots } from '../../src/utils/canvasInteractions.js';
 
@@ -279,7 +279,6 @@ export default [
       const keys = replacementUpdates[0].stats.dismissedJobKeys;
       assert(jobAndVariantKeys(card.data).every(key => !keys.includes(key)), 'replacing a scored card must not poison later combines');
       assert(keys.length === 0, 'view deletion must not create a persistent suppression list');
-      assert(filterDismissedBoardJobs([card.data], keys).length === 1, 'a second Combine must retain the same listing');
       const realDismissal = planJobCardDeletionCleanup([card], [board], () => board).boardUpdates[0].stats.dismissedJobKeys;
       assert(realDismissal.length === 0, 'a later real user deletion also leaves the source listing available');
       const hook = fs.readFileSync(new URL('../../src/hooks/useCanvasOSDeletion.js', import.meta.url), 'utf8');
@@ -330,7 +329,6 @@ export default [
   {
     name: 'view deletion preserves all posting variants for a saved-results recombine',
     run: () => {
-      const first = { title: 'First', company: 'Example', url: 'https://example.test/first' };
       const second = { title: 'Second', company: 'Example', url: 'https://example.test/second',
         postingVariants: [{ url: 'https://example.test/second' }, { url: 'https://example.test/second-sf' }] };
       const board = { id: 'board', type: 'jobboard', data: { dismissedJobKeys: [] } };
@@ -338,15 +336,9 @@ export default [
       const { boardUpdates } = planJobCardDeletionCleanup([card], [board], () => board);
       const keys = boardUpdates[0].stats.dismissedJobKeys;
       assert(keys.length === 0, 'deleting the card does not suppress either represented posting');
-      assert(JSON.stringify(filterDismissedBoardJobs([first, second], keys)) === JSON.stringify([first, second]),
-        'a later Combine recreates the deleted card');
       const boardSource = readNodeSource();
-      assert(!boardSource.includes('union = filterDismissedBoardJobs(') && boardSource.includes('const dismissedJobKeysAtCombine = [];'),
+      assert(boardSource.includes('const dismissedJobKeysAtCombine = [];'),
         'Combine also ignores legacy persisted dismissal lists and does not infer suppression from missing cards');
-      assert(recoverBoardDismissedKeys([first, second], [{ data: first }], false).length === 0,
-        'old missing cards cannot be inferred when source inputs changed');
-      assert(recoverBoardDismissedKeys([first, second], [{ data: first }], true).length === 2,
-        'exact old source inputs recover a pre-ledger dismissal');
     },
   },
   {

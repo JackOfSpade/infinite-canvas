@@ -4638,7 +4638,7 @@ function scoringPromptEnvelopeError(bytes) {
   return error;
 }
 
-export function scoringPromptFitsEnvelopeForTests(requestParts) {
+export function scoringPromptFitsEnvelope(requestParts) {
   const bytes = scoringPromptBytes(requestParts || {});
   return { bytes, fits: bytes <= MAX_SCORING_PROMPT_BYTES, limit: MAX_SCORING_PROMPT_BYTES };
 }
@@ -4871,7 +4871,7 @@ async function runGapReviewPass(scoredJobs, { postingJob, candidateText, signal,
   const runReviewBatch = async (units, topLevelBatch) => {
     const batch = units.map((unit, position) => ({ index: position, jobText: unit.jobText, rows: unit.rows }));
     const prompt = buildGapReviewPrompt({ jobs: batch, candidateText });
-    const envelope = scoringPromptFitsEnvelopeForTests({ prompt, responseSchema: JOB_GAP_REVIEW_SCHEMA });
+    const envelope = scoringPromptFitsEnvelope({ prompt, responseSchema: JOB_GAP_REVIEW_SCHEMA });
     if (!envelope.fits) {
       if (units.length > 1) {
         const mid = Math.ceil(units.length / 2);
@@ -7772,10 +7772,9 @@ export function filterJobsByDescriptionEvidence(jobs, shortThreshold = JOB_DESCR
 }
 
 // The `descriptionDeferredReason` values that mean the LISTING ITSELF is gone,
-// as opposed to "this pass could not read its description". Only
-// classifyIndeedUnavailablePage (electron/extractors/indeedBrowser.js) produces
-// them, and only when the detail page itself says the posting no longer exists;
-// the re-enrichment pass stores its verdict as `indeed-<reason>`.
+// as opposed to "this pass could not read its description". Rows saved by an
+// earlier version carry them, when the detail page itself said the posting no
+// longer existed; the verdict was stored as `indeed-<reason>`.
 // Deliberately excluded: 'description-rate-limited',
 // 'description-panel-http-error', 'description-card-unavailable' and the
 // detail-block reprobe codes. Every one of those is written onto rows the
@@ -16282,7 +16281,7 @@ Return a JSON object with four arrays of search query strings:
         activeCachedPrefix,
         scoringBatches.length,
       );
-      const envelope = scoringPromptFitsEnvelopeForTests(requestParts);
+      const envelope = scoringPromptFitsEnvelope(requestParts);
       // PROACTIVE context-window preflight: if this batch's prompt won't fit
       // what Claude can accept, split it in HALF and score the halves
       // independently BEFORE spending a doomed call. The recursion bottoms out

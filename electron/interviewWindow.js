@@ -13,6 +13,7 @@ import { logger } from './logger.js';
 import { createInterviewCallAudioService, idleInterviewListeningState, interviewAudioHelperPath } from './interviewCallAudio.js';
 import { selectInterviewCallQuestion, isInterviewPartialEligible } from './interviewCallQuestionDetector.js';
 import { createInterviewSpeculativeMatcher } from './interviewSpeculativeMatcher.js';
+import { stableJson } from '../src/utils/stableJson.js';
 
 // Live-call notices are read mid-interview at a glance: a few words, never a
 // sentence. "Use this question" beside the transcript is the action they name.
@@ -123,12 +124,6 @@ function positioningItems(value) {
 function sources(value) {
   return Array.isArray(value) && value.length <= MAX_BRIEF_SOURCES && value.every(item => exactKeys(item, ['sourceId', 'sourceUrl', 'sourceDate'])
     && briefText(item.sourceId, 80) && canonicalInterviewJobUrl(item.sourceUrl) === item.sourceUrl && briefText(item.sourceDate, 80));
-}
-
-function stableJson(value) {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-  return JSON.stringify(value);
 }
 
 function sha256(value) {
@@ -1296,17 +1291,8 @@ export function createInterviewWindowController({
   if (registerIpc) {
     ipcMain.handle('interview-window:launch', launch);
     ipcMain.handle('interview-window:get-brief', getBrief);
-    ipcMain.handle('interview-window:close', close);
-    ipcMain.handle('interview-window:set-always-on-top', setAlwaysOnTop);
-    ipcMain.handle('interview-window:set-latency-mode', setLatencyMode);
-    ipcMain.handle('interview-window:submit-question', submitQuestion);
-    ipcMain.handle('interview-window:follow-up-question', followUpQuestion);
-    ipcMain.handle('interview-window:select-prepared-card', selectPreparedCard);
-    ipcMain.handle('interview-window:next-question', nextQuestion);
-    ipcMain.handle('interview-window:get-listening-state', getListeningState);
     ipcMain.handle('interview-window:start-listening', startListening);
     ipcMain.handle('interview-window:stop-listening', stopListening);
-    ipcMain.handle('interview-window:use-transcript-question', useTranscriptQuestion);
   }
   const cleanupBySenderAndNode = (sender, nodeId) => {
     if (typeof nodeId !== 'string' || !NODE_ID.test(nodeId)) return false;

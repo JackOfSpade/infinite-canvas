@@ -106,8 +106,8 @@ export function syntheticCallRecords() {
     ['interviewer', 4, 'And when they disagree with your read of the effect?'],
     ['candidate', 15, 'I go back to the evidence with them, and if we still disagree I say what I will do differently rather than insisting.'],
   ]);
-  const record = (callId, persona, transcript, toneNotes) => Object.freeze({
-    callId, persona, transcript, toneNotes,
+  const record = (callId, persona, transcript) => Object.freeze({
+    callId, persona, transcript,
     durationMs: transcript.at(-1).endMs,
     startedAt: '2026-04-14T09:00:00.000Z',
     toneSamples: transcript.filter(turn => turn.speaker === 'candidate').map(turn => ({ startMs: turn.startMs, volumeDb: -21, pitchHz: 148 })),
@@ -118,9 +118,9 @@ export function syntheticCallRecords() {
     baseline: Object.freeze({ meanVolumeDb: -22, meanPitchHz: 150, sampleCount: 12 }),
   });
   return [
-    record('synth-ledger-platform', 'technical-screen', first, ['Steady pace through the migration story.']),
-    record('synth-failed-release', 'hiring-manager', second, ['Rushed and filler-heavy while retelling the incident.']),
-    record('synth-hard-feedback', 'behavioural', third, ['Even tone, short answers.']),
+    record('synth-ledger-platform', 'technical-screen', first),
+    record('synth-failed-release', 'hiring-manager', second),
+    record('synth-hard-feedback', 'behavioural', third),
   ];
 }
 

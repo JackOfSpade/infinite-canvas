@@ -1,5 +1,6 @@
 import { normalizeJobAnalysisClearRunId } from './jobAnalysisRecovery.js';
 import { jobBoardCareerOverrideRunIds } from './jobBoardCareerOverride.js';
+import { INTERVIEW_RUN_ID_RE, MAX_RETIREMENT_RECEIPTS } from './interviewRunIdGrammar.js';
 
 // ── Global Canvas Interaction State ──────────────────────────────────────────
 // These state objects are abstracted completely out of the React lifecycle to
@@ -34,15 +35,15 @@ function isManualAiWorkflowNode(node) {
 // at a deletion boundary. Keep their grammar in lockstep with
 // InterviewHelperNode and undoNonRestorableState: persisted canvas data is not
 // trusted simply because it has a string named `runId`.
-const INTERVIEW_HELPER_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
-const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = 32;
+const INTERVIEW_HELPER_RUN_ID_RE = INTERVIEW_RUN_ID_RE;
+const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = MAX_RETIREMENT_RECEIPTS;
 // Canvas JSON is normally a tree, but imported/corrupt in-memory data can
 // contain a cyclic reference or pathological nesting. Lifecycle cleanup runs
 // at destructive boundaries, so it must not overflow the renderer stack or
 // silently loop before it can cancel a real sibling. These limits are far
 // above a practical nested-canvas workspace while still bounding hostile data.
-export const CANVAS_LIFECYCLE_MAX_NESTED_DEPTH = 64;
-export const CANVAS_LIFECYCLE_MAX_NODES = 10_000;
+const CANVAS_LIFECYCLE_MAX_NESTED_DEPTH = 64;
+const CANVAS_LIFECYCLE_MAX_NODES = 10_000;
 
 /**
  * Visit each reachable canvas node once without recursion.
@@ -327,29 +328,6 @@ export function collectMarketplaceRecoveryOwners(nodes) {
   return owners;
 }
 
-/**
- * Return exact durable manual-AI workflow ids owned by deleted Job Search,
- * Job Board, or Interview Helper nodes, including nodes nested inside removed
- * canvas groups.
- */
-export function collectDeletedManualAiRetirements(nodes) {
-  if (!Array.isArray(nodes)) return [];
-  const retirements = [];
-  const seenRunIds = new Set();
-  walkCanvasNodesBounded(nodes, node => {
-      if (isManualAiWorkflowNode(node)) {
-        const nodeId = typeof node.id === 'string' && node.id ? node.id : null;
-        for (const runId of durableManualAiRunIdsForWorkflowNode(node)) {
-          if (nodeId && !seenRunIds.has(runId)) {
-            seenRunIds.add(runId);
-            retirements.push({ nodeId, runId });
-          }
-        }
-      }
-  });
-  return retirements;
-}
-
 export function collectDeletedManualAiWorkflowNodes(nodes) {
   if (!Array.isArray(nodes)) return [];
   const workflowNodesById = new Map();
@@ -367,39 +345,6 @@ export function collectDeletedManualAiWorkflowNodes(nodes) {
       }
   });
   return [...workflowNodesById.values()];
-}
-
-export function collectDeletedBoardChildClaims(nodes) {
-  const claims = [];
-  const seen = new Set();
-  walkCanvasNodesBounded(nodes, node => {
-      const plan = node?.type === 'jobboard' ? node.data?.boardScanResume : null;
-      const activeSourceIds = [...new Set([
-        ...(Array.isArray(plan?.activeSourceIds) ? plan.activeSourceIds : []),
-        plan?.activeSourceId,
-      ].filter(Boolean))];
-      if (
-        plan?.version === 1
-        && plan.phase === 'searches'
-        && node.id
-        && plan.boardRunId
-        && activeSourceIds.length > 0
-      ) {
-        for (const sourceId of activeSourceIds) {
-          const key = `${node.id}\u0000${plan.boardRunId}\u0000${sourceId}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            claims.push({
-              orchestratorNodeId: node.id,
-              boardRunId: plan.boardRunId,
-              sourceId,
-              plan,
-            });
-          }
-        }
-      }
-  });
-  return claims;
 }
 
 /**

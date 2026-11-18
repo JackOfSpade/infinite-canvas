@@ -178,10 +178,6 @@ export function applicationRequestId(jobId) {
   return `application:${String(jobId || '')}`;
 }
 
-export function isApplicationRequestId(requestId) {
-  return String(requestId || '').startsWith('application:');
-}
-
 const STAGE_LABELS = {
   requirements: 'Read job requirements',
   'requirements-audit': 'Audit job requirements',

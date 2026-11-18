@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createScrapeAlarmStore, scrapeAlarmsMarkdown, scrapeShareBroken } from '../../electron/ipc/scrapeAlarms.js';
+import { SCRAPE_ALARMS_CHANGED_CHANNEL, createScrapeAlarmStore, scrapeAlarmsMarkdown, scrapeShareBroken } from '../../electron/ipc/scrapeAlarms.js';
 import { assessSourceHealth } from '../../electron/ipc/jobSourceHealth.js';
 import { formatDetailReprobeAttempt, jobSourceHealthAlarmItems, sourceReceiptWindowParts } from '../../electron/ipc/bugReport/jobsSnapshot.js';
 import { describeSourceHealthFailures } from '../../src/utils/jobCollectionScopeCaveats.js';
@@ -141,6 +141,13 @@ export default [
       );
       assert.equal(formatDetailReprobeAttempt({ phase: 'detail-image-fetch', attempt: 4, maxAttempts: 5 }), 'attempt=4/5');
       assert.equal(formatDetailReprobeAttempt({ phase: 'detail-image-fetch' }), null);
+    },
+  },
+  {
+    name: 'Scrape alarm channel: the preload listens on the channel the store sends on',
+    run() {
+      const preload = fs.readFileSync(new URL('../../electron/preload.js', import.meta.url), 'utf8');
+      assert.ok(preload.includes(`onScrapeAlarmsChanged: createListener('${SCRAPE_ALARMS_CHANGED_CHANNEL}')`));
     },
   },
 ];

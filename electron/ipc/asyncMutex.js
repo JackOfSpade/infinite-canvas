@@ -125,3 +125,27 @@ export function createFifoLock({ name = 'lock', supportsAbort = false } = {}) {
 
   return { withLock, getQueueDepth, getSnapshot };
 }
+
+/**
+ * Keyed promise-tail mutex: `withKeyedLock(key, fn)` runs `fn` after every
+ * earlier call with the same key has settled, whether it resolved or rejected.
+ * Different keys never wait on one another. An idle key is dropped from the map
+ * so an unbounded set of keys over a long session does not leak, and a newer
+ * call queued behind this one keeps its entry. The tail map is exposed as
+ * `withKeyedLock.tails`.
+ */
+export function createKeyedLock() {
+  const tails = new Map();
+  function withKeyedLock(key, fn) {
+    const prior = tails.get(key) || Promise.resolve();
+    const result = prior.then(fn, fn);
+    const tail = result.then(() => {}, () => {});
+    tails.set(key, tail);
+    return result.finally(() => {
+      if (tails.get(key) === tail) tails.delete(key);
+    });
+  }
+  // Exposed so a caller that renames its keys can move the queued tails too.
+  withKeyedLock.tails = tails;
+  return withKeyedLock;
+}

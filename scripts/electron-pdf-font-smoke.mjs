@@ -2,9 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
-import { build } from 'esbuild';
-import electronPath from 'electron';
+import { runInlineElectronEntry } from './lib/electron-smoke.mjs';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 // Exercise the production renderer with synthetic copy in a disposable profile.
@@ -14,7 +12,7 @@ await fs.mkdir(path.join(repo, 'tmp'), { recursive: true });
 const root = await fs.mkdtemp(path.join(repo, 'tmp', 'pdf-font-smoke-'));
 try {
   const entry = path.join(root, 'main.cjs');
-  await build({ stdin: { resolveDir: repo, contents: `
+  const source = `
     import { app } from 'electron';
     import fs from 'node:fs/promises';
     import { buildCoverLetterDocument, buildResumeDocument } from './electron/ipc/resumeHtml.js';
@@ -45,22 +43,8 @@ try {
       } catch (error) { console.error(error); process.exitCode = 1; }
       finally { app.quit(); }
     })();
-  ` }, bundle: true, platform: 'node', format: 'cjs', packages: 'external', outfile: entry });
-  const env = { ...process.env, INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-  delete env.ELECTRON_RUN_AS_NODE;
-  await new Promise((resolve, reject) => {
-    const child = spawn(electronPath, [entry], { cwd: repo, env, stdio: ['ignore', 'pipe', 'pipe'] });
-    let output = '';
-    child.stdout.on('data', chunk => { output += chunk; });
-    child.stderr.on('data', chunk => { output += chunk; });
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 90_000);
-    child.once('error', error => { clearTimeout(timeout); reject(error); });
-    child.once('exit', code => {
-      clearTimeout(timeout);
-      if (code === 0) resolve();
-      else reject(new Error(`PDF smoke Electron exited ${code}: ${output}`));
-    });
-  });
+  `;
+  await runInlineElectronEntry({ source, resolveDir: repo, outfile: entry, timeoutMs: 90_000, failureLabel: 'PDF smoke Electron' });
   const results = JSON.parse(await fs.readFile(path.join(root, 'results.json'), 'utf8'));
   for (const result of results) {
     const task = getDocument({ data: new Uint8Array(await fs.readFile(result.file)), useSystemFonts: true });

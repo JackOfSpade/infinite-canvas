@@ -7,7 +7,7 @@ import {
   loadInterviewQa, loadInterviewQaLiveCards, saveInterviewQaCard,
 } from '../../electron/ipc/interviewQaStore.js';
 import { groundedDisclosures, mapInterviewDisclosures, validateDisclosureMapping } from '../../electron/ipc/interviewQaDisclosures.js';
-import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS, resetInterviewOffloadBlock } from '../../electron/ipc/interviewClaudeTransport.js';
+import { createInterviewClaudeTransport, firstJsonObject, interviewClaudeStage, interviewStageMayOffload, INTERVIEW_RESEARCH_MAX_TURNS } from '../../electron/ipc/interviewClaudeTransport.js';
 import { PARALLEL_RESEARCH_TOOLS, PARALLEL_EXHAUSTED_CODE, parallelBlocked, parallelExhaustedError, resetParallelLimit } from '../../electron/ipc/parallelSearch.js';
 import { attachInterviewLiveCards, cardsOf } from '../../electron/interviewWindow.js';
 import { planInterviewPracticeOrder, validatePracticeOrder } from '../../electron/ipc/interviewQaPractice.js';
@@ -262,7 +262,6 @@ export default [
     assert.deepEqual(await planInterviewPracticeOrder({ questions: ['Only one?'], callText: async () => { throw new Error('unused'); } }), ['Only one?']);
   } },
   { name: 'interview Q&A offload: a routed qa-brief is answered by the offload call with the handoff messages', async run() {
-    resetInterviewOffloadBlock();
     const runs = []; const offloads = []; const stages = [];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
       runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
@@ -285,7 +284,6 @@ export default [
     assert.equal(stages[1].provider, 'claude');
   } },
   { name: 'interview Q&A offload: qa-research and qa-fact-* stages never route even with a table entry', async run() {
-    resetInterviewOffloadBlock();
     const runs = [];
     const research = [];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
@@ -307,7 +305,6 @@ export default [
     assert.equal(interviewStageMayOffload('qa-practice-order'), true);
   } },
   { name: 'interview Claude transport: typed-job stages use their own profiles; only typed-job-research gets Parallel tools and fails when Parallel is out', async run() {
-    resetInterviewOffloadBlock();
     const runs = []; const research = [];
     const make = enabled => createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
       parallel: { enabled: async () => enabled },
@@ -390,7 +387,6 @@ export default [
     assert.equal(runs.length, 0);
   } },
   { name: 'interview Q&A shadow: only Claude-answered first attempts of qa-brief and qa-write are measured', async run() {
-    resetInterviewOffloadBlock();
     const jobs = [];
     const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
       runStage: async () => ({ text: '{"ok":true}', model: 'claude-x' }),

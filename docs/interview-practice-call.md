@@ -651,7 +651,7 @@ Run after building the app. Wear headphones for the first call. Timings come fro
 7. **Silence.** Say nothing for 20 s after a question. Pass: it prompts or rephrases once, and does not prompt again for another 30 s.
 8. **Chat.** Type an answer in the chat panel. Pass: it treats it as your answer; it may post a written problem statement in chat.
 9. **Off-brief question.** Ask something the brief does not cover. Pass: it deflects, never invents a company fact.
-10. **End.** Let it wrap up (or hang up). Pass: farewell, then the call ends; the replay screen appears after analysis with chapters per question, markers (long pauses, interruptions, tone notes, chat), the transcript highlight following playback, and feedback with a delivery section.
+10. **End.** Let it wrap up (or hang up). Pass: farewell, then the call ends; the replay screen appears after analysis with chapters per question, markers (long pauses, interruptions, fillers, chat), the transcript highlight following playback, and feedback with a delivery section.
 11. **Replay check.** Click a "less confident" or pause marker. Pass: the audio jumps to that moment and you hear both voices in sync.
 
 Report any failure with the step number; the call record and `analysis.json` have the timings needed to diagnose it.

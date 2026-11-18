@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import { calculateDatedTenure, careerRoleDateInputs, parseCareerDate } from './jobFitAssessment.js';
 import { comparableAdvertisedBand, salaryRecommendationBounds } from '../../src/utils/salaryRecommendationBounds.js';
 
@@ -183,10 +182,6 @@ export function buildPersonalSalaryEvidence(job, { careerData, profile, careerSn
     });
   }
   return packet;
-}
-
-export function personalSalaryEvidenceFingerprint(evidence) {
-  return crypto.createHash('sha256').update(JSON.stringify(evidence ?? {}), 'utf8').digest('hex');
 }
 
 function positiveNumber(value) {

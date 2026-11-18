@@ -1441,6 +1441,26 @@ export default [
     },
   },
   {
+    name: 'nested recovery signature does not re-walk child canvases that a drag frame kept',
+    run: () => {
+      let reads = 0;
+      const canvasData = { edges: [] };
+      Object.defineProperty(canvasData, 'nodes', {
+        enumerable: true,
+        get() { reads += 1; return [{ id: 'walk-probe', type: 'jobhub', data: { jobRunId: 'run-probe' } }]; },
+      });
+      const group = { id: 'walk-group', type: 'group', position: { x: 0, y: 0 }, data: { canvasData } };
+      const first = workspaceStartupRecoverySignature([group]);
+      const readsAfterFirst = reads;
+      assert(readsAfterFirst > 0, 'the first signature walks the child canvas');
+      const dragged = workspaceStartupRecoverySignature([{ ...group, position: { x: 50, y: 60 } }]);
+      assert(dragged === first, 'a dragged group keeps the signature');
+      assert(reads === readsAfterFirst + 1, `a drag frame only checks the child canvas is the same one (extra reads ${reads - readsAfterFirst})`);
+      const replaced = workspaceStartupRecoverySignature([{ ...group, data: { canvasData: { edges: [], nodes: [{ id: 'walk-probe', type: 'jobhub', data: { jobRunId: 'run-other' } }] } } }]);
+      assert(replaced !== first, 'a new child canvas is walked again and changes the signature');
+    },
+  },
+  {
     name: 'nested recovery signature ignores position/style churn but tracks recovery ownership and inputs',
     run: () => {
       const nested = {

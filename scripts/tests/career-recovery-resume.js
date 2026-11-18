@@ -27,11 +27,12 @@ import {
   __readOwnedStagedCareerAttachmentForTests, __stageCareerInputFilesForTests, registerCareerConvertedInputRoot,
 } from '../../electron/ipc/jobs.js';
 import { careerSnapshotId, careerSnapshotInputFingerprint } from '../../electron/ipc/careerSnapshot.js';
-import { readPlainTextDocument } from '../../electron/ipc/docUtils.js';
+import { readPlainTextDocumentWithReason } from '../../electron/ipc/docUtils.js';
 import { isCareerCompilerTask } from '../../src/utils/careerCompilerTasks.js';
 import { careerCompileResumeExplanation, careerResumeBannerStatus, careerResumeInputPaths } from '../../src/utils/jobCareerCompilationReceipt.js';
 import { writeApprovedCareerSnapshotFixture } from './careerSnapshotFixture.mjs';
 
+const readPlainTextDocument = async (filePath, options) => (await readPlainTextDocumentWithReason(filePath, options)).text;
 const STAGING_COMPONENT = 'career-input-staging';
 const SCHEMA = {
   type: 'object', required: ['answer'], additionalProperties: false,

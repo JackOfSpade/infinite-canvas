@@ -5,6 +5,7 @@ import crypto from 'node:crypto';
 import { JSDOM } from 'jsdom';
 import { careerImportReview, careerImportStatus } from './careerImportLog.js';
 import { watchlistStatus } from './applicationWatchlist.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 const MAX_PAIRS = 100;
 const SUMMARY_AGE_MS = 183 * 24 * 60 * 60 * 1000;
@@ -52,7 +53,7 @@ function serialize(operation) {
   queue = result.catch(() => {});
   return result;
 }
-function digest(value) { return crypto.createHash('sha256').update(String(value)).digest('hex'); }
+const digest = value => sha256Hex(String(value));
 function idFor(dir) { return digest(path.resolve(dir)); }
 
 export function documentSnapshot(html) {

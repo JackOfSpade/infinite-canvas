@@ -14,47 +14,6 @@ export function formatTime(ms) {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-function chapterBounds(chapter, fallbackDurationMs) {
-  const startMs = Math.max(0, asNumber(chapter?.startMs));
-  const declared = Number(chapter?.endMs);
-  const endMs = Number.isFinite(declared) && declared > startMs ? declared : asNumber(fallbackDurationMs, startMs);
-  return { startMs, endMs };
-}
-
-// Index of the chapter that covers ms, else the closest earlier chapter.
-export function chapterAt(chapters, ms) {
-  const list = Array.isArray(chapters) ? chapters : [];
-  const at = asNumber(ms);
-  let preceding = -1;
-  for (let index = 0; index < list.length; index += 1) {
-    const { startMs, endMs } = chapterBounds(list[index], list[index]?.endMs);
-    if (at >= startMs && at < endMs) return index;
-    if (startMs <= at) preceding = index;
-  }
-  return preceding;
-}
-
-// One block per chapter, positioned as percentages of the whole recording.
-export function segmentStyles(chapters, durationMs) {
-  const total = asNumber(durationMs);
-  if (!(total > 0)) return [];
-  const list = Array.isArray(chapters) ? chapters : [];
-  return list.map((chapter, index) => {
-    const startMs = Math.min(Math.max(0, asNumber(chapter?.startMs)), total);
-    const declaredEnd = Number(chapter?.endMs);
-    const endMs = Number.isFinite(declaredEnd) && declaredEnd > startMs ? Math.min(declaredEnd, total) : startMs;
-    return {
-      index,
-      title: String(chapter?.title || `Chapter ${index + 1}`),
-      startMs,
-      endMs,
-      leftPct: (startMs / total) * 100,
-      widthPct: ((endMs - startMs) / total) * 100,
-      markers: Array.isArray(chapter?.markers) ? chapter.markers : [],
-    };
-  });
-}
-
 // Index of the transcript turn that contains ms (final turn stays current
 // until the end of the recording) or -1 when nothing covers it.
 export function turnAt(transcript, ms) {
@@ -70,7 +29,7 @@ export function turnAt(transcript, ms) {
   return current;
 }
 
-export const MARKER_TONES = Object.freeze({
+ const MARKER_TONES = Object.freeze({
   tone: 'bg-sky-300/80',
   pause: 'bg-amber-300/80',
   interruption: 'bg-rose-300/80',

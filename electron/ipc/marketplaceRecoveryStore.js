@@ -15,6 +15,8 @@ import {
   resolveCanvasRecoveryPath,
 } from './canvasRecoveryPaths.js';
 import { getCurrentIpcRequestContext } from './ipcUtils.js';
+import { fsyncDirectory } from '../utils/pathSafety.js';
+import { createKeyedLock } from './asyncMutex.js';
 
 const VERSION = 1;
 const KINDS = new Set(['sellhub', 'marketplace-status']);
@@ -23,7 +25,8 @@ const REPLAY_PHASES = new Set(['analysis-result', 'comps-ready', 'priced-result'
 const MAX_JSON_BYTES = 32 * 1024 * 1024;
 const MAX_CANCELLATION_FENCES = 4096;
 const PROCESS_EPOCH = crypto.randomUUID();
-const tails = new Map();
+const withLock = createKeyedLock();
+const tails = withLock.tails;
 const activeClaims = new Map();
 const automaticAttempts = new Set();
 const senderClaims = new WeakMap();
@@ -282,16 +285,6 @@ export async function acquireMarketplaceRecoveryClaim(args = {}) {
       releaseMarketplaceClaimRecord(key, claimRecord);
     },
   };
-}
-
-function withLock(filePath, fn) {
-  const prior = tails.get(filePath) || Promise.resolve();
-  const result = prior.then(fn, fn);
-  const tail = result.then(() => {}, () => {});
-  tails.set(filePath, tail);
-  return result.finally(() => {
-    if (tails.get(filePath) === tail) tails.delete(filePath);
-  });
 }
 
 async function atomicWrite(filePath, value, options = {}) {
@@ -786,11 +779,7 @@ async function readBoundedJsonFile(filePath) {
   return JSON.parse(await readRegularNoFollowUtf8(filePath));
 }
 
-export async function fsyncDirectory(directoryPath) {
-  const handle = await fs.promises.open(directoryPath, 'r').catch(() => null);
-  if (!handle) return;
-  try { await handle.sync(); } finally { await handle.close(); }
-}
+export { fsyncDirectory };
 
 /**
  * Prepare Marketplace ownership migration while the caller holds the shared

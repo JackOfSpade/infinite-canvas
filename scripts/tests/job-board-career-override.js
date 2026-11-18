@@ -23,7 +23,7 @@ import {
   isBoardCombineManualAiRunId,
   boardIndependentManualAiMarkerCleanup,
 } from '../../src/utils/jobBoardCareerOverride.js';
-import { collectDeletedManualAiRetirements } from '../../src/utils/canvasInteractions.js';
+import { collectDeletedManualAiWorkflowNodes } from '../../src/utils/canvasInteractions.js';
 import { hasActiveExternalRunState } from '../../src/utils/undoNonRestorableState.js';
 import { cloneNode } from '../../src/utils/nodeFactory.js';
 
@@ -450,17 +450,17 @@ export default [
     name: 'career override: deletion, undo and clone lifecycle',
     run: () => {
       const record = { version: 1, approved: approved(), pending: pending(), retirePending: [RUN_3] };
-      const retirements = collectDeletedManualAiRetirements([
+      const workflowNodes = collectDeletedManualAiWorkflowNodes([
         { id: 'board-1', type: 'jobboard', data: { jobBoardCareerOverride: record } },
       ]);
       assert.deepStrictEqual(
-        retirements.map(entry => entry.runId).sort(),
+        workflowNodes.flatMap(entry => entry.markerRunIds).sort(),
         [RUN_2, RUN_3].sort(),
       );
-      assert.ok(retirements.every(entry => entry.nodeId === 'board-1'));
-      assert.deepStrictEqual(collectDeletedManualAiRetirements([
+      assert.ok(workflowNodes.every(entry => entry.nodeId === 'board-1'));
+      assert.deepStrictEqual(collectDeletedManualAiWorkflowNodes([
         { id: 'hub-1', type: 'jobhub', data: { jobBoardCareerOverride: record } },
-      ]), []);
+      ]).flatMap(entry => entry.markerRunIds), []);
 
       assert.strictEqual(hasActiveExternalRunState([
         { id: 'board-1', type: 'jobboard', data: { jobBoardCareerOverride: record } },

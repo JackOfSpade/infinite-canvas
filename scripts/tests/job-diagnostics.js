@@ -40,7 +40,6 @@ import { JOB_COLLECTION_PAGE_CEILING, JSDOM, PDFLib, getApplicationSyncTelemetry
 import { applicationVariantAttrsForJob } from '../test-dependencies.js';
 import { formatTypeAreaUtilization, pageTextMeasurementExpression, renderedPageLayoutIssues, resumeTypeAreaUtilization } from '../test-dependencies.js';
 import { reconcileTitleRelevanceFunnel, recordIssuedManualQuery } from '../test-dependencies.js';
-import { createApplicationConvergenceTracker } from '../test-dependencies.js';
 import { assertResponseMatchesSchema, buildJobAnalysisSnapshot, JOB_DESCRIPTION_EVIDENCE_MIN_CHARS, JOB_SCORING_SCHEMA, mergeDescriptionRecoverySourceJobs, snapshotDescriptionRecoveryJobs } from '../test-dependencies.js';
 import { buildLoginVerificationTimingMarkdown, formatLoginVerificationTimingResult } from '../../electron/ipc/bugReport.js';
 import { buildJobBoardDiagnostics, buildJobLinkSnapshot, buildJobRecoveryOfferSnapshot, handoffElapsed, manualAiBoardProgressForNode, receiptElapsed } from '../../electron/ipc/bugReport/jobsSnapshot.js';
@@ -14085,16 +14084,6 @@ export default [
       assert(emptyMeasurement === null,
         'a page with no measurable text reports no layout at all rather than a zero line height');
 
-      const convergence = createApplicationConvergenceTracker('draft-a');
-      assert(convergence.assess('draft-b').accept && convergence.assess('draft-c').accept,
-        'the shared convergence tracker accepts every novel candidate without a fixed limit');
-      const unchanged = convergence.assess('draft-c');
-      assert(!unchanged.accept && unchanged.diminishingReturns && /unchanged/.test(unchanged.reason),
-        'returning the current document is the shared explicit diminishing-returns signal');
-      const cycling = createApplicationConvergenceTracker('draft-a');
-      assert(cycling.assess('draft-b').accept && !cycling.assess('draft-a').accept,
-        'returning a previously measured version stops a non-improving cycle');
-
       return { ok: true };
     },
   },
@@ -16707,7 +16696,7 @@ export default [
       __resetSavedBugReportPruneForTests();
       const written = [];
       for (let i = 0; i < SAVED_REPORT_RETENTION + 5; i++) {
-        written.push(await writeSavedBugReport(`# Report ${i}\nbody ${i}\n`, {}));
+        written.push(await writeSavedBugReport(`# Report ${i}\nbody ${i}\n`));
       }
       const remaining = fs.readdirSync(dir).filter(f => /^bug-report-.*\.md$/.test(f));
       assert(remaining.length === SAVED_REPORT_RETENTION,
@@ -16720,13 +16709,13 @@ export default [
         'every saved report must claim its own filename');
 
       const body = '# Bug Report\nline two\nline three\n';
-      const saved = await writeSavedBugReport(body, {});
+      const saved = await writeSavedBugReport(body);
       assert(fs.readFileSync(saved.filePath, 'utf8') === body
         && saved.bytes === Buffer.byteLength(body) && saved.chars === body.length,
       'the saved file must contain exactly the report it was given, with accurate byte and character counts');
       // Multi-byte content is where the two counts diverge — the pointer reports
       // characters, so the write must expose both rather than conflating them.
-      const accented = await writeSavedBugReport('# Rapport — Montréal\n', {});
+      const accented = await writeSavedBugReport('# Rapport — Montréal\n');
       assert(accented.bytes > accented.chars,
         `byte and character counts must be tracked separately for multi-byte content, got ${JSON.stringify(accented)}`);
 

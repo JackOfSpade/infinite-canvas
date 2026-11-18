@@ -8,6 +8,7 @@ import {
   notePaceDetailOpened,
   notePaceListPage,
   notePaceSpacingWait,
+  recordChallengeDetectedTelemetry,
   recordManualScraperTelemetry,
   resetManualScraperTelemetry,
   resetScrapePace,
@@ -245,5 +246,29 @@ export default [{
       inputCounts: { clicks: 0, keys: 0, moves: 0, frameFocus: 0, documents: 2, polls: 80, failedPolls: 0 } });
     const text = JSON.stringify(report());
     assert.match(text, /challenge-resolved ZipRecruiter.*cleared=2m08s input=none \(clicks 0, keys 0, into-check focus 0, mouse moves 0\)/);
+  },
+}, {
+  name: 'challenge-detected telemetry is recorded before the egress lookup settles and filled in after',
+  async run() {
+    resetManualScraperTelemetry();
+    let settle;
+    const lookup = new Promise((resolve) => { settle = resolve; });
+    // A lookup that has not settled must not hold the recording back.
+    recordChallengeDetectedTelemetry({ phase: 'challenge-detected', srcName: 'ZipRecruiter' }, lookup);
+    const before = getManualScraperTelemetry().events.find((e) => e.phase === 'challenge-detected');
+    assert.ok(before, 'the event is recorded without waiting for the lookup');
+    assert.equal(before.egressIp, null);
+    settle({ ip: '203.0.113.9', isp: 'Example ISP', org: 'Example Org', hosting: true });
+    await lookup;
+    await Promise.resolve();
+    const after = getManualScraperTelemetry().events.find((e) => e.phase === 'challenge-detected');
+    assert.equal(after.egressIp, '203.0.113.9');
+    assert.equal(after.egressIsp, 'Example ISP');
+    assert.equal(after.egressHosting, true);
+    // A lookup that rejects leaves the fields null and raises nothing.
+    resetManualScraperTelemetry();
+    recordChallengeDetectedTelemetry({ phase: 'challenge-detected', srcName: 'ZipRecruiter' }, Promise.reject(new Error('offline')));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(getManualScraperTelemetry().events.find((e) => e.phase === 'challenge-detected').egressIp, null);
   },
 }];

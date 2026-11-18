@@ -23,8 +23,6 @@ import { applyClaudeAccountEnv } from './claudeAccounts.js';
 import { claudeResetTimeMs, clipText, describeClaudeSdkMessage } from './claudeTaskActivity.js';
 import { CLAUDE_PROMPT_TOKEN_BUDGET, CLAUDE_PROMPT_TOO_LONG, claudePromptTooLongMessage, estimateClaudePromptTokens } from './claudePromptLimit.js';
 
-export { describeClaudeSdkMessage };
-
 function stagePrompt(text, pageImages, sessionId) {
   if (!Array.isArray(pageImages) || pageImages.length === 0) return String(text ?? '');
   const input = JSON.parse(buildClaudeInputMessage({ text, pageImages }));

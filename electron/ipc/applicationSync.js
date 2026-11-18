@@ -25,6 +25,7 @@ import { reconcileApplicationHtmlFromPdf } from './applicationPdfReconcile.js';
 import { replaceApplicationBundleAtomically } from './applicationFileTransaction.js';
 import { logger } from '../logger.js';
 import { bundleEditNotes, improvementStatus, logBundleEditNotes, logSavedBundle } from './applicationEditLog.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 const { app } = electronPkg;
 
@@ -434,9 +435,7 @@ function sendJson(response, status, body, origin) {
   response.end(JSON.stringify(body));
 }
 
-function sha256(data) {
-  return crypto.createHash('sha256').update(data).digest('hex');
-}
+const sha256 = sha256Hex;
 
 // Generation Audit.json is the durable receipt for a completed Local AI
 // application. Its finalArtifacts section is producer provenance and must

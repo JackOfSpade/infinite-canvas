@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { INTERVIEW_ANSWER_BANK_STORE_DIR, INTERVIEW_ANSWER_BINDING_STORE_DIR } from '../utils/pathSafety.js';
 import { validationFailureCollector } from './validationFailure.js';
 import { wrapUntrustedText } from './promptSafety.js';
 import { normalizeInterviewPublicUrl } from '../../src/utils/interviewUrlPrivacy.js';
@@ -20,8 +21,8 @@ import { sanitizeInterviewExtensions, validateInterviewExtensionPoint } from './
 const HASH = /^[a-f0-9]{64}$/u;
 const EVIDENCE_ID = /^(?:career|research)-[a-f0-9]{64}$/u;
 const CARD_ID = /^[A-Za-z0-9_-]{1,64}$/u;
-const STORE = 'interview-helper-answer-banks';
-const BINDING_STORE = 'interview-helper-answer-bindings';
+const STORE = INTERVIEW_ANSWER_BANK_STORE_DIR;
+const BINDING_STORE = INTERVIEW_ANSWER_BINDING_STORE_DIR;
 const MAX_STORED_RECORDS = 100;
 const MAX_BYTES = 1024 * 1024;
 const MAX_EVIDENCE = 600;
@@ -31,23 +32,24 @@ const MAX_QUOTE = 6000;
 const MAX_QUESTION = 500;
 const STAGES = new Set(['situation', 'task', 'action', 'result', 'point']);
 export const INTERVIEW_ANSWER_MIN_CARDS = 8;
-export const INTERVIEW_PROJECT_QUESTION = 'Walk me through a project.';
-export const INTERVIEW_INTRO_QUESTION = 'Tell me about yourself.';
+ const INTERVIEW_PROJECT_QUESTION = 'Walk me through a project.';
+ const INTERVIEW_INTRO_QUESTION = 'Tell me about yourself.';
 export const INTERVIEW_REQUIRED_QUESTIONS = Object.freeze([INTERVIEW_INTRO_QUESTION, INTERVIEW_PROJECT_QUESTION]);
 export function isNarrowRequiredInterviewCard(card) {
   return INTERVIEW_REQUIRED_QUESTIONS.includes(card?.question) && card.thinEvidence === true
     && Array.isArray(card.bullets) && card.bullets.length < 2;
 }
-export function isNarrowInterviewWhyCard(card) {
+ function isNarrowInterviewWhyCard(card) {
   return isInterviewWhyQuestion(card?.question) && card.thinEvidence === true
     && Array.isArray(card.bullets) && card.bullets.length === 1;
 }
 
 import { INTERVIEW_ANSWER_QUESTION_CATALOG } from '../../src/utils/interviewAnswerQuestions.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 export { INTERVIEW_ANSWER_QUESTION_CATALOG };
 const QUESTION_CATALOG = new Map(INTERVIEW_ANSWER_QUESTION_CATALOG.map(item => [item.question, item]));
 
-function sha(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+const sha = sha256Hex;
 function plain(value) { return !!value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype; }
 function stable(value) {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;

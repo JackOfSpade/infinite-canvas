@@ -163,7 +163,7 @@ export default [
   { name: 'interview call audio IPC: exact child/main-frame binding rejects owners, siblings, forged ids and subframes', async run() {
     const h = await controllerHarness();
     try {
-      for (const name of ['get-listening-state', 'start-listening', 'stop-listening', 'use-transcript-question']) {
+      for (const name of ['start-listening', 'stop-listening']) {
         const handler = h.handlers.get(`interview-window:${name}`); assert.equal(typeof handler, 'function');
         for (const event of [{ sender: h.owner.webContents }, { sender: { id: h.event.sender.id } }, { sender: h.event.sender, senderFrame: {} }, { sender: h.event.sender }]) {
           await assert.rejects(async () => handler(event), /session is not available/u);
@@ -228,7 +228,7 @@ export default [
     vm.runInNewContext(fs.readFileSync(new URL('../../electron/interviewWindowPreload.js', import.meta.url), 'utf8'), {
       require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer }),
     });
-    for (const method of ['getListeningState', 'startListening', 'stopListening', 'useTranscriptQuestion']) await api[method]({ process: 'untrusted' });
+    for (const method of ['startListening', 'stopListening']) await api[method]({ process: 'untrusted' });
     assert(invokes.every(args => args.length === 1));
     assert.throws(() => api.onListeningUpdated(null), /callback/u);
     let received; const off = api.onListeningUpdated(value => { received = value; });

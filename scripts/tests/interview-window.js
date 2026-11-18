@@ -8,7 +8,6 @@ import { createInterviewWindowController, isTrustedInterviewNavigation } from '.
 import { interviewPreparedBriefRecordId } from '../../electron/ipc/interviewPreparation.js';
 import { registerNetworkHandlers } from '../../electron/ipc/network.js';
 import { getRecentLogs } from '../../electron/logger.js';
-import { interviewSubmitErrorMessage, INVALID_QUESTION_MESSAGE, SESSION_ENDED_MESSAGE, EVIDENCE_UNAVAILABLE_MESSAGE, SUBMIT_FAILED_MESSAGE } from '../../src/interview-window/submitError.js';
 
 const SNAPSHOT = 'a'.repeat(64);
 const JOB_URL = 'https://jobs.example.test/product-manager';
@@ -230,24 +229,13 @@ export default [
     },
   },
   {
-    name: 'interview window: narrow follow-up preload forwards only bounded question text',
-    async run() {
-      let api; const calls = [];
-      vm.runInNewContext(fs.readFileSync(new URL('../../electron/interviewWindowPreload.js', import.meta.url), 'utf8'), {
-        require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: (...args) => { calls.push(args); return Promise.resolve(true); } } }),
-      });
-      await api.followUpQuestion('What did you learn?');
-      assert(calls.length === 1 && calls[0][0] === 'interview-window:follow-up-question' && calls[0][1] === 'What did you learn?', 'follow-up must use its exact restricted route');
-      for (const invalid of [{ path: 'private' }, 'x'.repeat(2001)]) assert(await api.followUpQuestion(invalid).then(() => false, () => true), 'unbounded or object follow-up payload must be rejected before IPC');
-      assert(calls.length === 1 && !Object.hasOwn(api, 'electronAPI'), 'invalid calls cannot cross narrow preload boundary');
-    },
-  },
-  {
-    name: 'interview window: narrow preload exposes only sender-bound next-question route',
+    name: 'interview window: narrow preload exposes only the cue card reads and its listening controls',
     run() {
       const preload = fs.readFileSync(new URL('../../electron/interviewWindowPreload.js', import.meta.url), 'utf8');
-      assert(preload.includes("nextQuestion: () => ipcRenderer.invoke('interview-window:next-question')"), 'narrow preload must expose the sender-bound nextQuestion method');
       assert(!preload.includes('electronAPI'), 'narrow preload must not reuse the broad canvas bridge');
+      let api;
+      vm.runInNewContext(preload, { require: () => ({ contextBridge: { exposeInMainWorld: (_name, value) => { api = value; } }, ipcRenderer: { invoke: () => Promise.resolve(true), on() {}, removeListener() {} } }) });
+      assert(JSON.stringify(Object.keys(api).sort()) === JSON.stringify(['getBrief', 'onBriefUpdated', 'onListeningUpdated', 'startListening', 'stopListening']), 'the cue card bridge carries no submit, select or configure method');
     },
   },
   {
@@ -978,31 +966,6 @@ export default [
       assert(await reason(null, '   ') === 'Interview session is not available.', 'a missing session is reported before the question is judged');
       const accepted = await controller.submitQuestion({ sender: child.webContents }, 'a'.repeat(2000));
       assert(typeof accepted.plan?.status === 'string', 'a question of exactly 2000 characters is still accepted');
-    },
-  },
-  {
-    name: 'interview window: every reason submit-question can reject with maps to a specific child message and never echoes a path',
-    async run() {
-      // Electron wraps an IPC rejection as "Error invoking remote method '<channel>': Error: <message>".
-      const ipc = error => new Error(`Error invoking remote method 'interview-window:submit-question': Error: ${error.message}`);
-      const leak = "EACCES: permission denied, open '/Users/someone/Library/Application Support/app/store/x.json'";
-      let failRead = false;
-      const { owner, controller, args } = makeController({ loadSnapshot: async () => { if (failRead) throw new Error(leak); return profile(); } });
-      args.plan = null;
-      await controller.launch({ sender: owner.webContents }, args);
-      const child = [...controller.sessions.values()][0].child;
-      const ask = (sender, question) => controller.submitQuestion({ sender }, question).then(() => null, error => error);
-      const invalid = await ask(child.webContents, '   ');
-      const noSession = await ask(owner.webContents, 'How did you improve onboarding conversion?');
-      failRead = true;
-      const snapshot = await ask(child.webContents, 'How did you improve onboarding conversion?');
-      const mapped = [invalid, noSession, snapshot].map(error => interviewSubmitErrorMessage(ipc(error)));
-      assert(mapped[0] === INVALID_QUESTION_MESSAGE && mapped[1] === SESSION_ENDED_MESSAGE && mapped[2] === EVIDENCE_UNAVAILABLE_MESSAGE, `each controller reason must map to its own child message, got ${JSON.stringify(mapped)}`);
-      assert(new Set([INVALID_QUESTION_MESSAGE, SESSION_ENDED_MESSAGE, EVIDENCE_UNAVAILABLE_MESSAGE, SUBMIT_FAILED_MESSAGE]).size === 4, 'the four child messages are distinct');
-      assert(mapped.every(message => !/Users|EACCES|\/|interview-window:/u.test(message.replace(/\(up to 2,000 characters\)/u, ''))), 'no mapped message may echo a path, channel, or raw error');
-      assert(interviewSubmitErrorMessage(new Error(leak)) === SUBMIT_FAILED_MESSAGE && interviewSubmitErrorMessage(ipc(new Error(leak))) === SUBMIT_FAILED_MESSAGE && interviewSubmitErrorMessage(null) === SUBMIT_FAILED_MESSAGE && interviewSubmitErrorMessage(undefined) === SUBMIT_FAILED_MESSAGE, 'unknown failures stay generic and never echo the raw error');
-      assert(interviewSubmitErrorMessage(new TypeError('Interview question must be a bounded string.')) === INVALID_QUESTION_MESSAGE, 'the preload guard is an invalid question');
-      assert(interviewSubmitErrorMessage('Interview session is not available.') === SESSION_ENDED_MESSAGE, 'a bare string reason is matched too');
     },
   },
   {

@@ -137,9 +137,9 @@ export default [
         /role="dialog"/.test(source)
           && /aria-modal="true"/.test(source)
           && /useEscapeToClose/.test(source)
-          && /const trapFocus = useCallback/.test(source)
-          && /previousFocusRef\.current = document\.activeElement/.test(source)
-          && /previous\.focus\(\)/.test(source),
+          && /const trapFocus = useModalFocusTrap\(dialogRef, cancelButtonRef\)/.test(source)
+          && /document\.activeElement/.test(read('src/components/useModalFocusTrap.js'))
+          && /previous\.focus\(\)/.test(read('src/components/useModalFocusTrap.js')),
         'the dialog must be announced as modal, close on Escape, trap Tab, and restore the invoking control focus');
       return { accessibleModal: true };
     },

@@ -20,7 +20,7 @@ import path from 'node:path';
 import { INTERVIEW_FOUNDATION_QUESTIONS } from '../../src/utils/interviewAnswerQuestions.js';
 import { interviewLastRole } from './interviewAnswerBank.js';
 
-export const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
+ const INTERVIEW_QA_DIRECTORY = 'interview-helper-qa';
 const STORE_VERSION = 1;
 const MAX_STORE_BYTES = 2 * 1024 * 1024;
 const MAX_CARDS = 80;
@@ -132,7 +132,7 @@ const queueKey = (userDataPath, scope, nodeId) => `${userDataPath}\u0000${scope}
 // ------------------------------------------------------------- projection --
 
 /** Public, renderer-safe projection (no evidence IDs or private quotes). */
-export function toQaCard(card, scope) {
+ function toQaCard(card, scope) {
   return {
     id: card.id, scope, question: card.question,
     variants: Array.isArray(card.variants) ? card.variants.filter(item => typeof item === 'string').slice(0, MAX_VARIANTS) : [],
@@ -172,7 +172,7 @@ function userStatement(value, max) {
 }
 
 /** Validate and normalize a user edit payload into the stored card shape. */
-export function userCardFromPayload(payload, { id }) {
+ function userCardFromPayload(payload, { id }) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('This Q&A card is invalid.');
   const question = typeof payload.question === 'string' ? payload.question.trim() : '';
   if (!question || !text(question, MAX_QUESTION)) throw new Error('Write a question (up to 300 characters) before saving.');
@@ -548,10 +548,4 @@ export async function listInterviewPracticeSessions({ userDataPath }) {
     if (session && typeof session.codeHash === 'string' && typeof session.nodeId === 'string') sessions.push({ nodeId: session.nodeId, session });
   }
   return sessions;
-}
-
-/** Find the helper whose practice session carries this code hash. */
-export async function findInterviewPracticeSession({ userDataPath, codeHash }) {
-  if (typeof codeHash !== 'string' || !/^[a-f0-9]{64}$/u.test(codeHash)) return null;
-  return (await listInterviewPracticeSessions({ userDataPath })).find(item => item.session.codeHash === codeHash) || null;
 }

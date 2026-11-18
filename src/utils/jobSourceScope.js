@@ -55,8 +55,3 @@ export function getScopedJobSourceIds(allSourceIds = []) {
   if (!JOB_SEARCH_TEST_MODE.enabled || !JOB_SEARCH_TEST_MODE.sourceId) return ids;
   return ids.filter(id => id === JOB_SEARCH_TEST_MODE.sourceId);
 }
-
-export function isJobSourceEnabledInScope(sourceId) {
-  if (!JOB_SEARCH_TEST_MODE.enabled || !JOB_SEARCH_TEST_MODE.sourceId) return true;
-  return sourceId === JOB_SEARCH_TEST_MODE.sourceId;
-}

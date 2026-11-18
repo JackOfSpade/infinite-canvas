@@ -99,10 +99,6 @@ export function isNestedStartupRecoveryCandidate(node) {
   }
 }
 
-export function hasNestedStartupRecoveryCandidate(rootNodes) {
-  return collectNestedStartupRecoveryGraph(rootNodes).nodes.some(isNestedStartupRecoveryCandidate);
-}
-
 /**
  * ReactFlow recreates its root node array for drag/layout frames. Recovery
  * discovery cares about durable workflow identity and inputs, never geometry;
@@ -110,6 +106,25 @@ export function hasNestedStartupRecoveryCandidate(rootNodes) {
  * Settings while still invalidating for every field used by discovery.
  */
 export function workspaceStartupRecoverySignature(rootNodes) {
+  // The nested graph comes only from the child canvases of the root nodes, and
+  // a drag or layout frame recreates the root nodes while keeping those child
+  // canvas objects. Reuse the last signature while the same child canvases are
+  // present, so a drag does not re-walk and re-fingerprint every nested job row.
+  const canvases = (Array.isArray(rootNodes) ? rootNodes : [])
+    .map((node) => node?.data?.canvasData)
+    .filter((canvasData) => Array.isArray(canvasData?.nodes));
+  const last = lastSignatureCache;
+  if (last && last.canvases.length === canvases.length && last.canvases.every((canvas, i) => canvas === canvases[i])) {
+    return last.signature;
+  }
+  const signature = buildWorkspaceStartupRecoverySignature(rootNodes);
+  lastSignatureCache = { canvases, signature };
+  return signature;
+}
+
+let lastSignatureCache = null;
+
+function buildWorkspaceStartupRecoverySignature(rootNodes) {
   const { nodes, edges } = collectNestedStartupRecoveryGraph(rootNodes);
   const nodeSnapshot = nodes.map((node) => {
     const data = node?.data || {};

@@ -10,7 +10,7 @@
 import { hasControl as containsControlCharacters, normalizeInterviewPublicUrl } from './interviewUrlPrivacy.js';
 
 export const INTERVIEW_HELPER_MAX_STEPS = 6;
-export const INTERVIEW_HELPER_MATCH_THRESHOLD = 10;
+const INTERVIEW_HELPER_MATCH_THRESHOLD = 10;
 
 // Setup data is persisted with an Interview Helper node, so keep its URL
 // canonicalization deliberately small and deterministic.  In particular, do
@@ -635,11 +635,6 @@ export function buildInterviewPlan({ question, profile, snapshotId = null } = {}
   });
 }
 
-/** Session state intentionally locks only a supported rail, never an unknown question. */
-export function createInterviewHelperSession() {
-  return Object.freeze({ activePlan: null, locked: false });
-}
-
 export function isDependentInterviewFollowUp(value) {
   const sentence = stringValue(value).toLocaleLowerCase().replace(/[.!?]+$/gu, '');
   // A finite grammar preserves an explicit story anchor without borrowing
@@ -752,19 +747,6 @@ export function isLikelyInterviewQuestion(value) {
     .replace(/^(?:please\s+)?(?:briefly\s+)?(?=(?:tell me|describe|walk me|explain|give me|share|discuss)\b)/u, '');
   return /^(?:tell me|describe|walk me|explain|share|discuss|give me an example|how|what|why|when|where|which|who|can you|could you|have you|do you|did you|would you|are you|is there|salary|notice)\b/u.test(text)
     && !BARE_IMPERATIVE.test(text);
-}
-
-/**
- * Reducer for streaming transcript consumers. `receive-question` ignores later
- * transcript revisions once it has selected a grounded active plan. Only the
- * explicit `next-question` action unlocks the session.
- */
-export function interviewHelperSessionReducer(state = createInterviewHelperSession(), action = {}) {
-  if (action.type === 'next-question') return createInterviewHelperSession();
-  if (action.type !== 'receive-question') return state;
-  if (state.locked && state.activePlan?.status === 'supported') return state;
-  const plan = buildInterviewPlan({ question: action.question, profile: action.profile, snapshotId: action.snapshotId });
-  return freezeDeep({ activePlan: plan, locked: plan.status === 'supported' });
 }
 
 const LAUNCH_FAILURE_GENERIC = 'The cue card could not be opened. Try again from the prepared brief.';

@@ -11,7 +11,6 @@ import {
   getAbsorptionRejection,
   getNodeDims,
   hasActiveExternalRunState,
-  hasNestedStartupRecoveryCandidate,
   isNestedStartupRecoveryCandidate,
   isJobWorkflowDeletionPending,
   isJobWorkflowRelocationPending,
@@ -50,7 +49,7 @@ export default [
         'the graph must retain every nested node in its original canvas order for Board graph hydration');
       assert(graph.edges.length === 1 && graph.edges[0].source === 'nested-board' && graph.edges[0].target === 'nested-search',
         'the graph must retain intra-canvas Board ownership edges');
-      assert(hasNestedStartupRecoveryCandidate([rootSearch, group]),
+      assert(collectNestedStartupRecoveryGraph([rootSearch, group]).nodes.some(isNestedStartupRecoveryCandidate),
         'a nested durable Board/Sell/Search recovery must be discovered by the workspace coordinator');
       const coordinator = createWorkspaceStartupRecoveryCoordinator({
         peekJobRun: async ({ nodeId }) => nodeId === 'nested-search'

@@ -13,7 +13,6 @@ import { noteParallelLimit, PARALLEL_LIMIT_NOTICE, parallelBlocked, parallelExha
 import { createShadowMeasure } from '../../electron/ipc/aiShadowMeasure.js';
 import { WORKER_ENABLED_ATTACHMENT_TASKS, WORKER_RELEASE_ONE_TASKS } from '../../electron/ipc/nonApiAi.js';
 import { answeringModel, buildClaudeInputMessage } from '../../electron/ipc/claudeApplicationRunner.js';
-import { mergeResearchSections } from '../../electron/ipc/researchSectionMerge.js';
 import { buildCompensationResearchPrompt, buildRoleFamilyBatchResearchPrompt, compensationCohortResearchIds, compensationRoleFamilyResearchIds } from '../../electron/ipc/jobs.js';
 import { buildJobLocationLookupPrompt } from '../../electron/ipc/jobLocationLookup.js';
 import { buildOfficialPostingResearchRequest, officialPostingResearchMembers } from '../../electron/ipc/officialPostingBridge.js';
@@ -935,44 +934,6 @@ export default [
       photo.worker.start();
       await settle();
       assert.equal(photo.state.stages.length, 1);
-    },
-  },
-  {
-    name: 'research section merge: two replies join per id as labelled source sets, a single body passes through, and no body is null',
-    run() {
-      const replies = texts => [
-        { label: 'built-in web search', text: texts[0] },
-        { label: 'Parallel search', text: texts[1] },
-      ];
-      const both = mergeResearchSections({
-        ids: ['c1'],
-        replies: replies([compensationSection('c1', 'native body'), compensationSection('c1', 'parallel body')]),
-        begin: compensationBegin, end: compensationEnd,
-      });
-      assert.equal(both, compensationSection('c1', 'SOURCE SET A (built-in web search):\nnative body\n\nSOURCE SET B (Parallel search):\nparallel body'));
-      const one = mergeResearchSections({
-        ids: ['c1'],
-        replies: replies([compensationSection('c1', 'only body'), null]),
-        begin: compensationBegin, end: compensationEnd,
-      });
-      assert.equal(one, compensationSection('c1', 'only body'), 'a lone body is copied unchanged');
-      assert.equal(mergeResearchSections({
-        ids: ['c1'], replies: replies(['unrelated prose', null]), begin: compensationBegin, end: compensationEnd,
-      }), null);
-      assert.equal(mergeResearchSections({ ids: [], replies: replies([null, null]), begin: compensationBegin, end: compensationEnd }), null);
-    },
-  },
-  {
-    name: 'research section merge: markers match whole lines only, so c1 never consumes c10, and ids keep the given order',
-    run() {
-      const text = `preamble\n${compensationSection('c10', 'ten body')}\n${compensationSection('c1', 'one body')}`;
-      assert.equal(mergeResearchSections({
-        ids: ['c1', 'c10'], replies: [{ label: 'built-in web search', text }], begin: compensationBegin, end: compensationEnd,
-      }), `${compensationSection('c1', 'one body')}\n${compensationSection('c10', 'ten body')}`);
-      assert.equal(mergeResearchSections({
-        ids: ['c1'], replies: [{ label: 'built-in web search', text: compensationSection('c10', 'ten body') }],
-        begin: compensationBegin, end: compensationEnd,
-      }), null, 'a c10 section is not a c1 body');
     },
   },
   {

@@ -9,14 +9,15 @@ import {
   failCareerImportCompilation,
 } from './jobCareerCompilationReceipt.js';
 import { isCardOfficialPostingRunId } from './jobHubManualAiOwnership.js';
+import { INTERVIEW_RUN_ID_RE } from './interviewRunIdGrammar.js';
 
 export const JOB_BOARD_CAREER_OVERRIDE_VERSION = 1;
 // Deliberately distinct from the Board's own `job-board:` combine runs so an
 // override compile can never be mistaken for (or retired as) a combine run.
 export const JOB_BOARD_CAREER_OVERRIDE_RUN_PREFIX = 'job-board-career:';
 
-// Keep synchronized with InterviewHelperNode's RUN_ID_RE; never widen.
-const RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+// The grammar lives in interviewRunIdGrammar.js and must never widen.
+const RUN_ID_RE = INTERVIEW_RUN_ID_RE;
 const SNAPSHOT_ID_RE = /^[a-f0-9]{64}$/u;
 const MAX_FILES = 32;
 const MAX_FILE_NAME_LENGTH = 180;

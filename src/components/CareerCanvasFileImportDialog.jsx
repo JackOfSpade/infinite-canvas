@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useId, useRef } from 'react';
+import React, { useId, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { updateModalCount } from './modalStack';
+import { useModalFocusTrap } from './useModalFocusTrap';
 import { useEscapeToClose } from '../hooks/useEscapeToClose';
 import { sameCareerCanvasFileSelection } from '../utils/careerCanvasFileImport';
 
@@ -27,51 +27,12 @@ export function CareerCanvasFileImportDialog({
 }) {
   const dialogRef = useRef(null);
   const cancelButtonRef = useRef(null);
-  const previousFocusRef = useRef(null);
   const titleId = useId();
   const descriptionId = useId();
   const selectedCount = selectedSelections.length;
 
-  const focusableElements = useCallback(() => {
-    if (!dialogRef.current) return [];
-    return [...dialogRef.current.querySelectorAll(
-      'button:not([disabled]), input:not([disabled]), [href], select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-    )];
-  }, []);
-
-  const trapFocus = useCallback((event) => {
-    if (event.key !== 'Tab') return;
-    const elements = focusableElements();
-    if (elements.length === 0) {
-      event.preventDefault();
-      dialogRef.current?.focus();
-      return;
-    }
-    const first = elements[0];
-    const last = elements[elements.length - 1];
-    if (!dialogRef.current?.contains(document.activeElement)) {
-      event.preventDefault();
-      (event.shiftKey ? last : first).focus();
-    } else if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
-  }, [focusableElements]);
-
-  useEffect(() => {
-    updateModalCount(1);
-    previousFocusRef.current = document.activeElement;
-    // Start on Cancel, never on the potentially state-changing import action.
-    cancelButtonRef.current?.focus();
-    return () => {
-      updateModalCount(-1);
-      const previous = previousFocusRef.current;
-      if (previous instanceof HTMLElement && document.contains(previous)) previous.focus();
-    };
-  }, []);
+  // Starts on Cancel, never on the potentially state-changing import action.
+  const trapFocus = useModalFocusTrap(dialogRef, cancelButtonRef);
 
   useEscapeToClose((event) => {
     event.preventDefault();

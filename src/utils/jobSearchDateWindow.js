@@ -14,9 +14,6 @@ export const JOB_SEARCH_MAX_AUTOMATIC_HISTORY_LOOKBACK_DAYS = 365;
 // runtime horizon from the immutable start and can legitimately exceed this
 // persisted-input bound.
 export const JOB_SEARCH_MAX_PROVIDER_LOOKBACK_DAYS = 367;
-// Compatibility name for existing callers; it describes the automatic-history
-// safety backstop, not the persisted first-search preference.
-export const JOB_SEARCH_MAX_LOOKBACK_DAYS = JOB_SEARCH_MAX_AUTOMATIC_HISTORY_LOOKBACK_DAYS;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -60,32 +57,6 @@ export function jobSearchCompletionAnchor(
   return legacyStartedAt == null
     ? { timestamp: null, source: 'default-cap' }
     : { timestamp: legacyStartedAt, source: 'legacy-run-start' };
-}
-
-/**
- * Choose the no-gap anchor for the next successful-run rescan.
- *
- * `lastCompletedRunAt` remains the real user-facing collection completion.
- * The separate coverage timestamp exists because a successful crash recovery
- * can reuse providers that finished on the preceding calendar day.
- */
-export function jobSearchRescanAnchor(
-  lastSearchCoverageStartedAt,
-  lastCompletedRunAt,
-  jobRunId,
-  nodeId,
-) {
-  // A successfully completed run can span local midnight, especially when a
-  // crash-resume reuses providers that had already finished. Starting the next
-  // scan on the overall completion date would then leave a gap for those
-  // earlier providers. Prefer the original start of the successful run as the
-  // conservative coverage watermark, while retaining lastCompletedRunAt for
-  // the user-facing "Last scraped" timestamp.
-  const coverageStartedAt = normalizeCompletionTimestamp(lastSearchCoverageStartedAt);
-  if (coverageStartedAt != null) {
-    return { timestamp: coverageStartedAt, source: 'last-coverage-start' };
-  }
-  return jobSearchCompletionAnchor(lastCompletedRunAt, jobRunId, nodeId);
 }
 
 /**

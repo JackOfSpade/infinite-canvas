@@ -1,5 +1,5 @@
 import nodeAssert from 'node:assert';
-import { consideredEvidenceForTarget, settledStateDigest, applyProfileEditsWithRules, checkFindingAgainstLedgerWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../test-dependencies.js';
+import { consideredEvidenceForTarget, settledStateDigest, applyProfileEditsWithRules, checkFindingAgainstLedgerWithForwardedDetails } from '../test-dependencies.js';
 import { createHash } from 'node:crypto';
 
 import { assert } from './testHelpers.js';
@@ -146,11 +146,10 @@ export default [
         [decision.id, ['segment-0002'], 'LEDGER_CHALLENGE_NO_NEW_EVIDENCE'],
       ]) {
         const value = finding([set('Lead')], challengeId, evidence);
-        const result = checkFindingAgainstLedgerWithRules(ledger, 2, value);
-        assert(result.ruleIds.length === result.errors.length && result.ruleIds[0] === expected, expected);
-        const { ruleIds: _ids, ...legacy } = result;
-        nodeAssert.deepStrictEqual(legacy, checkFindingAgainstLedger(ledger, 2, value));
         const forwarded = checkFindingAgainstLedgerWithForwardedDetails(ledger, 2, value);
+        assert(forwarded.ruleIds.length === forwarded.errors.length && forwarded.ruleIds[0] === expected, expected);
+        const { ruleIds: _ids, details: _details, ...legacy } = forwarded;
+        nodeAssert.deepStrictEqual(legacy, checkFindingAgainstLedger(ledger, 2, value));
         assert(forwarded.details.every(line => !line.includes('value ') && !line.includes('Engineer')), 'forwarded lines carry target, decision and evidence ids only');
       }
     },

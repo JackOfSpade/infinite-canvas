@@ -121,8 +121,7 @@ const NODE_DIMS = {
   // capped at max-h-44 = 176px, JobBoardSearchSelection.jsx) + JobBoardDoneState's
   // result summary (~110px), matching the jobhub/sellhub height convention above.
   jobboard: { w: 260, h: 320 },
-  // InterviewHelperNode starts as a 740px two-column card and widens by whole
-  // columns as content grows (interviewHelperLayout.js). Its first actionable setup state (four configuration sections plus
+  // InterviewHelperNode is a 740px two-column card. Its first actionable setup state (four configuration sections plus
   // the optional evidence-question panel) splits across them. 560px was the
   // measured single-column setup height and stays as a safe upper bound (an
   // overestimate only leaves a gap; an underestimate overlaps neighbours) until

@@ -176,26 +176,6 @@ export function filterNonEnglishJobs(jobs) {
   return { jobs: kept, dropped };
 }
 
-// Legacy tagging helper retained for older callers and saved-card behavior.
-// Mutates a job IN PLACE: sets `job.language` only when confidently non-English
-// (English is the implicit default, so the field is left unset to keep the
-// payload small and the card chip absent). Re-tagging is common after a scraper
-// recovers a fuller description, so clear an older non-English tag when the new
-// evidence is English or inconclusive; otherwise a stale language chip survives
-// even though the current listing text no longer supports it. Returns the job.
-export function tagJobLanguage(job) {
-  if (!job || typeof job !== 'object') return job;
-  const lang = detectLanguage(`${job.title || ''}\n${job.description || ''}\n${job.snippet || ''}`);
-  if (lang && lang !== 'en') job.language = lang;
-  else delete job.language;
-  return job;
-}
-
-export function tagJobLanguages(jobs) {
-  if (Array.isArray(jobs)) for (const j of jobs) tagJobLanguage(j);
-  return jobs;
-}
-
 // Tally for the run report: summarize the pre-filter rows after filtering to
 // count non-English drops by language, with one sample each.
 export function summarizeJobLanguages(jobs) {

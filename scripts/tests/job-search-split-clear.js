@@ -13,7 +13,6 @@ import {
   buildSavedJobsRescoreMarker,
   hubRetainsSavedJobs,
   isCareerClearedWithSavedJobs,
-  jobHubClearAvailability,
   pendingSavedJobsRescore,
   savedJobCount,
   savedJobsReevaluationKeepsScores,
@@ -425,29 +424,6 @@ export default [
         );
       }
       assert.strictEqual(isCareerClearedWithSavedJobs(null), false);
-    },
-  },
-  {
-    name: 'jobHubClearAvailability reports each clear independently',
-    run: async () => {
-      assert.deepStrictEqual(jobHubClearAvailability(terminalHub()), {
-        savedJobCount: 2, careerClearedWithJobs: false, canClearScrape: true, canClearCareer: true,
-      });
-      assert.deepStrictEqual(
-        jobHubClearAvailability({ type: 'jobhub', data: { hubState: 'done', scoredJobs: JOBS, savedJobsCareerClearedAt: 1 } }),
-        { savedJobCount: 2, careerClearedWithJobs: true, canClearScrape: true, canClearCareer: false },
-      );
-      assert.deepStrictEqual(
-        jobHubClearAvailability({ type: 'jobhub', data: { hubState: 'empty', inputLocked: true } }),
-        { savedJobCount: 0, careerClearedWithJobs: false, canClearScrape: false, canClearCareer: true },
-      );
-      assert.deepStrictEqual(
-        jobHubClearAvailability({ type: 'jobhub', data: { hubState: 'scoring', scoredJobs: JOBS, careerSnapshotId: SNAPSHOT } }),
-        { savedJobCount: 2, careerClearedWithJobs: false, canClearScrape: false, canClearCareer: true },
-      );
-      assert.deepStrictEqual(jobHubClearAvailability(null), {
-        savedJobCount: 0, careerClearedWithJobs: false, canClearScrape: false, canClearCareer: false,
-      });
     },
   },
   {

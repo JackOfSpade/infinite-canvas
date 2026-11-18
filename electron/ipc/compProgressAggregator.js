@@ -16,19 +16,30 @@
  * @param {number}   opts.totalItems  how many items this run will scrape
  * @param {(payload: object) => void} opts.send  emits one `price-source-progress`
  *        payload (the caller adds nodeId + ships it over IPC)
- * @returns {(itemIndex: number) => (sourceId: string, payload: object) => void}
+ * @returns {((itemIndex: number) => (sourceId: string, payload: object) => void) & { flush: () => void }}
  *   a factory: call it once per item to get that item's `emit(sourceId, payload)`.
+ *   After the last item has finished, `flush()` releases the terminal for any
+ *   source that the last item never reported, so its card cannot spin forever.
  */
 export function createAggregatingProgress({ totalItems, send }) {
   // sourceId -> { count, warning, url, errored }
   const agg = new Map();
+  const released = new Set();
   const slot = (id) => {
     let a = agg.get(id);
     if (!a) { a = { count: 0, warning: null, url: null, errored: false }; agg.set(id, a); }
     return a;
   };
 
-  return function emitForItem(itemIndex) {
+  const terminalFor = (sourceId, a) => ({
+    sourceId,
+    status: a.errored ? 'error' : 'done',
+    count: a.count,
+    warning: a.warning,
+    url: a.url,
+  });
+
+  function emitForItem(itemIndex) {
     const isLast = itemIndex >= totalItems - 1;
     return function emit(sourceId, payload = {}) {
       const status = payload.status;
@@ -54,14 +65,21 @@ export function createAggregatingProgress({ totalItems, send }) {
         send({ sourceId, status: 'searching', count: a.count, completed: itemIndex + 1, total: totalItems });
       } else {
         // Last item finished this source → release the real terminal.
-        send({
-          sourceId,
-          status: a.errored ? 'error' : 'done',
-          count: a.count,
-          warning: a.warning,
-          url: a.url,
-        });
+        released.add(sourceId);
+        send(terminalFor(sourceId, a));
       }
     };
+  }
+
+  // A source an earlier item finished but the last item never reported would
+  // otherwise stay held back for good. Call this once, after the last item.
+  emitForItem.flush = () => {
+    for (const [sourceId, a] of agg) {
+      if (released.has(sourceId)) continue;
+      released.add(sourceId);
+      send(terminalFor(sourceId, a));
+    }
   };
+
+  return emitForItem;
 }

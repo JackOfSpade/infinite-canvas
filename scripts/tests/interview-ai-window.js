@@ -340,7 +340,7 @@ export default [
         const before = h.session.display;
         assert.match(h.controller.getListeningState(h.event).message, /^Not matched · Use to match$/u);
         h.queue.push({ result: declined });
-        const display = await h.handlers.get('interview-window:use-transcript-question')(h.event);
+        const display = await h.controller.useTranscriptQuestion(h.event);
         assert.notEqual(display, before); assert.equal(display.question, question);
         assert.equal(display.matching.kind, 'question'); assert.equal(display.answerCard, null);
         assert(display.plan?.message, 'saved cues or a visible unsupported explanation must resolve the explicit choice');
@@ -615,7 +615,7 @@ export default [
         h.controller.nextQuestion(h.event);
         const preparedQuestion = h.fixture.bank.cards.find(card => card.id === 'priorities').question;
         h.queue.push({ result: pick('priorities') });
-        const typed = await h.handlers.get('interview-window:submit-question')(h.event, preparedQuestion);
+        const typed = await h.controller.submitQuestion(h.event, preparedQuestion);
         assert.equal(typed.answerCard.id, 'priorities'); assert.equal(h.transports[0].matches.length, 2, 'an exact typed question still uses semantic AI selection');
         assert.equal(h.updates().at(-1).value, h.session.display, 'main and renderer receive the same committed answer');
       } finally { h.cleanup(); }
@@ -629,7 +629,7 @@ export default [
         const cards = h.fixture.bank.cards;
         assert.deepEqual(h.session.display.briefing.preparedCards, cards.map(({ id, question }) => ({ id, question })));
         assert.deepEqual(h.session.display.briefing.preparedQuestions, cards.map(card => card.question), 'the existing string projection remains compatible');
-        const select = h.handlers.get('interview-window:select-prepared-card');
+        const select = h.controller.selectPreparedCard;
         for (const card of cards) {
           const display = await select(h.event, card.id);
           assert.equal(display.answerCard.id, card.id); assert.equal(display.question, card.question);
@@ -689,7 +689,7 @@ export default [
       try {
         await h.controller.selectPreparedCard(h.event, 'leadership');
         const before = h.session.display; const updateCount = h.updates().length;
-        const select = h.handlers.get('interview-window:select-prepared-card');
+        const select = h.controller.selectPreparedCard;
         for (const event of [{ sender: h.owner.webContents }, { sender: h.event.sender, senderFrame: {} }, { sender: { id: h.event.sender.id }, senderFrame: h.event.sender.mainFrame }]) {
           await assert.rejects(() => select(event, 'priorities'), /prepared answer is unavailable/u);
         }
@@ -815,7 +815,7 @@ export default [
         h.queue.push({ result: pick('leadership'), latencyMs: 3000 });
         const slow = await h.controller.submitQuestion(h.event, SEMANTIC_QUESTION);
         assert.equal(slow.matching.p50Ms, 3000); assert.equal(slow.matching.mode, 'auto'); assert.equal(slow.matching.effectiveMode, 'continuation');
-        const mode = h.handlers.get('interview-window:set-latency-mode');
+        const mode = h.controller.setLatencyMode;
         assert.equal(mode(h.event, 'recall').matching.effectiveMode, 'recall', 'manual recall overrides measured latency');
         assert.throws(() => mode(h.event, 'continuation'), /display mode is invalid/u, 'Keep going can only follow measured latency');
         assert.equal(mode(h.event, 'auto').matching.effectiveMode, 'continuation');

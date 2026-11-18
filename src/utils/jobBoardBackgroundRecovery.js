@@ -9,16 +9,11 @@ import {
 import { getSearchLocation, locationToLegacyText } from './jobSearchLocations.js';
 import { getRunnableJobSourceIds, normalizeEnabledJobSourceIds } from './jobPlatformSelection.js';
 import { buildJobCareerQueryCacheKey, careerSnapshotBindingMatches, normalizedJobCareerSnapshotId } from './jobCareerSnapshotBinding.js';
+import { stableJson } from './stableJson.js';
 
 const BACKGROUND_SAFE_SOURCE_IDS = new Set([
   'linkedin', 'remoteok', 'weworkremotely', 'dice', 'usajobs',
 ]);
-
-function stableJson(value) {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`;
-}
 
 function profileFingerprint(value) {
   const normalized = typeof value === 'string' ? value.trim() : '';

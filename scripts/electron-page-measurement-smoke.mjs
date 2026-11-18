@@ -2,9 +2,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { build } from 'esbuild';
-import electron from 'electron';
+import { runInlineElectronEntry } from './lib/electron-smoke.mjs';
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'ic-page-measurement-'));
 await fs.mkdir('.test-artifacts', { recursive: true });
@@ -46,19 +44,10 @@ try {
     } catch (error) { console.error(error); app.exit(1); }
     })().catch(error => { console.error(error); app.exit(1); });
   `;
-  const outfile = path.join(bundleDir, 'main.cjs');
-  await build({ stdin: { contents: entry, resolveDir: process.cwd(), sourcefile: 'page-measurement-smoke.mjs' }, outfile,
-    bundle: true, platform: 'node', format: 'cjs', packages: 'external',
+  await runInlineElectronEntry({
+    source: entry, sourcefile: 'page-measurement-smoke.mjs', resolveDir: process.cwd(),
+    outfile: path.join(bundleDir, 'main.cjs'), timeoutMs: 90_000, echo: true, failureLabel: 'Page measurement smoke',
   });
-  const exitCode = await new Promise((resolve, reject) => {
-    const env = { ...process.env, INFINITE_CANVAS_E2E_BACKGROUND: '1' };
-    delete env.ELECTRON_RUN_AS_NODE;
-    const child = spawn(electron, [outfile], { cwd: process.cwd(), stdio: 'inherit', env });
-    const timeout = setTimeout(() => child.kill('SIGKILL'), 90_000);
-    child.once('error', error => { clearTimeout(timeout); reject(error); });
-    child.once('exit', code => { clearTimeout(timeout); resolve(code); });
-  });
-  if (exitCode !== 0) throw new Error('Page measurement smoke failed: ' + exitCode);
 } finally {
   await fs.rm(root, { recursive: true, force: true });
   await fs.rm(bundleDir, { recursive: true, force: true });

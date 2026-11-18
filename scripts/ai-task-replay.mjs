@@ -24,6 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDurableOutDir, createRunJournal, takeEphemeralFlag, tallyRows } from './ai-test-journal.mjs';
+import { isPathInside, resolveThroughExistingParentSync } from './lib/outside-repo.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const TASKS = ['job-preference-evaluation', 'job-scoring', 'job-official-posting-research', 'job-official-posting-match',
@@ -131,26 +132,10 @@ export function parseArgs(argv) {
   return opts;
 }
 
-function resolveReal(target) {
-  let current = path.resolve(target);
-  const rest = [];
-  while (!fs.existsSync(current)) {
-    const parent = path.dirname(current);
-    if (parent === current) break;
-    rest.unshift(path.basename(current));
-    current = parent;
-  }
-  let real = current;
-  try { real = fs.realpathSync(current); } catch { /* keep the resolved path */ }
-  return path.join(real, ...rest);
-}
-
 /** The results hold private data, so a directory inside the repository is refused outright. */
 export function assertOutsideRepo(outDir, repoRoot = REPO_ROOT) {
-  const out = resolveReal(outDir);
-  const root = resolveReal(repoRoot);
-  const rel = path.relative(root, out);
-  if (rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))) {
+  const out = resolveThroughExistingParentSync(outDir);
+  if (isPathInside(out, resolveThroughExistingParentSync(repoRoot))) {
     throw new Error('--out must be outside the repository: replay results contain private data.');
   }
   return out;

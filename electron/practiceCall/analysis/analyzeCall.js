@@ -196,7 +196,6 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   const timelineMs = Math.max(durationMs + (clockMs(callRecord.recordingLeadMs) ?? 0), transcript.reduce((max, turn) => Math.max(max, clockMs(turn?.endMs) ?? 0), 0));
   const chapters = buildChapters({
     transcript, reviewChapters: checked.chapters, moments: checked.moments, metrics,
-    toneNotes: list(callRecord.toneNotes).filter(note => typeof note?.note === 'string' && note.note.trim()),
     candidateProsodyByTurn: prosodyByEntry(transcript, callRecord.candidateProsody), durationMs: timelineMs,
   });
   const analysis = compose({ status: 'ready', chapters, fillers: fillerTotals({ feedback: checked.feedback, moments: checked.moments, transcript, durationMs }) });

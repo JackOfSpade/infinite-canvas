@@ -73,8 +73,8 @@ export const CHALLENGE_ESCALATE_MS = [15 * 60_000, 30 * 60_000];
 // Auto/All resolves to the highest value a person can type, so a ceiling at or
 // above these is OUR safety net, not a limit the user chose. Hitting one is a
 // guard worth showing; an explicit number stays a quiet finish.
-export const UNLIMITED_PAGE_BACKSTOP = JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
-export const UNLIMITED_JOB_BACKSTOP = JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform;
+const UNLIMITED_PAGE_BACKSTOP = JOB_COLLECTION_AUTO_LIMITS.pagesPerQuery;
+const UNLIMITED_JOB_BACKSTOP = JOB_COLLECTION_AUTO_LIMITS.jobsPerPlatform;
 const CHALLENGE_STABLE_MS    = 1_500;         // page must be challenge-free for this long before resuming — guards against re-serves
 // Cloudflare can remove a solved Turnstile iframe before it either redirects or
 // re-renders the challenge. Do not mistake that short DOM transition for a final
@@ -690,7 +690,7 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
     manualScraperTelemetry.fieldAnomalies.push(entry);
     if (manualScraperTelemetry.fieldAnomalies.length > ANOMALY_RING_MAX) manualScraperTelemetry.fieldAnomalies.shift();
   }
-  if (!updateActive) return;
+  if (!updateActive) return entry;
   // A source/query/page boundary is a new diagnostic context, not an update to
   // the prior listing. Replacing at those boundaries prevents a Glassdoor
   // detail key/reason/evidence from being reported as the current Google item
@@ -705,6 +705,30 @@ export function recordManualScraperTelemetry(event, { updateActive = true } = {}
   manualScraperTelemetry.active = ACTIVE_CONTEXT_RESET_PHASES.has(entry.phase)
     ? entry
     : { ...(manualScraperTelemetry.active || {}), ...entry };
+  return entry;
+}
+
+// Records the challenge-detected event at once, then fills in the egress fields
+// when the lookup settles, so the user-solve wait never waits on a network call.
+// The lookup never rejects; a failed one leaves the fields null.
+export function recordChallengeDetectedTelemetry(event, egressLookup) {
+  const entry = recordManualScraperTelemetry({
+    ...event,
+    egressIp: null, egressIsp: null, egressOrg: null, egressHosting: null,
+  });
+  Promise.resolve(egressLookup).then((egress) => {
+    if (!egress) return;
+    const fields = {
+      egressIp: egress.ip ?? null,
+      egressIsp: egress.isp ?? null,
+      egressOrg: egress.org ?? null,
+      egressHosting: egress.hosting ?? null,
+    };
+    Object.assign(entry, fields);
+    const active = manualScraperTelemetry.active;
+    if (active && active !== entry && active.phase === entry.phase && active.ts === entry.ts) Object.assign(active, fields);
+  }, () => {});
+  return entry;
 }
 
 /** Record a query only when Chrome accepted the location-assignment command. */
@@ -980,7 +1004,9 @@ const BROWSER_LAUNCH_PROFILE =
 // Egress (public) IP + best-effort datacenter/residential classification. ipify
 // gives the IP (same source the LinkedIn egress trail uses); ip-api adds org +
 // a `hosting` flag so a reader can tell a datacenter/VPN exit (the dominant
-// DataDome trigger) from a residential IP. Returns nulls on any failure.
+// DataDome trigger) from a residential IP. Returns nulls on any failure. ip-api's
+// free endpoint is HTTP only (HTTPS needs its paid key), so that call stays plain
+// HTTP and only reports the public IP it was already given by the HTTPS ipify call.
 async function lookupEgress() {
   const out = { ip: null, isp: null, org: null, hosting: null };
   try {
@@ -1475,7 +1501,7 @@ export function createGoogleApplyRedirectResolver(openPage) {
 
 export const GOOGLE_APPLY_LINKS_RATE_LIMITED_CODE = 'google-apply-links-rate-limited';
 /** At most this many still-unread redirects ride on one row into the checkpoint. */
-export const GOOGLE_PENDING_APPLY_REDIRECT_LIMIT = 4;
+const GOOGLE_PENDING_APPLY_REDIRECT_LIMIT = 4;
 const GOOGLE_PENDING_APPLY_LABEL_MAX = 120;
 
 const googlePendingApplyLabel = value => String(value ?? '')
@@ -3235,10 +3261,11 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
         });
         logger.info(`[BrowserScraper] ${overlayBase.srcName}: bot challenge detected — waiting for user (no timeout; Reset to cancel)`);
         // Gather anti-bot diagnostics once, before the (potentially minutes-long)
-        // user-solve wait. Best-effort; nulls if a lookup fails.
-        const egress = await lookupEgress();
+        // user-solve wait. Best-effort; nulls if a lookup fails. The egress
+        // lookup runs in the background and fills its fields in when it settles.
+        const egressLookup = lookupEgress();
         const blockId = await extractBlockId(page);
-        recordManualScraperTelemetry({
+        recordChallengeDetectedTelemetry({
           phase:    'challenge-detected',
           srcName:  overlayBase.srcName,
           reason:   signals?.reason,
@@ -3263,12 +3290,8 @@ export async function waitForReady(page, sourceId, overlayBase, signal, resumeUr
             dataDomeScript: !!signals?.hasDataDomeScript,
           },
           browserProfile: BROWSER_LAUNCH_PROFILE,
-          egressIp:       egress.ip,
-          egressIsp:      egress.isp,
-          egressOrg:      egress.org,
-          egressHosting:  egress.hosting,
           blockId,
-        });
+        }, egressLookup);
       }
       if (!shownVerifiedOverlay && signals?.verificationCompleted) {
         shownVerifiedOverlay = true;
@@ -6441,9 +6464,9 @@ export const REVEAL_STABLE_PASSES = 5;
  * Google can add one card per reveal action forever, which the plateau exit
  * never catches and the iteration ceiling only catches hours later.
  */
-export const REVEAL_LOW_GROWTH_PASSES = 10;
-export const REVEAL_LOW_GROWTH_SHARE = 0.05;
-export const REVEAL_LOW_GROWTH_MIN_START = 20;
+const REVEAL_LOW_GROWTH_PASSES = 10;
+const REVEAL_LOW_GROWTH_SHARE = 0.05;
+const REVEAL_LOW_GROWTH_MIN_START = 20;
 
 /**
  * True when the last REVEAL_LOW_GROWTH_PASSES passes together added less than
@@ -6467,7 +6490,7 @@ export function revealLowGrowthStop(counts) {
 // finished. These are the fixed-shape records jobs.js turns into a visible
 // warning; counts only, never titles, URLs or listing text.
 export const WALK_GUARD_MAX = 20;
-export const WALK_GUARD_DETAIL_MAX_CHARS = 240;
+const WALK_GUARD_DETAIL_MAX_CHARS = 240;
 export const WALK_GUARD_KINDS = Object.freeze([
   'pager-trickle',
   'page-backstop',

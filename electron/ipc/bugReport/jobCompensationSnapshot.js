@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { reportDigestHex } from './helpers.js';
 import { collectJobCompensationReport, COMPENSATION_REPORT_STATUSES, COMPENSATION_THRESHOLD_CHECKS, COMPENSATION_RECOMMENDATION_STATUSES, COMPENSATION_RECOMMENDATION_CHECKS } from '../../../src/utils/jobCompensationReport.js';
 import { COMPENSATION_COMPARISON_REASONS, COMPENSATION_OFFER_REASONS } from '../../../src/utils/jobCompensationDisplay.js';
 
@@ -17,7 +17,7 @@ export function buildJobCompensationSnapshot(nodes, snapshot = null) {
     const reason = COMPENSATION_COMPARISON_REASONS.has(row?.reason) ? row.reason : 'other';
     const offerReason = COMPENSATION_OFFER_REASONS.has(row?.offerReason) ? row.offerReason : 'unknown';
     const threshold = COMPENSATION_THRESHOLD_CHECKS.has(row?.thresholdCheck) ? row.thresholdCheck : 'no_comparison';
-    const id = createHash('sha256').update(typeof row?.id === 'string' ? row.id.slice(0, 256) : '').digest('hex').slice(0, 10);
+    const id = reportDigestHex(typeof row?.id === 'string' ? row.id.slice(0, 256) : '');
     const sources = Number.isSafeInteger(row?.sourceCount) ? Math.max(0, Math.min(5, row.sourceCount)) : 0;
     const recommendationStatus = COMPENSATION_RECOMMENDATION_STATUSES.has(row?.recommendationStatus) ? row.recommendationStatus : 'absent';
     const recommendationCheck = COMPENSATION_RECOMMENDATION_CHECKS.has(row?.recommendationCheck) ? row.recommendationCheck : 'absent';

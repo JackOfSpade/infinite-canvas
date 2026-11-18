@@ -25,6 +25,8 @@ import {
   isExistingFileAsync,
   isRendererSensitivePath,
   registerRendererPrivateAppRoot,
+  RENDERER_PRIVATE_STORE_DIRECTORY_NAMES,
+  fsyncDirectory,
 } from '../utils/pathSafety.js';
 import { isBackgroundE2E, backgroundE2EDisabledError } from '../utils/backgroundE2e.js';
 import { rebindJobRunRecoveryOwners } from './jobRunStaging.js';
@@ -193,25 +195,9 @@ async function assertAllowedOpenFileIdentity(target) {
   }
 }
 
-export async function resolveAllowedOpenFilePath(filePath) {
-  const target = await inspectAllowedOpenFilePath(filePath);
-  await assertAllowedOpenFileIdentity(target);
-  return target.resolvedPath;
-}
-
 const ALLOWED_TEXT_EDIT_EXTS = new Set(['.md', '.txt']);
 const MAX_OS_DELETE_PROTECTION_PATHS = 512;
 const MAX_OS_DELETE_PROTECTION_PATH_LENGTH = 4096;
-const RENDERER_PRIVATE_STORE_DIRECTORY_NAMES = Object.freeze([
-  'interview-helper-artifacts',
-  'interview-helper-prepared-briefs',
-  'interview-helper-answer-banks',
-  'interview-helper-answer-bindings',
-  'career-input-staging',
-  'career-snapshot-store',
-  'renderer-workspace-write-journal',
-  'local-file-protocol-transcodes',
-]);
 
 /** True when a document is one of the two formats the renderer exposes as editable. */
 function isAllowedTextEditExt(filePath) {
@@ -1105,49 +1091,10 @@ export async function scanPath(currentPath, visited, sender = null, depth = 0) {
   }
 }
 
-/**
- * Helper to perform an atomic write (write to tmp then rename).
- */
 // Cleanup is deliberately age-gated for artifacts from another interrupted
 // process. Temps created by this process receive the stronger exact-path guard
 // below, even if an unusually slow write outlives that age threshold.
 const activeOwnedTempPaths = new Set();
-
-export async function atomicWriteFile(targetPath, data) {
-  let finalPath = targetPath;
-  try {
-    // Resolve symlinks so we write to the actual destination, preserving the link structure
-    finalPath = await fs.promises.realpath(targetPath);
-  } catch {
-    // If realpath fails (e.g. file doesn't exist yet), use targetPath as-is
-  }
-
-  const tmpPath = `${finalPath}.__ic_atomic_${randomUUID()}.tmp`;
-  let mode = 0o600;
-  try { mode = (await fs.promises.stat(finalPath)).mode & 0o777; }
-  catch { /* New files default to owner-only; existing files keep their mode. */ }
-  activeOwnedTempPaths.add(tmpPath);
-  try {
-    const handle = await fs.promises.open(tmpPath, 'w', mode);
-    try {
-      await handle.writeFile(data, { encoding: 'utf8' });
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await fs.promises.rename(tmpPath, finalPath);
-    const directory = await fs.promises.open(path.dirname(finalPath), 'r').catch(() => null);
-    if (directory) {
-      try { await directory.sync(); } finally { await directory.close(); }
-    }
-  } catch (err) {
-    // Clean up tmp file if write succeeded but rename failed
-    try { await fs.promises.unlink(tmpPath); } catch { /* ignore */ }
-    throw err;
-  } finally {
-    activeOwnedTempPaths.delete(tmpPath);
-  }
-}
 
 // Google Drive for desktop (and similar sync clients) hard-link a file into a
 // hidden upload-staging folder (`.tmp.driveupload`) for as long as it uploads
@@ -2326,12 +2273,6 @@ async function readRecoveryRebindJournal(journalPath) {
       || !['prepared', 'canvas-written'].includes(parsed.phase)) return null;
     return { ...parsed, oldCanvasPath: oldPath, newCanvasPath: newPath };
   } catch { return null; }
-}
-
-async function fsyncDirectory(directory) {
-  const handle = await fs.promises.open(directory, 'r').catch(() => null);
-  if (!handle) return;
-  try { await handle.sync(); } finally { await handle.close(); }
 }
 
 async function clearRecoveryRebindJournals(oldCanvasPath, newCanvasPath) {

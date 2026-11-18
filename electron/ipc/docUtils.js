@@ -11,7 +11,7 @@ import { isSensitivePath } from '../utils/pathSafety.js';
 // directly is byte-faithful instead of model-approximate, which also strengthens
 // the achievement miner's verbatim-quote grounding (aiSchemas.js requires quotes
 // to appear in the career data exactly as written).
-export const PLAIN_TEXT_EXT = new Set(['.txt', '.text', '.md', '.markdown']);
+const PLAIN_TEXT_EXT = new Set(['.txt', '.text', '.md', '.markdown']);
 const MARKDOWN_EXT = new Set(['.md', '.markdown']);
 
 // The extractor contract this reader stands in for asks for PLAIN text with
@@ -197,15 +197,10 @@ const MARKDOWN_HIDDEN_RE = [
 const PLAIN_TEXT_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
- * Read a plain-text document verbatim, or return null when it is not
- * confidently clean text. Never throws. `readPlainTextDocumentWithReason`
- * returns the same decision with the refusal reason, so a caller can tell the
- * person what to fix.
+ * Read a plain-text document verbatim, or refuse it when it is not confidently
+ * clean text. Never throws. The result carries the refusal reason, so a caller
+ * can tell the person what to fix.
  */
-export async function readPlainTextDocument(filePath, options = {}) {
-  return (await readPlainTextDocumentWithReason(filePath, options)).text;
-}
-
 // Refusal reasons, each a fixable property of the file:
 //   extension     not a plain-text extension
 //   sensitive     a system or credential path

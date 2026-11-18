@@ -64,7 +64,7 @@ after the user agrees in the call window (sizes shown). Pinned:
 
 ## Call service (wave 2), store and window
 
-- Call record dir: `<userData>/practice-calls/<callId>/` (0700): `call.json` (persona, start time, thresholds, transcript with helper-timeline times, events, tone notes, timings), `candidate.wav` (helper), `interviewer.wav` (trackWriter), after the call `call.m4a` (mixdown then `/usr/bin/afconvert -f m4af -d aac`), `analysis.json`. WAVs are deleted once `call.m4a` and `analysis.json` exist. A "Delete recording" action removes the audio, keeps transcript and feedback.
+- Call record dir: `<userData>/practice-calls/<callId>/` (0700): `call.json` (persona, start time, thresholds, transcript with helper-timeline times, events, tone samples, timings), `candidate.wav` (helper), `interviewer.wav` (trackWriter), after the call `call.m4a` (mixdown then `/usr/bin/afconvert -f m4af -d aac`), `analysis.json`. WAVs are deleted once `call.m4a` and `analysis.json` exist. A "Delete recording" action removes the audio, keeps transcript and feedback.
 - Feedback lands in the existing practice store through the registry (`arm` then `finish`), schema extended with optional `callId` and `delivery`.
 - Replay audio is served by a privileged `practice-call:` protocol with range requests, readable only for known call ids.
 
@@ -73,7 +73,7 @@ after the user agrees in the call window (sizes shown). Pinned:
 - Deterministic (`callMetrics.js`): per answer wpm, fastest 20 s window, pauses >1 s and >2 s, response latency, answers over ~2 min, talk ratio, candidate interruptions (and whether the question had finished), pitch range vs baseline, tone measures vs baseline per answer.
 - Scribe verbatim of candidate audio (fillers, restarts); Claude counts non-lexical fillers in review (no lists in code).
 - One Claude review call writes the feedback (existing schema + `delivery`), chapter titles and flagged moments, each anchored to a transcript turn index; the host converts anchors to timeline ms.
-- Chapters: one per interviewer question (title from the review), with markers inside (flagged moments, long pauses, interruptions, tone notes) that seek the player.
+- Chapters: one per interviewer question (title from the review), with markers inside (flagged moments, long pauses, interruptions, fillers, typed lines) that seek the player.
 
 ## Call window IPC (wave 2)
 
@@ -88,4 +88,4 @@ CallState: `{ phase: 'consent' | 'downloading' | 'precheck' | 'ringing' | 'conne
 
 ## analysis.json (wave 3)
 
-`{ callId, status: 'ready' | 'failed', createdAt, metrics, chapters: [{ title, startMs, endMs, questionTurnIndex, markers: [{ atMs, kind: 'tone' | 'pause' | 'interruption' | 'filler' | 'moment' | 'chat', label }] }], toneTimeline: [{ atMs, arousal, dominance, valence }], fillers: { total, perMinute, byAnswer: [n] } }`. Chapter boundaries: each interviewer turn that the review marks as a new question starts a chapter; small talk before the first question is chapter "Opening"; the farewell is "Closing". Markers come from metrics (long pauses, interruptions), tone notes sent during the call, the review's flagged moments, and typed chat turns.
+`{ callId, status: 'ready' | 'failed', createdAt, metrics, chapters: [{ title, startMs, endMs, questionTurnIndex, markers: [{ atMs, kind: 'pause' | 'interruption' | 'filler' | 'moment' | 'chat', label }] }], toneTimeline: [{ atMs, arousal, dominance, valence }], fillers: { total, perMinute, byAnswer: [n] } }`. Chapter boundaries: each interviewer turn that the review marks as a new question starts a chapter; small talk before the first question is chapter "Opening"; the farewell is "Closing". Markers come from metrics (long pauses, interruptions), tone notes sent during the call, the review's flagged moments, and typed chat turns.

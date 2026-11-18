@@ -44,23 +44,3 @@ export async function pruneEmptyApplicationParents(bundleDirectory, canvasRoot) 
   }
   return removed;
 }
-
-// One-time maintenance uses the same empty-directory rule, bottom-up, and
-// always leaves the chosen Applied Jobs root in place.
-export async function cleanupEmptyApplicationFolders(rootDirectory) {
-  const root = path.resolve(rootDirectory);
-  await assertRegularDirectory(root);
-  const removed = [];
-  async function visit(directory) {
-    await assertRegularDirectory(directory);
-    const entries = await fs.readdir(directory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      const child = path.join(directory, entry.name);
-      await visit(child);
-      if (await removeEmptyDirectory(child)) removed.push(child);
-    }
-  }
-  await visit(root);
-  return removed;
-}

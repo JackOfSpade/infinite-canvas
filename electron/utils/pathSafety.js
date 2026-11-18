@@ -137,6 +137,14 @@ export async function atomicWriteJson(targetPath, data, { mode = 0o600, pretty =
   }
 }
 
+// Flush a directory entry to disk after a rename or unlink. A directory that
+// cannot be opened is skipped; a failed sync is thrown to the caller.
+export async function fsyncDirectory(directoryPath) {
+  const handle = await fs.promises.open(directoryPath, 'r').catch(() => null);
+  if (!handle) return;
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
 /** True when `filePath` exists and is a regular file. */
 export function isExistingFile(filePath) {
   try {
@@ -200,11 +208,17 @@ const SENSITIVE_EXACT_PATHS = new Set(['/users/shared', '/volumes']);
 // with separators, which deliberately matches the directory itself and
 // descendants but not an ordinary filename such as
 // `my-interview-helper-artifacts.json`.
-const SENSITIVE_APP_PRIVATE_STORE_COMPONENTS = [
-  'interview-helper-artifacts',
-  'interview-helper-prepared-briefs',
-  'interview-helper-answer-banks',
-  'interview-helper-answer-bindings',
+// The one list of host-private store directory names. Interview and career
+// modules import the named constants below, and filesystem.js imports the list.
+export const INTERVIEW_ARTIFACT_STORE_DIR = 'interview-helper-artifacts';
+export const INTERVIEW_PREPARED_BRIEF_STORE_DIR = 'interview-helper-prepared-briefs';
+export const INTERVIEW_ANSWER_BANK_STORE_DIR = 'interview-helper-answer-banks';
+export const INTERVIEW_ANSWER_BINDING_STORE_DIR = 'interview-helper-answer-bindings';
+export const RENDERER_PRIVATE_STORE_DIRECTORY_NAMES = Object.freeze([
+  INTERVIEW_ARTIFACT_STORE_DIR,
+  INTERVIEW_PREPARED_BRIEF_STORE_DIR,
+  INTERVIEW_ANSWER_BANK_STORE_DIR,
+  INTERVIEW_ANSWER_BINDING_STORE_DIR,
   // Host-owned career inputs/snapshots contain the same source material that
   // Interview Helper consumes. They must not become renderer-readable merely
   // because a canvas supplies a userData-looking absolute pathname.
@@ -214,7 +228,8 @@ const SENSITIVE_APP_PRIVATE_STORE_COMPONENTS = [
   // Pathname-only image decoders receive copies only in this host workspace;
   // renderer filesystem IPC must not enumerate or reuse those transient bytes.
   'local-file-protocol-transcodes',
-];
+]);
+const SENSITIVE_APP_PRIVATE_STORE_COMPONENTS = RENDERER_PRIVATE_STORE_DIRECTORY_NAMES;
 
 // Component names protect portable test stores and known private namespaces.
 // The actual Electron userData root is installation-specific, though, and can

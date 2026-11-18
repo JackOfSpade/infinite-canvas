@@ -1,47 +1,20 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { JobSearchCoordinatorContext } from './jobSearchCoordinatorShared';
 import { createJobSearchCoordinatorRegistry } from '../utils/jobSearchCoordinatorRegistry';
 
 export function JobSearchCoordinatorProvider({ children }) {
   const [registry] = useState(() => createJobSearchCoordinatorRegistry());
 
-  const registerSearchModule = useCallback(
-    (...args) => registry.registerSearchModule(...args),
-    [registry],
-  );
-  const hasSearchModule = useCallback(
-    (...args) => registry.hasSearchModule(...args),
-    [registry],
-  );
-  const runSearchModule = useCallback(
-    (...args) => registry.runSearchModule(...args),
-    [registry],
-  );
-  const cancelSearchModule = useCallback(
-    (...args) => registry.cancelSearchModule(...args),
-    [registry],
-  );
-  const registerBoardModule = useCallback(
-    (...args) => registry.registerBoardModule(...args),
-    [registry],
-  );
-  const cancelBoardModule = useCallback(
-    (...args) => registry.cancelBoardModule(...args),
-    [registry],
-  );
-  const pauseSearchModule = useCallback((...args) => registry.pauseSearchModule(...args), [registry]);
-  const pauseBoardModule = useCallback((...args) => registry.pauseBoardModule(...args), [registry]);
-
   const value = useMemo(() => ({
-    registerSearchModule,
-    runSearchModule,
-    cancelSearchModule,
-    hasSearchModule,
-    registerBoardModule,
-    cancelBoardModule,
-    pauseSearchModule,
-    pauseBoardModule,
-  }), [cancelBoardModule, cancelSearchModule, hasSearchModule, pauseBoardModule, pauseSearchModule, registerBoardModule, registerSearchModule, runSearchModule]);
+    registerSearchModule: (...args) => registry.registerSearchModule(...args),
+    runSearchModule: (...args) => registry.runSearchModule(...args),
+    cancelSearchModule: (...args) => registry.cancelSearchModule(...args),
+    hasSearchModule: (...args) => registry.hasSearchModule(...args),
+    registerBoardModule: (...args) => registry.registerBoardModule(...args),
+    cancelBoardModule: (...args) => registry.cancelBoardModule(...args),
+    pauseSearchModule: (...args) => registry.pauseSearchModule(...args),
+    pauseBoardModule: (...args) => registry.pauseBoardModule(...args),
+  }), [registry]);
 
   return (
     <JobSearchCoordinatorContext.Provider value={value}>

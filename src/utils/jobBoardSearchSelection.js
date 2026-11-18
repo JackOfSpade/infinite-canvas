@@ -884,9 +884,6 @@ export function remapCopiedJobModuleReferences(originalNodes, clonedNodes, oldId
   ));
 }
 
-// Compatibility name for callers that only need the Board-selection behavior.
-export const remapCopiedJobBoardSelections = remapCopiedJobModuleReferences;
-
 const JOB_BOARD_SELECTOR_ACTIVE_STATES = new Set([
   'queued', 'parsing', 'interpreting-preferences', 'querying', 'searching',
   'evaluating-preferences', 'scoring',

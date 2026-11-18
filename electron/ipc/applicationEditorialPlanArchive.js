@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { atomicWriteJson, ensureDirectoryWithinRoot } from '../utils/pathSafety.js';
 import { EDITORIAL_PLAN_MAX_BYTES, EDITORIAL_PLAN_VERSION, parseEditorialPlanResponse } from './applicationEditorialPlan.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 const RECORD_VERSION = 1;
 const MAX_RECORD_BYTES = EDITORIAL_PLAN_MAX_BYTES + 16 * 1024;
@@ -13,7 +14,7 @@ const CATALOG_ID = /^host\.career\.[a-z]+\.[a-z0-9-]+\.[0-9]+$/u;
 const RECORD_KEYS = ['version', 'schema', 'jobId', 'laneKey', 'contextKey', 'sourceDigest',
   'writerPromptSha256', 'plan', 'planSha256', 'planRunId', 'planSessionId', 'model', 'createdAt'];
 
-function hash(text) { return crypto.createHash('sha256').update(text, 'utf8').digest('hex'); }
+const hash = sha256Hex;
 
 function boundedText(value, max) {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= max && !value.includes('\u0000');

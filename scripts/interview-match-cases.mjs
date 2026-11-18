@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { bankDigest, normalizeBank, validateCases, writePrivateJson } from './interview-match-shared.mjs';
 import { createTransport, inspectCli } from './interview-match-transports.mjs';
+import { isPathInside } from './lib/outside-repo.mjs';
 
 const USAGE = `Usage: node scripts/interview-match-cases.mjs --bank <file> --out <file>
   [--model sonnet] [--effort low|medium|high|xhigh|max|default]
@@ -185,8 +186,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (options.help) { console.log(USAGE); return; }
   const out = await resolvedDestination(options.out);
   const repository = await fs.realpath(fileURLToPath(new URL('..', import.meta.url)));
-  const relative = path.relative(repository, out);
-  if (!relative || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))) {
+  if (isPathInside(out, repository)) {
     throw new Error('Private generated cases must be saved outside the repository.');
   }
   try { await fs.lstat(out); throw new Error('Output already exists. Reuse the fixed cases file or choose a new --out.'); }

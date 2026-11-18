@@ -9,11 +9,9 @@ import {
   buildInterviewFollowUpPlan,
   isDependentInterviewFollowUp,
   canonicalInterviewJobUrl,
-  createInterviewHelperSession,
   extractLatestInterviewQuestion,
   extractInterviewProfileEvidence,
   interviewHelperTerms,
-  interviewHelperSessionReducer,
   rankInterviewEvidence,
   validInterviewPreparationBrief,
 } from '../../src/utils/interviewHelper.js';
@@ -27,7 +25,6 @@ import {
 import { cloneNode, NODE_FACTORIES } from '../../src/utils/nodeFactory.js';
 import { emptyInterviewData } from '../../src/interview-app/sessions.js';
 import { getNodeDims } from '../../src/utils/constants.js';
-import { interviewHelperCardWidth, interviewHelperColumns } from '../../src/utils/interviewHelperLayout.js';
 
 function profileFixture() {
   return {
@@ -548,33 +545,6 @@ export default [
     },
   },
   {
-    name: 'interview helper: matched plan locks across transcript revisions until explicit next question',
-    run: () => {
-      const profile = profileFixture();
-      let session = createInterviewHelperSession();
-      session = interviewHelperSessionReducer(session, { type: 'receive-question', question: 'How did you improve onboarding conversion?', profile });
-      const lockedPlan = session.activePlan;
-      assert(session.locked && lockedPlan.status === 'supported', 'first supported plan should lock');
-      const revised = interviewHelperSessionReducer(session, { type: 'receive-question', question: 'Tell me about the analytics dashboard.', profile });
-      assert(revised === session && revised.activePlan === lockedPlan, 'revision must not replace a locked answer path');
-      session = interviewHelperSessionReducer(session, { type: 'next-question' });
-      assert(!session.locked && session.activePlan === null, 'explicit next question should unlock and clear the rail');
-      session = interviewHelperSessionReducer(session, { type: 'receive-question', question: 'Tell me about the analytics dashboard.', profile });
-      assert(session.locked && session.activePlan.steps.some(step => step.provenance.entityId === 'project-dashboard'), 'new turn should allow a new grounded plan');
-    },
-  },
-  {
-    name: 'interview helper: unsupported partial question stays unlocked for a later grounded question',
-    run: () => {
-      const profile = profileFixture();
-      let session = createInterviewHelperSession();
-      session = interviewHelperSessionReducer(session, { type: 'receive-question', question: 'How do you negotiate a real-estate lease?', profile });
-      assert(session.activePlan.status === 'unsupported' && !session.locked, 'unsupported question must not lock the session');
-      session = interviewHelperSessionReducer(session, { type: 'receive-question', question: 'How did you improve onboarding conversion?', profile });
-      assert(session.activePlan.status === 'supported' && session.locked, 'later grounded question must still be eligible to lock');
-    },
-  },
-  {
     name: 'interview helper: education and certifications remain exact, grounded evidence',
     run: () => {
       const profile = {
@@ -941,20 +911,6 @@ export default [
       const dims = getNodeDims({ type: 'interviewhelper' });
       assert(dims.w === 740 && dims.h === 560,
         `Interview Helper needs its real 740x560 setup fallback before DOM measurement, got ${dims.w}x${dims.h}`);
-    },
-  },
-  {
-    name: 'interview helper layout: widens by whole columns as content grows, without flip-flopping',
-    run: () => {
-      const desktop = { width: 1600, height: 1000 };
-      assert(interviewHelperCardWidth(2) === 740 && getNodeDims({ type: 'interviewhelper' }).w === interviewHelperCardWidth(2),
-        'the unmeasured footprint must match the default two-column card');
-      assert(interviewHelperColumns(900, desktop, 2) === 2, 'a short setup card stays two columns');
-      assert(interviewHelperColumns(3200, desktop, 2) === 4, 'long practice feedback widens so the whole card fits at a readable zoom');
-      assert(interviewHelperColumns(3200, { width: 1000, height: 1000 }, 2) === 3, 'a narrower window stops at the widest card it can show');
-      const settled = interviewHelperColumns(1800, desktop, 2);
-      assert(interviewHelperColumns(1800, desktop, settled) === settled, 'the chosen count must be stable on re-measurement');
-      assert(interviewHelperColumns(0, desktop, 3) === 3 && interviewHelperColumns(1800, null, 3) === 3, 'unknown measurements keep the current count');
     },
   },
   {

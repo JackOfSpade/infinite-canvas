@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath, withCanvasRecoveryRebind } from './canvasRecoveryPaths.js';
+import { fsyncDirectory } from '../utils/pathSafety.js';
 
 const JOB_ANALYSIS_JSON = 'job-search-last-scrape.json';
 const JOB_ANALYSIS_LAST_SUCCESS_JSON = 'job-search-last-successful-scrape.json';
@@ -23,13 +24,7 @@ const ANALYSIS_ARTIFACT_SUFFIX_PATTERN = '(?:(?:[a-f0-9]{32}-)?(?:last-scrape\\.
 const ANALYSIS_ARTIFACT_SUFFIX = new RegExp(`^${ANALYSIS_ARTIFACT_SUFFIX_PATTERN}$`);
 const ANALYSIS_WRITER_TEMP_SUFFIX = new RegExp(`^${ANALYSIS_ARTIFACT_SUFFIX_PATTERN}\\.[1-9][0-9]*\\.[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\\.tmp$`);
 
-async function fsyncDirectory(directory) {
-  const handle = await fs.promises.open(directory, 'r').catch(() => null);
-  if (!handle) return;
-  try { await handle.sync(); } finally { await handle.close(); }
-}
-
-export function resolveJobAnalysisCanvasPath(canvasFilePath, { followRebindAliases = true } = {}) {
+ function resolveJobAnalysisCanvasPath(canvasFilePath, { followRebindAliases = true } = {}) {
   return followRebindAliases ? resolveCanvasRecoveryPath(canvasFilePath) : rawCanvasRecoveryPath(canvasFilePath);
 }
 
@@ -38,7 +33,7 @@ function savedCanvasPath(canvasFilePath) {
 }
 
 /** A non-sensitive, deterministic namespace for one exact saved canvas. */
-export function jobAnalysisCanvasNamespace(canvasFilePath) {
+ function jobAnalysisCanvasNamespace(canvasFilePath) {
   const canvasPath = savedCanvasPath(canvasFilePath);
   if (!canvasPath) return null;
   // 128 bits leaves a practically unreachable collision probability while not
@@ -71,7 +66,7 @@ function unsavedScopeDigest(scope) {
  * canvas. `null` deliberately means "use the historical canvas bundle" so
  * callers that have not yet been upgraded remain fully backward compatible.
  */
-export function jobAnalysisOwnerNamespace(canvasFilePath, ownerId, unsavedScope = null) {
+ function jobAnalysisOwnerNamespace(canvasFilePath, ownerId, unsavedScope = null) {
   const owner = normalizedOwnerId(ownerId);
   if (!owner) return null;
   const canvasPath = savedCanvasPath(canvasFilePath);

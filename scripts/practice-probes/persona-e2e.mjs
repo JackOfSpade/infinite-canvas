@@ -28,6 +28,7 @@ import {
 import { DIVERSE_POOL, NAME_POOLS, NEUTRAL_FIRST_NAMES } from '../../electron/practiceCall/eleven/voiceNames.js';
 import { drawVoice } from '../../electron/practiceCall/eleven/voiceLibrary.js';
 import { buildInterviewerInstructions } from '../../electron/interviewPracticeCallPrompt.js';
+import { wavHeader } from '../../electron/practiceCall/audio/wavFormat.js';
 
 const SPEAK_TIMEOUT_MS = 20000;
 const greetingFor = firstName => `Hi, I'm ${firstName}. Thanks for making the time today. Shall we get started?`;
@@ -155,25 +156,6 @@ function firstNameOf(fullName) {
 function lastNameOf(fullName) {
   const parts = String(fullName ?? '').trim().split(/\s+/);
   return parts.slice(1).join(' ');
-}
-
-/** 44-byte RIFF header for 16-bit mono little-endian PCM. */
-function wavHeader(dataBytes, sampleRate) {
-  const header = Buffer.alloc(44);
-  header.write('RIFF', 0, 'ascii');
-  header.writeUInt32LE(36 + dataBytes, 4);
-  header.write('WAVE', 8, 'ascii');
-  header.write('fmt ', 12, 'ascii');
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20); // PCM
-  header.writeUInt16LE(1, 22); // mono
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(sampleRate * 2, 28); // byte rate
-  header.writeUInt16LE(2, 32); // block align
-  header.writeUInt16LE(16, 34); // bits per sample
-  header.write('data', 36, 'ascii');
-  header.writeUInt32LE(dataBytes, 40);
-  return header;
 }
 
 /** Re-parses a 44-byte header and reports whether it is a valid mono/16-bit PCM WAV at `sampleRate`. */

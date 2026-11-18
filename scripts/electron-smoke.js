@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { _electron as electron } from 'playwright';
 import { buildResumeDocument } from '../electron/ipc/resumeHtml.js';
 import { BACKGROUND_E2E_SHUTDOWN_TIMEOUT_MS } from '../electron/utils/backgroundE2e.js';
+import { pollUntil } from './lib/electron-smoke.mjs';
 
 // `applicationPdfReconcile` must leave pdf.js to Electron main's Node resolver.
 // If Vite inlines it, pdf.js selects the browser worker path and PDF import
@@ -218,48 +219,24 @@ async function closeElectron(app) {
 // Poll a locator count until the predicate holds — asserting the instant an
 // input event returns races React's commit, which is the e2e's main flake source.
 async function waitForCount(locator, predicate, label, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const n = await locator.count();
-    if (predicate(n)) return n;
-    if (Date.now() > deadline) assert.fail(`${label} (count=${n})`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  return pollUntil(() => locator.count(), predicate, label, { timeoutMs, format: (text, n) => `${text} (count=${n})` });
 }
 
 async function waitForCheckbox(locator, checked, label, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await locator.isChecked() === checked) return;
-    if (Date.now() > deadline) assert.fail(`${label} (checked=${await locator.isChecked()})`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  await pollUntil(() => locator.isChecked(), value => value === checked, label, { timeoutMs, format: (text, value) => `${text} (checked=${value})` });
 }
 
 async function waitForAsync(predicate, label, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (await predicate()) return;
-    if (Date.now() > deadline) assert.fail(label);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  await pollUntil(predicate, Boolean, label, { timeoutMs, format: text => text });
 }
 
 async function waitForFileContent(filePath, expected, label, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  let actual;
-  for (;;) {
-    try {
-      actual = await fs.readFile(filePath, 'utf8');
-      if (actual === expected) return;
-    } catch (error) {
-      actual = `<read failed: ${error?.message || error}>`;
-    }
-    if (Date.now() > deadline) {
-      assert.fail(`${label} (expected=${JSON.stringify(expected)}, actual=${JSON.stringify(actual)})`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  await pollUntil(
+    () => fs.readFile(filePath, 'utf8').catch(error => `<read failed: ${error?.message || error}>`),
+    actual => actual === expected,
+    label,
+    { timeoutMs, format: (text, actual) => `${text} (expected=${JSON.stringify(expected)}, actual=${JSON.stringify(actual)})` },
+  );
 }
 
 let atomicReplaceSequence = 0;
@@ -282,21 +259,17 @@ async function replaceFileAtomically(filePath, content) {
 // outside the pane. Wait for two equal layout samples before any sidebar-to-
 // canvas drag so this smoke test exercises the actual DnD path deterministically.
 async function waitForStableBox(locator, label, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
   let previous = null;
-  for (;;) {
-    const box = await locator.boundingBox();
-    if (box && previous
+  const isStable = box => {
+    const stable = !!(box && previous
       && Math.abs(box.x - previous.x) < 1
       && Math.abs(box.y - previous.y) < 1
       && Math.abs(box.width - previous.width) < 1
-      && Math.abs(box.height - previous.height) < 1) {
-      return box;
-    }
-    if (Date.now() > deadline) assert.fail(`${label} did not reach stable layout`);
+      && Math.abs(box.height - previous.height) < 1);
     previous = box;
-    await new Promise((resolve) => setTimeout(resolve, 75));
-  }
+    return stable;
+  };
+  return pollUntil(() => locator.boundingBox(), isStable, label, { timeoutMs, intervalMs: 75, format: text => `${text} did not reach stable layout` });
 }
 
 // Retain the final drop payload in failures: it distinguishes a lost sidebar
@@ -361,16 +334,10 @@ async function findTopLevelModuleDropPosition(page) {
 }
 
 async function waitForWorkspaceNodeData(page, filePath, nodeType, predicate, label, timeoutMs = 5000) {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const data = await page.evaluate(async ({ path: workspaceFile, type }) => {
-      const loaded = await window.electronAPI.loadWorkspace({ filePath: workspaceFile });
-      return loaded.data.nodes.find(node => node.type === type)?.data;
-    }, { path: filePath, type: nodeType });
-    if (predicate(data)) return data;
-    if (Date.now() > deadline) assert.fail(`${label} (data=${JSON.stringify(data)})`);
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
+  return pollUntil(() => page.evaluate(async ({ path: workspaceFile, type }) => {
+    const loaded = await window.electronAPI.loadWorkspace({ filePath: workspaceFile });
+    return loaded.data.nodes.find(node => node.type === type)?.data;
+  }, { path: filePath, type: nodeType }), predicate, label, { timeoutMs, format: (text, data) => `${text} (data=${JSON.stringify(data)})` });
 }
 
 async function clickPane(page, x, y) {

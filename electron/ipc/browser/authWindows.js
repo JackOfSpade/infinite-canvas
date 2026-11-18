@@ -166,7 +166,7 @@ const waitForVisibleWindowNavigation = (page, timeoutMs) => new Promise(resolve 
  * A single bounded `goto` fallback is deliberately reserved for this failure
  * case; normal navigation keeps the native-looking location assignment.
  */
-export async function navigateVisibleWindow(page, requestedUrl) {
+ async function navigateVisibleWindow(page, requestedUrl) {
   const valid = validateVisibleWindowUrl(requestedUrl);
   if (!valid.ok) return classifyVisibleWindowNavigation({ requestedUrl, actualUrl: 'about:blank', assignmentError: valid.error });
   let assignmentError = null;
@@ -488,7 +488,7 @@ export function canAuthCookieBypassLoginUrl(platformId) {
 const PLATFORM_LOGGED_IN_URL_MARKERS = {
   google: 'myaccount.google.com',
 };
-export function isOutsideLoggedInUrlMarker(platformId, url) {
+ function isOutsideLoggedInUrlMarker(platformId, url) {
   const marker = PLATFORM_LOGGED_IN_URL_MARKERS[String(platformId || '').toLowerCase()];
   if (!marker) return false;
   let host = '';
@@ -3360,44 +3360,3 @@ export async function openCaptchaResolveWindow(url, sender = null, signal = null
   });
 }
 
-/**
- * Check if we have active session cookies for a given platform.
- * Launches a quick headless page, navigates to the site, and checks for auth indicators.
- */
-export async function getSessionStatus(platformId) {
-  const domains = PLATFORM_COOKIE_DOMAINS[platformId];
-  if (!domains) return { platform: platformId, connected: false };
-
-  try {
-    const browser = await getStealthBrowser();
-    const page = await browser.newPage();
-
-    try {
-      // Check cookies for this domain
-      const cookies = await page.cookies(...domains.map(d => `https://${d.replace(/^\./, '')}`));
-
-      // Simple heuristic: if there are session/auth cookies, we're logged in
-      const hasSession = cookies.some(c =>
-        c.name.toLowerCase().includes('session') ||
-        c.name.toLowerCase().includes('token') ||
-        c.name.toLowerCase().includes('auth') ||
-        c.name.toLowerCase().includes('li_at') ||      // LinkedIn
-        c.name.toLowerCase().includes('jses') ||        // Indeed  
-        c.name.toLowerCase().includes('dp1') ||          // eBay
-        c.name.toLowerCase().includes('session-id')      // Amazon
-      );
-
-      return {
-        platform: platformId,
-        connected: hasSession,
-        cookieCount: cookies.length,
-      };
-    } finally {
-      if (page && !page.isClosed()) {
-        await page.close().catch(() => {});
-      }
-    }
-  } catch {
-    return { platform: platformId, connected: false };
-  }
-}

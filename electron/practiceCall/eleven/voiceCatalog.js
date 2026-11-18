@@ -6,8 +6,8 @@ import { classifyFailure, voiceError, redact } from './voiceErrors.js';
 import { DIVERSE_POOL, NAME_POOLS, NEUTRAL_FIRST_NAMES } from './voiceNames.js';
 
 export const VOICES_URL = 'https://api.elevenlabs.io/v2/voices';
-export const PAGE_SIZE = 100;
-export const MAX_PAGES = 20;
+ const PAGE_SIZE = 100;
+ const MAX_PAGES = 20;
 
 // Longest, most specific accents first so "south african" never matches a bare "african".
 const ACCENT_KEYS = [
@@ -41,7 +41,7 @@ export const normalizeGender = value => {
   return 'neutral';
 };
 
-export const labelUseCases = labels => String(labels?.use_case ?? labels?.useCase ?? '')
+ const labelUseCases = labels => String(labels?.use_case ?? labels?.useCase ?? '')
   .split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
 
 export const isConversational = voice => {
@@ -54,10 +54,10 @@ export const hasKnownGender = voice => {
   return gender.length > 0;
 };
 
-const textOf = value => String(value ?? '').trim().toLowerCase();
+export const textOf = value => String(value ?? '').trim().toLowerCase();
 
 /** Verified language codes, from raw API voices (objects) or normalized voices (strings). */
-export const verifiedLanguagesOf = voice => {
+ const verifiedLanguagesOf = voice => {
   const list = Array.isArray(voice?.verifiedLanguages) ? voice.verifiedLanguages
     : Array.isArray(voice?.verified_languages) ? voice.verified_languages : [];
   return list.map(item => (typeof item === 'string' ? item : item?.language)).map(textOf).filter(Boolean);

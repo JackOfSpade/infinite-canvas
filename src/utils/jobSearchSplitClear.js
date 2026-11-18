@@ -54,16 +54,6 @@ export function isCareerClearedWithSavedJobs(hub) {
     && !hubHasAcceptedInitialDrop(hub);
 }
 
-export function jobHubClearAvailability(hub) {
-  const data = hub?.data || {};
-  return {
-    savedJobCount: savedJobCount(data),
-    careerClearedWithJobs: isCareerClearedWithSavedJobs(hub),
-    canClearScrape: data.hubState === 'done' && hubRetainsSavedJobs(data),
-    canClearCareer: hubHasAcceptedInitialDrop(hub),
-  };
-}
-
 // The durable request a Board consumes to re-score a hub's saved jobs against
 // one exact approved career snapshot.
 export function buildSavedJobsRescoreMarker({ careerSnapshotId, generation, now = Date.now() } = {}) {

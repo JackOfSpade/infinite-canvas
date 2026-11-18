@@ -6,7 +6,6 @@ import { handleSafe } from './ipcUtils.js';
 import { logger } from '../logger.js';
 import {
   openLoginWindow,
-  getSessionStatus,
   getSellMonitorPlatforms,
   getSellMonitorConfig,
   getJobLoginPlatforms,
@@ -330,12 +329,7 @@ export async function verifySellMonitorLogin(platformId, { signal = null } = {})
       // still wins on a login page.
       const loginPageCopyOnly = !!antiBot && isLoginPageCopyAntiBot(antiBot.code, finalUrlLower);
       if (antiBot && !loginPageCopyOnly) {
-        const session = signal?.aborted
-          ? { connected: false, cookieCount: 0 }
-          : await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
         trace.antiBot = antiBot.code;
-        trace.sessionCookieHeuristic = !!session?.connected;
-        trace.sessionCookieCount = session?.cookieCount || 0;
         return { connected: false, inconclusive: true, reason: `Anti-bot wall (${antiBot.code}) at ${target} (HTTP ${r.status}${r.finalUrl ? ` → ${r.finalUrl}` : ''}) — cannot confirm session; keeping prior status.`, trace: { target, checks: traces } };
       }
       if (r.status === 401 || r.status === 403) {
@@ -1155,7 +1149,7 @@ export function registerAccountsHandlers() {
   // Returns { connected: boolean, platform: string, loginOpened: boolean }
   //
   // Both pre- and post-login checks use the disk cache + verifySellMonitorLogin
-  // path — never the broken getSessionStatus cookie heuristic, which false-
+  // path — never a cookie-name heuristic, which false-
   // positives on anonymous tracking cookies (see note on `check-sell-monitor-auth`).
   handleSafe('check-and-login', async (event, { platformId }, signal) => {
     // Step 1: Quick cache lookup. If we already have a positive verdict

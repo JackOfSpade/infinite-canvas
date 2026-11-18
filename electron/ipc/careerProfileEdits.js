@@ -18,9 +18,9 @@
  * except the ledger helpers, which mutate the ledger they are given.
  */
 
-import { createHash } from 'node:crypto';
 import { CAREER_PROFILE_PAGE_SCHEMA, CAREER_PROFILE_EDIT_SCHEMA } from './aiSchemas.js';
 import { validateResponseSchema } from './schemaValidation.js';
+import { sha256Hex } from '../utils/sha256Hex.js';
 
 const PAGE_PROPERTIES = CAREER_PROFILE_PAGE_SCHEMA.properties;
 const ENTITY_GROUPS = ['roles', 'achievements', 'projects', 'skills', 'education', 'certifications', 'otherEvidence'];
@@ -39,9 +39,7 @@ function canonicalJson(value) {
 
 const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 
-function sha256(text) {
-  return createHash('sha256').update(text, 'utf8').digest('hex');
-}
+const sha256 = sha256Hex;
 
 function itemSchemaFor(group) {
   if (group === 'identity') return PAGE_PROPERTIES.identity;
@@ -409,7 +407,7 @@ function checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits = findi
 }
 
 /**
- * Like checkFindingAgainstLedgerWithRules, plus `details[i]`: the line for
+ * The ledger check with its rule ids, plus `details[i]`: the line for
  * `errors[i]` that may be forwarded to the answering chat. It names ids only
  * (target, decision, evidence segments), never the settled value.
  */
@@ -422,13 +420,7 @@ export function checkFindingAgainstLedgerWithForwardedDetails(ledger, pageIndex,
  * A settled target may be challenged by naming its decision id or the groupId
  * shared by a coordinated set of decisions; either way every challenged target
  * still needs at least one challenge evidence segment not yet considered.
- * `ruleIds[i]` is the rule id of `errors[i]`.
  */
-export function checkFindingAgainstLedgerWithRules(ledger, pageIndex, finding, edits = finding?.edits) {
-  const { ok, errors, ruleIds, challengedDecisions } = checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits);
-  return { ok, errors, ruleIds, challengedDecisions };
-}
-
 export function checkFindingAgainstLedger(ledger, pageIndex, finding, edits = finding?.edits) {
   const { ok, errors, challengedDecisions } = checkFindingAgainstLedgerCore(ledger, pageIndex, finding, edits);
   return { ok, errors, challengedDecisions };

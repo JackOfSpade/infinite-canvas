@@ -56,6 +56,7 @@ import { JOB_PREFERENCE_CRITERION_MAX_LENGTH, JOB_PREFERENCE_TITLE_MAX_LENGTH } 
 import { rawCanvasRecoveryPath, resolveCanvasRecoveryPath, withCanvasRecoveryRead } from './canvasRecoveryPaths.js';
 import { getJobDescriptionRecoveryCheckpointPath } from './jobAnalysisPaths.js';
 import { jobAnalysisOperationAuthorityReceipt, withCurrentJobAnalysisOperationAuthority } from './jobAnalysisOperationAuthorityStore.js';
+import { fsyncDirectory } from '../utils/pathSafety.js';
 
 const MANIFEST_VERSION = 2;
 // A Solve checkpoint can contain the full saved candidate universe; it is not
@@ -77,7 +78,7 @@ const JOB_RUN_COLLECTION_DISPOSITIONS = new Set(Object.values(JOB_RUN_COLLECTION
 // new blocked outcomes explicitly distinguish safe unattended retry from a
 // human gate; legacy/missing markers are likewise automatic unless a durable
 // explicit manual disposition says otherwise.
-export const JOB_RUN_RECOVERY_DISPOSITION = Object.freeze({
+ const JOB_RUN_RECOVERY_DISPOSITION = Object.freeze({
   AUTOMATIC: 'automatic',
   MANUAL: 'manual',
 });
@@ -311,12 +312,6 @@ const MAX_REBIND_JSON_SIDECAR_BYTES = 8 * 1024 * 1024;
 // cap for hostile/corrupt files, but it must exceed real recovery ledgers (the
 // migration copies bytes exactly; it does not parse listing payloads).
 const MAX_REBIND_STAGING_BYTES = 64 * 1024 * 1024;
-
-async function fsyncDirectory(directory) {
-  const handle = await fs.promises.open(directory, 'r').catch(() => null);
-  if (!handle) return;
-  try { await handle.sync(); } finally { await handle.close(); }
-}
 
 async function readSafeRebindSidecar(filePath) {
   const stat = await fs.promises.lstat(filePath);
@@ -1124,14 +1119,14 @@ const JOB_SEARCH_WINDOW_CAP_REASONS = new Set([
 ]);
 
 /** Keep the durable collection outcome to a fixed, non-provider-controlled enum. */
-export function normalizeJobRunCollectionDisposition(value) {
+ function normalizeJobRunCollectionDisposition(value) {
   return typeof value === 'string' && JOB_RUN_COLLECTION_DISPOSITIONS.has(value)
     ? value
     : null;
 }
 
 /** Keep the restart policy to the single explicit, user-controlled state. */
-export function normalizeJobRunRecoveryDisposition(value) {
+ function normalizeJobRunRecoveryDisposition(value) {
   return typeof value === 'string' && JOB_RUN_RECOVERY_DISPOSITIONS.has(value)
     ? value
     : null;
@@ -2168,11 +2163,6 @@ async function clearRunWithResultRaw(canvasFilePath, { trashItem = null, expecte
   });
 }
 
-async function clearRunRaw(canvasFilePath, options = {}) {
-  const result = await clearRunWithResultRaw(canvasFilePath, options);
-  return result.cleared === true;
-}
-
 async function clearRunFiles(files, trashItem = null) {
   const removeAndVerify = async (p) => {
     // Skip a sidecar that isn't there (a run may have only one, or it was
@@ -2227,7 +2217,7 @@ async function clearRunFiles(files, trashItem = null) {
 /**
  * Atomically records a redacted terminal receipt before removing recovery
  * sidecars, then records the actual cleanup outcome. The manifest token is
- * checked under the same lock as startRun/clearRun, so a delayed completion from
+ * checked under the same lock as startRun/clearRunWithResult, so a delayed completion from
  * an older hub run cannot overwrite a newer run's receipt or delete its files.
  */
 async function completeRunWithReceiptRaw(canvasFilePath, receipt, { trashItem = null, expectedNodeId = null, expectedCareerSnapshotId = null, __testOnlyAllowUnpinned = false } = {}) {
@@ -2367,5 +2357,4 @@ export const finishRunWithSavedListings = recoveryBound(finishRunWithSavedListin
 export const readStagedJobs = recoveryBound(readStagedJobsRaw);
 export const readRunState = recoveryBound(readRunStateRaw);
 export const clearRunWithResult = recoveryBound(clearRunWithResultRaw);
-export const clearRun = recoveryBound(clearRunRaw);
 export const completeRunWithReceipt = recoveryBound(completeRunWithReceiptRaw);

@@ -1190,7 +1190,6 @@ export async function resetPlatformSession(platformId) {
 export { humanMouseMove, humanScroll, dismissCookieBanner } from './browser/humanEmulation.js';
 export {
   openLoginWindow,
-  getSessionStatus,
   getLoginAutoCloseWaitReason,
   hasPlatformAuthCookie,
   readPlatformAuthCookieState,

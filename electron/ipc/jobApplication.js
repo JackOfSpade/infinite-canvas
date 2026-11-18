@@ -46,6 +46,7 @@ export {
   partitionResumeCheckResults,
   resumeCheckDisposition,
 } from './resumeCheckDispositions.js';
+import { stableJson } from '../../src/utils/stableJson.js';
 
 const { app, shell } = electronPkg;
 
@@ -1681,7 +1682,7 @@ const resumeBulletText = bullet => String(bullet?.text || '').replace(/\s+/g, ' 
  * Reject only high-confidence backward references here; broader antecedent
  * ambiguity remains an editorial review concern.
  */
-export function checkResumeBulletSelfContainment(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
+ function checkResumeBulletSelfContainment(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
   evidence.roles.forEach((role, roleIndex) => {
     (Array.isArray(role.bullets) ? role.bullets : []).forEach((bullet, bulletIndex) => {
@@ -1792,7 +1793,7 @@ export function checkResumeBulletFocus(mainHtml, evidence = extractResumeEvidenc
 // only by the writer's own arithmetic — and an overlong bullet reached the
 // renderer as an unexplained page overflow instead of a named defect.
 export const RESUME_BULLET_CHARACTER_BUDGET = 180;
-export const RESUME_TRADEOFF_CHARACTER_BUDGET = 100;
+ const RESUME_TRADEOFF_CHARACTER_BUDGET = 100;
 
 export function checkResumeBulletLength(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
@@ -1826,7 +1827,7 @@ export function checkResumeBulletLength(mainHtml, evidence = extractResumeEviden
 // when a page must shed a line, and a floor in this battery would deadlock
 // that move against the very check meant to let it through.
 export const RESUME_ROLE_BULLET_CEILING = 6;
-export const MAX_RESUME_BULLET_OPENING_REPETITIONS = 2;
+ const MAX_RESUME_BULLET_OPENING_REPETITIONS = 2;
 
 export function checkResumeRoleBulletBudget(mainHtml, evidence = extractResumeEvidence(mainHtml)) {
   const observations = [];
@@ -2081,17 +2082,9 @@ function generationLogEventId(entry, label) {
 // retry can serialize the same JSON with a different object-key order (and a
 // new timestamp). Preserve the original durable line in that case, while
 // still rejecting a genuinely conflicting event for the stable identity.
-function canonicalGenerationLogEvent(entry) {
-  if (Array.isArray(entry)) return `[${entry.map(canonicalGenerationLogEvent).join(',')}]`;
-  if (entry && typeof entry === 'object') {
-    return `{${Object.keys(entry).sort().map(key => `${JSON.stringify(key)}:${canonicalGenerationLogEvent(entry[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(entry);
-}
-
 function generationLogComparableEvent(entry) {
   const { at: _at, ...withoutTimestamp } = entry;
-  return canonicalGenerationLogEvent(withoutTimestamp);
+  return stableJson(withoutTimestamp);
 }
 
 function parseGenerationLog(data, label) {

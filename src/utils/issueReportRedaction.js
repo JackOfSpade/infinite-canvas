@@ -2,6 +2,7 @@
 // contains full listings and evidence quotes. Neither belongs in a report.
 import { summarizeJobScoringIntegrity } from './jobScoringContract.js';
 import { sanitizeJobSearchDateDiagnostics } from './jobSearchDateDiagnostics.js';
+import { INTERVIEW_RUN_ID_RE, MAX_RETIREMENT_RECEIPTS } from './interviewRunIdGrammar.js';
 
 // A hub can live inside a folder (a sidebar module dropped onto a group, or
 // spawned while a sub-canvas is open), so redaction has to follow
@@ -14,10 +15,10 @@ const INTERVIEW_HELPER_CAREER_MODES = new Set(['job-search', 'import']);
 const INTERVIEW_HELPER_COMPILATION_STATUSES = new Set(['compiling', 'failed', 'approved']);
 const INTERVIEW_HELPER_PREPARATION_STATUSES = new Set(['preparing', 'failed']);
 const INTERVIEW_HELPER_CLEANUP_KINDS = new Set(['career', 'preparation']);
-const INTERVIEW_HELPER_RUN_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/u;
+const INTERVIEW_HELPER_RUN_ID_RE = INTERVIEW_RUN_ID_RE;
 const INTERVIEW_HELPER_BRIEF_ID_RE = /^[a-f0-9]{64}$/u;
 const INTERVIEW_HELPER_MAX_STEPS = 6;
-const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = 32;
+const INTERVIEW_HELPER_MAX_RETIREMENT_RECEIPTS = MAX_RETIREMENT_RECEIPTS;
 
 function plainRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
