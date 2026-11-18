@@ -4,6 +4,11 @@
  * Every dependency (WebSocket class, clock, key) is injected; nothing is logged.
  */
 export const MODEL_ID = 'eleven_v4_turbo';
+// Stability runs 0 to 1 and defaults to 0.5 when nothing is sent; lower values give the voice a
+// broader emotional range, which is what makes delivery tags audible. 0.3 leans expressive
+// without the wandering of the lowest settings.
+export const VOICE_STABILITY = 0.3;
+export const VOICE_CLONE_STRENGTH = 0;
 export const SOCKET_URL = 'wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input';
 export const SUBSCRIPTION_URL = 'https://api.elevenlabs.io/v1/user/subscription';
 export const PAID_RATE = 44100;
@@ -111,6 +116,11 @@ export function wordsFromAlignment(alignment, offsetMs = 0) {
       if (current) { words.push(current); current = null; }
       continue;
     }
+    // Each sentence is sent as its own text and the service can return two of them with no
+    // space between ("Great.Great, let's"). A capital straight after clause-ending
+    // punctuation starts a new word.
+    // Initials ("U.S.", "A.I.") are one word, not sentences.
+    if (current && /[.?!…]['"”’)\]]*$/u.test(current.word) && /^\p{Lu}/u.test(char) && !/^(\p{L}\.)+$/u.test(current.word)) { words.push(current); current = null; }
     const start = Number(starts[index]);
     const duration = Number(durations[index]);
     const hasStart = Number.isFinite(start);
@@ -136,6 +146,9 @@ const toBuffer = data => {
   return null;
 };
 
+// Marks a point in the queued texts where the service is asked to speak what it has.
+const FLUSH = Symbol('flush');
+
 const messageText = data => (typeof data === 'string' ? data : (toBuffer(data)?.toString('utf8') ?? ''));
 
 function parseFrame(data) {
@@ -144,9 +157,9 @@ function parseFrame(data) {
   try { return JSON.parse(text); } catch { return null; }
 }
 
-export function socketUrl(rate, base = SOCKET_URL) {
+export function socketUrl(rate, base = SOCKET_URL, modelId = MODEL_ID) {
   const url = new URL(base);
-  url.searchParams.set('model_id', MODEL_ID);
+  url.searchParams.set('model_id', modelId);
   url.searchParams.set('output_format', outputFormat(rate));
   url.searchParams.set('sync_alignment', 'true');
   return url.toString();
@@ -177,6 +190,8 @@ export function createDialogueVoiceFactory({
   tier = 'free',
   WebSocket = globalThis.WebSocket,
   url = SOCKET_URL,
+  modelId = MODEL_ID,
+  stability = VOICE_STABILITY,
   keepAliveMs = KEEP_ALIVE_MS,
   clock = {
     setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -231,8 +246,39 @@ export function createDialogueVoiceFactory({
       if (cancelled || status !== 'ready') return false;
       try { socket.send(JSON.stringify(frame)); return true; } catch { return false; }
     };
+    // A chunk boundary can fall inside a word ("Ani" + "ka"). The last word of a chunk that
+    // does not end in white space is held back and joined to the start of the next chunk, so
+    // listeners only ever get whole words.
+    let heldWord = null;
+    const isSpace = value => /\s/.test(String(value ?? ''));
+    // Clause-ending punctuation, with any closing quote or bracket after it.
+    const endsClause = word => /[.?!,;:…]['"”’)\]]*$/u.test(word);
+    const joinAcrossChunks = (alignment, words) => {
+      const chars = Array.isArray(alignment?.chars) ? alignment.chars.filter(char => String(char ?? '')) : [];
+      if (!chars.length) return [];
+      const out = words.slice();
+      if (heldWord) {
+        // Each sentence is sent as its own text, so one chunk can end "hear." and the next
+        // start "Let's" with no space between them: a held word that ends a clause is complete.
+        if (!isSpace(chars[0]) && out.length && !endsClause(heldWord.word)) {
+          out[0] = { word: heldWord.word + out[0].word, startMs: heldWord.startMs, endMs: Math.max(heldWord.endMs, out[0].endMs) };
+        } else out.unshift(heldWord);
+        heldWord = null;
+      }
+      // Only an unfinished fragment waits. A word that ends a clause is whole, and holding it
+      // would leave it out of the heard text if the reply is interrupted before the next chunk.
+      if (!isSpace(chars[chars.length - 1]) && out.length && !endsClause(out[out.length - 1].word)) heldWord = out.pop();
+      return out;
+    };
+    const flushHeldWord = () => {
+      if (!heldWord) return;
+      const word = heldWord;
+      heldWord = null;
+      emit(wordListeners, [word]);
+    };
     const settle = result => {
       if (settled) return;
+      flushHeldWord();
       settled = true;
       status = 'closed';
       clearKeepAlive();
@@ -263,6 +309,7 @@ export function createDialogueVoiceFactory({
     const drain = () => {
       if (status !== 'ready' || cancelled) return;
       while (delivered < texts.length) {
+        if (texts[delivered] === FLUSH) { send({ flush: true }); delivered += 1; continue; }
         const input = { text: texts[delivered], voice_id: voiceId };
         if (delivered === 0) input.new_turn = true;
         send({ inputs: [input] });
@@ -283,6 +330,7 @@ export function createDialogueVoiceFactory({
       onFallback();
       currentRate = FALLBACK_RATE;
       audioMs = 0;
+      heldWord = null;
       delivered = 0;
       closedSent = false;
       connect();
@@ -292,7 +340,7 @@ export function createDialogueVoiceFactory({
       socketError = '';
       let next;
       try {
-        next = new WebSocket(socketUrl(currentRate, url));
+        next = new WebSocket(socketUrl(currentRate, url, modelId));
       } catch (cause) {
         fail('voice-network', 'could not open the voice socket', cause);
         return;
@@ -302,7 +350,10 @@ export function createDialogueVoiceFactory({
         open: () => {
           if (socket !== next || cancelled || settled) return;
           status = 'ready';
-          send({ voices: [voiceId], xi_api_key: key });
+          // voice_settings is only accepted on this first message.
+          // clone_strength 0 is ElevenLabs' recommended value and is always sent. The other
+          // settings (similarity_boost, style, use_speaker_boost, speed) stay at the service defaults.
+          send({ voices: [voiceId], xi_api_key: key, voice_settings: { ...(Number.isFinite(stability) ? { stability: Math.min(1, Math.max(0, stability)) } : {}), clone_strength: VOICE_CLONE_STRENGTH } });
           drain();
           scheduleKeepAlive();
         },
@@ -328,7 +379,10 @@ export function createDialogueVoiceFactory({
         fail(classifyFailure({ reason: problem, message: problem, code: message.code }), problem);
         return;
       }
-      if (message.alignment) emit(wordListeners, wordsFromAlignment(message.alignment, audioMs));
+      if (message.alignment) {
+        const ready = joinAcrossChunks(message.alignment, wordsFromAlignment(message.alignment, audioMs));
+        if (ready.length) emit(wordListeners, ready);
+      }
       if (message.audio) {
         const buffer = Buffer.from(String(message.audio), 'base64');
         if (buffer.length) {
@@ -369,6 +423,17 @@ export function createDialogueVoiceFactory({
       drain();
       return true;
     }
+    /**
+     * Speak what has been sent so far now. The service otherwise waits for about 40 characters
+     * and 8 words before it makes any sound, so a one-word acknowledgement would sit silent
+     * until the rest of the reply arrived.
+     */
+    function flush() {
+      if (cancelled || settled || finishing || !texts.length || texts[texts.length - 1] === FLUSH) return false;
+      texts.push(FLUSH);
+      drain();
+      return true;
+    }
     function finish() {
       if (finishPromise) return finishPromise;
       finishPromise = new Promise((resolve, reject) => { resolveFinish = resolve; rejectFinish = reject; });
@@ -401,6 +466,7 @@ export function createDialogueVoiceFactory({
       get sampleRate() { return currentRate; },
       get closed() { return status === 'closed'; },
       sendText,
+      flush,
       finish,
       cancel,
       onAudio: callback => subscribe(audioListeners, callback),

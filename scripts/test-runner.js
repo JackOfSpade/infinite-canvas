@@ -183,6 +183,7 @@ import job_continuation_authority_contract from './tests/job-continuation-author
 import career_canvas_file_import from './tests/career-canvas-file-import.js';
 import job_board_canvas_career_drop from './tests/job-board-canvas-career-drop.js';
 import career_text_files from './tests/career-text-files.js';
+import career_file_to_text from './tests/career-file-to-text.js';
 import career_profile_compilation from './tests/career-profile-compilation.js';
 import career_incremental_compilation from './tests/career-incremental-compilation.js';
 import career_clean_layer from './tests/career-clean-layer.js';
@@ -241,6 +242,7 @@ import interview_helper_canvas_career_drop from './tests/interview-helper-canvas
 import interview_helper_privacy from './tests/interview-helper-privacy.js';
 import interview_helper_render from './tests/interview-helper-render.js';
 import interview_private_store_filesystem from './tests/interview-private-store-filesystem.js';
+import interview_typed_job from './tests/interview-typed-job.js';
 import interview_preparation from './tests/interview-preparation.js';
 import interview_snapshot_readonly from './tests/interview-snapshot-readonly.js';
 import interview_answer_bank from './tests/interview-answer-bank.js';
@@ -267,11 +269,16 @@ import interview_practice_audio from './tests/interview-practice-audio.js';
 import interview_practice_call_engine from './tests/interview-practice-call-engine.js';
 import interview_practice_call_simulation from './tests/interview-practice-call-simulation.js';
 import practice_call_audio from './tests/practice-call-audio.js';
+import practice_call_call_sound from './tests/practice-call-call-sound.js';
+import practice_call_call_codec from './tests/practice-call-call-codec.js';
 import practice_call_models from './tests/practice-call-models.js';
 import practice_call_eleven from './tests/practice-call-eleven.js';
+import practice_call_panel_voice from './tests/practice-call-panel-voice.js';
 import practice_call_service from './tests/practice-call-service.js';
 import practice_call_render from './tests/practice-call-render.js';
+import practice_call_window from './tests/practice-call-window.js';
 import practice_call_analysis from './tests/practice-call-analysis.js';
+import practice_call_planner from './tests/practice-call-planner.js';
 import interview_practice_benchmark from './tests/interview-practice-benchmark.js';
 import interview_preload from './tests/interview-preload.js';
 import interview_app from './tests/interview-app.js';
@@ -519,6 +526,7 @@ const testGroups = [
   ['career-canvas-file-import.js', career_canvas_file_import],
   ['job-board-canvas-career-drop.js', job_board_canvas_career_drop],
   ['career-text-files.js', career_text_files],
+  ['career-file-to-text.js', career_file_to_text],
   ['career-profile-compilation.js', career_profile_compilation],
   ['career-incremental-compilation.js', career_incremental_compilation],
   ['career-clean-layer.js', career_clean_layer],
@@ -577,6 +585,7 @@ const testGroups = [
   ['interview-helper-privacy.js', interview_helper_privacy],
   ['interview-helper-render.js', interview_helper_render],
   ['interview-private-store-filesystem.js', interview_private_store_filesystem],
+  ['interview-typed-job.js', interview_typed_job],
   ['interview-preparation.js', interview_preparation],
   ['interview-snapshot-readonly.js', interview_snapshot_readonly],
   ['interview-answer-bank.js', interview_answer_bank],
@@ -603,11 +612,16 @@ const testGroups = [
   ['interview-practice-call-engine.js', interview_practice_call_engine],
   ['interview-practice-call-simulation.js', interview_practice_call_simulation],
   ['practice-call-audio.js', practice_call_audio],
+  ['practice-call-call-sound.js', practice_call_call_sound],
+  ['practice-call-call-codec.js', practice_call_call_codec],
   ['practice-call-models.js', practice_call_models],
   ['practice-call-eleven.js', practice_call_eleven],
+  ['practice-call-panel-voice.js', practice_call_panel_voice],
   ['practice-call-service.js', practice_call_service],
   ['practice-call-render.js', practice_call_render],
+  ['practice-call-window.js', practice_call_window],
   ['practice-call-analysis.js', practice_call_analysis],
+  ['practice-call-planner.js', practice_call_planner],
   ['interview-practice-benchmark.js', interview_practice_benchmark],
   ['interview-preload.js', interview_preload],
   ['interview-app.js', interview_app],

@@ -105,4 +105,18 @@ contextBridge.exposeInMainWorld('interviewAppAPI', Object.freeze({
   chooseCareerFiles: () => ipcRenderer.invoke('interview-app:choose-career-files'),
   chooseAppliedJobsFolder: () => ipcRenderer.invoke('interview-app:choose-applied-jobs-folder'),
   readCanvasInterviews: () => ipcRenderer.invoke('interview-app:read-canvas-interviews'),
+  resolveInterviewTypedJob: (args) => {
+    const { nodeId, text } = args || {};
+    return ipcRenderer.invoke('resolve-interview-typed-job', { nodeId, text });
+  },
+  // Career files of any type are converted to text before the text-only compile reads them.
+  convertCareerFiles: (args) => {
+    const { nodeId, filePaths } = args || {};
+    return ipcRenderer.invoke('convert-interview-career-files', { nodeId, filePaths });
+  },
+  // Shows one converted text file in the file manager; the renderer names it only by an opaque token.
+  revealConvertedCareerFile: (args) => {
+    const { token } = args || {};
+    return ipcRenderer.invoke('interview-app:reveal-converted-career-file', { token });
+  },
 }));

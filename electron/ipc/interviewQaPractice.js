@@ -121,7 +121,9 @@ const bounded = (value, max, field) => {
   return value.trim();
 };
 const score = (value, field) => {
-  if (value === undefined) return null;
+  // A missing score comes back as null, so null must be accepted too: feedback that was
+  // validated once is validated again when it is stored, and must still pass.
+  if (value === undefined || value === null) return null;
   if (!Number.isInteger(value) || value < 1 || value > 10) throw new Error(`${field} must be an integer from 1 to 10.`);
   return value;
 };

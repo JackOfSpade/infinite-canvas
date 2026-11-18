@@ -1,7 +1,11 @@
 import React, { useRef, useState } from 'react';
 import { AlertTriangle, Pause, Play, Trash2 } from 'lucide-react';
 import { FeedbackView } from '../components/InterviewPracticePanel.jsx';
+import { replaySpeakerName } from './persona.js';
 import { bubbleLeftPx, chapterIndexAt, formatTime, markerTone, nearestMarker, positionToMs, scrubberKeyTarget, segmentFill, segmentLayout, turnAt } from './replayModel.js';
+import SharedScreen from './SharedScreen.jsx';
+import CodingPad from './CodingPad.jsx';
+import { padSnapshotAt, screenAt } from './screenMarkup.js';
 import { describeDeliveryValue, humanizeKey } from './callModel.js';
 
 export function DeliverySection({ delivery }) {
@@ -149,7 +153,7 @@ export function Scrubber({ chapters, durationMs, positionMs, onSeek }) {
   </div>;
 }
 
-function TurnList({ transcript, currentTurn, onSeek }) {
+function TurnList({ transcript, currentTurn, onSeek, replay }) {
   if (!transcript.length) return <p className="text-[11px] text-white/40">No transcript for this call.</p>;
   return <ol aria-label="Call transcript" className="max-h-56 space-y-1 overflow-y-auto pr-1">
     {transcript.map((turn, index) => {
@@ -157,13 +161,21 @@ function TurnList({ transcript, currentTurn, onSeek }) {
       const timed = typeof startMs === 'number' && Number.isFinite(startMs);
       const current = index === currentTurn;
       const mine = (turn?.speaker ?? turn?.role) === 'candidate';
-      return <li key={`turn-${index}`}>
+      const label = mine ? 'You' : replaySpeakerName(replay, turn?.speakerId);
+      // A turn several interviewers spoke in shows each part under its own speaker.
+      const segments = !mine && Array.isArray(turn?.segments) && turn.segments.length > 1 ? turn.segments : null;
+      const body = segments
+        ? segments.map((segment, at) => <span key={at} data-segment-speaker={segment?.speakerId} className="block"><span className="mr-1 text-[9px] uppercase text-white/45">{replaySpeakerName(replay, segment?.speakerId)}:</span>{segment?.text}</span>)
+        : turn?.text;
+      // A remark said over another speaker is that person's line, marked as such.
+      const overMark = !mine && turn?.overlay ? <span data-over-mark="true" className="mr-1 text-[9px] italic text-white/45">(over the speaker)</span> : null;
+      return <li key={`turn-${index}`} data-overlay={!mine && turn?.overlay ? 'true' : undefined}>
         {timed ? <button type="button" onClick={() => onSeek(startMs)} aria-current={current ? 'true' : undefined} data-current-turn={current ? 'true' : 'false'}
           aria-label={`Seek to ${turn?.text || (mine ? 'your turn' : 'interviewer turn')} at ${formatTime(startMs)}`}
           className={`block w-full rounded px-1.5 py-1 text-left text-[11px] ${current ? 'bg-violet-500/25 text-violet-50 ring-1 ring-violet-300/40' : 'text-white/70 hover:bg-white/5'}`}>
-          <span className="mr-1 text-[9px] uppercase text-white/45">{mine ? 'You' : 'Interviewer'} · {formatTime(startMs)}</span>{turn?.text}
+          <span className="mr-1 text-[9px] uppercase text-white/45">{label} · {formatTime(startMs)}</span>{overMark}{body}
         </button> : <div data-untimed-turn="true" data-current-turn="false" className="block w-full rounded px-1.5 py-1 text-left text-[11px] text-white/40">
-          <span className="mr-1 text-[9px] uppercase text-white/45">{mine ? 'You' : 'Interviewer'}</span>{turn?.text}
+          <span className="mr-1 text-[9px] uppercase text-white/45">{label}</span>{overMark}{body}
         </div>}
       </li>;
     })}
@@ -233,6 +245,10 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
   const currentChapterTitle = currentChapterIndex >= 0 ? String(chapters[currentChapterIndex]?.title || `Chapter ${currentChapterIndex + 1}`) : '';
   const showChapters = () => chaptersRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'nearest' });
   const hasFeedback = !!replay?.feedback;
+  // What was on the shared screen, and the code the candidate had written, at this moment.
+  const shownScreen = screenAt(replay?.screens, positionMs);
+  const shownPad = padSnapshotAt(replay?.pad, positionMs);
+  const hasShare = (Array.isArray(replay?.screens) && replay.screens.length > 0) || (Array.isArray(replay?.pad?.snapshots) && replay.pad.snapshots.length > 0);
   // The review leads: it is what the call window turns into once processing is done.
   return <main className="min-h-screen bg-[#202124] p-4 text-violet-50" aria-label="Practice call replay">
     <header className="pc-rise flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
@@ -268,7 +284,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
     {deleteError && <p role="alert" aria-label="Delete failed" className="rounded-md border border-red-400/30 bg-red-500/15 p-2 text-[11px] text-red-100">{deleteError}</p>}
     <Scrubber chapters={chapters} durationMs={durationMs} positionMs={positionMs} onSeek={seek} />
     <div className="flex min-w-0 items-baseline gap-2 text-[10px] text-white/45">
-      <span className="font-mono">{formatTime(positionMs)} / {formatTime(durationMs)}</span>
+      <span className="shrink-0 whitespace-nowrap font-mono">{formatTime(positionMs)} / {formatTime(durationMs)}</span>
       {currentChapterTitle
         ? <button type="button" aria-label={`Current chapter: ${currentChapterTitle}. Show chapters`} onClick={showChapters}
           className="flex min-w-0 items-center gap-1 rounded px-1 text-left text-violet-200/80 hover:bg-white/5 hover:text-violet-100">
@@ -276,6 +292,16 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
         </button>
         : null}
     </div>
+    {/* A call that shared anything keeps this area at one height for the whole replay, so the
+        chapters under it do not jump as the playback moves in and out of a shared screen. */}
+    {hasShare && <section aria-label="Shared screen and code at this moment" data-replay-share="true" className="grid gap-2 lg:grid-cols-2">
+      {shownScreen
+        ? <SharedScreen title={shownScreen.title} content={shownScreen.content} presenterName={replaySpeakerName(replay, shownScreen.speakerId)} className="h-44" />
+        : <p data-replay-share-empty="screen" className="grid h-44 place-items-center rounded-xl border border-white/10 bg-black/20 px-3 text-center text-xs text-violet-200/50">Nothing was on the shared screen at this moment.</p>}
+      {shownPad
+        ? <CodingPad readOnly lang={replay?.pad?.lang || ''} value={shownPad.text} className="h-44" />
+        : <p data-replay-share-empty="pad" className="grid h-44 place-items-center rounded-xl border border-white/10 bg-black/20 px-3 text-center text-xs text-violet-200/50">No code had been written yet at this moment.</p>}
+    </section>}
     <div className={`grid gap-2 ${hasFeedback ? '' : 'md:grid-cols-2'}`}>
       <section aria-label="Chapters" ref={chaptersRef} className="rounded-md border border-white/10 bg-black/20 p-2">
         <p className="text-[10px] font-semibold uppercase text-white/45">Chapters</p>
@@ -305,7 +331,7 @@ export default function Replay({ replay, api, initialPositionMs = 0 }) {
       </section>
       <section aria-label="Transcript" className="rounded-md border border-white/10 bg-black/20 p-2">
         <p className="text-[10px] font-semibold uppercase text-white/45">Transcript</p>
-        <TurnList transcript={transcript} currentTurn={currentTurn} onSeek={seek} />
+        <TurnList transcript={transcript} currentTurn={currentTurn} onSeek={seek} replay={replay} />
       </section>
     </div>
     {confirmingDelete && <div role="alertdialog" aria-label="Delete recording" className="space-y-1 rounded-md border border-red-400/30 bg-red-500/10 p-2 text-[11px] text-red-100">

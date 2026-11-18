@@ -15,7 +15,7 @@ const test = (name, run) => suite.push({ name: `interview practice simulation: $
 
 const cmds = (result, type) => result.commands.filter(command => command.type === type);
 const lastMain = result => result.mainMessages[result.mainMessages.length - 1];
-const silentMessages = result => result.mainMessages.filter(message => message.includes('[candidate silent 10s]'));
+const silentMessages = result => result.mainMessages.filter(message => message.includes('[candidate silent 20s'));
 const untimed = entries => entries.map(({ startMs, endMs, ...rest }) => { assert(Number.isInteger(startMs) && startMs === endMs, `chat entry carries helper-timeline timing: ${JSON.stringify({ startMs, endMs })}`); return rest; });
 const interviewerLines = result => result.transcript.filter(entry => entry.speaker === 'interviewer' && entry.channel !== 'chat');
 
@@ -132,7 +132,7 @@ test('thinking-pause: no play command during a 1500 ms within-answer pause at de
   assert.equal(result.mainMessages.filter(message => message.includes('I would start with the data model and then')).length, 1, label);
 }));
 
-test('silence-10s: exactly one silence message after 10 s of quiet', () => eachSeed('silence-10s', (result, label) => {
+test('silence-20s: exactly one silence message after 20 s of quiet', () => eachSeed('silence-20s', (result, label) => {
   assert.equal(silentMessages(result).length, 1, label);
   assert.equal(result.mainMessages.length, 2, `${label}: greeting plus the silence prompt only`);
   assert(cmds(result, 'play').length === 2, label);

@@ -8,7 +8,7 @@ import electronPkg from 'electron';
 import path from 'path';
 import { logger } from '../logger.js';
 import { pathToFileURL } from 'node:url';
-import { configureCareerSnapshotDataRoot, registerCareerDataHandlers } from '../ipc/jobs.js';
+import { configureCareerSnapshotDataRoot, registerCareerConvertedInputRoot, registerCareerDataHandlers } from '../ipc/jobs.js';
 import { loadInterviewHelperCareerSnapshot, registerInterviewHelperHandlers } from '../ipc/interviewHelper.js';
 import { loadInterviewPreparationBundle, registerInterviewPreparationHandlers } from '../ipc/interviewPreparation.js';
 import { createInterviewWindowController } from '../interviewWindow.js';
@@ -25,6 +25,8 @@ import { registerClaudePauseHandlers, registerClaudeTaskActivityHandler, registe
 import { registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import { createInterviewSessionStore, readInterviewHelperNodesFromCanvas } from './sessionStore.js';
 import { interviewAppDataRoots } from './dataRoots.js';
+import { createCareerFileConversionService, registerCareerConversionHandlers } from './careerFileConversion.js';
+import { handleSafe } from '../ipc/ipcUtils.js';
 
 const { app, BrowserWindow, dialog, ipcMain, protocol, shell } = electronPkg;
 
@@ -135,7 +137,8 @@ if (!app.requestSingleInstanceLock()) {
     ipcMain.handle('interview-app:choose-career-files', guarded(async () => {
       const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose career files', properties: ['openFile', 'multiSelections'],
-        filters: [{ name: 'Career data (text)', extensions: ['md', 'txt'] }],
+        // Any file type: each is converted to text before the text-only compile reads it.
+        filters: [{ name: 'All files', extensions: ['*'] }],
       });
       return result.canceled ? [] : result.filePaths;
     }));
@@ -158,6 +161,15 @@ if (!app.requestSingleInstanceLock()) {
     }));
 
     registerCareerDataHandlers();
+    // Career files of any type: converted to text in a private folder, which alone may be named as a compile input.
+    const careerConversion = createCareerFileConversionService({
+      dataRoot: roots.data,
+      transport: createInterviewClaudeTransport(),
+      registerInputRoot: registerCareerConvertedInputRoot,
+      showItemInFolder: file => shell.showItemInFolder(file),
+    });
+    registerCareerConversionHandlers({ handleSafe, ipcMain, guarded, service: careerConversion });
+    try { await careerConversion.conversionsRoot(); } catch (error) { logger.warn?.('[career conversion] folder unavailable:', error?.message || error); }
     registerInterviewHelperHandlers({ appInstance: dataApp });
     registerInterviewPreparationHandlers({
       appInstance: dataApp,
@@ -180,6 +192,10 @@ if (!app.requestSingleInstanceLock()) {
       const practiceCallText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
         signal, task: 'practice-review', claudeStage: 'qa-practice-review', responseSchema: schema,
       });
+      // The careful planning step before a practice call: its own stage, Opus at high effort.
+      const practicePlanText = ({ prompt, schema, signal } = {}) => reviewTransport.callText(prompt, {
+        signal, task: 'practice-plan', claudeStage: 'practice-call-plan', responseSchema: schema,
+      });
       const helperPath = practiceAudioHelperPath({ packaged: app.isPackaged, projectDir: app.getAppPath() || process.cwd() });
       practiceCallController = createPracticeCallController({
         BrowserWindow, ipcMain, appInstance: dataApp,
@@ -190,7 +206,8 @@ if (!app.requestSingleInstanceLock()) {
         callText: practiceCallText,
         registry: getInterviewPracticeRegistry(),
         serviceOptions: {
-          callText: practiceCallText, registry: getInterviewPracticeRegistry(),
+          callText: practiceCallText, planText: practicePlanText, registry: getInterviewPracticeRegistry(),
+          logger,
           inferenceWorkerPath: asarUnpacked(path.join(__dirname, 'inferenceWorkerThread.js')),
           // The packaged helper lives in Resources; the default only knows the project folder.
           helperFactory: options => createPracticeAudioHelper({ ...options, helperPath }),
@@ -229,6 +246,9 @@ if (!app.requestSingleInstanceLock()) {
     event.preventDefault();
     Promise.resolve()
       .then(() => flushNonApiAiPersistence())
+      .catch(() => {})
+      // A practice call in progress is saved (recording and transcript, no review) before the app goes.
+      .then(() => practiceCallController?.shutdown?.())
       .catch(() => {})
       .finally(() => { try { practiceCallController?.dispose(); } catch { /* already closed */ } app.exit(0); });
   });

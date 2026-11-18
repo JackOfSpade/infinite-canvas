@@ -94,6 +94,17 @@ function rejects(response, context, message) {
 
 export default [
   {
+    name: 'interview answer bank: the prompt says what a typed listing really is and leaves captured bundles unchanged',
+    run: async () => {
+      const context = contextFixture();
+      const promptFor = status => interviewAnswerBankPrompt({ ...context, bundle: { ...context.bundle, ...(status ? { verification: { status, reason: 'x' } } : {}), listingText: 'Engineer at Acme.' }, evidence: buildInterviewAnswerEvidence(context) });
+      const generated = promptFor('typed-generated'); const posting = promptFor('typed-posting'); const captured = promptFor('verified');
+      assert(generated.includes("AI-generated stand-in listing, not the employer's text") && generated.includes('do not treat its specifics as facts about the employer'), 'a generated listing is disclosed');
+      assert(posting.includes('read from the job posting page') && posting.includes('no application documents were submitted') && !posting.includes('AI-generated'), 'a typed posting says it came from the page');
+      assert(!promptFor(null).includes('stand-in') && !captured.includes('stand-in') && !captured.includes('read from the job posting page'), 'a captured bundle prompt is unchanged');
+    },
+  },
+  {
     name: 'interview answer bank: new handoffs require dedicated compact extensions while legacy sealed cards remain readable',
     run() {
       const context = contextFixture(); const value = responseFixture(context);

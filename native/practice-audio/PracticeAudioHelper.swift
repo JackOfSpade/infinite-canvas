@@ -799,8 +799,14 @@ final class MicProcessor: @unchecked Sendable {
 
             // Voice processing (echo cancellation) must be on before anything
             // is attached or started. Never continue without it.
+            // The output side of the graph must exist before voice processing is switched on,
+            // and the mixer must be joined to the output explicitly afterwards (below). With the
+            // implicit connection the engine refuses to start (-10875 on the output unit); measured
+            // on macOS 27.2: 0 of 6 starts as it was, 6 of 6 with either step, so both are done.
+            _ = engine.outputNode
+            _ = engine.mainMixerNode
             do { try engine.inputNode.setVoiceProcessingEnabled(true) }
-            catch { throw HelperFailure.code("capture-failed") }
+            catch { diagnose("voice processing", error); throw HelperFailure.code("capture-failed") }
 
             let (inputs, continuation) = AsyncStream<AnalyzerInput>.makeStream(bufferingPolicy: .bufferingNewest(100))
             let micProcessor = MicProcessor(analyzerFormat: format, input: continuation, writer: writer,
@@ -836,9 +842,10 @@ final class MicProcessor: @unchecked Sendable {
             guard !stopped else { return }
 
             playbackController.attach()
+            connectMixerToOutput()
             installTap()
             engine.prepare()
-            do { try engine.start() } catch { throw HelperFailure.code("capture-failed") }
+            do { try engine.start() } catch { diagnose("engine start", error); throw HelperFailure.code("capture-failed") }
             configObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.engineConfigurationChanged() }
@@ -858,7 +865,19 @@ final class MicProcessor: @unchecked Sendable {
         } catch is CancellationError {
             finish.yield("stopped")
         } catch let failure as HelperFailure { fail(failure.code) }
-        catch { fail("capture-failed") }
+        catch { diagnose("start", error); fail("capture-failed") }
+    }
+
+    /// Which step failed and the system's own error, on stderr. The protocol on stdout only
+    /// carries a code, and without this a failed start cannot be told apart from any other.
+    /// The text is the framework's error description: no speech, transcript or path.
+    private func diagnose(_ step: String, _ error: Error) {
+        let line = "practice-audio-helper: \(step) failed: \(error)\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+
+    private func connectMixerToOutput() {
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: engine.outputNode.inputFormat(forBus: 0))
     }
 
     private func installTap() {
@@ -880,6 +899,7 @@ final class MicProcessor: @unchecked Sendable {
         playback?.cancelActive() // The queued buffers do not survive a reconfiguration.
         engine.inputNode.removeTap(onBus: 0)
         playback?.reconnect()
+        connectMixerToOutput()
         installTap()
         engine.prepare()
         do { try engine.start() } catch { fail("capture-failed") }

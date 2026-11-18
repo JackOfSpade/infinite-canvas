@@ -106,12 +106,13 @@ export default [
     },
   },
   {
-    name: 'interview practice transport: start accepts READY with a chosen temperament and rejects anything else',
+    name: 'interview practice transport: start accepts a bare READY and rejects anything else, a temperament or casting included',
     async run() {
       for (const [text, ok, reply = text] of [
-        ['READY', true], ['READY tough', true], ['READY warm.', true],
-        ['Voice is charming and casual: that reads as warm.\n\nREADY warm', true, 'READY warm'],
-        ['READY grumpy', false], ['Sure, READY', false], ['READY neutral\nActually tough.', false],
+        ['READY', true], ['READY.', true], ['  READY  \n', true, 'READY'],
+        ['Thinking it over.\n\nREADY', true, 'READY'],
+        ['READY tough', false], ['READY warm.', false], ['READY neutral {"role":"Hiring Manager","questions":[1]}', false],
+        ['Sure, READY', false], ['READY\nActually tough.', false],
       ]) {
         const { spawn } = fakeSpawn({ replies: [{ text, total: 0.01 }] });
         const session = await createInterviewerSession({ model: 'opus', effort: 'low', claudeBin: 'stub-claude' }, { spawn });

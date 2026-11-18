@@ -60,10 +60,23 @@ export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
   'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
   // Post-call review of an in-app practice call (judgement and writing, one call per practice): Opus medium, not yet tested (needs a recorded practice call; docs/ai-model-selection.md).
   'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // Planning of an in-app practice call (cast, questions, time, probes and prepared problems, one call per practice): Opus high, not yet tested (docs/ai-model-selection.md).
+  'practice-call-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
   // qa-glance-cues (short reminders for the live card, one call per Prepare): Opus low, not yet tested. Chosen by analogy with qa-card-repair, where Sonnet added unsupported wording and Haiku broke lines (docs/ai-model-selection.md).
   'qa-glance-cues': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
   // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a cue (docs/ai-model-selection.md).
   'qa-approach-reminders': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // Typed-job stages (a typed link, or a company and role, turned into a job for Prepare; electron/ipc/interviewTypedJob.js). All four are chosen by analogy and need a test (docs/ai-model-selection.md).
+  // typed-job-intake: short-text understanding into JSON, like job-preference-interpretation, where Haiku medium was judged best.
+  'typed-job-intake': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }),
+  // typed-job-posting: reads a whole fetched page and copies the posting text out; like qa-disclosures extraction, where Sonnet low kept everything and Haiku dropped content.
+  'typed-job-posting': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
+  // typed-job-research: Parallel web research about one company; same task shape as qa-research (Opus high, within noise of xhigh).
+  'typed-job-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
+  // typed-job-listing: realistic stand-in posting written from research alone; like qa-write, where cheaper settings invented specifics.
+  'typed-job-listing': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
+  // career-file-to-text: Claude reads one dropped image (or document) and copies its text out verbatim, in reading order, with [unreadable] for a part it cannot read (electron/ipc/interviewCareerFileConversion.js). Sonnet low, not yet tested; chosen by analogy with typed-job-posting and qa-disclosures extraction, where Sonnet low kept everything and Haiku dropped content (docs/ai-model-selection.md).
+  'career-file-to-text': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
   'qa-fact-check': APPLICATION_STAGE_PROFILES['fact-check'],
   'qa-fact-correction': APPLICATION_STAGE_PROFILES['fact-correction'],
   'qa-fact-recheck': APPLICATION_STAGE_PROFILES['fact-recheck'],

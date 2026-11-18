@@ -49,12 +49,35 @@ function fastestWindowWpm(wordCount, startMs, endMs, windowMs = 20000) {
   return round((best / windowMs) * 60000, 1);
 }
 
+/**
+ * Measured turns from the ear, keyed by the spoken candidate transcript entry they overlap
+ * most in time. The ear and the transcript share the helper timeline, so overlap is the link.
+ */
+export function prosodyByEntry(transcript = [], turns = []) {
+  const entries = Array.isArray(transcript) ? transcript : [];
+  const byEntry = {};
+  for (const turn of Array.isArray(turns) ? turns : []) {
+    if (!finite(turn?.startMs) || !finite(turn?.endMs)) continue;
+    let best = -1;
+    let bestOverlap = 0;
+    entries.forEach((entry, index) => {
+      if (entry?.speaker !== 'candidate' || entry.channel === 'chat' || entry.acknowledgement) return;
+      if (!finite(entry.startMs) || !finite(entry.endMs)) return;
+      const overlap = Math.min(entry.endMs, turn.endMs) - Math.max(entry.startMs, turn.startMs);
+      if (overlap > bestOverlap) { best = index; bestOverlap = overlap; }
+    });
+    if (best >= 0) (byEntry[best] ??= []).push(turn);
+  }
+  return byEntry;
+}
+
 function interviewerRuns(entries) {
   // Contiguous interviewer entries are one question; the run end is when it finished.
+  // A typed interviewer message is not speech, so it neither makes nor extends a run.
   const runs = [];
   let current = null;
   entries.forEach((entry, index) => {
-    if (entry.speaker !== 'interviewer') return;
+    if (entry.speaker !== 'interviewer' || entry.channel === 'chat') return;
     if (!current || current.lastIndex !== index - 1) {
       current = { firstIndex: index, lastIndex: index, startMs: entry.startMs, endMs: entry.endMs };
       runs.push(current);
@@ -67,17 +90,22 @@ function interviewerRuns(entries) {
   return runs;
 }
 
-export function callMetrics({ transcript = [], candidateProsodyByTurn = null, baselineSnapshot = null } = {}) {
+export function callMetrics({ transcript = [], candidateProsodyByTurn = null, candidateProsody = null, baselineSnapshot = null } = {}) {
   const entries = Array.isArray(transcript) ? transcript : [];
+  const prosodyMap = Array.isArray(candidateProsody) ? prosodyByEntry(entries, candidateProsody) : candidateProsodyByTurn;
   const groups = [];
   const typedAnswers = [];
   let group = null;
   entries.forEach((entry, index) => {
     if (entry?.channel === 'chat') {
+      // Only the candidate's own typed lines are typed answers; the interviewer's chat
+      // messages and spoken acknowledgements typed in passing are not.
+      if (entry.speaker !== 'candidate' || entry.acknowledgement) return;
       typedAnswers.push({ startMs: entry.startMs, endMs: entry.endMs, wordCount: countWords(entry.text), text: String(entry.text ?? '') });
       return;
     }
     if (entry?.speaker !== 'candidate') { group = null; return; }
+    if (entry.acknowledgement) return;
     if (!group) { group = { turnIndexes: [], startMs: entry.startMs, endMs: entry.endMs, words: 0 }; groups.push(group); }
     group.turnIndexes.push(index);
     group.startMs = Math.min(group.startMs, entry.startMs);
@@ -86,7 +114,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ba
   });
 
   const answers = groups.map((answer, answerIndex) => {
-    const prosody = answer.turnIndexes.flatMap(index => prosodyFor(candidateProsodyByTurn, index));
+    const prosody = answer.turnIndexes.flatMap(index => prosodyFor(prosodyMap, index));
     const pauses = prosody.flatMap(item => item.pauses ?? []);
     const speechMs = prosody.reduce((sum, item) => sum + (finite(item.speechMs) ? item.speechMs : 0), 0);
     const durationMs = Math.max(0, answer.endMs - answer.startMs);
@@ -94,7 +122,7 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ba
     const prior = answer.turnIndexes[0] - 1;
     let responseLatencyMs = null;
     for (let i = prior; i >= 0; i -= 1) {
-      if (entries[i]?.speaker === 'interviewer') { responseLatencyMs = Math.max(0, answer.startMs - entries[i].endMs); break; }
+      if (entries[i]?.speaker === 'interviewer' && entries[i].channel !== 'chat') { responseLatencyMs = Math.max(0, answer.startMs - entries[i].endMs); break; }
     }
     return {
       index: answerIndex,
@@ -136,13 +164,15 @@ export function callMetrics({ transcript = [], candidateProsodyByTurn = null, ba
   });
 
   const candidateTalkMs = answers.reduce((sum, answer) => sum + (answer.speechMs > 0 ? answer.speechMs : answer.durationMs), 0);
-  const interviewerTalkMs = entries.filter(entry => entry.speaker === 'interviewer')
+  const interviewerTalkMs = entries.filter(entry => entry.speaker === 'interviewer' && entry.channel !== 'chat')
     .reduce((sum, entry) => sum + Math.max(0, (entry.endMs ?? 0) - (entry.startMs ?? 0)), 0);
   const totalTalkMs = candidateTalkMs + interviewerTalkMs;
 
   return {
     answers,
     typedAnswers,
+    // A call answered only by typing has no voice to measure: pace, pauses, fillers and tone do not apply.
+    typedOnly: answers.length === 0 && typedAnswers.length > 0,
     answerCount: answers.length,
     typedAnswerCount: typedAnswers.length,
     candidateTalkMs,

@@ -302,8 +302,47 @@ export default [
     assert.equal(interviewStageMayOffload('qa-answer-entailment'), false);
     assert.equal(interviewStageMayOffload('qa-card-repair'), false);
     assert.equal(interviewStageMayOffload('qa-fact-recheck'), false);
+    assert.equal(interviewStageMayOffload('career-file-to-text'), false, 'a verbatim copy of a personal file never routes to another provider');
     assert.equal(interviewStageMayOffload('qa-disclosures'), true);
     assert.equal(interviewStageMayOffload('qa-practice-order'), true);
+  } },
+  { name: 'interview Claude transport: typed-job stages use their own profiles; only typed-job-research gets Parallel tools and fails when Parallel is out', async run() {
+    resetInterviewOffloadBlock();
+    const runs = []; const research = [];
+    const make = enabled => createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {},
+      parallel: { enabled: async () => enabled },
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; },
+      runResearchStage: async args => { research.push(args); return { text: 'Acme research', model: 'claude-parallel' }; },
+      routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
+      offloadCall: async () => { throw new Error('typed-job stages with no table entry must not route here'); } });
+    const transport = make(true);
+    // routeFor above answers every stage, so the stages that may offload would call offloadCall; check the gate directly.
+    assert.equal(interviewStageMayOffload('typed-job-research'), false, 'research never routes');
+    assert.equal(interviewStageMayOffload('typed-job-intake'), true);
+    assert.equal(await transport.callRaw('R', { claudeStage: 'typed-job-research', task: 'interview-typed-job-research' }), 'Acme research');
+    assert.deepEqual([research[0].model, research[0].effort, research[0].tools], ['opus', 'high', [...PARALLEL_RESEARCH_TOOLS]]);
+    assert.equal(runs.length, 0, 'typed-job-research never runs on the built-in runStage');
+    const noRoute = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true },
+      runStage: async args => { runs.push(args); return { text: '{"ok":true}', model: 'claude-x' }; }, routeFor: () => null });
+    for (const stage of ['typed-job-intake', 'typed-job-posting', 'typed-job-listing']) await noRoute.callText('P', { claudeStage: stage, responseSchema: { type: 'object' } });
+    assert.deepEqual(runs.map(run => [run.model, run.effort, run.tools]), [['haiku', 'medium', ''], ['sonnet', 'low', ''], ['opus', 'medium', '']]);
+    research.length = 0;
+    await assert.rejects(make(false).callRaw('R', { claudeStage: 'typed-job-research' }), error => error.code === 'PARALLEL_SEARCH_EXHAUSTED');
+    assert.equal(research.length, 0, 'no research session starts when Parallel is out');
+  } },
+  { name: 'interview Claude transport: career-file-to-text sends page images on the first message only and never offloads', async run() {
+    const runs = [];
+    const images = [{ label: 'resume.png', mimeType: 'image/png', data: 'AAAA' }];
+    let replies = 0;
+    const transport = createInterviewClaudeTransport({ resolveBinary: () => '/usr/bin/claude', env: {}, parallel: { enabled: async () => true },
+      runStage: async args => { runs.push(args); replies += 1; return { text: replies === 1 ? 'not json' : '{"ok":true}', model: 'claude-x' }; },
+      routeFor: () => ({ route: 'deepseek-flash', reasoning: 'high' }),
+      offloadCall: async () => { throw new Error('career-file-to-text must never offload'); },
+      recordSample: sample => { assert.equal(JSON.stringify(sample).includes('AAAA'), false, 'image data is never recorded'); } });
+    await transport.callText('Copy the text.', { claudeStage: 'career-file-to-text', task: 'career-file-to-text', pageImages: images, responseSchema: { type: 'object' } });
+    assert.deepEqual(runs.map(run => [run.model, run.effort, run.tools]), [['sonnet', 'low', ''], ['sonnet', 'low', '']]);
+    assert.deepEqual(runs[0].pageImages, images);
+    assert.equal(runs[1].pageImages, undefined, 'a resumed correction round carries no image again');
   } },
   { name: 'interview Q&A offload: an OFFLOAD_ error fails the call loudly with its own code and Claude never answers a routed stage', async run() {
     const runs = []; let offloadCalls = 0;

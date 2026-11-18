@@ -15,6 +15,8 @@ export const SMART_TURN_URL =
 export const TONE_URL =
   'https://zenodo.org/api/records/6221127/files/w2v2-L-robust-12.6bc4a7fd-1.1.0.zip/content';
 
+export const MODEL_DOWNLOAD_USER_AGENT = 'practice-call-model-download/1.0';
+
 export const MODEL_SPECS = Object.freeze({
   smartTurn: Object.freeze({
     name: 'smartTurn',
@@ -155,7 +157,9 @@ export function createModelStore({
     if (signal?.aborted) throw abortError();
     let handle = null;
     try {
-      const response = await doFetch(spec.url, { signal });
+      // Zenodo answers 403 to Node's default "node" user agent (and to an empty one),
+      // so every model request names its client.
+      const response = await doFetch(spec.url, { signal, headers: { 'user-agent': MODEL_DOWNLOAD_USER_AGENT } });
       if (!response || (response.ok === false)) {
         throw new Error(`model download failed for ${spec.name}: HTTP ${response?.status}`);
       }
@@ -183,11 +187,29 @@ export function createModelStore({
     }
   }
 
+  // A quit or crash mid-download leaves dot-named temp files that no later attempt reuses
+  // (each attempt has a fresh tag), so clear this model's leftovers before starting.
+  async function sweepStale(spec) {
+    let names = [];
+    try {
+      names = await io.promises.readdir(rootDir);
+    } catch {
+      return;
+    }
+    const prefix = `.${spec.name}-`;
+    for (const name of names) {
+      if (typeof name === 'string' && name.startsWith(prefix)) {
+        await io.promises.rm(path.join(rootDir, name), { recursive: true, force: true }).catch(() => {});
+      }
+    }
+  }
+
   async function ensureOne(spec, { onProgress, signal } = {}) {
     await io.promises.mkdir(rootDir, { recursive: true, mode: 0o700 });
     if (signal?.aborted) throw abortError();
     const finalPath = path.join(rootDir, spec.fileName);
     if (isReady(spec.name)) return finalPath;
+    await sweepStale(spec);
     const tag = randomTag();
     const tempPath = path.join(rootDir, `.${spec.name}-${tag}.part`);
     if (!spec.archive) {

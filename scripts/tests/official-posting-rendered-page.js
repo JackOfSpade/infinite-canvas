@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { snapshotOfficialPostingLeads, SNAPSHOT_TOTAL_CHARS, trimOfficialPostingSnapshots } from '../../electron/ipc/officialPostingSnapshot.js';
-import { _resetOfficialPostingRenderForTests, createOfficialPostingRenderSession, publicHostCheck, renderOfficialPostingPage,
+import { _resetOfficialPostingRenderForTests, createOfficialPostingRenderSession, publicHostCheck, releaseOfficialPostingBrowserIfIdle, renderOfficialPostingPage,
   waitForPageToSettle } from '../../electron/ipc/officialPostingRenderedPage.js';
 import { decideOfficialPostingJudgments, buildOfficialPostingJudgeRequest } from '../../electron/ipc/officialPostingJudge.js';
 import { officialPostingComparativeTrail, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
@@ -305,6 +305,39 @@ export default [
       _resetOfficialPostingRenderForTests();
       const cancel = new AbortController(); cancel.abort();
       assert.deepEqual(await renderOfficialPostingPage(URL_A, { signal: cancel.signal }), { ok: false, reason: 'aborted' });
+    },
+  },
+  {
+    name: 'A browser the lookup started is closed once idle; one already running, replaced, or in use is left alone',
+    async run() {
+      const fakeStealth = ({ connected = false, blocker = null } = {}) => {
+        const state = { connected, generation: connected ? 1 : 0, closed: 0, blocker };
+        return { state, getStealthBrowserInfo: () => ({ connected: state.connected, generation: state.generation }),
+          getStealthBrowser: async () => { if (!state.connected) { state.connected = true; state.generation += 1; } return {}; },
+          getBrowserSessionResetBlocker: async () => state.blocker,
+          closeStealthBrowser: async () => { state.closed += 1; state.connected = false; } };
+      };
+      const read = stealth => renderOfficialPostingPage(URL_A, { isPublicUrl: async () => true, withLock: fn => fn(), stealth });
+      _resetOfficialPostingRenderForTests();
+      const started = fakeStealth();
+      await read(started);
+      assert.equal(await releaseOfficialPostingBrowserIfIdle(), true);
+      assert.equal(started.state.closed, 1);
+      assert.equal(await releaseOfficialPostingBrowserIfIdle(), false, 'nothing is left to close');
+      const alreadyUp = fakeStealth({ connected: true });
+      await read(alreadyUp);
+      assert.equal(await releaseOfficialPostingBrowserIfIdle(), false);
+      assert.equal(alreadyUp.state.closed, 0);
+      const inUse = fakeStealth({ blocker: 'A browser operation is still running.' });
+      await read(inUse);
+      assert.equal(await releaseOfficialPostingBrowserIfIdle(), false);
+      assert.equal(inUse.state.closed, 0);
+      const replaced = fakeStealth();
+      await read(replaced);
+      replaced.state.generation += 1;
+      assert.equal(await releaseOfficialPostingBrowserIfIdle(), false);
+      assert.equal(replaced.state.closed, 0);
+      _resetOfficialPostingRenderForTests();
     },
   },
   {

@@ -10,8 +10,13 @@ const electron = () => electronPkg;
 const WINDOW_PREFIX = 'practice-call-window:';
 const WINDOW_CHANNELS = Object.freeze([
   'get-state', 'agree-model-download', 'answer', 'hang-up', 'set-muted', 'send-chat',
-  'set-typing', 'get-prepared-cards', 'get-replay', 'delete-recording', 'close',
+  'set-typing', 'set-paused', 'update-pad', 'get-prepared-cards', 'get-replay', 'delete-recording', 'close',
 ]);
+
+// While the service is in one of these phases a call is in progress or being wrapped up.
+const RUNNING_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing', 'connecting', 'in-call', 'ended', 'analyzing']);
+// Phases a starting call passes through before it rings; the window opens at the first of them.
+const SETUP_PHASES = new Set(['consent', 'downloading', 'precheck', 'ringing']);
 
 function childUrl({ devServerUrl, distHtmlPath, replay = false, callId = null }) {
   const search = new URLSearchParams({ view: 'practice-call' });
@@ -65,6 +70,9 @@ export function createPracticeCallController(deps = {}) {
   let current = null;
   // R10: the mode is read when the window closes, so it must follow window reuse.
   let winMode = null;
+  // service.start() awaits several things before its first setup phase; until then there is no window
+  // and the phase is not a running one, so this flag is what tells open-replay a call is on its way.
+  let starting = false;
   const windowAlive = () => !!win && !win.isDestroyed?.();
   const alreadyRunning = () => ({
     ...(service.getState?.() ?? {}), phase: 'error',
@@ -146,6 +154,8 @@ export function createPracticeCallController(deps = {}) {
     async [WINDOW_PREFIX + 'set-muted'](muted) { return service.setMuted(muted); },
     async [WINDOW_PREFIX + 'send-chat'](text) { return service.sendChat(text); },
     async [WINDOW_PREFIX + 'set-typing'](typing) { return service.setTyping(typing); },
+    async [WINDOW_PREFIX + 'set-paused'](paused) { return service.setPaused(paused); },
+    async [WINDOW_PREFIX + 'update-pad'](text) { return service.updatePad(text); },
     async [WINDOW_PREFIX + 'get-prepared-cards']() { return service.getPreparedCards(); },
     async [WINDOW_PREFIX + 'get-replay']() { return service.getReplay(current?.callId ?? service.getState().callId); },
     async [WINDOW_PREFIX + 'delete-recording']() { return service.deleteRecording(current?.callId ?? service.getState().callId); },
@@ -153,22 +163,46 @@ export function createPracticeCallController(deps = {}) {
   };
   if (registerIpc) {
     ipcMain.handle('practice-call:start', guardCanvas(async args => {
-      // R10: a live call window wins with the service's already-running state;
-      // a replay window is replaced by a fresh call window.
-      if (windowAlive() && winMode === 'call') return alreadyRunning();
-      if (windowAlive() && winMode === 'replay') closeReplayWindow();
-      const state = await service.start(args);
-      if (state?.phase !== 'error') {
-        current = { callId: state?.callId ?? null, nodeId: args?.nodeId ?? null, replay: false };
-        openWindow({ callId: state?.callId ?? null });
+      // A window whose call is still going wins with the already-running state. A replay window,
+      // or an old call window that has already failed or finished, is replaced by a fresh one.
+      if (windowAlive() && winMode === 'call' && RUNNING_PHASES.has(service.getState?.()?.phase)) {
+        try { win.show(); win.focus(); } catch { /* window is going away */ }
+        return alreadyRunning();
       }
+      if (windowAlive()) closeReplayWindow();
+      // The setup before the call rings (voice, sessions, microphone) takes several seconds.
+      // The window opens as soon as that setup begins, so the audio check is on screen while it
+      // runs; a start refused outright (nothing prepared, a bad request) opens no window.
+      let opened = false;
+      const openFor = callId => {
+        if (opened) return;
+        opened = true;
+        current = { callId: callId ?? null, nodeId: args?.nodeId ?? null, replay: false };
+        openWindow({ callId: callId ?? null });
+      };
+      const stopWatching = service.onState?.(state => {
+        if (state?.callId && SETUP_PHASES.has(state.phase)) openFor(state.callId);
+      });
+      let state;
+      starting = true;
+      try { state = await service.start(args); } finally { starting = false; if (typeof stopWatching === 'function') stopWatching(); }
+      if (state?.phase !== 'error') openFor(state?.callId);
       return state;
     }));
     ipcMain.handle('practice-call:open-replay', guardCanvas(async args => {
       if (!args || !isPracticeCallId(args.callId) || typeof args.nodeId !== 'string') throw new TypeError('Practice call replay requires a valid call.');
       const record = await store.readRecord(args.callId);
       if (!record || record.nodeId !== args.nodeId) throw new Error('That practice call is not available.');
+      if (starting) return { success: false, error: 'Finish the call in progress before opening a replay.' };
+      // A call in progress keeps its window; opening a replay there would take it over.
+      if (windowAlive() && winMode === 'call' && RUNNING_PHASES.has(service.getState?.()?.phase)) {
+        try { win.show(); win.focus(); } catch { /* window is going away */ }
+        return { success: false, error: 'Finish the call in progress before opening a replay.' };
+      }
+      // Any other open window is closed so the replay always opens fresh on the chosen call.
+      if (windowAlive()) closeReplayWindow();
       current = { callId: args.callId, nodeId: args.nodeId, replay: true };
+      service.showReplay?.(args.callId);
       openWindow({ replay: true, callId: args.callId });
       return { callId: args.callId };
     }));
@@ -178,8 +212,24 @@ export function createPracticeCallController(deps = {}) {
     }));
     for (const [channel, handler] of Object.entries(handlers)) ipcMain.handle(channel, guardWindow(handler));
   }
+  /**
+   * The app is quitting. A call in progress is ended first without a review, so its recording
+   * and transcript are saved; without this the quit left only a half-written recording. The
+   * wait is bounded so a stuck call can never hold the app open.
+   */
+  async function shutdown({ timeoutMs = 10000 } = {}) {
+    try {
+      if (RUNNING_PHASES.has(service.getState?.()?.phase) && typeof service.hangUp === 'function') {
+        let timer = null;
+        const waited = new Promise(resolveWaited => { timer = setTimeout(resolveWaited, timeoutMs); });
+        await Promise.race([Promise.resolve(service.hangUp({ feedback: false })).catch(() => {}), waited]);
+        clearTimeout(timer);
+      }
+    } catch { /* quitting anyway */ }
+  }
+
   return Object.freeze({
-    service, store, openWindow,
+    service, store, openWindow, shutdown,
     getWindow: () => (windowAlive() ? win : null),
     dispose() {
       if (registerIpc) {

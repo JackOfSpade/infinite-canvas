@@ -1,6 +1,6 @@
 # Practice-interview Phase 0 probes
 
-Two measurement probes. Nothing here is imported by the app.
+Measurement probes and a live-call runner. Nothing here is imported by the app.
 
 **Recordings and transcripts stay out of the repo.** Use a scratch directory
 (`/tmp/speech-probe` below) and delete everything in it after scoring.
@@ -49,6 +49,20 @@ Optional `--voice <voiceId>`. Output is a JSON summary (p50/p95 TTFA, connect
 time, time to final, whether alignment arrived, audio length) on stdout and
 per-trial progress on stderr. The WebSocket parameter names are constants at the
 top of `voice-latency.mjs`; correct them there if ElevenLabs' docs differ.
+
+## C. A whole live call from source, answered by chat
+
+`live-call.mjs` runs the real call service with a stand-in for the microphone helper, so a full
+call (ring, interviewer, voice, models, hang-up, recording, review) can be driven from a terminal.
+Drop text files into `<outDir>/inbox` to answer as the candidate; see the header of the file for the
+commands. It spends Claude usage and ElevenLabs credits.
+
+```sh
+node --import ./scripts/test-stubs/register.mjs scripts/practice-probes/live-call.mjs "$PWD" /tmp/practice-live "Quick recruiter screen, about 6 minutes"
+```
+
+It does not cover microphone capture, on-device transcription or turn-taking on real speech: those
+need a spoken call in the built app.
 
 ## Tests (no network, no microphone)
 

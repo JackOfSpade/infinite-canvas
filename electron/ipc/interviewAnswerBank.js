@@ -190,6 +190,14 @@ export const INTERVIEW_ANSWER_BANK_SCHEMA = Object.freeze({
   },
 });
 
+// A typed source (a link or a company and role) has no application documents;
+// a generated listing is not the employer's text. Captured bundles add nothing.
+function answerListingNote(bundle) {
+  const status = bundle?.verification?.status;
+  if (status === 'typed-generated') return "The listing below is an AI-generated stand-in listing, not the employer's text; do not treat its specifics as facts about the employer. No application documents exist for this job: consistentWithResume is false and resumeQuote empty on every card.\n";
+  if (status === 'typed-posting') return 'The listing below was read from the job posting page; no application documents were submitted for this job, so consistentWithResume is false and resumeQuote empty on every card.\n';
+  return '';
+}
 export function interviewAnswerBankPrompt({ brief, bundle, evidence } = {}) {
   // Preparation may resume after a newly published brief with the same
   // semantic hash. A wall-clock timestamp must not change the durable prompt.
@@ -223,7 +231,7 @@ HOST RANKED SELECTION (scores guide selection, never establish new candidate fac
 ${JSON.stringify(selection)}
 ${wrapUntrustedText('interview-answer-sealed-brief', JSON.stringify(stableBrief))}
 ${wrapUntrustedText('interview-answer-approved-evidence', JSON.stringify(evidence))}
-${wrapUntrustedText('interview-answer-original-listing', bundle?.listingText || '')}
+${answerListingNote(bundle)}${wrapUntrustedText('interview-answer-original-listing', bundle?.listingText || '')}
 ${wrapUntrustedText('interview-answer-submitted-positioning', JSON.stringify(bundle?.applicationPositioning || {}))}`;
 }
 

@@ -1,7 +1,8 @@
 import { promises as nodeFs } from 'node:fs';
 import path from 'node:path';
 import { validatePracticeFeedback } from '../../ipc/interviewQaPractice.js';
-import { buildReviewPrompt, REVIEW_MOMENT_KINDS, REVIEW_SCHEMA } from './reviewPrompt.js';
+import { buildReviewPrompt, candidateAnswerKinds, REVIEW_MOMENT_KINDS, REVIEW_SCHEMA } from './reviewPrompt.js';
+import { prosodyByEntry } from '../audio/callMetrics.js';
 import { buildChapters } from './chapters.js';
 
 // Opus at medium effort: the review is a judgement-and-writing task like
@@ -133,13 +134,18 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
 
   let words = [];
   let transcriptionError = null;
-  stage('transcribing');
-  try {
-    const scribed = await clients.transcribe({ path: path.join(callDir, 'candidate.wav') });
-    words = list(scribed?.words);
-  } catch (error) {
-    // Scribe failing only costs the word-level view; the call still gets metrics and a review.
-    transcriptionError = reason(error);
+  // A call answered only by typing has a silent recording: there is nothing to transcribe,
+  // and the review is told the call was typed rather than that transcription failed.
+  const nothingSpoken = candidateAnswerKinds(transcript).spoken === 0;
+  if (!nothingSpoken) {
+    stage('transcribing');
+    try {
+      const scribed = await clients.transcribe({ path: path.join(callDir, 'candidate.wav') });
+      words = list(scribed?.words);
+    } catch (error) {
+      // Scribe failing only costs the word-level view; the call still gets metrics and a review.
+      transcriptionError = reason(error);
+    }
   }
   let metrics = null;
   let metricsError = null;
@@ -147,8 +153,8 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
   try {
     metrics = await clients.metrics({
       transcript,
-      candidateProsodyByTurn: callRecord.candidateProsodyByTurn ?? {},
-      baselineSnapshot: callRecord.baseline ?? null,
+      candidateProsody: list(callRecord.candidateProsody),
+      baselineSnapshot: callRecord.voiceBaseline ?? null,
     });
   } catch (error) {
     metricsError = reason(error);
@@ -185,7 +191,14 @@ export async function analyzeCall({ callDir, callRecord = {}, plan, brief, deps 
     return { analysis, feedback: null };
   }
 
-  const chapters = buildChapters({ transcript, reviewChapters: checked.chapters, moments: checked.moments, metrics, toneNotes: list(callRecord.toneNotes), candidateProsodyByTurn: callRecord.candidateProsodyByTurn ?? {}, durationMs });
+  // The call clock starts at the answer but every transcript time is on the recording's
+  // timeline, which began earlier; the chapters live on the recording's timeline.
+  const timelineMs = Math.max(durationMs + (clockMs(callRecord.recordingLeadMs) ?? 0), transcript.reduce((max, turn) => Math.max(max, clockMs(turn?.endMs) ?? 0), 0));
+  const chapters = buildChapters({
+    transcript, reviewChapters: checked.chapters, moments: checked.moments, metrics,
+    toneNotes: list(callRecord.toneNotes).filter(note => typeof note?.note === 'string' && note.note.trim()),
+    candidateProsodyByTurn: prosodyByEntry(transcript, callRecord.candidateProsody), durationMs: timelineMs,
+  });
   const analysis = compose({ status: 'ready', chapters, fillers: fillerTotals({ feedback: checked.feedback, moments: checked.moments, transcript, durationMs }) });
   await writeAnalysis(callDir, analysis, deps);
   return { analysis, feedback: { ...checked.feedback, callId: callRecord.callId } };

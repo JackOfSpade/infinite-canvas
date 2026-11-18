@@ -106,9 +106,15 @@ const tests = [
     name: 'interview preload: the standalone app bridge reaches only its own saved-state and chooser channels',
     run: async () => {
       const { api, appApi, invocations } = loadPreloadBridge();
-      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'loadState', 'readCanvasInterviews', 'saveState']);
+      assert.deepEqual(Object.keys(appApi).sort(), ['chooseAppliedJobsFolder', 'chooseCareerFiles', 'convertCareerFiles', 'loadState', 'readCanvasInterviews', 'resolveInterviewTypedJob', 'revealConvertedCareerFile', 'saveState']);
       await appApi.loadState(); await appApi.saveState({ sessions: [] }); await appApi.chooseCareerFiles(); await appApi.chooseAppliedJobsFolder(); await appApi.readCanvasInterviews();
-      assert.deepEqual(invocations.map(({ channel }) => channel), ['interview-app:load-state', 'interview-app:save-state', 'interview-app:choose-career-files', 'interview-app:choose-applied-jobs-folder', 'interview-app:read-canvas-interviews']);
+      await appApi.resolveInterviewTypedJob({ nodeId: 'interview-node', text: 'Engineer at Acme', extra: 'dropped' });
+      await appApi.convertCareerFiles({ nodeId: 'interview-node', filePaths: ['/a/resume.pdf'], extra: 'dropped' });
+      await appApi.revealConvertedCareerFile({ token: 'tok', path: '/etc/passwd' });
+      assert.deepEqual(invocations.map(({ channel }) => channel), ['interview-app:load-state', 'interview-app:save-state', 'interview-app:choose-career-files', 'interview-app:choose-applied-jobs-folder', 'interview-app:read-canvas-interviews', 'resolve-interview-typed-job', 'convert-interview-career-files', 'interview-app:reveal-converted-career-file']);
+      assert.deepEqual({ ...invocations.at(-2).args[0] }, { nodeId: 'interview-node', filePaths: ['/a/resume.pdf'] }, 'conversion forwards only nodeId and filePaths');
+      assert.deepEqual({ ...invocations.at(-1).args[0] }, { token: 'tok' }, 'reveal forwards only an opaque token, never a path');
+      assert.deepEqual({ ...invocations.at(-3).args[0] }, { nodeId: 'interview-node', text: 'Engineer at Acme' }, 'the typed job call forwards only its two reviewed fields');
       // There is no canvas here: the application list never forwards a renderer-supplied path.
       const listed = await api.listInterviewApplicationFolders({ nodeId: 'interview-node', canvasFilePath: '/Users/someone/elsewhere.json' });
       assert.deepEqual({ ...listed.args[0] }, { nodeId: 'interview-node', canvasFilePath: null });

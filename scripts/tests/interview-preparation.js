@@ -15,6 +15,8 @@ import {
   normalizeInterviewPreparationJobUrl,
   registerInterviewPreparationHandlers,
   publishInterviewPreparedBrief,
+  publishTypedJobBundle,
+  validateTypedJobArgs,
   validateInterviewBriefAssessment,
   validateInterviewBriefRequestArgs,
   validateInterviewPreparationLoadArgs,
@@ -61,6 +63,88 @@ async function promptsFor(artifact, root) {
 }
 
 export default [
+  {
+    name: 'interview preparation: a typed job is stored as a private artifact with honest statuses, digests and display name',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-typed-'));
+      try {
+        const base = { job: { title: 'Platform Engineer', company: 'Acme', location: 'Toronto' }, organization: 'Acme Corp', listingText: 'Platform Engineer at Acme.\nReach hr@acme.example.test for questions.', jobUrl: 'https://careers.example.test/jobs/7?gh_jid=9#apply', notes: [] };
+        const link = await publishTypedJobBundle({ result: { ...base, kind: 'link' }, userDataPath: root });
+        assert(link.jobUrl === 'https://careers.example.test/jobs/7', 'the session URL is the canonical form without the typed query or fragment');
+        assert(link.bundle.verification.status === 'typed-posting' && link.bundle.displayName === 'Acme \u00B7 Platform Engineer' && /read from the posting page/u.test(link.bundle.integritySummary) && /no application documents/u.test(link.bundle.integritySummary), 'a link reads as a posting with no application documents');
+        const found = await publishTypedJobBundle({ result: { ...base, kind: 'found' }, userDataPath: root });
+        assert(found.bundle.verification.status === 'typed-posting' && found.bundle.artifactId !== link.bundle.artifactId, 'a found posting is also typed-posting, with its own reason');
+        const generated = await publishTypedJobBundle({ result: { ...base, kind: 'generated' }, userDataPath: root });
+        assert(generated.bundle.verification.status === 'typed-generated' && generated.bundle.displayName === 'Acme \u00B7 Platform Engineer (generated listing)' && /AI-generated stand-in listing, not the employer/u.test(generated.bundle.integritySummary), 'a generated listing is unmistakable');
+        const long = await publishTypedJobBundle({ result: { ...base, kind: 'generated', job: { ...base.job, title: 'T'.repeat(290) } }, userDataPath: root });
+        assert(long.bundle.displayName.length <= 180 && long.bundle.displayName.endsWith(' (generated listing)'), 'a long name keeps the generated suffix');
+        const reloaded = await loadInterviewPreparationBundle({ artifactId: generated.bundle.artifactId, userDataPath: root });
+        assert(JSON.stringify(reloaded) === JSON.stringify(generated.bundle) && !Object.hasOwn(reloaded, 'listingText') && !Object.hasOwn(reloaded, 'digests'), 'the public projection reloads and still hides the listing and digests');
+        const stored = JSON.parse(await fs.promises.readFile(path.join(root, 'interview-helper-artifacts', `${generated.bundle.artifactId}.json`), 'utf8'));
+        assert(stored.digests.originalJobListing === sha(stored.listingText) && Object.keys(stored.digests).length === 1, 'the only digest is the real listing digest');
+        assert(!stored.listingText.includes('hr@acme') && stored.listingText.includes('[redacted email]') && ![...stored.listingText].some(character => character.codePointAt(0) < 32), 'listing text is redacted and free of controls like a captured one');
+        assert(JSON.stringify(stored.applicationPositioning) === JSON.stringify({ resume: '', coverLetter: '' }), 'no application documents');
+        // Digest shape is tied to the status: a typed artifact cannot claim an application file, and a captured one still must have it.
+        const forged = async (verification, digests) => {
+          const payload = { ...stored, verification, digests }; delete payload.artifactId;
+          const artifactId = sha(stableJson(payload));
+          await fs.promises.writeFile(path.join(root, 'interview-helper-artifacts', `${artifactId}.json`), JSON.stringify({ ...payload, artifactId }), { mode: 0o600 });
+          return loadInterviewPreparationBundle({ artifactId, userDataPath: root });
+        };
+        assert(await forged({ status: 'typed-generated', reason: 'x' }, { originalJobListing: sha('a'), applicationHtml: sha('b') }) === null, 'a typed artifact that claims an application file is rejected');
+        assert(await forged({ status: 'typed-posting', reason: 'x' }, { applicationHtml: sha('b') }) === null, 'a typed artifact without its listing digest is rejected');
+        assert(await forged({ status: 'verified', reason: 'x' }, { originalJobListing: sha('a') }) === null, 'a captured artifact without Application.html is still rejected');
+        assert(await forged({ status: 'typed-posting', reason: 'x' }, { originalJobListing: sha('a') }) !== null, 'the typed shape loads');
+        for (const bad of [{ ...base, kind: 'other' }, { ...base, kind: 'link', jobUrl: 'ftp://x.example.test/a' }, { ...base, kind: 'link', jobUrl: '' }, { ...base, kind: 'link', listingText: '  ' }, { ...base, kind: 'link', job: { title: '', company: '', location: '' }, organization: '' }]) {
+          assert(await publishTypedJobBundle({ result: bad, userDataPath: root }).then(() => false, () => true), `a typed result that cannot be stored safely is rejected: ${JSON.stringify(bad).slice(0, 60)}`);
+        }
+        // Prompts and the brief say what the listing is.
+        const promptsFrom = async result => {
+          const { bundle } = await publishTypedJobBundle({ result, userDataPath: root });
+          return promptsFor(bundle, root);
+        };
+        const generatedPrompts = await promptsFrom({ ...base, kind: 'generated', jobUrl: 'https://jobs.example.test/1' });
+        assert(generatedPrompts.rawPrompt.includes('AI-generated stand-in listing, not the employer') && generatedPrompts.rawPrompt.includes('do not treat its specifics as facts about the employer'), 'research prompt discloses a generated listing');
+        const postingPrompts = await promptsFrom({ ...base, kind: 'link', jobUrl: 'https://jobs.example.test/1' });
+        assert(postingPrompts.rawPrompt.includes('read from the job posting page') && postingPrompts.rawPrompt.includes('no application documents were submitted') && !postingPrompts.rawPrompt.includes('AI-generated'), 'research prompt says a typed link was read from the page');
+        const captured = await captureInterviewPreparationBundle({ directory: await fixture(path.join(root, 'cap')), userDataPath: root });
+        const capturedPrompts = await promptsFor(captured, root);
+        assert(!/SOURCE OF THE LISTING/u.test(capturedPrompts.rawPrompt) && !/SOURCE OF THE LISTING/u.test(capturedPrompts.assessmentPrompt), 'a captured bundle prompt is unchanged');
+        const privateLike = { ...stored, verification: stored.verification, job: stored.job };
+        const brief = validateInterviewBriefAssessment({ ...briefValue(), applicationPositioning: [], warnings: ['Unknown: interview format.', 'x1', 'x2', 'x3', 'x4', 'x5', 'x6', 'x7'] }, { rawResearch: 'Acme serves teams. Source: https://acme.test/news Published 2026-01-01', bundle: privateLike, snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: generated.bundle.artifactId, createdAt: '2026-10-08T00:00:00.000Z' });
+        assert(brief.warnings.length === 8 && /AI-generated stand-in/u.test(brief.warnings[0]) && isPublishedInterviewBrief(brief), 'a generated listing always puts its disclosure first and the brief still seals within the item cap');
+        const postingBrief = validateInterviewBriefAssessment(briefValue(), { rawResearch: 'Acme serves teams. Source: https://acme.test/news Published 2026-01-01', bundle: { ...privateLike, verification: { status: 'typed-posting', reason: 'x' }, applicationPositioning: { resume: '', coverLetter: 'Build reliable systems.' } }, snapshotId: SNAPSHOT_ID, canonicalJobUrl: 'https://jobs.example.test/1', bundleArtifactId: found.bundle.artifactId, createdAt: '2026-10-08T00:00:00.000Z' });
+        assert(!postingBrief.warnings.some(item => /stand-in/u.test(item)), 'a posting read from a page adds no stand-in warning');
+        validateTypedJobArgs({ nodeId: 'node-1', text: 'Engineer at Acme' });
+        for (const bad of [{ nodeId: 'node-1' }, { nodeId: 'node-1', text: '' }, { nodeId: 'node-1', text: '   ' }, { nodeId: 'node-1', text: 'x'.repeat(2001) }, { nodeId: 'node-1', text: 'a', extra: 1 }, { nodeId: '../x', text: 'a' }, { nodeId: 'node-1', text: 5 }]) {
+          assert((() => { try { validateTypedJobArgs(bad); return false; } catch (error) { return error instanceof TypeError; } })(), `typed job args are strict: ${JSON.stringify(bad).slice(0, 50)}`);
+        }
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview preparation: the typed job handler reports the resolver message, never internals, and honours cancellation',
+    run: async () => {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-typed-handler-'));
+      try {
+        const run = async (resolveTypedJob, signal) => {
+          const handlers = new Map();
+          registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: { ...syntheticAiTransport, withActivity: () => syntheticAiTransport },
+            typedJob: { resolveTypedJob }, readTypedPage: async () => ({ ok: false }), logWarning: () => {} });
+          return handlers.get('resolve-interview-typed-job')({}, { nodeId: 'node-1', text: 'Acme' }, signal).then(value => ({ value }), error => ({ error }));
+        };
+        const unclear = Object.assign(new Error('internal detail /Users/x'), { code: 'typed-job-unclear', userMessage: 'Which company and role do you mean?' });
+        assert((await run(async () => { throw unclear; })).error.message === 'Which company and role do you mean?', 'the resolver message reaches the renderer');
+        const other = await run(async () => { throw new Error('secret path /Users/x/token'); });
+        assert(!/secret|Users/u.test(other.error.message) && other.error.message.length > 10, 'any other failure is generic');
+        const unsafe = await run(async () => ({ kind: 'link', job: { title: 'A', company: 'B', location: '' }, listingText: 'x', jobUrl: 'ftp://nope.example.test', organization: 'B', notes: [] }));
+        assert(unsafe.error && !/ftp/u.test(unsafe.error.message), 'a result that cannot be stored fails without echoing it');
+        const controller = new AbortController(); const reason = new Error('cancelled by user');
+        const aborted = await run(async () => { controller.abort(reason); throw reason; }, controller.signal);
+        assert(aborted.error === reason, 'an abort is rethrown untouched');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
   {
     name: 'interview preparation: captures only fixed safe files and persists an opaque verified artifact',
     run: async () => {

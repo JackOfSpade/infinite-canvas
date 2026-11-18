@@ -62,7 +62,16 @@ export default [
     assert.deepEqual(careerWritingStageProfile('qa-practice-order'), { model: 'opus', effort: 'low' });
     assert.deepEqual(careerWritingStageProfile('qa-answer-entailment'), { model: 'opus', effort: 'high' });
     assert.deepEqual(careerWritingStageProfile('qa-card-repair'), { model: 'opus', effort: 'low' });
-    for (const stage of ['qa-disclosures', 'qa-practice-order', 'qa-answer-entailment', 'qa-card-repair']) {
+    assert.deepEqual(careerWritingStageProfile('typed-job-intake'), { model: 'haiku', effort: 'medium' });
+    assert.deepEqual(careerWritingStageProfile('typed-job-posting'), { model: 'sonnet', effort: 'low' });
+    assert.deepEqual(careerWritingStageProfile('typed-job-research'), { model: 'opus', effort: 'high' });
+    assert.deepEqual(careerWritingStageProfile('typed-job-listing'), { model: 'opus', effort: 'medium' });
+    assert.deepEqual(careerWritingStageProfile('career-file-to-text'), { model: 'sonnet', effort: 'low' });
+    assert.equal(Object.hasOwn(INTERVIEW_QA_STAGE_PROFILES, 'career-file-to-text'), true, 'career-file-to-text is an explicit stage entry, not the Sonnet-high default');
+    for (const stage of ['typed-job-intake', 'typed-job-posting', 'typed-job-research', 'typed-job-listing', 'career-file-to-text']) {
+      assert.notEqual(careerWritingStageProfile(stage).effort, 'max', `${stage} never uses max effort`);
+    }
+    for (const stage of ['qa-disclosures', 'qa-practice-order', 'qa-answer-entailment', 'qa-card-repair', 'typed-job-intake', 'typed-job-posting', 'typed-job-research', 'typed-job-listing']) {
       assert.equal(Object.hasOwn(INTERVIEW_QA_STAGE_PROFILES, stage), true, `${stage} is an explicit Q&A stage entry`);
       assert.notDeepEqual(careerWritingStageProfile(stage), { model: 'sonnet', effort: 'high' }, `${stage} does not fall back to the Sonnet-high default`);
     }

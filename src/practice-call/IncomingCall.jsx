@@ -1,7 +1,8 @@
 import React, { useEffect } from 'react';
 import { Phone, PhoneOff } from 'lucide-react';
 import { startRingtone } from './ringtone.js';
-import { initialsOf, roleLine } from './persona.js';
+import Avatar from './Avatar.jsx';
+import { roleLine } from './persona.js';
 
 export default function IncomingCall({ persona, onAnswer, onDecline }) {
   // The ring starts when the screen mounts and stops on answer, decline or
@@ -14,7 +15,7 @@ export default function IncomingCall({ persona, onAnswer, onDecline }) {
   return <main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-[#202124] p-4 text-violet-50" aria-label="Incoming practice call">
     <p className="text-[10px] font-semibold uppercase tracking-widest text-violet-300">Incoming practice call</p>
     <div className="flex flex-col items-center gap-2">
-      <div className="grid h-20 w-20 place-items-center rounded-full border border-violet-300/40 bg-violet-500/15 text-2xl font-semibold text-violet-100 ring-4 ring-violet-400/20" aria-hidden="true">{initialsOf(persona)}</div>
+      <Avatar person={persona} className="h-20 w-20 text-3xl ring-4 ring-white/10" />
       <h1 className="text-lg font-semibold text-violet-50">{name}</h1>
       <p className="text-[12px] text-white/60">{roleLine(persona) || 'Interviewer'}</p>
     </div>

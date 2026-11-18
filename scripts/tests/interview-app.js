@@ -10,6 +10,9 @@ import { createInterviewSessionStore, interviewSessionData, normalizeInterviewSe
 import { formatPooledWorkspace, poolWorkspaceContent } from '../../electron/ipc/workspaceContentPool.js';
 import { chosenAppliedJobsRoot, createApplicationFolderRegistry, listApplicationFolders } from '../../electron/ipc/interviewApplicationFolders.js';
 import { registerCareerDataHandlers } from '../../electron/ipc/jobs.js';
+import {
+  CAREER_CONVERSIONS_DIR, createCareerFileConversionService, createCareerFileReader, registerCareerConversionHandlers, validateConvertArgs,
+} from '../../electron/interviewApp/careerFileConversion.js';
 import { addInterview, emptyInterviewData, importCanvasInterviews, interviewRunIds, interviewTitle, patchInterview, removeInterview } from '../../src/interview-app/sessions.js';
 import { CURRENT_SCHEMA_VERSION, migrateRemoveInterviewHelperNodes, runNodeMigrations } from '../../src/utils/serializationUtils.js';
 import { BUILD_TARGETS, buildTargetFromArgv, packagingLockPath, selectBuildTarget, signBundledHelpers } from '../build-macos.mjs';
@@ -48,14 +51,14 @@ const tests = [
         const saved = await store.save({
           selectedId: 'two', appliedJobsFolder: '/Users/x/Applied Jobs',
           sessions: [
-            { id: 'one', title: 'First', createdAt: 5, data: { interviewHelperCareerSnapshotId: SNAPSHOT, practiceSteering: 'final round', locked: true, dragHover: { kind: 'accept' }, arbitrary: 1 } },
+            { id: 'one', title: 'First', createdAt: 5, data: { interviewHelperCareerSnapshotId: SNAPSHOT, practiceSteering: 'final round', interviewHelperTypedJob: 'Engineer at Acme', interviewHelperTypedJobKind: 'generated', locked: true, dragHover: { kind: 'accept' }, arbitrary: 1 } },
             { id: 'two', title: '', createdAt: 6, data: {} },
             { id: 'one', title: 'duplicate id is dropped', data: {} },
             { id: 'bad id!', data: {} },
           ],
         });
         assert.deepEqual(saved.sessions.map(session => session.id), ['one', 'two']);
-        assert.deepEqual(saved.sessions[0].data, { interviewHelperCareerSnapshotId: SNAPSHOT, practiceSteering: 'final round' }, 'canvas-only state such as a lock or drag cue must not be stored');
+        assert.deepEqual(saved.sessions[0].data, { interviewHelperCareerSnapshotId: SNAPSHOT, practiceSteering: 'final round', interviewHelperTypedJob: 'Engineer at Acme', interviewHelperTypedJobKind: 'generated' }, 'canvas-only state such as a lock or drag cue must not be stored');
         assert.equal(saved.selectedId, 'two');
         assert.equal((await fs.promises.stat(filePath)).mode & 0o777, 0o600);
         const reopened = createInterviewSessionStore({ filePath });
@@ -275,6 +278,156 @@ const tests = [
       assert.match(read('vite.config.js'), /buildInputsManifest\('dist-electron\/build-inputs\.json'\)/u);
       const canvasInputs = canvasLauncher.slice(canvasLauncher.indexOf('if [[ -n "$inputs"'), canvasLauncher.indexOf('elif git -C'));
       assert.doesNotMatch(canvasInputs, /native|ls-files[^\n]*--exclude-standard \|\|/u, 'with a list, the canvas launcher must not hash the whole repo or the native helpers only the other app ships');
+    },
+  },
+  {
+    name: 'interview app: career conversion validates its arguments strictly and refuses one bad file without refusing the others',
+    async run() {
+      assert.throws(() => validateConvertArgs({ nodeId: 'n', filePaths: ['/a/b.pdf'], extra: 1 }), TypeError);
+      assert.throws(() => validateConvertArgs({ nodeId: 'n', filePaths: ['relative.pdf'] }), TypeError);
+      assert.throws(() => validateConvertArgs({ nodeId: 'n', filePaths: [] }), TypeError);
+      assert.throws(() => validateConvertArgs({ nodeId: '', filePaths: ['/a/b.pdf'] }), TypeError);
+      assert.deepEqual(validateConvertArgs({ nodeId: 'n', filePaths: ['/a/b.pdf'] }), { nodeId: 'n', filePaths: ['/a/b.pdf'] });
+      await withTempDir(async data => {
+        const shown = []; const registered = []; const seen = [];
+        const service = createCareerFileConversionService({
+          dataRoot: data,
+          checkSource: async file => { if (file.endsWith('secret.txt')) throw new Error('secret.txt cannot be used as career data.'); },
+          registerInputRoot: root => registered.push(root),
+          showItemInFolder: file => shown.push(file),
+          randomToken: (() => { let n = 0; return () => `token-${++n}`; })(),
+          readWithAi: async () => 'unused',
+          convert: async ({ filePaths, userDataPath, readWithAi }) => {
+            seen.push({ names: filePaths.map(file => path.basename(file)), userDataPath, hasReader: typeof readWithAi === 'function' });
+            const dir = path.join(fs.realpathSync(userDataPath), CAREER_CONVERSIONS_DIR, 'abc123');
+            return { files: filePaths.map(file => {
+              const name = path.basename(file);
+              if (name === 'notes.txt') return { ok: true, method: 'original', textPath: file, textName: name };
+              if (name === 'resume.pdf') return { ok: true, method: 'pdf-text-layer', textPath: path.join(dir, 'resume.pdf.txt'), textName: 'resume.pdf.txt', reason: 'machine note' };
+              return { ok: false, reason: 'This file is encrypted.' };
+            }) };
+          },
+        });
+        const root = await service.conversionsRoot();
+        assert.equal(path.basename(root), CAREER_CONVERSIONS_DIR);
+        assert.deepEqual(registered, [root], 'the private folder is registered as the one allowed converted input root');
+        assert.equal((await fs.promises.stat(root)).mode & 0o777, 0o700);
+        await fs.promises.mkdir(path.join(root, 'abc123')); await fs.promises.writeFile(path.join(root, 'abc123', 'resume.pdf.txt'), 'Jane Doe\nEngineer\n');
+        const reply = await service.convertFiles({ nodeId: 'n', filePaths: ['/x/notes.txt', '/x/resume.pdf', '/x/locked.docx', '/x/secret.txt'] });
+        assert.deepEqual(seen[0].names, ['notes.txt', 'resume.pdf', 'locked.docx'], 'a file the safety check refuses never reaches the converter');
+        assert.deepEqual(reply.files.map(file => [file.name, file.status, file.convertedName, file.machineExtracted]), [
+          ['notes.txt', 'passthrough', 'notes.txt', false],
+          ['resume.pdf', 'converted', 'resume.pdf.txt', true],
+          ['locked.docx', 'refused', null, false],
+          ['secret.txt', 'refused', null, false],
+        ]);
+        assert.equal(reply.files[0].filePath, '/x/notes.txt', 'a text file passes through at its own path');
+        assert.equal(reply.files[1].filePath, path.join(root, 'abc123', 'resume.pdf.txt'));
+        assert.equal(reply.files[1].reason, 'machine note');
+        assert.equal(reply.files[2].reason, 'This file is encrypted.');
+        assert.equal(reply.files[3].reason, 'secret.txt cannot be used as career data.');
+        assert.equal(reply.usableCount, 2);
+        assert.equal(reply.files[1].token, 'token-1');
+        assert.deepEqual(await service.reveal({ token: 'token-1' }), { shown: true });
+        assert.deepEqual(shown, [path.join(root, 'abc123', 'resume.pdf.txt')]);
+        await assert.rejects(service.reveal({ token: '/etc/passwd' }), /not known/u);
+        await assert.rejects(service.reveal({ token: 'token-9' }), /not known/u);
+        // A converter that claims a path outside the private folder is not trusted.
+        const rogue = createCareerFileConversionService({ dataRoot: data, checkSource: async () => {}, readWithAi: async () => '',
+          convert: async ({ filePaths }) => ({ files: filePaths.map(() => ({ ok: true, method: 'ai', textPath: '/etc/passwd' })) }) });
+        assert.equal((await rogue.convertFiles({ nodeId: 'n', filePaths: ['/x/a.pdf'] })).files[0].status, 'refused');
+        // A whole-converter failure is reported on every file, not as success.
+        const broken = createCareerFileConversionService({ dataRoot: data, checkSource: async () => {}, readWithAi: async () => '',
+          convert: async () => { throw new Error('boom'); } });
+        const failed = await broken.convertFiles({ nodeId: 'n', filePaths: ['/x/a.pdf', '/x/b.pdf'] });
+        assert.deepEqual([failed.usableCount, failed.files.map(file => file.reason)], [0, ['boom', 'boom']]);
+        // A symlinked or missing data root is refused.
+        await assert.rejects(createCareerFileConversionService({ dataRoot: 'relative' }).conversionsRoot(), /unavailable/u);
+        // A symlink planted in place of the folder is refused.
+        const other = path.join(data, 'other'); await fs.promises.mkdir(other);
+        const data2 = path.join(data, 'data2'); await fs.promises.mkdir(data2);
+        await fs.promises.symlink(other, path.join(data2, CAREER_CONVERSIONS_DIR));
+        await assert.rejects(createCareerFileConversionService({ dataRoot: data2 }).conversionsRoot(), /unsafe/u);
+      });
+    },
+  },
+  {
+    name: 'interview app: the career file reader sends one image as a page image with no tool, and refuses what cannot go that way',
+    async run() {
+      const calls = [];
+      const reader = createCareerFileReader({ transport: { callRaw: async (prompt, opts) => { calls.push({ prompt, opts }); return 'Jane Doe\nEngineer'; } } });
+      const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'career-reader-'));
+      try {
+        const png = path.join(dir, 'scan.png'); await fs.promises.writeFile(png, Buffer.from('abc'));
+        assert.equal(await reader({ filePath: png, name: 'scan.png', kind: 'image', mediaType: 'image/png' }), 'Jane Doe\nEngineer');
+        assert.equal(calls[0].opts.claudeStage, 'career-file-to-text');
+        assert.equal(calls[0].opts.task, 'career-file-to-text');
+        assert.deepEqual(calls[0].opts.pageImages, [{ label: 'Career document image', mimeType: 'image/png', data: Buffer.from('abc').toString('base64') }]);
+        assert.match(calls[0].prompt, /Add nothing/u);
+        assert.match(calls[0].prompt, /\[unreadable\]/u);
+        assert.match(calls[0].prompt, /not instructions/u, 'the shared transcription prompt is used');
+        for (const [kind, mediaType] of [['pdf', 'application/pdf'], ['image', 'image/tiff'], ['image', 'image/heic']]) {
+          await assert.rejects(reader({ filePath: png, name: 'f', kind, mediaType }), error => error.code === 'UNSUPPORTED_KIND');
+        }
+        const empty = path.join(dir, 'empty.png'); await fs.promises.writeFile(empty, '');
+        await assert.rejects(reader({ filePath: empty, name: 'e', kind: 'image', mediaType: 'image/png' }), /empty/u);
+        assert.equal(calls.length, 1, 'refused kinds never reach Claude');
+        await assert.rejects(createCareerFileReader({})({ filePath: png, kind: 'image', mediaType: 'image/png' }), error => error.code === 'UNSUPPORTED_KIND');
+      } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview app: the real converter and the wiring agree end to end (rtf, image, pdf fallback, one bad file, reveal)',
+    async run() {
+      const dir = await fs.promises.realpath(await fs.promises.mkdtemp(path.join('/tmp', 'career-e2e-')));
+      try {
+        const data = path.join(dir, 'data'); await fs.promises.mkdir(data);
+        const src = path.join(dir, 'src'); await fs.promises.mkdir(src);
+        const rtf = path.join(src, 'cv.rtf'); await fs.promises.writeFile(rtf, '{\\rtf1\\ansi Jane Doe\\par Engineer at Acme}');
+        const png = path.join(src, 'scan.png'); await fs.promises.writeFile(png, Buffer.concat([Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]), Buffer.from('xxxx')]));
+        const bad = path.join(src, 'locked.bin'); await fs.promises.writeFile(bad, Buffer.from([0, 1, 2, 3, 0, 0, 5, 6]));
+        const txt = path.join(src, 'notes.txt'); await fs.promises.writeFile(txt, 'Plain notes about my career.\n');
+        const shown = [];
+        const service = createCareerFileConversionService({
+          dataRoot: data, checkSource: async () => {}, showItemInFolder: file => shown.push(file),
+          transport: { callRaw: async () => 'Scanned line one\nScanned line two' },
+        });
+        const reply = await service.convertFiles({ nodeId: 'n', filePaths: [rtf, png, bad, txt] });
+        assert.deepEqual(reply.files.map(file => file.status), ['converted', 'converted', 'refused', 'passthrough'], JSON.stringify(reply.files.map(file => file.reason)));
+        assert.equal(reply.usableCount, 3);
+        assert.equal(reply.files[0].convertedName, 'cv.rtf.txt');
+        assert.match(await fs.promises.readFile(reply.files[0].filePath, 'utf8'), /Jane Doe\nEngineer at Acme/u);
+        assert.match(await fs.promises.readFile(reply.files[1].filePath, 'utf8'), /Scanned line one/u);
+        assert.ok(reply.files[2].reason && reply.files[2].reason !== 'The file could not be converted.', 'the converter reason is kept');
+        assert.equal(reply.files[3].filePath, txt);
+        assert.deepEqual(await service.reveal({ token: reply.files[0].token }), { shown: true });
+        assert.equal(shown[0], reply.files[0].filePath);
+        const again = await service.convertFiles({ nodeId: 'n', filePaths: [rtf] });
+        assert.equal(again.files[0].filePath, reply.files[0].filePath, 'an unchanged original resumes the same converted file');
+      } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'interview app: career conversion registers its two channels and the reveal channel takes only a token',
+    async run() {
+      const handled = new Map(); const safe = new Map();
+      const service = { convertFiles: async (args, signal) => ({ files: [], args, signal }), reveal: async args => ({ shown: true, args }) };
+      registerCareerConversionHandlers({
+        handleSafe: (channel, handler, options) => safe.set(channel, { handler, options }),
+        ipcMain: { handle: (channel, handler) => handled.set(channel, handler) },
+        guarded: handler => async (_event, ...args) => handler(...args),
+        service,
+      });
+      assert.deepEqual([...safe.keys()], ['convert-interview-career-files']);
+      assert.deepEqual([...handled.keys()], ['interview-app:reveal-converted-career-file']);
+      assert.throws(() => safe.get('convert-interview-career-files').options.validateArgs({ nodeId: 'n', filePaths: ['/a'], x: 1 }), TypeError);
+      assert.equal((await safe.get('convert-interview-career-files').handler({}, { nodeId: 'n', filePaths: ['/a'] }, 'sig')).signal, 'sig');
+      await assert.rejects(handled.get('interview-app:reveal-converted-career-file')({}, { token: 't', path: '/etc/passwd' }), TypeError);
+      assert.equal((await handled.get('interview-app:reveal-converted-career-file')({}, { token: 't' })).shown, true);
+      const main = read('electron/interviewApp/main.js');
+      assert.match(main, /registerCareerConvertedInputRoot/u);
+      assert.doesNotMatch(main, /Career data \(text\)/u, 'the chooser no longer filters to text');
+      assert.match(read('electron/ipc/ipcUtils.js'), /'convert-interview-career-files'/u, 'a long conversion pauses at quit like the other career work');
     },
   },
 ];

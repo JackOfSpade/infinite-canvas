@@ -5,7 +5,7 @@ import { assert } from './testHelpers.js';
 import {
   buildInterviewBrief, buildInterviewPreparedAnswers, captureInterviewPreparationBundle,
   loadInterviewPreparedAnswerBank, publishInterviewPreparedAnswers, publishInterviewPreparedBrief,
-  registerInterviewPreparationHandlers, validateInterviewBriefAssessment,
+  publishTypedJobBundle, registerInterviewPreparationHandlers, validateInterviewBriefAssessment,
 } from '../../electron/ipc/interviewPreparation.js';
 import { answerBankRecordId, buildInterviewAnswerEvidence, INTERVIEW_ANSWER_QUESTION_CATALOG, inspectInterviewAnswerCards, isInterviewAnswerBank } from '../../electron/ipc/interviewAnswerBank.js';
 import { canonicalizeGeneratedUntrustedBoundaryNonces } from '../../electron/ipc/nonApiAi.js';
@@ -26,12 +26,13 @@ const assessment = { role: { title: 'Engineer', company: 'Example Studio', locat
   roleThemes: ['Release automation'], companyFacts: [{ fact: COMPANY_FACT, sourceUrl: 'https://example.test/about', sourceDate: 'unknown', evidenceQuote: COMPANY_FACT }],
   recentContext: [], likelyQuestions: ['How did you improve release automation?'], questionsToAsk: [], applicationPositioning: [], warnings: [] };
 
-async function fixture(root) {
+async function fixture(root, { typed = null } = {}) {
   const directory = path.join(root, 'bundle');
-  await fs.promises.mkdir(directory);
-  await fs.promises.writeFile(path.join(directory, 'Application.html'), `<section data-ic-document-panel="resume"><main><h2>Experience</h2><h3>Engineer · Fixture Labs</h3><p>May 2022 – June 2025</p><ul>${snapshot.profile.achievements.map(item => `<li>${item.claim}</li>`).join('')}</ul></main></section>`);
-  await fs.promises.writeFile(path.join(directory, 'Original Job Listing.md'), '# Engineer\n\n**Company:** Example Studio\n**Location:** Remote\n\n---\n\nRelease automation.');
-  const captured = await captureInterviewPreparationBundle({ directory, userDataPath: root });
+  if (!typed) await fs.promises.mkdir(directory);
+  if (!typed) await fs.promises.writeFile(path.join(directory, 'Application.html'), `<section data-ic-document-panel="resume"><main><h2>Experience</h2><h3>Engineer · Fixture Labs</h3><p>May 2022 – June 2025</p><ul>${snapshot.profile.achievements.map(item => `<li>${item.claim}</li>`).join('')}</ul></main></section>`);
+  if (!typed) await fs.promises.writeFile(path.join(directory, 'Original Job Listing.md'), '# Engineer\n\n**Company:** Example Studio\n**Location:** Remote\n\n---\n\nRelease automation.');
+  // A typed source stores only a listing: no application file and no résumé text.
+  const captured = typed ? (await publishTypedJobBundle({ result: typed, userDataPath: root })).bundle : await captureInterviewPreparationBundle({ directory, userDataPath: root });
   const bundle = JSON.parse(await fs.promises.readFile(path.join(root, 'interview-helper-artifacts', `${captured.artifactId}.json`), 'utf8'));
   const brief = validateInterviewBriefAssessment(assessment, { rawResearch: research, bundle, snapshotId, canonicalJobUrl, bundleArtifactId: captured.artifactId });
   const projection = buildInterviewAnswerEvidence({ snapshot, brief, bundle });
@@ -53,8 +54,8 @@ async function fixture(root) {
       consistency: { consistentWithResume: true, resumeQuote: item.text } };
   }) };
   for (const card of value.cards) {
-    card.consistency = deriveInterviewResumeConsistency([card.headline, ...card.bullets, card.example], evidence, bundle.applicationPositioning.resume);
-    assert(card.consistency?.consistentWithResume, 'each synthetic prepared card has a genuine captured résumé match');
+    card.consistency = typed ? { consistentWithResume: false, resumeQuote: '' } : deriveInterviewResumeConsistency([card.headline, ...card.bullets, card.example], evidence, bundle.applicationPositioning.resume);
+    assert(typed || card.consistency?.consistentWithResume, 'each synthetic prepared card has a genuine captured résumé match');
   }
   return { captured, bundle, brief, value, args: { nodeId: 'interview-node', snapshotId, canonicalJobUrl, bundleArtifactId: captured.artifactId, manualAiRunId: 'interview-run' } };
 }
@@ -79,7 +80,54 @@ function answerReply(value, prompt, opts) {
   return reply;
 }
 
+const TYPED_RESULT = { kind: 'generated', job: { title: 'Engineer', company: 'Example Studio', location: 'Remote' }, organization: 'Example Studio',
+  listingText: 'Engineer at Example Studio. Release automation for a remote team.', jobUrl: `${canonicalJobUrl}?utm=typed#top`, notes: ['No open posting for this role was found, so this listing is generated.'] };
+
 export default [
+  {
+    name: 'interview answer preparation: a typed generated listing resolves, passes brief validation and answer-bank bindings with no application documents',
+    async run() {
+      const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'interview-typed-job-'));
+      try {
+        const { args, value } = await fixture(root, { typed: TYPED_RESULT });
+        const handlers = new Map(); const calls = []; const seenText = []; let answerPrompt = ''; let researchPrompt = ''; let assessmentPrompt = '';
+        const loadSnapshot = async () => snapshot;
+        const fakeTransport = { callText: async (prompt, opts) => { calls.push(['text', opts.claudeStage, opts.task, !!opts.responseSchema]); return { ok: true }; },
+          callRaw: async (prompt, opts) => { calls.push(['raw', opts.claudeStage, opts.task]); return 'prose'; } };
+        registerInterviewPreparationHandlers({ appInstance: { getPath: () => root }, registerHandler: (channel, handler) => handlers.set(channel, handler), aiTransport: fakeTransport,
+          readTypedPage: async () => ({ ok: false }),
+          typedJob: {
+            resolveTypedJob: async ({ text, callText, readPage }) => {
+              seenText.push(text); assert(typeof readPage === 'function', 'the resolver receives the composed page reader');
+              await callText({ prompt: 'p1', claudeStage: 'typed-job-intake', task: 'typed-job-intake', schema: { type: 'object' } });
+              await callText({ prompt: 'p2', claudeStage: 'typed-job-research', task: 'typed-job-research' });
+              await callText({ prompt: 'p3', claudeStage: 'typed-job-listing', task: 'typed-job-listing' });
+              return TYPED_RESULT;
+            } },
+          buildBrief: a => buildInterviewBrief({ ...a, callRaw: async prompt => { researchPrompt = prompt; return research; }, callText: async prompt => { assessmentPrompt = prompt; return assessment; } }),
+          buildAnswers: a => buildInterviewPreparedAnswers({ ...a, loadSnapshot, callText: async (prompt, opts) => { if (!isEntailmentPrompt(prompt)) answerPrompt = prompt; return answerReply(value, prompt, opts); } }),
+          publishAnswers: a => publishInterviewPreparedAnswers({ ...a, loadSnapshot }),
+          loadAnswers: a => loadInterviewPreparedAnswerBank({ ...a, loadSnapshot }),
+        });
+        const typedReply = await handlers.get('resolve-interview-typed-job')({}, { nodeId: 'interview-node', text: 'Engineer at Example Studio' });
+        assert(seenText[0] === 'Engineer at Example Studio' && typedReply.kind === 'generated' && typedReply.notes.length === 1, 'the handler returns the kind and the notes');
+        assert(typedReply.jobUrl === canonicalJobUrl, 'the session job URL is the canonical form: the typed link query and fragment are dropped');
+        assert(JSON.stringify(calls) === JSON.stringify([['text', 'typed-job-intake', 'typed-job-intake', true], ['raw', 'typed-job-research', 'typed-job-research'], ['raw', 'typed-job-listing', 'typed-job-listing']]), `stages use the right transport entry points: ${JSON.stringify(calls)}`);
+        assert(typedReply.bundle.artifactId === args.bundleArtifactId && typedReply.bundle.verification.status === 'typed-generated' && typedReply.bundle.displayName === 'Example Studio \u00B7 Engineer (generated listing)', 'a generated bundle reads as one');
+        assert(/AI-generated stand-in/u.test(typedReply.bundle.integritySummary) && /^[a-f0-9]{64}$/u.test(typedReply.bundle.applicationArtifactDigest), 'the integrity text says what the source is and the digest is bound');
+        const stored = JSON.parse(await fs.promises.readFile(path.join(root, 'interview-helper-artifacts', `${typedReply.bundle.artifactId}.json`), 'utf8'));
+        assert(JSON.stringify(Object.keys(stored.digests)) === '["originalJobListing"]' && stored.applicationPositioning.resume === '' && stored.applicationPositioning.coverLetter === '', 'no application file is claimed and no application text exists');
+        const reply = await handlers.get('build-interview-brief')({}, { ...args, bundleArtifactId: typedReply.bundle.artifactId });
+        assert(reply.brief.inputs.applicationArtifactDigest === typedReply.bundle.applicationArtifactDigest && reply.answerBankAvailable && reply.answerCardCount === 12, 'brief validation and the answer-bank bindings accept a typed artifact');
+        assert(reply.brief.warnings[0].includes('AI-generated stand-in') && reply.brief.applicationPositioning.length === 0, 'the sealed brief carries a plain warning and no application positioning');
+        assert(researchPrompt.includes('AI-generated stand-in listing') && assessmentPrompt.includes('not the employer') && answerPrompt.includes('AI-generated stand-in listing') && answerPrompt.includes('consistentWithResume is false'), 'research, assessment and answer prompts say what the listing really is');
+        const loaded = await handlers.get('load-interview-prepared-brief')({}, { nodeId: args.nodeId, briefRecordId: reply.briefRecordId, snapshotId, canonicalJobUrl, bundleArtifactId: typedReply.bundle.artifactId, bundleArtifactDigest: typedReply.bundle.applicationArtifactDigest });
+        assert(loaded.answerBankAvailable && loaded.answerCardCount === 12, 'the sealed bank reloads against the typed artifact');
+        const bank = await loadInterviewPreparedAnswerBank({ brief: reply.brief, userDataPath: root, snapshot });
+        assert(bank.cards.every(card => card.consistency.consistentWithResume === false && card.consistency.resumeQuote === ''), 'every card reads as not verified against a résumé');
+      } finally { await fs.promises.rm(root, { recursive: true, force: true }); }
+    },
+  },
   {
     name: 'interview answer preparation: reviewed-claim why intro and project fallbacks review previously unreviewed extensions',
     async run() {

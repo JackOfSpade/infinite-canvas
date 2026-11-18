@@ -22,7 +22,8 @@ const answerArrays = (metrics, key) => list(metrics?.answers).flatMap(answer => 
 function pauseMarkers(candidateProsodyByTurn) {
   const seen = new Set();
   const markers = [];
-  for (const turn of Object.values(candidateProsodyByTurn ?? {})) {
+  // The map holds one measured turn or a list of them per transcript entry.
+  for (const turn of Object.values(candidateProsodyByTurn ?? {}).flat()) {
     for (const entry of list(turn?.pauses)) {
       const startMs = ms(entry?.startMs);
       const endMs = ms(entry?.endMs);

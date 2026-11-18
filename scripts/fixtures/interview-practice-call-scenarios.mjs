@@ -64,9 +64,9 @@ export const SCENARIOS = [
 
 SCENARIOS.push(
   {
-    name: 'silence-10s', synthetic: true,
+    name: 'silence-20s', synthetic: true,
     interviewer: [GREETING, 'Take your time, would you like me to rephrase the question?'],
-    actions: [wait(11000)],
+    actions: [wait(21000)],
     expect: { silenceMessages: 1 },
   },
   {

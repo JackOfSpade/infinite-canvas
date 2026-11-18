@@ -78,6 +78,9 @@ export function InterviewPracticePanel({ nodeId, briefRecordId, snapshotId, cano
         ...(focus ? { steering: focus } : {}),
       });
       if (result && result.success === false) setPastNotice({ tone: 'error', text: result.error || 'The practice call could not start.' });
+      // A call that could not start comes back as an error state and opens no window,
+      // so this panel is the only place the reason can be shown.
+      else if (result?.phase === 'error') setPastNotice({ tone: 'error', text: result.error?.message || 'The practice call could not start.' });
       else if (result?.note) setPastNotice({ tone: 'error', text: result.note });
     } catch (error) { setPastNotice({ tone: 'error', text: error?.message || 'The practice call could not start.' }); }
     finally { setPracticeBusy(false); }

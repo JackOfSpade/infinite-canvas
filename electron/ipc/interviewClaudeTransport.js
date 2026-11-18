@@ -16,7 +16,7 @@
  * never steps in. Research and fact-check stages never route: tool use and truth
  * checks stay on Claude.
  *
- * Research (qa-research) is Parallel Search only: the Parallel MCP server and
+ * Research (qa-research, and typed-job-research for a typed company and role) is Parallel Search only: the Parallel MCP server and
  * its six tools, through the SDK stage. Measured 2026-11-14 on 4 briefs with a
  * blind judge (out of 5): built-in 3.43, Parallel 4.05, both merged 3.85. There
  * is no built-in fallback: no stage here is offered WebSearch or WebFetch, and
@@ -49,9 +49,14 @@ const SHADOW_STAGES = Object.freeze(['qa-brief', 'qa-write']);
 /** Kept for callers and tests from when credit exhaustion blocked offload; a routed stage now simply fails. */
 export function resetInterviewOffloadBlock() {}
 
+/** The stages that search the web through Parallel: Prepare research and the typed-job company research. */
+export function isInterviewResearchStage(stage) {
+  return stage === 'qa-research' || stage === 'typed-job-research';
+}
+
 /** Research and every truth-check stage stay on Claude even if a table entry exists. */
 export function interviewStageMayOffload(stage) {
-  return typeof stage === 'string' && stage !== 'qa-research' && stage !== 'qa-answer-entailment' && stage !== 'qa-card-repair' && !stage.startsWith('qa-fact-');
+  return typeof stage === 'string' && !isInterviewResearchStage(stage) && stage !== 'career-file-to-text' && stage !== 'qa-answer-entailment' && stage !== 'qa-card-repair' && !stage.startsWith('qa-fact-');
 }
 
 /** The Claude stage for an interview task. `stage` from the caller wins. */
@@ -144,8 +149,10 @@ export function createInterviewClaudeTransport({
 
   async function call(prompt, opts = {}, { json, scope = null }) {
     const { signal, task, responseSchema, responseValidator, claudeStage } = opts;
+    // Page images (base64) for a stage that reads a picture: sent with the first message only, never recorded.
+    const pageImages = Array.isArray(opts.pageImages) && opts.pageImages.length ? opts.pageImages : null;
     const stage = interviewClaudeStage(task, claudeStage);
-    const research = stage === 'qa-research';
+    const research = isInterviewResearchStage(stage);
     const profile = careerWritingStageProfile(stage);
     // Ultracode is off by default: only an explicit opt-in (call or stage profile) is forwarded.
     const ultracode = opts.ultracode === true || (opts.ultracode !== false && profile.ultracode === true);
@@ -204,6 +211,7 @@ export function createInterviewClaudeTransport({
           } else {
             usedBuiltIn = true;
             reply = await runStage({ ...binding(), text, signal, model: profile.model, effort: profile.effort, sessionId, resume: claudeStarted, tools: '',
+              ...(pageImages && !claudeStarted ? { pageImages } : {}),
               ...(ultracode ? { ultracode: true } : {}),
               ...(scope ? { onActivity: event => standaloneClaudeActivity.event(scope.key, event) } : {}) });
           }

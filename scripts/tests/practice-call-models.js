@@ -372,6 +372,31 @@ const storeAbortFixture = {
   },
 };
 
+const staleSweepFixture = {
+  name: 'practice call models: a download first clears that model\'s stale temp files and leaves the rest',
+  async run() {
+    const root = await tempRoot('practice-model-store-');
+    try {
+      const bytes = Buffer.from('smart bytes '.repeat(30));
+      await fsp.writeFile(path.join(root, '.smartTurn-deadbeef.part'), 'half');
+      await fsp.mkdir(path.join(root, '.smartTurn-deadbeef-extract'));
+      await fsp.writeFile(path.join(root, '.smartTurn-deadbeef-extract', 'x'), 'x');
+      await fsp.writeFile(path.join(root, '.tone-cafe.zip'), 'other model');
+      const store = createModelStore({
+        rootDir: root,
+        fetch: async () => chunkedResponse(bytes),
+        fs: fsp,
+        unzip: unzipWriting(bytes, []),
+        specs: testSpecs({ smartBytes: bytes, zipBytes: bytes, onnxBytes: bytes }),
+      });
+      await store.ensure('smartTurn');
+      assert.deepEqual((await fsp.readdir(root)).sort(), ['.tone-cafe.zip', 'smart-turn-test.onnx']);
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  },
+};
+
 const pinnedSpecFixture = {
   name: 'practice call models: pinned model specs match the build contract',
   run() {
@@ -399,6 +424,7 @@ tests.push(
   storeDownloadFixture,
   storeRejectFixture,
   storeAbortFixture,
+  staleSweepFixture,
   pinnedSpecFixture,
 );
 

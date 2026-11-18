@@ -12,6 +12,8 @@
     "identity": "AI Chalkboard Local Code Signing",
     "forceCodeSigning": true,
     "hardenedRuntime": true,
+    "entitlements": "build/entitlements.interview.plist",
+    "entitlementsInherit": "build/entitlements.interview.plist",
     "extraResources": [
       {
         "from": "native/interview-audio/build/Interview Audio Helper.app",
@@ -24,6 +26,7 @@
     ],
     "timestamp": "none",
     "extendInfo": {
+      "NSCameraUsageDescription": "Show your own camera preview during practice calls. Video is never recorded or sent.",
       "NSMicrophoneUsageDescription": "Hear your answers during interview practice calls. Audio is transcribed on this Mac and recorded locally for your feedback.",
       "NSAudioCaptureUsageDescription": "Transcribe interview call output on this Mac without capturing your microphone or changing playback.",
       "NSScreenCaptureUsageDescription": "Read interview call system audio locally. No screen frames or microphone audio are captured by Interview Helper."
@@ -42,6 +45,8 @@
   ],
   "asarUnpack": [
     "node_modules/onnxruntime-node/**/*",
+    "node_modules/onnxruntime-common/**/*",
+    "node_modules/opusscript/**/*",
     "dist-electron-interview/inferenceWorkerThread.js"
   ],
   "extraResources": [

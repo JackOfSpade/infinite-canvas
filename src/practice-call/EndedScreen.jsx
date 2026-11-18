@@ -1,7 +1,7 @@
 import React from 'react';
 import { Check, Loader2 } from 'lucide-react';
 import { ANALYSIS_STAGES, analysisStageIndex } from './callModel.js';
-import { initialsOf } from './persona.js';
+import Avatar from './Avatar.jsx';
 import { formatTime } from './replayModel.js';
 
 export const ANALYSING_MESSAGE = 'Analysing the recording. Your feedback opens in this window as soon as it is ready.';
@@ -18,10 +18,7 @@ export default function EndedScreen({ state }) {
   return <main className="flex min-h-screen items-center justify-center bg-[#202124] p-6 text-[#e8eaed]" aria-label={title}>
     <section className="pc-rise w-full max-w-md space-y-5">
       <div className="flex items-center gap-4">
-        <div className="relative grid h-14 w-14 shrink-0 place-items-center rounded-full bg-[#7b1fa2] text-xl font-medium text-white" aria-hidden="true">
-          {initialsOf(state?.persona)}
-          <span className="pc-ring absolute inset-0 rounded-full" />
-        </div>
+        <Avatar person={state?.persona} className="h-14 w-14 text-xl"><span className="pc-ring absolute inset-0 rounded-full" /></Avatar>
         <div className="min-w-0">
           <h1 className="text-2xl font-normal text-white">{analysing ? 'Preparing your feedback' : 'You left the call'}</h1>
           <p className="text-sm text-[#9aa0a6]">Call length {formatTime(state?.elapsedMs)}{state?.persona?.name ? ` · Interviewer: ${state.persona.name}` : ''}</p>

@@ -14,6 +14,11 @@ function readApi() {
   return typeof window === 'undefined' ? null : window.practiceCallAPI || null;
 }
 
+// A replay window is opened with ?replay=1; it shows the past call whatever the service phase says.
+const isReplayWindow = () => {
+  try { return typeof window !== 'undefined' && new URLSearchParams(window.location?.search || '').get('replay') === '1'; } catch { return false; }
+};
+
 // A window without the preload has no main process to talk to; that is known
 // before the first render, so it is the initial state instead of an effect write.
 const initialState = () => (typeof readApi()?.getState === 'function' ? null : MISSING_PRELOAD);
@@ -46,7 +51,7 @@ export default function PracticeCallApp() {
     };
   }, []);
 
-  const phase = state?.phase;
+  const phase = isReplayWindow() && state && state.phase !== 'error' ? 'replay' : state?.phase;
   useEffect(() => {
     if (phase !== 'replay') return undefined;
     const api = readApi();
@@ -85,13 +90,13 @@ export default function PracticeCallApp() {
     return <main role="status" aria-live="polite" aria-label="Loading practice call" className="grid min-h-screen place-items-center bg-[#202124] text-[11px] text-violet-100">Loading practice call…</main>;
   }
   // Keyed by stage of the session so each hand-over (call, processing, feedback) fades in.
-  const stageKey = state.phase === 'ended' || state.phase === 'analyzing' ? 'processing' : state.phase;
+  const stageKey = phase === 'ended' || phase === 'analyzing' ? 'processing' : phase;
   const renderPhase = () => {
-  switch (state.phase) {
+  switch (phase) {
     case 'consent': return <ConsentScreen onAgree={agree} busy={busy} />;
     case 'downloading': return <DownloadingScreen download={state.modelDownload} />;
     case 'precheck': return <PrecheckScreen level={state.level} usageWarning={state.usageWarning} persona={state.persona} />;
-    case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('hangUp')} />;
+    case 'ringing': return <IncomingCall persona={state.persona} onAnswer={() => invoke('answer')} onDecline={() => invoke('hangUp', { feedback: false })} />;
     case 'connecting': return <ConnectingScreen persona={state.persona} />;
     case 'in-call': return <InCall state={state} leaveRequest={leaveRequest} api={{
       setMuted: value => invoke('setMuted', value),
@@ -99,6 +104,8 @@ export default function PracticeCallApp() {
       getPreparedCards: () => invoke('getPreparedCards'),
       sendChat: text => invoke('sendChat', text),
       setTyping: value => invoke('setTyping', value),
+      setPaused: value => invoke('setPaused', value),
+      updatePad: text => invoke('updatePad', text),
     }} />;
     case 'ended':
     case 'analyzing': return <EndedScreen state={state} />;

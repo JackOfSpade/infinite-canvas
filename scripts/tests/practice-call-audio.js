@@ -11,6 +11,8 @@ import { createFloorBidDetector, FLOOR_BID_THRESHOLDS } from '../../electron/pra
 import { createInterviewerTrack } from '../../electron/practiceCall/audio/trackWriter.js';
 import { mixTracks } from '../../electron/practiceCall/audio/mixdown.js';
 import { callMetrics } from '../../electron/practiceCall/audio/callMetrics.js';
+import { createPracticeEar } from '../../electron/practiceCall/ear.js';
+import { trimWavStart } from '../../electron/practiceCall/audio/trimWav.js';
 
 // All fixtures here are synthetic: generated sines, seeded noise, silence and
 // scripted word timings. No real recording is read.
@@ -474,6 +476,156 @@ export default [
       }
       assert.ok(first >= 2399 && first <= 2401, "tone starts at 100 ms, not 183.75 ms: " + first);
       assert.ok(last >= 4798 && last <= 4800, "tone ends at 200 ms: " + last);
+    },
+  },
+
+  {
+    // The ear has only ever been built with stand-ins. With its own default reader, prosody,
+    // baseline and note parts (only the model worker is a stand-in here) it must still read
+    // the recording and return plain values, never a function or a promise.
+    name: 'practice ear works with its real default parts on a real recording file',
+    async run() {
+      const dir = tempDir();
+      const file = path.join(dir, 'candidate.wav');
+      const voiced = [];
+      for (let i = 0; i < 6; i += 1) voiced.push(sine(140 + i * 10, 4000), silence(400));
+      const total = voiced.reduce((sum, part) => sum + part.length, 0);
+      const samples = new Float32Array(total);
+      let at = 0;
+      for (const part of voiced) { samples.set(part, at); at += part.length; }
+      writeWav(file, samples, RATE);
+      const seenByModel = [];
+      const tones = [];
+      const ear = createPracticeEar({
+        candidatePath: file, minSpeechMs: 3000,
+        inference: async () => ({
+          endOfTurn: async chunk => { seenByModel.push(chunk.length); return 0.9; },
+          tone: async () => ({ arousal: 0.6, dominance: 0.5, valence: 0.4 }),
+          close() {},
+        }),
+        onToneSample: sample => tones.push(sample),
+      });
+      try {
+        // A first answer can arrive before any end-of-turn check has opened the recording.
+        ear.noteSpeech({ startMs: 0, endMs: 12000 });
+        await ear.settle(5000);
+        assert.ok(tones.length >= 1, 'tone samples were taken from the recording');
+        assert.equal(await ear.endOfTurn(10000), 0.9);
+        assert.equal(seenByModel[0], 8 * RATE, 'the model saw the last 8 s of real samples');
+        ear.noteSpeech({ startMs: 12000, endMs: 24000 });
+        await ear.settle(5000);
+        const note = ear.voiceNote({ startMs: 12000, endMs: 24000 });
+        assert.ok(note === null || typeof note === 'string', `voice note is text or nothing, got ${Object.prototype.toString.call(note)}`);
+      } finally {
+        ear.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+
+  {
+    name: 'call metrics: only the candidate\'s own typed lines are typed answers, and a typed-only call measures no delivery',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Hi there', startMs: 0, endMs: 2000 },
+        { speaker: 'interviewer', channel: 'chat', text: 'Link to the doc', startMs: 2500, endMs: 2500 },
+        { speaker: 'candidate', channel: 'chat', acknowledgement: true, text: 'ok', startMs: 3000, endMs: 3000 },
+        { speaker: 'candidate', channel: 'chat', text: 'I led the migration at Acme', startMs: 9000, endMs: 9000 },
+      ];
+      const metrics = callMetrics({ transcript });
+      assert.equal(metrics.typedAnswerCount, 1, 'interviewer chat and acknowledgements are not typed answers');
+      assert.equal(metrics.typedAnswers[0].text, 'I led the migration at Acme');
+      assert.equal(metrics.typedOnly, true);
+      assert.equal(metrics.answerCount, 0);
+      assert.equal(metrics.interviewerTalkMs, 2000, 'typed interviewer messages add no talk time');
+      const spoken = callMetrics({ transcript: [...transcript, { speaker: 'candidate', text: 'And then I spoke', startMs: 12000, endMs: 15000 }] });
+      assert.equal(spoken.typedOnly, false);
+      assert.equal(spoken.answerCount, 1);
+    },
+  },
+
+  {
+    name: 'call metrics: measured turns from the ear attach to the spoken answer they overlap in time',
+    run() {
+      const transcript = [
+        { speaker: 'interviewer', text: 'Question', startMs: 0, endMs: 3000 },
+        { speaker: 'candidate', text: 'one two three four five six', startMs: 4000, endMs: 10000 },
+        { speaker: 'interviewer', text: 'Next', startMs: 11000, endMs: 12000 },
+        { speaker: 'candidate', text: 'seven eight', startMs: 13000, endMs: 15000 },
+      ];
+      const turns = [
+        { startMs: 4100, endMs: 9900, speechMs: 5000, pauses: [{ startMs: 6000, endMs: 8500 }] },
+        { startMs: 13000, endMs: 15000, speechMs: 1500, pauses: [] },
+        { startMs: 40000, endMs: 42000, speechMs: 1000, pauses: [] },
+      ];
+      const metrics = callMetrics({ transcript, candidateProsody: turns });
+      assert.equal(metrics.answers[0].speechMs, 5000);
+      assert.equal(metrics.answers[0].pausesOver2s, 1, 'the pause came from the turn that overlaps the first answer');
+      assert.equal(metrics.answers[1].speechMs, 1500);
+      assert.equal(metrics.answers[1].pauseCount, 0);
+    },
+  },
+
+  {
+    name: 'practice ear: keeps each measured turn with its pace from the segment word count, plus the baseline snapshot',
+    async run() {
+      const dir = tempDir();
+      const file = path.join(dir, 'candidate.wav');
+      const parts = [];
+      for (let i = 0; i < 4; i += 1) parts.push(sine(140 + i * 10, 3000), silence(500));
+      writeWav(file, concat(...parts), RATE);
+      const ear = createPracticeEar({
+        candidatePath: file, minSpeechMs: 3000,
+        inference: async () => ({ endOfTurn: async () => 0.9, tone: async () => ({ arousal: 0.6, dominance: 0.5, valence: 0.4 }), close() {} }),
+      });
+      try {
+        assert.deepEqual(ear.prosodyTurns(), []);
+        assert.equal(ear.baselineSnapshot(), null);
+        ear.noteSpeech({ startMs: 0, endMs: 7000, wordCount: 14 });
+        await ear.settle(5000);
+        ear.noteSpeech({ startMs: 7000, endMs: 14000, wordCount: 0 });
+        await ear.settle(5000);
+        const turns = ear.prosodyTurns();
+        assert.deepEqual(turns.map(turn => [turn.startMs, turn.endMs]), [[0, 7000], [7000, 14000]], 'time order');
+        const first = turns[0];
+        assert.ok(first.speechMs > 0);
+        assert.equal(first.wordsPerMinute, Math.round((14 / first.speechMs) * 60000 * 10) / 10, 'pace is words over speech time');
+        assert.equal(turns[1].wordsPerMinute, 0, 'no word count, no pace claim');
+        for (const key of ['pauseCount', 'longestPauseMs', 'pitchMedianHz', 'pitchRangeSt', 'loudnessDb', 'restarts']) assert.ok(key in first, `turn has ${key}`);
+        const snapshot = ear.baselineSnapshot();
+        assert.ok(snapshot && snapshot.turns === 1, 'only the first speech feeds the baseline');
+        assert.ok(snapshot.wordsPerMinute > 0, 'the baseline now has a pace to compare against');
+      } finally {
+        ear.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+
+  {
+    name: 'practice call audio: cutting the lead drops exactly that much from each track and keeps both headers valid',
+    async run() {
+      const dir = tempDir();
+      try {
+        const candidate = path.join(dir, 'candidate.wav');
+        const interviewer = path.join(dir, 'interviewer.wav');
+        writeWav(candidate, new Float32Array([...silence(1000), ...sine(200, 500)]), RATE);
+        writeWav(interviewer, new Float32Array([...silence(1000, 24000), ...sine(300, 250, 24000)]), 24000);
+        assert.deepEqual(trimWavStart({ paths: [candidate, interviewer], startMs: 1000 }), { trimmedMs: 1000 });
+        const first = readWav(candidate);
+        const second = readWav(interviewer);
+        assert.equal(first.samples.length, RATE / 2, 'the candidate track keeps its 500 ms of sound');
+        assert.equal(second.samples.length, 24000 / 4, 'the interviewer track keeps its 250 ms of sound');
+        assert.ok(Math.abs(first.samples[20]) > 0.2, 'the sound now starts at the beginning');
+        assert.equal(fs.statSync(candidate).size, 44 + first.samples.length * 2, 'the header sizes match the file');
+        // A track that is not a WAV stops the cut before either file is rewritten.
+        const broken = path.join(dir, 'broken.wav');
+        fs.writeFileSync(broken, Buffer.from('not audio'));
+        const before = fs.statSync(candidate).size;
+        assert.throws(() => trimWavStart({ paths: [candidate, broken], startMs: 100 }), /not a RIFF/u);
+        assert.equal(fs.statSync(candidate).size, before, 'the good track is left alone');
+        assert.deepEqual(trimWavStart({ paths: [candidate], startMs: 0 }), { trimmedMs: 0 });
+      } finally { fs.rmSync(dir, { recursive: true, force: true }); }
     },
   },
 

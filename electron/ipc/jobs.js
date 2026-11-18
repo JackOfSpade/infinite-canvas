@@ -18,7 +18,7 @@ import { callLLMText, callLLMRaw, checkPromptFits } from './llm.js';
 import { NON_API_AI_TRANSPORT, durableRunHasAnyTask, durableRunSettlementSummary, isNonApiAiStepBackError, recallRunMigration, rememberRunMigration } from './nonApiAi.js';
 import { readPlainTextDocumentWithReason } from './docUtils.js';
 import { isWorkspaceLinkCountSafe } from './filesystem.js';
-import { isRendererSensitivePath, isSystemSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
+import { isRendererSensitivePath, isSensitivePath, isSystemSensitivePath, registerRendererPrivateAppRoot } from '../utils/pathSafety.js';
 import {
   careerDataFromCareerSnapshot,
   approvedCareerEvidenceCatalog,
@@ -1139,8 +1139,30 @@ function registerCareerRendererPrivateRoot() {
   try { registerRendererPrivateAppRoot(app.getPath('userData')); } catch { /* Electron startup/test stubs may not expose it yet. */ }
 }
 
+// The Interview Helper converts dropped career files to text inside one folder of its private data
+// root; that folder alone may be named as a career input (the converted text, never a private store).
+// Registered by the app's main process only; the symlink, link-count and size checks still apply.
+const careerConvertedInputRoots = new Set();
+export function registerCareerConvertedInputRoot(dir) {
+  if (typeof dir !== 'string' || !path.isAbsolute(dir)) throw new Error('The converted career folder must be an absolute path.');
+  careerConvertedInputRoots.add(path.resolve(dir));
+  try { careerConvertedInputRoots.add(fs.realpathSync(dir)); } catch { /* not created yet: the lexical spelling still matches */ }
+}
+function isWithinCareerConvertedInputRoot(filePath) {
+  const resolved = path.resolve(String(filePath || ''));
+  for (const root of careerConvertedInputRoots) {
+    const relative = path.relative(root, resolved);
+    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) return true;
+  }
+  return false;
+}
+
 function assertRendererCareerInputPathAllowed(filePath) {
   registerCareerRendererPrivateRoot();
+  if (isWithinCareerConvertedInputRoot(filePath)) {
+    if (isSensitivePath(filePath)) throw careerInputSensitiveError(filePath);
+    return;
+  }
   if (isRendererSensitivePath(filePath)) throw careerInputSensitiveError(filePath);
 }
 

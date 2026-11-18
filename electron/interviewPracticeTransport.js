@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { noteResolvedClaudeModel } from './ipc/aiModelCalibration.js';
+import { resolveClaudeBinary } from './ipc/claudeApplicationRunner.js';
 import { cancelledError as cancelled, captureCliOutput, createWarmProcess, managedSpawn, requireCliFlags, transportError as error } from './interviewClaudeCli.js';
 import { createReplyStreamParser } from './interviewPracticeCallPrompt.js';
 
@@ -57,7 +58,10 @@ export async function createInterviewerSession(config = {}, { spawn = nodeSpawn 
   let warm;
   let lastTotalCost = 0;
   const handles = new Set();
-  const binary = config.claudeBin || 'claude';
+  // An app opened from Finder has a short PATH, so look in the usual install places as well.
+  const binary = config.claudeBin || (() => {
+    try { return resolveClaudeBinary({ env: process.env, homedir: os.homedir() }); } catch { return 'claude'; }
+  })();
   // The CLI reports total_cost_usd as the running session total; each turn gets the difference.
   function costDelta(event) {
     const total = finite(event?.total_cost_usd);
@@ -77,11 +81,11 @@ export async function createInterviewerSession(config = {}, { spawn = nodeSpawn 
       warm = createWarmProcess(handle, OUTPUT_LIMIT);
       const ready = await warm.request(instructions, signal);
       costDelta(ready.event);
-      // A bare READY, or READY plus the temperament the interviewer chose for itself. A short
-      // explanation before it is tolerated: only the last line counts.
+      // A bare READY (an optional trailing period is tolerated). A short explanation before it is
+      // tolerated too: only the last line counts. Setup decisions are made by the planning step, not here.
       const lines = ready.text.trim().split(/\r?\n/).map(line => line.trim()).filter(Boolean);
       const reply = lines.at(-1) ?? '';
-      if (!/^READY(?:\s+(?:warm|neutral|tough)\.?)?$/i.test(reply)) throw error('TRANSPORT_INVALID_RESPONSE');
+      if (!/^READY\.?$/i.test(reply)) throw error('TRANSPORT_INVALID_RESPONSE');
       return { reply };
     },
     async turn(message, { signal, onDelta } = {}) {

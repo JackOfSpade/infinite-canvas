@@ -257,6 +257,145 @@ function within(root, label) {
   return [...root.querySelectorAll('button')].find(item => item.textContent.trim() === label);
 }
 
+function typedReply(kind, extra = {}) {
+  return { bundle: { artifactId: BUNDLE_ID, displayName: kind === 'generated' ? 'Acme · Engineer (generated listing)' : 'Acme · Engineer', applicationArtifactDigest: BUNDLE_DIGEST, integritySummary: 'Typed source.', verification: { status: kind === 'generated' ? 'typed-generated' : 'typed-posting' } }, jobUrl: JOB_URL, kind, notes: kind === 'generated' ? ['No open posting for this role was found, so this listing is generated.'] : [], ...extra };
+}
+async function mountTyped(bundle, window, resolve, { initialData = {}, updates = [], extra = {} } = {}) {
+  window.interviewAppAPI = { resolveInterviewTypedJob: resolve };
+  window.electronAPI = {
+    loadInterviewHelperCareerSnapshot: async () => ({ snapshot: snapshot() }),
+    loadInterviewApplicationBundle: async () => publicBundle(),
+    listInterviewApplicationFolders: async () => ({ root: '/Applied Jobs', folders: FOLDERS }),
+    selectInterviewApplicationFolder: async () => ({ ...publicBundle(OTHER_BUNDLE_ID), jobUrl: JOB_URL }),
+    ...extra,
+  };
+  return mount(bundle, window, { nodes: sourceNodes(), initialData, onPersist: patch => updates.push(patch) });
+}
+const typedBox = window => window.document.querySelector('textarea[aria-label="Job link, or company and role"]');
+async function submitTyped(bundle, window, value) {
+  await bundle.module.act(async () => { setTextarea(window, typedBox(window), value); await flush(); });
+  await bundle.module.act(async () => { button(window, 'Use this job').click(); await flush(); });
+  await settle(bundle, 6);
+}
+
+const TYPED_JOB_TESTS = [
+  {
+    name: 'interview helper render: a typed job link or company and role is resolved and adopted like a picked bundle for every kind',
+    async run() {
+      for (const kind of ['link', 'found', 'generated']) {
+        await withDomBundledProbe(async (bundle, window) => {
+          const updates = []; const calls = [];
+          const root = await mountTyped(bundle, window, async args => { calls.push(args); return typedReply(kind); }, { updates, extra: { loadInterviewApplicationBundle: async () => ({ bundle: typedReply(kind).bundle }) } });
+          try {
+            await settle(bundle);
+            assert(text(window).includes('Or type a job link, or a company and role'), 'the typed job box must be labelled');
+            assert(typedBox(window).maxLength === 2000, 'the box must cap the text at 2000 characters');
+            assert(button(window, 'Use this job').disabled, 'the button must wait for text');
+            await submitTyped(bundle, window, 'Engineer at Acme');
+            assert(calls.length === 1 && calls[0].nodeId === 'interview-helper' && calls[0].text === 'Engineer at Acme', 'the typed text must be sent with the node id');
+            const patch = updates.find(item => item.interviewHelperApplicationBundle);
+            assert(patch.interviewHelperApplicationBundle.artifactId === BUNDLE_ID && patch.interviewHelperApplicationBundle.digest === BUNDLE_DIGEST, 'the bundle must persist with the picker projection');
+            assert(patch.interviewHelperJobUrl === JOB_URL && patch.interviewHelperPreparation === null, 'the job URL must be adopted and preparation reset');
+            assert(patch.interviewHelperTypedJob === 'Engineer at Acme' && patch.interviewHelperTypedJobKind === kind, 'the typed text and kind must be kept on the session');
+            const generated = window.document.querySelector('[data-testid="typed-job-generated"]');
+            if (kind === 'generated') {
+              assert(generated && /AI as a realistic stand-in/u.test(generated.textContent), 'a generated listing must be unmistakable');
+              assert(text(window).includes('Acme · Engineer (generated listing)') && text(window).includes('No open posting for this role was found, so this listing is generated.'), 'the label and note must show');
+            } else assert(!generated, 'only a generated listing carries the generated warning');
+            if (kind === 'link') assert(text(window).includes('Read from the posting link.'), 'a link result must say where it came from');
+          } finally { await bundle.module.act(async () => root.unmount()); }
+        });
+      }
+    },
+  },
+  {
+    name: 'interview helper render: an unclear typed job shows the question, an error shows amber alerts, and the typed text survives both',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = []; let mode = 'unclear';
+        const root = await mountTyped(bundle, window, async () => {
+          if (mode === 'unclear') throw Object.assign(new Error('x'), { userMessage: 'Which company and which role?' });
+          if (mode === 'envelope') return { success: false, error: 'The link could not be read.' };
+          return typedReply('found');
+        }, { updates });
+        try {
+          await settle(bundle);
+          await submitTyped(bundle, window, 'something vague');
+          const alert = [...window.document.querySelectorAll('[role="alert"]')].find(item => item.textContent.includes('Which company and which role?'));
+          assert(alert && alert.className.includes('amber'), 'the unclear question must show in an amber alert');
+          assert(!updates.some(item => item.interviewHelperApplicationBundle), 'a failed resolve must not store a bundle');
+          assert(typedBox(window).value === 'something vague' && updates.some(item => item.interviewHelperTypedJob === 'something vague'), 'the typed text must be kept so the user can add detail');
+          mode = 'envelope';
+          await submitTyped(bundle, window, 'something vague https://x.example.test/a');
+          assert(text(window).includes('The link could not be read.'), 'an error envelope must show its message');
+          mode = 'ok';
+          await bundle.module.act(async () => { button(window, 'Use this job').click(); await flush(); });
+          await settle(bundle, 6);
+          assert(!text(window).includes('The link could not be read.') && updates.some(item => item.interviewHelperApplicationBundle), 'a retry must clear the error and adopt the job');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: the typed job shows a running state and the status strip entry while it works, and blocks double submission',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const gate = deferred(); const calls = [];
+        const root = await mountTyped(bundle, window, args => { calls.push(args); return gate.promise; });
+        try {
+          await settle(bundle);
+          await bundle.module.act(async () => { setTextarea(window, typedBox(window), 'Engineer at Acme'); await flush(); });
+          await bundle.module.act(async () => { button(window, 'Use this job').click(); await flush(); });
+          assert(button(window, 'Finding the job…')?.disabled && typedBox(window).disabled, 'the button and box must be disabled while running');
+          assert(text(window).includes('researching the company and role'), 'a running line must show');
+          await bundle.module.act(async () => { button(window, 'Finding the job…').click(); await flush(); });
+          assert(calls.length === 1, 'a second click must not start another run');
+          await bundle.module.act(async () => { gate.resolve(typedReply('link')); await flush(); });
+          await settle(bundle, 6);
+          assert(button(window, 'Use this job') && !button(window, 'Use this job').disabled, 'the box must unlock when done');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: picking a folder bundle after a typed job still works and clears the typed result marks',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const updates = [];
+        const root = await mountTyped(bundle, window, async () => typedReply('generated'), { updates });
+        try {
+          await settle(bundle);
+          await submitTyped(bundle, window, 'Engineer at Acme');
+          assert(window.document.querySelector('[data-testid="typed-job-generated"]'), 'the generated warning must show first');
+          const combobox = window.document.querySelector('[role="combobox"]');
+          await bundle.module.act(async () => { combobox.click(); await flush(); });
+          await settle(bundle);
+          await bundle.module.act(async () => { firstFolderOption(window).click(); await flush(); });
+          await settle(bundle, 6);
+          const patch = [...updates].reverse().find(item => item.interviewHelperApplicationBundle);
+          assert(patch.interviewHelperApplicationBundle.artifactId === OTHER_BUNDLE_ID, 'the picked bundle must replace the typed one');
+          assert(patch.interviewHelperTypedJobKind === null && patch.interviewHelperTypedJobNotes === null, 'the typed result marks must clear');
+          assert(!window.document.querySelector('[data-testid="typed-job-generated"]'), 'the generated warning must go');
+          assert(typedBox(window).value === 'Engineer at Acme', 'the typed text itself stays in the box');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: a saved typed job text and generated mark are restored when the interview reopens',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const root = await mountTyped(bundle, window, async () => typedReply('link'), { initialData: { interviewHelperTypedJob: 'Engineer at Acme', interviewHelperTypedJobKind: 'generated', interviewHelperTypedJobNotes: ['Generated for Acme.'], interviewHelperJobUrl: JOB_URL, interviewHelperApplicationBundle: { artifactId: BUNDLE_ID, label: 'Acme · Engineer (generated listing)', digest: BUNDLE_DIGEST } } });
+        try {
+          await settle(bundle);
+          assert(typedBox(window).value === 'Engineer at Acme', 'the typed text must be restored');
+          assert(window.document.querySelector('[data-testid="typed-job-generated"]') && text(window).includes('Generated for Acme.'), 'the generated mark and notes must be restored');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+];
+
 const QA_SETUP_TESTS = [
   {
     name: 'interview helper render: application combobox lists, filters and selects a folder by keyboard and adopts the bundle URL',
@@ -636,6 +775,81 @@ export default [
           }
           assert(parseCalls === 0, 'a selection containing C0, DEL, C1, or Unicode format characters must not reach parse IPC');
         } finally { await bundle.module.act(async () => root.unmount()); }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: any-type career drop converts first, lists each file and compiles only the converted ones',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        const scenarios = [
+          { label: 'mixed', names: ['cv.pdf', 'notes.md', 'photo.png'], reply: [{ status: 'converted', filePath: '/conv/cv.pdf.txt', convertedName: 'cv.pdf.txt', method: 'pdf-text-layer', machineExtracted: true, reason: 'This PDF was extracted by machine.', token: 't1' }, { status: 'passthrough', filePath: '/priv/notes.md', convertedName: 'notes.md' }, { status: 'converted', filePath: '/conv/photo.png.txt', convertedName: 'photo.png.txt', method: 'ai', token: 't3' }], paths: ['/conv/cv.pdf.txt', '/priv/notes.md', '/conv/photo.png.txt'], note: 'This PDF was extracted by machine.' },
+          { label: 'one refusal', names: ['cv.pdf', 'locked.pdf'], reply: [{ status: 'converted', filePath: '/conv/cv.pdf.txt', method: 'ai', token: 't1' }, { status: 'refused', reason: 'it is encrypted' }], paths: ['/conv/cv.pdf.txt'], note: 'not converted: it is encrypted' },
+          { label: 'all refused', names: ['a.bin', 'b.bin'], reply: [{ status: 'refused', reason: 'unreadable' }, { status: 'refused', reason: 'too large' }], paths: null, note: 'nothing was imported' },
+        ];
+        for (const scenario of scenarios) {
+          let parseArgs = null; let convertArgs = null; const opened = [];
+          window.interviewAppAPI = {
+            convertCareerFiles: async args => { convertArgs = args; return { success: true, files: scenario.reply.map((r, i) => ({ name: scenario.names[i], ...r })) }; },
+            revealConvertedCareerFile: async args => { opened.push(args); return { ok: true }; },
+          };
+          window.electronAPI = {
+            getPathForFile: file => `/orig/${file.name}`,
+            parseCareerData: async args => { parseArgs = args; return { success: false, error: 'stop' }; },
+          };
+          const updates = [];
+          const root = await mount(bundle, window, { onPersist: (patch, next) => updates.push({ patch, next }) });
+          try {
+            const drop = new window.Event('drop', { bubbles: true });
+            Object.defineProperty(drop, 'dataTransfer', { value: { files: scenario.names.map(name => ({ name })) } });
+            await bundle.module.act(async () => { window.document.querySelector('.border-dashed').dispatchEvent(drop); await flush(); await flush(); });
+            assert(convertArgs?.nodeId && convertArgs.filePaths.length === scenario.names.length && convertArgs.filePaths[0] === `/orig/${scenario.names[0]}`, `${scenario.label}: conversion must get the dropped paths in order`);
+            assert(text(window).includes(scenario.note), `${scenario.label}: the panel must list each file's outcome`);
+            if (scenario.paths) {
+              assert(JSON.stringify(parseArgs?.filePaths) === JSON.stringify(scenario.paths), `${scenario.label}: compile must get converted and pass-through paths in dropped order`);
+              assert(updates.some(item => JSON.stringify(item.patch.interviewHelperCareerFilenames) === JSON.stringify(scenario.paths.map(path => path.split('/').pop()))), `${scenario.label}: saved filenames must be the converted names`);
+              const button = window.document.querySelector('button[aria-label^="Open converted text"]');
+              await bundle.module.act(async () => { button.click(); await flush(); });
+              assert(opened.length === 1 && opened[0].token && Object.keys(opened[0]).length === 1, `${scenario.label}: Open text must pass the token`);
+            } else {
+              assert(parseArgs === null, 'nothing may compile when no file converted');
+            }
+          } finally { await bundle.module.act(async () => root.unmount()); }
+        }
+      });
+    },
+  },
+  {
+    name: 'interview helper render: a text-only drop skips conversion and a re-drop of the same originals reuses the converted names',
+    async run() {
+      await withDomBundledProbe(async (bundle, window) => {
+        let convertCalls = 0; let parseArgs = null;
+        window.interviewAppAPI = { convertCareerFiles: async () => { convertCalls += 1; return { success: true, files: [{ name: 'cv.pdf', status: 'converted', filePath: '/conv/cv.pdf.txt', convertedName: 'cv.pdf.txt', method: 'ai', token: 't' }] }; } };
+        window.electronAPI = { getPathForFile: file => `/orig/${file.name}`, parseCareerData: async args => { parseArgs = args; return { success: false, error: 'stop' }; } };
+        const updates = [];
+        const root = await mount(bundle, window, { onPersist: (patch, next) => updates.push({ patch, next }) });
+        try {
+          const dropFiles = async names => {
+            const drop = new window.Event('drop', { bubbles: true });
+            Object.defineProperty(drop, 'dataTransfer', { value: { files: names.map(name => ({ name })) } });
+            await bundle.module.act(async () => { window.document.querySelector('.border-dashed').dispatchEvent(drop); await flush(); await flush(); });
+          };
+          await dropFiles(['cv.pdf']);
+          assert(convertCalls === 1 && updates.some(item => item.patch.interviewHelperCareerFilenames?.[0] === 'cv.pdf.txt'), 'a PDF drop must convert once and save the converted name');
+          assert(JSON.stringify(parseArgs?.filePaths) === JSON.stringify(['/conv/cv.pdf.txt']), 'compile must read the converted path');
+          parseArgs = null;
+          await dropFiles(['cv.pdf']);
+          assert(convertCalls === 2 && !text(window).includes('awaiting recovery'), 'a re-drop of the same original must resume the same run, not ask for recovery');
+          assert(JSON.stringify(parseArgs?.filePaths) === JSON.stringify(['/conv/cv.pdf.txt']), 'a re-drop of the same original must compile the same converted path');
+        } finally { await bundle.module.act(async () => root.unmount()); }
+        convertCalls = 0; parseArgs = null;
+        const textRoot = await mount(bundle, window);
+        try {
+          const drop = new window.Event('drop', { bubbles: true });
+          Object.defineProperty(drop, 'dataTransfer', { value: { files: [{ name: 'career.md' }] } });
+          await bundle.module.act(async () => { window.document.querySelector('.border-dashed').dispatchEvent(drop); await flush(); await flush(); });
+          assert(convertCalls === 0 && parseArgs?.filePaths?.[0] === '/orig/career.md', 'a text-only drop must reach compile unchanged without conversion');
+        } finally { await bundle.module.act(async () => textRoot.unmount()); }
       });
     },
   },
@@ -1953,4 +2167,5 @@ export default [
     },
   },
   ...QA_SETUP_TESTS,
+  ...TYPED_JOB_TESTS,
 ];

@@ -15,6 +15,12 @@ export function mergeEvent(current, event) {
   if (event.kind === 'chat' && event.message) next.chat = [...(Array.isArray(current?.chat) ? current.chat : []), event.message];
   if (event.kind === 'caption' && event.caption) next.captions = [...(Array.isArray(current?.captions) ? current.captions : []), event.caption].slice(-6);
   if (event.kind === 'timing' && event.elapsedMs != null) next.elapsedMs = event.elapsedMs;
+  // Panel events from the service: a late colleague appears, and the speaker changes with playback.
+  if (event.type === 'participant-joined' && event.id) {
+    const known = Array.isArray(current?.participants) ? current.participants : [];
+    if (!known.some(item => item?.id === event.id)) next.participants = [...known, { id: event.id, name: event.name || '', role: '', focus: '', status: 'joined' }];
+  }
+  if (event.type === 'speaker' && event.speakerId) next.speakingId = event.speakerId;
   if (event.kind === 'typing') next.typing = !!event.typing;
   return next;
 }

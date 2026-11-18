@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { readElevenLabsKey, KEYCHAIN_SERVICE, SECURITY_BIN } from '../../electron/practiceCall/eleven/elevenKey.js';
 import {
-  createDialogueVoiceFactory, fetchSubscriptionTier, rateForTier, wordsFromAlignment, KEEP_ALIVE_MS, PAID_RATE, FREE_RATE,
+  createDialogueVoiceFactory, fetchSubscriptionTier, rateForTier, wordsFromAlignment, VOICE_STABILITY, KEEP_ALIVE_MS, PAID_RATE, FREE_RATE,
 } from '../../electron/practiceCall/eleven/dialogueVoice.js';
 import {
   listConversationalVoices, pickPersonaVoice, accentPoolKey, isEnglishVoice, isStandardPrice, normalizeGender, voiceCharacterOf,
@@ -95,7 +95,7 @@ function memoryFs(initial = {}) {
 
 const candidate = (id, gender, extra = {}) => ({
   voice_id: id, public_owner_id: `owner-${id}`, name: `${id} voice`, gender, age: 'young', accent: 'american',
-  use_case: 'conversational', language: 'en', rate: 1, category: 'professional', verified_languages: [{ language: 'en' }], ...extra,
+  use_case: 'conversational', language: 'en', rate: 1, category: 'high_quality', verified_languages: [{ language: 'en' }], ...extra,
 });
 
 /** A shared-voices fetch stand-in: serves pages from rows and records every request. */
@@ -194,7 +194,7 @@ export default [
       assert.equal(url.searchParams.get('sync_alignment'), 'true');
       assert.equal(socket.sent.length, 0);
       socket.open();
-      assert.deepEqual(socket.sent, [{ voices: ['voice-river'], xi_api_key: KEY }]);
+      assert.deepEqual(socket.sent, [{ voices: ['voice-river'], xi_api_key: KEY, voice_settings: { stability: VOICE_STABILITY, clone_strength: 0 } }]);
       assert.equal(JSON.stringify(Object.values(stream)).includes(KEY), false);
     },
   },
@@ -252,6 +252,11 @@ export default [
       stream.onAudio(buffer => audio.push(buffer));
       socket.message({ audio: pcm(4410), alignment: alignment(['h', 'i', ' '], [0, 10, 20], [10, 10, 0]) });
       socket.message({ audio: pcm(8820), alignment: alignment(['y', 'o', 'u'], [0, 10, 20], [10, 10, 10]) });
+      // The last word of a chunk with no white space after it waits for the next chunk or the end.
+      assert.deepEqual(words, [{ word: 'hi', startMs: 0, endMs: 20 }]);
+      const done = stream.finish();
+      socket.message({ is_final: true });
+      await done;
       assert.deepEqual(words, [
         { word: 'hi', startMs: 0, endMs: 20 },
         { word: 'you', startMs: 50, endMs: 80 },
@@ -303,7 +308,7 @@ export default [
       assert.equal(factory.sampleRate, FREE_RATE);
       second.open();
       assert.deepEqual(second.sent, [
-        { voices: ['voice-river'], xi_api_key: KEY },
+        { voices: ['voice-river'], xi_api_key: KEY, voice_settings: { stability: VOICE_STABILITY, clone_strength: 0 } },
         { inputs: [{ text: 'Take a breath.', voice_id: 'voice-river', new_turn: true }] },
       ]);
       const next = factory.open({ utteranceId: 'utterance-7' });
@@ -589,11 +594,127 @@ export default [
       assert.equal(stream.sampleRate, FREE_RATE);
       second.open();
       second.message({ alignment: alignment(["y", "o", "u"], [0, 10, 20], [10, 10, 10]) });
-      assert.deepEqual(words.at(-1), { word: "you", startMs: 0, endMs: 30 });
       const done = stream.finish();
       second.message({ is_final: true });
       assert.deepEqual(await done, { ok: true });
+      // The half word held from the refused socket is dropped, not joined to the retry.
+      assert.deepEqual(words, [{ word: "you", startMs: 0, endMs: 30 }]);
       assert.equal(stream.closed, true);
+    },
+  },
+  {
+    // Seen in the first live call: "Anika" and "hiring" each arrived split over two chunks
+    // and were reported as "Ani ka" and "h iring".
+    name: 'practice call eleven: a word split across two alignment chunks is reported whole',
+    async run() {
+      const { factory } = paidFactory();
+      const stream = factory.open({ utteranceId: 'utterance-split-word' });
+      const socket = latest();
+      socket.open();
+      const batches = [];
+      stream.onWords(list => batches.push(list.map(item => item.word)));
+      const words = [];
+      stream.onWords(list => words.push(...list));
+      socket.message({ audio: pcm(4410), alignment: alignment(['i', 's', ' ', 'A', 'n', 'i'], [0, 10, 20, 30, 40, 50], [10, 10, 10, 10, 10, 10]) });
+      socket.message({ audio: pcm(4410), alignment: alignment(['k', 'a', ' ', 'S', 'h'], [0, 10, 20, 30, 40], [10, 10, 10, 10, 10]) });
+      socket.message({ audio: pcm(4410), alignment: alignment([' ', 'o', 'k'], [0, 10, 20], [10, 10, 10]) });
+      const done = stream.finish();
+      socket.message({ is_final: true });
+      await done;
+      assert.deepEqual(words.map(item => item.word), ['is', 'Anika', 'Sh', 'ok']);
+      assert.deepEqual(words[1], { word: 'Anika', startMs: 30, endMs: 70 });
+      assert.deepEqual(batches, [['is'], ['Anika'], ['Sh'], ['ok']]);
+    },
+  },
+  {
+    // Seen in the second live call: "Good to hear." and "Let's get into it" are two texts,
+    // and their words came back joined as "hear.Let's".
+    name: 'practice call eleven: the last word of one sentence is not joined to the first word of the next',
+    async run() {
+      const { factory } = paidFactory();
+      const stream = factory.open({ utteranceId: 'utterance-two-sentences' });
+      const socket = latest();
+      socket.open();
+      const words = [];
+      stream.onWords(list => words.push(...list.map(item => item.word)));
+      socket.message({ audio: pcm(4410), alignment: alignment(['t', 'o', ' ', 'h', 'e', 'a', 'r', '.'], [0, 5, 10, 15, 20, 25, 30, 35], [5, 5, 5, 5, 5, 5, 5, 5]) });
+      socket.message({ audio: pcm(4410), alignment: alignment(['L', 'e', 't', "'", 's', ' ', 'g', 'o'], [0, 5, 10, 15, 20, 25, 30, 35], [5, 5, 5, 5, 5, 5, 5, 5]) });
+      const done = stream.finish();
+      socket.message({ is_final: true });
+      await done;
+      assert.deepEqual(words, ['to', 'hear.', "Let's", 'go']);
+    },
+  },
+  {
+    // A word that ends a clause is whole: it is reported with its own chunk, so an
+    // interruption before the next chunk still counts it as heard, and a closing quote
+    // after the full stop does not glue the next sentence on.
+    // Seen in a live call: "Great." and "Great, let's dive right in then." came back as one
+    // run of characters with no space, and the heard text read "Great.Great,".
+    name: 'practice call eleven: two sentences returned without a space between them are separate words',
+    async run() {
+      const chars = [...'Great.Great, then.Can you 3.5'];
+      const words = wordsFromAlignment(alignment(chars, chars.map((_, index) => index * 10), chars.map(() => 10)), 0);
+      assert.deepEqual(words.map(item => item.word), ['Great.', 'Great,', 'then.', 'Can', 'you', '3.5']);
+      // Initials stay one word.
+      const initials = [...'the U.S. market and A.I. Then more'];
+      assert.deepEqual(wordsFromAlignment(alignment(initials, initials.map((_, index) => index * 10), initials.map(() => 10)), 0).map(item => item.word), ['the', 'U.S.', 'market', 'and', 'A.I.', 'Then', 'more']);
+      assert.deepEqual(words[1], { word: 'Great,', startMs: 60, endMs: 120 });
+    },
+  },
+  {
+    name: 'practice call eleven: a library draw skips a voice named like a built-in voice, and the built-in list reads only premade voices',
+    async run() {
+      const { drawVoice, listBuiltInVoices, ACCOUNT_VOICES_URL } = await import('../../electron/practiceCall/eleven/voiceLibrary.js');
+      const row = (voice_id, name) => ({ voice_id, name, public_owner_id: 'owner', gender: 'male', age: 'middle_aged', accent: 'american', use_case: 'conversational', language: 'en', category: 'high_quality' });
+      const rows = [row('lib-a', 'Brian - Deep, Resonant and Comforting'), row('lib-b', 'Dana - Calm and Clear')];
+      const fetchLibrary = async () => ({ ok: true, status: 200, json: async () => ({ voices: rows, total_count: rows.length, has_more: false }) });
+      // Every random value lands on the first row, the library copy of a built-in voice.
+      let calls = 0;
+      const random = () => { calls += 1; return calls % 2 ? 0 : 0.9; };
+      const drawn = await drawVoice({ fetch: fetchLibrary, key: 'k', random, excludeNames: ['BRIAN - deep, resonant and comforting'] });
+      assert.equal(drawn.voice.voiceId, 'lib-b');
+      const seen = [];
+      const fetchAccount = async url => { seen.push(String(url)); return { ok: true, status: 200, json: async () => ({ voices: [
+        { voice_id: 'p1', name: 'Brian - Deep, Resonant and Comforting', category: 'premade' },
+        { voice_id: 's1', name: 'Saved Voice', category: 'professional' },
+      ] }) }; };
+      assert.deepEqual(await listBuiltInVoices({ fetch: fetchAccount, key: 'k' }), { voiceIds: ['p1'], names: ['brian - deep, resonant and comforting'] });
+      assert.deepEqual(seen, [ACCOUNT_VOICES_URL]);
+    },
+  },
+  {
+    name: 'practice call eleven: flush asks the service to speak a short line now, in order with the texts',
+    async run() {
+      const { factory } = paidFactory();
+      const stream = factory.open({ utteranceId: 'utterance-flush' });
+      const socket = latest();
+      assert.equal(stream.flush(), false, 'nothing to flush before any text');
+      stream.sendText('Right.');
+      assert.equal(stream.flush(), true);
+      assert.equal(stream.flush(), false, 'a second flush with nothing new is not sent');
+      stream.sendText('So tell me about the hub.');
+      socket.open();
+      const frames = socket.sent.slice(1).map(frame => (frame.flush ? 'flush' : frame.inputs?.[0]?.text));
+      assert.deepEqual(frames, ['Right.', 'flush', 'So tell me about the hub.']);
+    },
+  },
+  {
+    name: 'practice call eleven: a clause-final word is reported at once, also before a closing quote',
+    async run() {
+      const { factory } = paidFactory();
+      const stream = factory.open({ utteranceId: 'utterance-clause-end' });
+      const socket = latest();
+      socket.open();
+      const batches = [];
+      stream.onWords(list => batches.push(list.map(item => item.word)));
+      socket.message({ audio: pcm(4410), alignment: alignment(['"', 'o', 'k', '.', '"'], [0, 5, 10, 15, 20], [5, 5, 5, 5, 5]) });
+      assert.deepEqual(batches, [['"ok."']], 'nothing is held back');
+      socket.message({ audio: pcm(4410), alignment: alignment(['N', 'o', 'w'], [0, 5, 10], [5, 5, 5]) });
+      const done = stream.finish();
+      socket.message({ is_final: true });
+      await done;
+      assert.deepEqual(batches, [['"ok."'], ['Now']]);
     },
   },
   {
@@ -724,6 +845,7 @@ export default [
       assert.equal(harness.calls[0].url.pathname, '/v1/shared-voices');
       assert.equal(harness.calls[0].url.searchParams.get('language'), 'en');
       assert.equal(harness.calls[0].url.searchParams.get('use_cases'), 'conversational');
+      assert.equal(harness.calls[0].url.searchParams.get('category'), 'high_quality');
       assert.equal(harness.calls[0].url.searchParams.get('page_size'), '5');
       assert.equal(harness.calls[0].url.searchParams.get('page'), '0');
       assert.equal(harness.calls[0].options.headers['xi-api-key'], KEY);
@@ -737,8 +859,26 @@ export default [
         assert.equal(call.url.pathname, '/v1/shared-voices');
         assert.equal(call.url.searchParams.get('language'), 'en');
         assert.equal(call.url.searchParams.get('use_cases'), 'conversational');
+        assert.equal(call.url.searchParams.get('category'), 'high_quality');
         assert.equal(call.url.searchParams.get('page_size'), '5');
       }
+    },
+  },
+  {
+    name: 'practice call eleven: drawVoice skips a row outside the high-quality tier even when the library returns one',
+    async run() {
+      const rows = [
+        candidate('lib-pro', 'female', { category: 'professional' }),
+        candidate('lib-none', 'male', { category: '' }),
+        candidate('lib-hq', 'female'),
+      ];
+      const harness = sharedVoicesFetch({ rows });
+      const picks = [0, 0.4, 0.7];
+      const drawn = await drawVoice({ fetch: harness.fetch, key: KEY, random: () => picks.shift() ?? 0.7 });
+      assert.equal(drawn.voice.voiceId, 'lib-hq');
+      assert.equal(drawn.attempts, 3);
+      const none = sharedVoicesFetch({ rows: rows.slice(0, 2) });
+      await assert.rejects(drawVoice({ fetch: none.fetch, key: KEY, random: () => 0 }), { code: 'voice-library-unavailable' });
     },
   },
   {
@@ -756,7 +896,7 @@ export default [
       assert.equal(result.libraryTotal, 3427);
       assert.deepEqual(result.voice, {
         voiceId: 'lib-target', voiceName: 'lib-target voice', gender: 'female', age: 'young', accent: 'american',
-        useCases: ['conversational'], category: 'professional', description: 'Warm and clear.', descriptive: 'smooth',
+        useCases: ['conversational'], category: 'high_quality', description: 'Warm and clear.', descriptive: 'smooth',
         language: 'en', rate: 1,
       });
       assert.deepEqual(harness.calls.map(call => call.url.searchParams.get('page')), ['0', '1']);

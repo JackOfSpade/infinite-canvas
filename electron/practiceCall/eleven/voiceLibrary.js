@@ -1,6 +1,6 @@
 /**
- * The shared voice library: a uniformly random draw over the whole eligible ElevenLabs
- * Voice Library, and never over the account's own voices. Library voices are drawn
+ * The shared voice library: a uniformly random draw over the eligible voices of the ElevenLabs
+ * Voice Library's high-quality tier, and never over the account's own voices. Library voices are drawn
  * unsaved and used directly, because live tests on 2026-11-08 showed an unsaved library
  * id works with the text-to-dialogue WebSocket (~4.5 s on the first line, then ~0.2 s),
  * so the app never writes a library voice to the account.
@@ -16,6 +16,14 @@ import {
 export { SUBSCRIPTION_URL };
 
 export const SHARED_VOICES_URL = 'https://api.elevenlabs.io/v1/shared-voices';
+export const ACCOUNT_VOICES_URL = 'https://api.elevenlabs.io/v1/voices';
+
+/**
+ * The only library tier an interviewer voice is drawn from: the voices ElevenLabs has reviewed as
+ * studio quality. Measured on 2026-11-17 it keeps 558 of the 2,961 otherwise eligible voices, with
+ * a median yearly use about seven times the whole pool's. The owner chose it that day.
+ */
+export const LIBRARY_TIER = 'high_quality';
 
 const MAX_LAST_USED = 50;
 
@@ -104,6 +112,21 @@ const catalogVoiceOf = voice => ({
   rate: voice.rate,
 });
 
+/**
+ * ElevenLabs' built-in default voices (the ones every account starts with, category "premade").
+ * Some of them are also published in the shared library under the same name and a different id
+ * (four of 3,512 English conversational rows on 2026-11-17), so a draw from the library can still
+ * land on one. The owner wants none of them: a draw is given these ids and names to skip.
+ */
+export async function listBuiltInVoices({ fetch: fetchImpl = globalThis.fetch, key, signal } = {}) {
+  const body = await requestJson({ fetch: fetchImpl, key, url: ACCOUNT_VOICES_URL, signal, what: 'built-in voices' });
+  const rows = (Array.isArray(body?.voices) ? body.voices : []).filter(voice => textOf(voice?.category) === 'premade');
+  return {
+    voiceIds: rows.map(voice => String(voice?.voice_id ?? '').trim()).filter(Boolean),
+    names: rows.map(voice => textOf(voice?.name)).filter(Boolean),
+  };
+}
+
 const indexAt = (value, length) => {
   const number = Number(value?.());
   const clamped = Number.isFinite(number) ? Math.min(Math.max(number, 0), 0.999999) : 0;
@@ -122,8 +145,9 @@ function libraryUnavailable(message, options = {}) {
 }
 
 /**
- * Draws one interviewer voice uniformly from the eligible rows of the whole shared
- * library, by rejection sampling over the index space T: i = floor(random * T), page
+ * Draws one interviewer voice uniformly from the eligible rows of the shared library's
+ * high-quality tier (asked for in the request and checked again on the row drawn, so a
+ * server that ignores the filter cannot widen the pool), by rejection sampling over the index space T: i = floor(random * T), page
  * floor(i / pageSize), row i % pageSize. Only library voices are ever returned: the
  * account's own voices are not candidates and there is no fallback.
  * Library voices are returned unsaved; the only requests are GETs of shared-voices pages.
@@ -132,8 +156,10 @@ function libraryUnavailable(message, options = {}) {
  */
 export async function drawVoice({
   fetch: fetchImpl = globalThis.fetch, key, random = Math.random,
-  excludeVoiceIds = [], pageSize = 100, maxAttempts = 24, signal,
+  excludeVoiceIds = [], excludeNames = [], pageSize = 100, maxAttempts = 24, signal,
 } = {}) {
+  // Names are matched whole and without regard to case: a library copy of a built-in voice keeps its name.
+  const excludedNames = new Set((Array.isArray(excludeNames) ? excludeNames : []).map(textOf).filter(Boolean));
   const exclude = new Set((Array.isArray(excludeVoiceIds) ? excludeVoiceIds : [])
     .map(voiceId => String(voiceId ?? '').trim()).filter(Boolean));
   const attemptLimit = Number.isFinite(Number(maxAttempts)) && Number(maxAttempts) >= 1 ? Math.floor(Number(maxAttempts)) : 0;
@@ -145,6 +171,7 @@ export async function drawVoice({
     const target = new URL(SHARED_VOICES_URL);
     target.searchParams.set('language', 'en');
     target.searchParams.set('use_cases', 'conversational');
+    target.searchParams.set('category', LIBRARY_TIER);
     target.searchParams.set('page_size', String(size));
     target.searchParams.set('page', String(page));
     let found;
@@ -175,7 +202,9 @@ export async function drawVoice({
     if (!data) continue;
     const row = normalizeLibraryVoice(data.rows[index % size]);
     if (!row) continue;
+    if (textOf(row.category) !== LIBRARY_TIER) continue;
     if (exclude.has(row.voiceId)) continue;
+    if (excludedNames.has(textOf(row.voiceName))) continue;
     return { voice: catalogVoiceOf(row), source: 'library', libraryTotal, attempts };
   }
 

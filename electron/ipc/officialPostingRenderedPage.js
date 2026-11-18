@@ -4,6 +4,7 @@ import { detectAntiBotSignal } from './antiBotDetector.js';
 import { isPublicOfficialAddress } from './officialPostingFetch.js';
 import { officialHttpsUrl } from './officialPostingFields.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
+import { logger } from '../logger.js';
 
 // Many careers pages arrive empty until JavaScript runs, and neither a plain download nor the judges' WebFetch runs it.
 // This opens one lead in a real browser and returns what a person would see. Transport only: the judges still decide.
@@ -183,10 +184,41 @@ async function drainRenderQueue() {
       const next = renderQueue.shift();
       try { next.resolve(await renderOnePage(next.url, next.options)); } catch (error) { next.reject(error); }
     }
-  } finally { rendering = false; }
+  } finally { rendering = false; scheduleIdleRelease(); }
+}
+
+// A lookup that had to start the shared browser closes it again once no page has been asked for in a while. Left running,
+// it holds the shared profile for the rest of the app session with nothing open. A browser that was already up belongs to
+// whoever started it, and one that other work has since picked up is left alone.
+const IDLE_RELEASE_MS = 30_000;
+let startedBrowser = null;
+let idleTimer = null;
+function scheduleIdleRelease() {
+  clearTimeout(idleTimer);
+  if (!startedBrowser) return;
+  idleTimer = setTimeout(() => { void releaseOfficialPostingBrowserIfIdle(); }, IDLE_RELEASE_MS);
+  idleTimer.unref?.();
+}
+/** Resolves true when it closed the browser. Runs from the idle timer; exported for tests. */
+export async function releaseOfficialPostingBrowserIfIdle() {
+  const started = startedBrowser;
+  if (!started || rendering || renderQueue.length) return false;
+  try {
+    return await started.withLock(async () => {
+      // A page asked for while this waited its turn keeps the browser; the queue sets the timer again when it empties.
+      if (startedBrowser !== started || rendering || renderQueue.length) return false;
+      startedBrowser = null;
+      const info = started.stealth.getStealthBrowserInfo();
+      if (!info.connected || info.generation !== started.generation) return false;
+      if (await started.stealth.getBrowserSessionResetBlocker()) return false;
+      await started.stealth.closeStealthBrowser(false);
+      logger.info('[OfficialPosting] Released idle shared browser after page reads');
+      return true;
+    }, null, 'official-posting-render cleanup');
+  } catch { return false; }
 }
 /** For tests. */
-export function _resetOfficialPostingRenderForTests() { busyUntil = 0; renderQueue.length = 0; }
+export function _resetOfficialPostingRenderForTests() { busyUntil = 0; renderQueue.length = 0; startedBrowser = null; clearTimeout(idleTimer); }
 
 /**
  * One lead, opened in a browser. Never throws: a failure means only that this attempt saw nothing.
@@ -207,7 +239,7 @@ export async function renderOfficialPostingPage(value, options = {}) {
   catch { return failure(options.signal?.aborted ? 'aborted' : 'load-failed'); }
 }
 
-async function renderOnePage(url, { signal, now = Date.now, getBrowser, isPublicUrl = publicHostCheck(), withLock = withSharedProfileLock } = {}) {
+async function renderOnePage(url, { signal, now = Date.now, getBrowser, stealth: stealthModule, isPublicUrl = publicHostCheck(), withLock = withSharedProfileLock } = {}) {
   if (signal?.aborted) return failure('aborted');
   if (now() < busyUntil) return failure('busy');
   if (!(await isPublicUrl(url))) return failure('unsafe-address');
@@ -218,10 +250,19 @@ async function renderOnePage(url, { signal, now = Date.now, getBrowser, isPublic
   try {
     return await withLock(async () => {
       clearTimeout(lockTimer);
-      const browse = getBrowser || (async () => (await import('./stealthBrowser.js')).getStealthBrowser());
+      let stealth = null; let before = null;
+      const browse = getBrowser || (async () => {
+        stealth = stealthModule || await import('./stealthBrowser.js');
+        before = stealth.getStealthBrowserInfo();
+        return stealth.getStealthBrowser();
+      });
       let browser;
       try { browser = await abortable(browse(), signal); }
       catch (error) { return failure(error?.code === 'aborted' ? 'aborted' : 'browser-unavailable'); }
+      const after = stealth?.getStealthBrowserInfo();
+      if (after?.connected && (!before.connected || after.generation !== before.generation)) {
+        startedBrowser = { generation: after.generation, stealth, withLock };
+      }
       const visitLimit = new AbortController();
       const stopVisit = () => visitLimit.abort();
       signal?.addEventListener('abort', stopVisit, { once: true });

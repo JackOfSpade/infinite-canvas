@@ -22,7 +22,7 @@ const callRecord = {
   persona: 'Warm hiring manager', transcript,
   toneNotes: [{ atMs: 15000, note: 'voice dropped' }],
   toneSamples: [{ atMs: 5000, arousal: 0.4, dominance: 0.5, valence: 0.6 }, { atMs: 25000, arousal: 0.5, dominance: 0.6, valence: 0.4 }],
-  candidateProsodyByTurn: { 3: { wordsPerMinute: 130, pauses: [{ startMs: 16000, endMs: 19000 }] } }, baseline: { ready: true },
+  candidateProsody: [{ startMs: 12000, endMs: 20000, speechMs: 6000, wordsPerMinute: 130, pauses: [{ startMs: 16000, endMs: 19000 }] }], voiceBaseline: { wordsPerMinute: 120 },
 };
 const plan = [{ id: 'intro', question: 'Tell me about yourself.', headline: 'Checkout engineer.', bullets: ['Shipped the redesign'], example: 'At Acme I led the migration.' }];
 const brief = { role: { title: 'Product engineer', company: 'Discord' } };
@@ -61,7 +61,7 @@ export default [
       const result = await analyzeCall({ callDir: dir, callRecord, plan, brief, deps });
       assert.equal(calls.scribe.length, 1);
       assert.equal(calls.scribe[0].path, path.join(dir, 'candidate.wav'), 'Scribe reads the candidate track');
-      assert.deepEqual(calls.metrics[0], { transcript, candidateProsodyByTurn: callRecord.candidateProsodyByTurn, baselineSnapshot: callRecord.baseline });
+      assert.deepEqual(calls.metrics[0], { transcript, candidateProsody: callRecord.candidateProsody, baselineSnapshot: callRecord.voiceBaseline });
       assert.equal(calls.review.length, 1, 'exactly one review call');
       assert.deepEqual(calls.review[0].profile, { model: 'opus', effort: 'medium' });
       assert.equal(calls.review[0].schema, REVIEW_SCHEMA);
@@ -274,4 +274,155 @@ export default [
     },
   },
 
+  {
+    name: 'practice call analysis: a call answered only by typing skips Scribe and tells the reviewer delivery was not measurable',
+    async run() {
+      const dir = await tempDir();
+      try {
+        const typed = [
+          { speaker: 'interviewer', text: 'Tell me about yourself.', startMs: 1000, endMs: 3000 },
+          { speaker: 'candidate', text: 'I build checkout systems.', startMs: 9000, endMs: 9000, channel: 'chat' },
+          { speaker: 'interviewer', text: 'Thanks.', startMs: 12000, endMs: 13000 },
+        ];
+        let scribed = 0;
+        let prompt = '';
+        const result = await analyzeCall({ callDir: dir, callRecord: { ...callRecord, transcript: typed, toneSamples: [], candidateProsody: [], startedAt: Date.UTC(2026, 10, 8, 10), persona: { name: 'Dana Lee', role: 'Engineering manager', team: 'Voice', temperament: 'warm' } }, plan, brief, deps: {
+          transcribe: () => { scribed += 1; throw new Error('empty recording'); },
+          metrics: request => ({ typedOnly: request.transcript.length === 3 }),
+          callText: request => { prompt = request.prompt; return { ...review, chapters: [{ questionTurnIndex: 0, title: 'Intro' }], moments: [] }; },
+        } });
+        assert.equal(scribed, 0, 'no transcription of a silent recording');
+        assert.equal(result.analysis.status, 'ready');
+        assert.doesNotMatch(prompt, /Scribe pass failed/u, 'typing is not a transcription failure');
+        assert.match(prompt, /answered only by typing/u);
+        assert.match(prompt, /Delivery could not be measured because the call was typed/u);
+        assert.match(prompt, /Never make a claim about pace, pauses, fillers, confidence or tone for a typed turn/u);
+        assert.doesNotMatch(prompt, /CANDIDATE PROSODY BY TURN/u);
+        assert.doesNotMatch(prompt, /TONE TIMELINE/u);
+        assert.match(prompt, /interviewer persona: Dana Lee, Engineering manager, Voice \(warm\)/u);
+        assert.match(prompt, /started: 2026-11-08T10:00:00\.000Z/u);
+        assert.doesNotMatch(prompt, /persona: \(unknown\)/u);
+        assert.doesNotMatch(prompt, /started: \(unknown\)/u);
+      } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'practice call analysis: a technical ending is not reviewed as a complete call or blamed on the candidate',
+    async run() {
+      const build = reason => buildReviewPrompt({ callRecord: { ...callRecord, reason }, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      for (const reason of ['helper-error', 'audio-error', 'session-error']) {
+        const text = build(reason);
+        assert.match(text, new RegExp(`a technical failure cut the call short \\(${reason}\\)`, 'u'));
+        assert.match(text, /must not be faulted/u);
+        assert.match(text, /review only the part of the call that took place/u);
+        assert.equal(text.includes('the candidate ended the call early'), false);
+      }
+    },
+  },
+  {
+    name: 'practice call analysis: chapters use the recording timeline, which starts before the call clock',
+    async run() {
+      const dir = await tempDir();
+      try {
+        const result = await analyzeCall({ callDir: dir, callRecord: { ...callRecord, durationMs: 30000, recordingLeadMs: 10000 }, plan, brief, deps: {
+          transcribe: () => ({ words }), metrics: () => metrics, callText: () => review,
+        } });
+        assert.equal(result.analysis.chapters.at(-1).title, 'Closing');
+        assert.equal(result.analysis.chapters.at(-1).endMs, 40000, 'call length plus the lead before the answer');
+      } finally { await fs.promises.rm(dir, { recursive: true, force: true }); }
+    },
+  },
+  {
+    name: 'practice call analysis: screens and the coding pad reach the review prompt only when present, and are capped',
+    async run() {
+      const build = record => buildReviewPrompt({ callRecord: record, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      const plain = build(callRecord);
+      assert.equal(build({ ...callRecord, screens: [], pad: { lang: 'python', snapshots: [] } }), plain, 'empty screens and pad change nothing');
+      assert.equal(build({ ...callRecord, screens: undefined, pad: null }), plain);
+      assert.equal(plain.includes('SHARED SCREENS'), false);
+      const record = {
+        ...callRecord,
+        screens: [{ atMs: 8000, title: 'Sum pairs', content: 'Given a list, return pairs.\n\n```\nf([1,2])\n```', speakerId: 'A', endMs: 25000 }],
+        pad: { lang: 'python', snapshots: [{ atMs: 15000, text: 'def f(x):\n  pass' }, { atMs: 30000, text: 'def f(x):\n  return sorted(x)' }] },
+      };
+      const text = build(record);
+      assert.match(text, /--- SHARED SCREENS/u);
+      assert.match(text, /screen 1: "Sum pairs" shown at 00:08 \(during or after transcript turn \[2\]\), until 00:25/u);
+      assert.match(text, /Given a list, return pairs\./u);
+      assert.match(text, /--- CANDIDATE CODING PAD \(final text, language: python\) ---/u);
+      assert.equal(text.includes('return sorted(x)'), true, 'the last snapshot is the final text');
+      assert.equal(text.includes('  pass'), false, 'earlier snapshots are not shown');
+      assert.match(text, /Never claim anything about code that is not in the pad/u);
+      const big = build({ ...record, screens: [{ atMs: 0, title: 'Big', content: 'x'.repeat(7000) }], pad: { snapshots: [{ atMs: 1, text: 'y'.repeat(13000) }] } });
+      assert.equal(big.includes('x'.repeat(6001)), false);
+      assert.equal(big.includes('x'.repeat(6000)), true);
+      assert.equal(big.includes('y'.repeat(12001)), false);
+      assert.equal(big.includes('y'.repeat(12000)), true);
+      assert.match(big, /cut: the first 6000 characters of 7000/u);
+      assert.match(big, /cut: the first 12000 characters of 13000/u);
+    },
+  },
+  {
+    name: 'practice call analysis: a panel record names every interviewer, who spoke each turn, and adds the panel rule',
+    async run() {
+      const build = record => buildReviewPrompt({ callRecord: record, plan: { cards: [] }, metrics: {}, wordsByTurn: {} });
+      const solo = build(callRecord);
+      assert.equal(build({ ...callRecord, panel: [] }), solo, 'an empty panel is byte-for-byte the solo prompt');
+      assert.equal(solo.includes('- Panel:'), false);
+      const persona = { name: 'Dana', role: 'Engineering manager', temperament: 'warm' };
+      const record = {
+        ...callRecord, persona,
+        panel: [
+          { id: 'B', name: 'John', role: 'Senior engineer', focus: 'system design', joins: 'late', joinedAtMs: 95000, voiceId: 'v-b' },
+          { id: 'C', name: 'Priya', role: 'Recruiter', focus: '', joins: 'late', joinedAtMs: null, voiceId: 'v-c' },
+        ],
+        transcript: [
+          { speaker: 'interviewer', speakerId: 'A', text: 'Welcome.', startMs: 0, endMs: 3000 },
+          { speaker: 'candidate', text: 'Thanks.', startMs: 3500, endMs: 4000 },
+          { speaker: 'interviewer', speakerId: 'A', text: 'Over to John. John, go ahead.', startMs: 4500, endMs: 9000,
+            segments: [{ speakerId: 'A', text: 'Over to John.' }, { speakerId: 'B', text: 'John, go ahead.' }] },
+          { speaker: 'interviewer', text: 'No speaker recorded.', startMs: 9500, endMs: 10000 },
+        ],
+      };
+      const text = build(record);
+      assert.match(text, /interviewers on this call \(a panel\): Dana, Engineering manager; John, Senior engineer \(focus: system design; joined late at 01:35\); Priya, Recruiter \(joined late, but never joined the call\)/u);
+      assert.match(text, /\[0\] Dana 00:00-00:03: Welcome\./u);
+      assert.match(text, /\[1\] candidate 00:03-00:04: Thanks\./u);
+      assert.match(text, /\[2\] Dana 00:04-00:09:\n {4}Dana: Over to John\.\n {4}John: John, go ahead\./u);
+      assert.equal(text.includes('Over to John. John, go ahead.'), false, 'the joined text is replaced by the segments');
+      assert.match(text, /\[3\] interviewer 00:09-00:10: No speaker recorded\./u, 'a turn with no speaker keeps the bare word');
+      assert.equal(text.split('- Panel:').length, 2, 'the panel rule is added once');
+      assert.match(text, /only when the transcript shows it/u);
+      // A record that repeats the lead inside the panel is read the same way.
+      const withLead = build({ ...record, panel: [{ id: 'A', name: 'Dana', role: 'Engineering manager', joins: 'start' }, ...record.panel] });
+      assert.match(withLead, /Dana, Engineering manager; John/u);
+      assert.equal(withLead.includes('Engineering manager; Dana'), false, 'the lead is listed once in the panel line');
+    },
+  },
+  {
+    name: 'practice call analysis: an overlay entry is labelled as an overlapping remark and a call without one prompts as before',
+    async run() {
+      const plain = buildReviewPrompt({ callRecord, plan, brief, metrics });
+      assert.doesNotMatch(plain, /overlapping remark/u);
+      const withOver = [...transcript.slice(0, 1), { speaker: 'interviewer', speakerId: 'B', text: 'Hi there.', startMs: 1000, endMs: 1700, overlay: true }, ...transcript.slice(1)];
+      const prompt = buildReviewPrompt({ callRecord: { ...callRecord, transcript: withOver }, plan, brief, metrics });
+      assert.match(prompt, /\[1\] interviewer \(overlapping remark, said over the speaker\) 00:01-00:01: Hi there\./u);
+      assert.equal(buildReviewPrompt({ callRecord: { ...callRecord, transcript }, plan, brief, metrics }), plain, 'no overlay, identical prompt');
+    },
+  },
+  {
+    name: 'practice call analysis: the unprepared question is named with its own judging rule, and an absent field leaves the prompt unchanged',
+    async run() {
+      const plain = buildReviewPrompt({ callRecord, plan, brief, metrics });
+      assert.doesNotMatch(plain, /not one the candidate had prepared/u);
+      const asked = 'Tell me about a time a launch went wrong.';
+      const named = buildReviewPrompt({ callRecord: { ...callRecord, unpreparedQuestion: { text: asked, askedBy: 'A' } }, plan, brief, metrics });
+      assert.ok(named.includes(asked));
+      assert.match(named, /There is no prepared answer for it/u);
+      assert.match(named, /adaptability: structure, relevance and composure/u);
+      assert.match(named, /Never fault it for departing from prepared material/u);
+      const viaPlan = buildReviewPrompt({ callRecord: { ...callRecord, setup: { plan: { questions: [{ number: 1 }, { number: 0, text: asked }] } } }, plan, brief, metrics });
+      assert.ok(viaPlan.includes(asked));
+    },
+  },
 ];

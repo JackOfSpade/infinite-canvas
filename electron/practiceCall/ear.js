@@ -1,5 +1,3 @@
-import fsPromises from 'node:fs/promises';
-
 const TONE_CHUNK_MS = 6000;
 
 async function defaultWavOpen() {
@@ -56,24 +54,34 @@ export function createPracticeEar({
   let bidder = null;
   let note = null;
   const toneSamples = [];
+  // Every measured answer span, kept so the call record can hold the prosody per turn.
+  const measuredTurns = [];
   // R12: noteSpeech runs in the background; settle() can wait for its work.
   const inflight = new Set();
   let speechMs = 0;
   let latestTone = null;
   let closed = false;
 
-  async function reader() {
-    if (wav) return wav;
-    const open = await wavOpen;
-    wav = await open(candidatePath, { fs: fsPromises });
-    return wav;
+  let opening = null;
+  function reader() {
+    // One shared attempt: two callers arriving together must not each open the file, or the
+    // first handle is overwritten and never closed. A failed attempt is forgotten so the next
+    // caller tries again (the recording may not exist yet).
+    opening ??= (async () => {
+      // Every dependency here is a loader (an async function), like the defaults above.
+      const open = await wavOpen();
+      // The reader uses synchronous file calls, so it takes its own default file system.
+      wav = await open(candidatePath);
+      return wav;
+    })().catch(error => { opening = null; throw error; });
+    return opening;
   }
   async function workerOf() {
     if (worker) return worker;
     worker = createInference ? createInference({ smartTurnPath, tonePath }) : await inference({ smartTurnPath, tonePath });
     return worker;
   }
-  async function prosodyOf() { pro ??= await prosody; return pro; }
+  async function prosodyOf() { pro ??= await prosody(); return pro; }
   async function baselineOf() {
     base ??= await baseline({ minSpeechMs });
     return base;
@@ -82,7 +90,7 @@ export function createPracticeEar({
     bidder ??= await floorBid({ baseline: await baselineOf() });
     return bidder;
   }
-  async function noteOf() { note ??= await toneNote; return note; }
+  async function noteOf() { note ??= await toneNote(); return note; }
   // composeVoiceNote is pure and cheap, so load it with the ear: the voice-note
   // path then has it in hand instead of waiting on a model mid-call.
   const noteLoaded = noteOf().catch(() => null);
@@ -112,14 +120,24 @@ export function createPracticeEar({
   }
 
   /** Feed an answer span: baseline prosody now, tone scores in the background. */
-  function noteSpeech({ startMs, endMs } = {}) {
+  function noteSpeech({ startMs, endMs, wordCount = 0 } = {}) {
     if (closed || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return;
-    const samples = spanSamples(startMs, endMs);
-    if (!samples || !samples.length) return;
     const run = async () => {
+      // The recording is opened here too: a call may reach its first answer before any
+      // end-of-turn check has opened it.
+      await reader();
+      const samples = spanSamples(startMs, endMs);
+      if (!samples || !samples.length) return;
       await noteLoaded;
       const measure = await prosodyOf();
-      const turn = measure({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+      const measured = measure({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+      // The measure has no word timings here, so pace is the segment's word count over its speech time.
+      const spoken = Number(measured?.speechMs) || 0;
+      const words = Number.isFinite(wordCount) && wordCount > 0 ? Math.round(wordCount) : 0;
+      const turn = words > 0 && spoken > 0
+        ? { ...measured, wordCount: words, wordsPerMinute: Math.round((words / spoken) * 60000 * 10) / 10 }
+        : measured;
+      measuredTurns.push({ ...turn, startMs, endMs });
       // Only the first ~minSpeechMs of candidate speech defines the baseline;
       // later answers are measured against it rather than moving it.
       const feedsBaseline = speechMs < minSpeechMs;
@@ -163,12 +181,18 @@ export function createPracticeEar({
     }
   }
 
-  function voiceNote({ startMs, endMs } = {}) {
+  function voiceNote({ startMs, endMs, wordCount } = {}) {
     if (closed || !Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return null;
     const samples = spanSamples(startMs, endMs);
     if (!samples || !samples.length || !pro || !base || !note) return null;
     if (!base.ready()) return null;
-    const turn = pro({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+    const measured = pro({ samples, sampleRate: 16000, startMs, endMs, words: [] });
+    // Pace needs the words of this span: use the caller's count, else the one noted for the same span.
+    const known = Number.isFinite(wordCount) ? wordCount : measuredTurns.find(item => item.startMs === startMs && item.endMs === endMs)?.wordCount;
+    const spoken = Number(measured?.speechMs) || 0;
+    const turn = known > 0 && spoken > 0
+      ? { ...measured, wordCount: known, wordsPerMinute: Math.round((known / spoken) * 60000 * 10) / 10 }
+      : measured;
     let tone = latestTone;
     for (const sample of toneSamples) if (sample.atMs >= startMs && sample.atMs < endMs) tone = sample;
     return note(base.relative(turn, tone));
@@ -181,6 +205,10 @@ export function createPracticeEar({
     noteSpeech,
     settle,
     toneSamples: () => toneSamples.map(sample => ({ ...sample })),
+    /** Measured candidate turns in time order, each with its pauses, for the call record. */
+    prosodyTurns: () => measuredTurns.map(turn => ({ ...turn })).sort((left, right) => left.startMs - right.startMs),
+    /** The voice baseline's medians, or null when no answer has been measured. */
+    baselineSnapshot: () => { try { return base?.snapshot?.() ?? null; } catch { return null; } },
     transcript: async () => (await reader()).writtenMs(),
     close: () => {
       closed = true;
