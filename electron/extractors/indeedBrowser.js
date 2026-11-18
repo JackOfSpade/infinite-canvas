@@ -123,7 +123,7 @@ export function classifyIndeedSessionPreflight({ hasPPID = false, authenticatedU
   // still be an indeed.com URL, but it says nothing about either account
   // authentication or clearance. "indeed-login-wall" is deliberately excluded
   // here: this preflight navigates to an auth-gated URL
-  // (secure.indeed.com/settings/account) on purpose, so a redirect to Indeed's
+  // (myjobs.indeed.com/saved) on purpose, so a redirect to Indeed's
   // OWN sign-in page is the ORDINARY logged-out signal, not a bot wall — routing
   // it through "challenge" told a logged-out user to wait and retry while hiding
   // the actual login path.
@@ -1069,7 +1069,11 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
 
     // Verify auth state before running any queries.
     let navError = null;
-    const accountVerifyUrl = 'https://secure.indeed.com/settings/account';
+    // Saved jobs, not secure.indeed.com/settings/account: the settings page needs
+    // Indeed's step-up sign-in, which lapses about 2h15 after login and then sends
+    // a still-signed-in user to the email-code page (see the indeed verify config
+    // in stealthBrowser.js). Saved jobs needs only the ordinary session.
+    const accountVerifyUrl = 'https://myjobs.indeed.com/saved';
     await page.goto(accountVerifyUrl, { waitUntil: 'domcontentloaded', timeout: 20000 }).catch((e) => { navError = e; });
     const landedUrl = page.url();
     await injectOverlay(page);
@@ -1084,7 +1088,7 @@ export async function fetchIndeedListingsBrowser(queries, signal = null, maxAgeD
     let preflightSignals = await getChallengeSignals(page);
     let preflight = classifyIndeedSessionPreflight({
       hasPPID,
-      authenticatedUrl: /^https:\/\/secure\.indeed\.com\/settings\/account(?:[/?#]|$)/i.test(landedUrl),
+      authenticatedUrl: /^https:\/\/myjobs\.indeed\.com\/saved(?:[/?#]|$)/i.test(landedUrl),
       landedUrl,
       challengeReason: preflightSignals.isChallenge ? preflightSignals.reason : null,
     });

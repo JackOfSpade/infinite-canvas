@@ -54,6 +54,27 @@ export async function getUserDataDir() {
   return _userDataDir;
 }
 
+// Launch switch that turns Chrome's own browser-level sign-in off. Every Chrome
+// the app starts on the shared profile must carry it.
+//
+// With browser sign-in on (the default), Chrome keeps the Google web login in
+// step with its own browser account. The app never has a browser account, so a
+// browser started without this switch signs the web login out about a second
+// after launch. Observed 2026-11-17: a Google login made in a native window was
+// intact on disk (.google.com SID cookies present), the headless scraping browser
+// launched, and its own gaia_cookie.changed_time plus the missing SID cookies
+// marked the sign-out 1.5 s later. Both Chrome 157 and Chrome for Testing 147
+// were checked on throwaway profiles: with the switch, Preferences records
+// signin.allowed=false; without it, true. A Preferences-only setting does not
+// hold: the scraping browser came up with sign-in allowed regardless.
+export const BROWSER_SIGNIN_OFF_ARGS = Object.freeze(['--allow-browser-signin=false']);
+export function withBrowserSigninOffArgs(args) {
+  const list = Array.isArray(args) ? args : [];
+  return list.some(arg => String(arg).startsWith('--allow-browser-signin'))
+    ? list
+    : [...list, ...BROWSER_SIGNIN_OFF_ARGS];
+}
+
 export async function prepareSharedBrowserProfileForLaunch(userDataDir) {
   const result = await clearOwnedBrowserTabRestoreState(userDataDir, await getUserDataDir());
   if (result.outcome === 'failed' || result.outcome === 'unsafe-path') {
@@ -571,6 +592,7 @@ export async function launchWithProfileLockRetry(launchOpts, context, url = null
       const launchSignal = launchSignalFor(callerSignal, launchDeadline);
       const rawLaunch = puppeteer.launch({
         ...launchOptions,
+        args: withBrowserSigninOffArgs(launchOptions.args),
         // puppeteer-extra deep-merges native AbortSignals into `{}`. Preserve
         // cancellation and the canonical launch deadline with its compatible
         // forwarding bridge instead of handing the raw signal to that merge.
@@ -1208,11 +1230,21 @@ const JOB_LOGIN_PLATFORMS = {
     // redirected to accounts.google.com/signin/... so the hostname check is sufficient.
     connectedFinalUrlMustContain: 'myaccount.google.com',
   },
+  // NOT secure.indeed.com/settings/account: that page needs Indeed's step-up
+  // ("acr_values=strong") sign-in, which lapses about 2h15 after the email code
+  // is entered. From then on it redirects EVERY browser — real Chrome included —
+  // to /account/login/emailtwofactorauth while the ordinary session (PPID, SOCK,
+  // SHOE, refresh token) is still alive, so the check reported a live login as
+  // lost (measured 2026-11-18: real Chrome at +2h44 got the email-code page,
+  // then loaded myjobs.indeed.com/saved signed in seconds later). Saved jobs
+  // needs only the ordinary session; a signed-out visitor is redirected to
+  // secure.indeed.com/auth.
   indeed:       {
     name: 'Indeed',
     verifyUrls: [
-      'https://secure.indeed.com/settings/account',
+      'https://myjobs.indeed.com/saved',
     ],
+    connectedFinalUrlMustContain: 'myjobs.indeed.com/saved',
     bodySignals: [
       'upload your resume sign in',
       'sign in employers / post job',

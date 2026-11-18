@@ -1,5 +1,5 @@
 import { logger } from '../../logger.js';
-import { closeOwnedBrowserProcess, isBrowserProcessExited, waitForBrowserProcessExit, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile, prepareSharedBrowserProfileForLaunch } from '../stealthBrowser.js';
+import { closeOwnedBrowserProcess, isBrowserProcessExited, waitForBrowserProcessExit, getStealthBrowser, closeStealthBrowser, getUserDataDir, findChromePath, findSystemChromePath, launchWithProfileLockRetry, reserveSharedProfile, prepareSharedBrowserProfileForLaunch, BROWSER_SIGNIN_OFF_ARGS } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { READINESS } from '../scrapeBudget.js';
 import { matchesNoResultsSentinel } from '../antiBotDetector.js';
@@ -586,7 +586,40 @@ export function captchaResolveHostMismatchDiagnostic(originalHost, currentUrl, c
 //     so no clearance token is ever minted and the "Verify you are human" widget
 //     re-spawns forever. Swappa added Turnstile to its login page (it "worked
 //     before" under CDP); the only fix is a real, non-automated browser.
-export const NATIVE_LOGIN_PLATFORMS = new Set(['indeed', 'swappa', 'mercari']);
+// Google's own sign-in is the first reason at its source: under CDP the form
+// accepts the account, then lands on accounts.google.com/v3/signin/rejected
+// ("Couldn't sign you in — This browser or app may not be secure").
+export const NATIVE_LOGIN_PLATFORMS = new Set(['indeed', 'swappa', 'mercari', 'google']);
+// Native-login platforms whose landed URL is never cached as connected on its
+// own: the post-close HTTP verify must also pass. Google has no login-only cookie
+// registered in PLATFORM_AUTH_COOKIES, so the verify is the only proof that the
+// session written by the native window is readable by the scraping browser.
+const NATIVE_LOGIN_REVERIFY_PLATFORMS = new Set(['google']);
+// Native-login platforms whose window must be the SAME browser build the scraper
+// runs (findChromePath — Chrome for Testing when installed), not real Google
+// Chrome. Google: a session created in real Chrome did not survive being used
+// from the scraping browser. Over five live runs on 2026-11-17 the .google.com
+// SID cookies were gone seconds after a different build opened the profile, with
+// device-bound sessions off, with browser sign-in off, and with both. Before
+// that day the login and the scrape shared one build and the session held for
+// weeks; only the CDP attachment during sign-in is what Google rejects.
+const NATIVE_LOGIN_SCRAPER_BUILD_PLATFORMS = new Set(['google']);
+export function nativeLoginUsesScraperBuild(platformId) {
+  return NATIVE_LOGIN_SCRAPER_BUILD_PLATFORMS.has(String(platformId || '').toLowerCase());
+}
+
+// AppleScript target for the browser a native window runs in: the .app bundle
+// path of the executable, so the tab poll reads THAT browser and not whichever
+// "Google Chrome" is installed. Falls back to the app name. PURE.
+export function nativeLoginAppleScriptTarget(executablePath) {
+  const match = /^(.*\.app)\/Contents\/MacOS\/[^/]+$/.exec(String(executablePath || ''));
+  if (!match || /["\\\n\r]/.test(match[1])) return 'Google Chrome';
+  return match[1];
+}
+
+export function nativeLoginNeedsHttpReverify(platformId) {
+  return NATIVE_LOGIN_REVERIFY_PLATFORMS.has(String(platformId || '').toLowerCase());
+}
 const NATIVE_LOGIN_SUCCESS_URLS = {
   indeed: [
     // /jobs is public: an anonymous user (or a Cloudflare interstitial that
@@ -594,6 +627,12 @@ const NATIVE_LOGIN_SUCCESS_URLS = {
     // success made the native window close and cached a connection that the
     // scraper could not actually use.  This is the same account-only route the
     // post-login verifier uses in stealthBrowser.js.
+    // Saved jobs is where the login URL now sends a signed-in user: it needs only
+    // the ordinary session. The settings page needs Indeed's step-up sign-in,
+    // which lapses about 2h15 after login, so opening this window on a session
+    // that was still alive asked for another email code for nothing. Settings
+    // stays listed because it is still a signed-in-only page.
+    'myjobs.indeed.com/saved',
     'secure.indeed.com/settings/account',
   ],
   // Login URL carries ?next=/my/swappa, so a completed login lands on the seller
@@ -610,6 +649,12 @@ const NATIVE_LOGIN_SUCCESS_URLS = {
   // doesn't false-succeed mid-redirect.
   mercari: [
     'mercari.com/mypage',
+  ],
+  // The sign-in form's continue target. Matched on the HOST as well
+  // (isOutsideLoggedInUrlMarker in isNativeLoginSuccess): the signed-out landing
+  // page google.com/account/about can carry this string in its query.
+  google: [
+    'myaccount.google.com',
   ],
 };
 
@@ -922,7 +967,7 @@ export function normalizeNativeTabQueryError(rawMessage, { echoedScript = '', ma
   return message;
 }
 
-async function getNativeChromeTabs() {
+async function getNativeChromeTabs(appTarget = 'Google Chrome') {
   if (process.platform !== 'darwin') return [];
   // `id of tab` is Chrome's own stable per-tab identifier. Window/tab INDEXES
   // are front-to-back positions that renumber whenever the user focuses another
@@ -930,7 +975,7 @@ async function getNativeChromeTabs() {
   // id is read inside a `try` so a Chrome build without it degrades to indexes
   // instead of failing the whole inventory.
   const script = `
-tell application "Google Chrome"
+tell application "${appTarget}"
   set output to ""
   repeat with wi from 1 to (count of windows)
     set w to window wi
@@ -1002,6 +1047,9 @@ export function isNativeLoginSuccess(platformId, url, title = '') {
   // heading), not a logged-in page. Without this, clicking Login while logged
   // out auto-"succeeds" and the window is killed before the user can sign in.
   if (isLoggedOutTitleForPlatform(platformId, titleLower)) return false;
+  // A platform with a logged-in host marker (Google) succeeds only ON that host,
+  // never on a page that merely names it in a query string.
+  if (isOutsideLoggedInUrlMarker(platformId, lower)) return false;
   // Inline-login platforms: the success URL ALSO serves the login form, so an empty/
   // loading title at that URL must NOT count as success — otherwise the very first
   // poll (before the page's <title> settles) auto-closes the window before the user
@@ -1021,16 +1069,16 @@ export const PLATFORM_LOGIN_URLS = {
   // Do NOT open myaccount.google.com directly: a signed-out request there is
   // sent to google.com/account/about, a marketing page with no sign-in form, and
   // its "Go to Google Account" button opens the form in a NEW tab (the reported
-  // three-attempt login). Google has no auth-gated URL marker: the window
-  // confirms login via the DOM signal on myaccount.google.com
-  // (PLATFORM_LOGGED_IN_URL_MARKERS) and the post-close HTTP verify
-  // (connectedFinalUrlMustContain: 'myaccount.google.com').
+  // three-attempt login). Google is a NATIVE_LOGIN_PLATFORMS member (it rejects
+  // sign-in under CDP): the native window closes once the tab reaches
+  // myaccount.google.com (NATIVE_LOGIN_SUCCESS_URLS), and the post-close HTTP
+  // verify (connectedFinalUrlMustContain: 'myaccount.google.com') confirms it.
   google:        'https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmyaccount.google.com%2F',
   linkedin:      'https://www.linkedin.com/login',
   // Continue to an authenticated account page, not public /jobs.  The native
   // auto-close may only claim success once Indeed itself admits this session to
   // its account settings.
-  indeed:        'https://secure.indeed.com/auth?continue=https%3A%2F%2Fsecure.indeed.com%2Fsettings%2Faccount',
+  indeed:        'https://secure.indeed.com/auth?continue=https%3A%2F%2Fmyjobs.indeed.com%2Fsaved',
   glassdoor:     'https://www.glassdoor.com/profile/login_input.htm',
   ziprecruiter:  'https://www.ziprecruiter.com/login',
   dice:          'https://www.dice.com/dashboard/login',
@@ -1298,7 +1346,7 @@ export async function openLoginWindow(platformId, sender = null, signal = null) 
     // for Puppeteer-login platforms where both login and scraper share the same
     // executable through the normal path.
     const executablePath = process.env.CHROME_PATH ||
-      (NATIVE_LOGIN_PLATFORMS.has(platformId)
+      (NATIVE_LOGIN_PLATFORMS.has(platformId) && !nativeLoginUsesScraperBuild(platformId)
         ? (await findSystemChromePath() ?? await findChromePath())
         : await findChromePath());
     logger.info(`[StealthBrowser] Opening login window for ${platformId} (executable: ${executablePath})`);
@@ -1706,7 +1754,10 @@ export async function openLoginWindow(platformId, sender = null, signal = null) 
 async function openNativeLoginWindow({ platformId, url, executablePath, sender = null, signal = null }) {
   throwIfSignalAborted(signal, 'Native login window cancelled');
   const userDataDir = await getUserDataDir();
-  const nativeExecutablePath = await findGoogleSafeChromePath(executablePath);
+  const nativeExecutablePath = nativeLoginUsesScraperBuild(platformId)
+    ? executablePath
+    : await findGoogleSafeChromePath(executablePath);
+  const appleScriptTarget = nativeLoginAppleScriptTarget(nativeExecutablePath);
   logger.info(`[StealthBrowser] Opening native Chrome login window for ${platformId} (no CDP automation, executable: ${nativeExecutablePath}, profile: ${userDataDir})`);
   updateAuthWindowDiagnostic(platformId, {
     mode: 'native-chrome',
@@ -1729,6 +1780,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
     // static mock-keychain key — the two families would write mutually
     // undecryptable cookies into one shared profile.
     ...PUPPETEER_OSCRYPT_PARITY_ARGS,
+    ...BROWSER_SIGNIN_OFF_ARGS,
     `--app=${url}`,
   ];
   updateAuthWindowDiagnostic(platformId, { chromeArgs });
@@ -1827,7 +1879,7 @@ async function openNativeLoginWindow({ platformId, url, executablePath, sender =
 
     const runNativePoll = createNonOverlappingRunner(async () => {
       if (settled) return;
-      const tabs = await getNativeChromeTabs();
+      const tabs = await getNativeChromeTabs(appleScriptTarget);
       // Match the tab for THIS platform's flow by domain — the platform's own
       // site plus Google (flows that delegate to Google SSO). Was hardcoded to
       // indeed/google; derived now so each native platform (swappa, …) finds its tab.
@@ -2165,6 +2217,7 @@ export async function openNativeIndeedChallengeWindow(url, sender = null, { chal
       // window's cookie OSCrypt key aligned with the Puppeteer scrape browser
       // that shares this same userDataDir.
       ...PUPPETEER_OSCRYPT_PARITY_ARGS,
+      ...BROWSER_SIGNIN_OFF_ARGS,
       `--app=${url}`,
     ];
     logger.info(`[StealthBrowser] Opening native Chrome challenge handoff for Indeed (no CDP, executable: ${executablePath}, profile: ${userDataDir}): ${url}`);

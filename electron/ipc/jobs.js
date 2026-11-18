@@ -7208,7 +7208,7 @@ export function authenticatedIndeedScrapeStatus(sessionDiagnostics, warning) {
   // the same second the source failed with scrape-failed; the bug report then
   // showed an authenticated-session claim contradicting the failure beside it.
   if (sessionDiagnostics.preflightStatus !== 'authenticated') return null;
-  const url = String(sessionDiagnostics.landedUrl || 'https://secure.indeed.com/settings/account');
+  const url = String(sessionDiagnostics.landedUrl || 'https://myjobs.indeed.com/saved');
   const signal = sessionDiagnostics.hasPPID === true ? 'PPID auth cookie' : 'authenticated account page';
   return {
     lastReason: `Indeed scrape preflight freshly observed an authenticated session (${signal}).`,

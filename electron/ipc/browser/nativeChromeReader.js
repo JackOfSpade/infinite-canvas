@@ -3,7 +3,7 @@ import { promisify } from 'util';
 import fs from 'fs';
 import path from 'path';
 import { logger } from '../../logger.js';
-import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile, prepareSharedBrowserProfileForLaunch } from '../stealthBrowser.js';
+import { closeStealthBrowser, getUserDataDir, findSystemChromePath, findChromePath, reserveSharedProfile, prepareSharedBrowserProfileForLaunch, BROWSER_SIGNIN_OFF_ARGS } from '../stealthBrowser.js';
 import { pauseBrowserPool } from '../browserPool.js';
 import { withMarketplaceBrowserLock } from '../marketplaceBrowserLock.js';
 import { findGoogleSafeChromePath, isLoggedOutTitleForPlatform, isLoginUrlPath, PUPPETEER_OSCRYPT_PARITY_ARGS } from './authWindows.js';
@@ -622,6 +622,7 @@ export async function readHubUrlsViaNativeChrome(watchUrls, { platformId, signal
         // uses Chromium's static mock-keychain key — a login done IN this window
         // would write cookies invisible to every later headless scrape/read.
         ...PUPPETEER_OSCRYPT_PARITY_ARGS,
+        ...BROWSER_SIGNIN_OFF_ARGS,
         `--app=${urls[0]}`,
       ], { stdio: 'ignore', detached: false });
 

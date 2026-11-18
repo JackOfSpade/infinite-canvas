@@ -1,5 +1,6 @@
-import { ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, classifyVisibleWindowNavigation, computeMissingLogins, cookieListHasAuth, describeIndeedQueryOutcomes, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, validateVisibleWindowUrl, visibleWindowLaunchOptions, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
+import { withBrowserSigninOffArgs, BROWSER_SIGNIN_OFF_ARGS, nativeLoginUsesScraperBuild, nativeLoginAppleScriptTarget, ALL_COMP_SOURCE_IDS, EBAY_ACTIVE_EXTRACTOR, EBAY_SOLD_EXTRACTOR, JSDOM, MERCARI_SOLD_EXTRACTOR, NATIVE_LOGIN_PLATFORMS, NATIVE_READ_PLATFORMS, PLATFORM_AUTH_COOKIES, PLATFORM_COOKIE_DOMAINS, PLATFORM_LOGIN_URLS, POSHMARK_SOLD_EXTRACTOR, PRICE_SYNTHESIS_SCHEMA, PUPPETEER_OSCRYPT_PARITY_ARGS, SELL_PLATFORMS, SELL_PLATFORM_BY_ID, SWAPPA_SOLD_EXTRACTOR, areCaptchaResolveHostsEquivalent, assert, buildAuthAttemptRecord, buildTrustedNativeLoginVerdict, canAuthCookieBypassLoginUrl, captchaResolveHostMismatchDiagnostic, classifyIndeedSessionPreflight, classifyNativeIndeedChallengeTab, classifyVisibleWindowNavigation, computeMissingLogins, cookieListHasAuth, describeIndeedQueryOutcomes, ensureAppleEventsJsEnabled, extractAlgoliaHits, filterPriceChartingByRelevance, fs, getIndeedSessionResetOrigins, getJobLoginConfig, getLoginAutoCloseWaitReason, getSellMonitorConfig, getSoftLoginWallMatch, isAppleEventsJsDisabledError, isAptDecoApplicable, isAuthChallengeUrl, isBrowserProcessExited, isIndeedCookieDomain, isInlineLoginPlatform, isLoggedOutTitleForPlatform, isLoginUrlPath, isNativeIndeedChallengeCleared, isNativeIndeedChallengeHardBlock, isNativeIndeedChallengePending, nativeIndeedChallengeIsStalled, isNativeLoginSuccess, isPostLoginInterstitialUrl, isPriceChartingApplicable, isStrictIndeedHttpsUrl, nativeIndeedChallengeExitDisposition, nativeIndeedChallengeTabIdentity, nativeReadLoginState, nativeReadLooksChallenged, nativeReadLooksLoggedOut, nativeReadToFetchResult, os, parseAiJson, parseAptDecoComps, parseNativeReadOutput, parsePriceChartingHtml, path, priceChartingQuery, renderSessionTraceBlocks, reverbListingsToComps, selectNativeIndeedChallengeTab, selectRestorableStatuses, shouldHandoffIndeedChallengeToNative, shouldUseNativeRead, unwrapInlineExtractorItems, validateVisibleWindowUrl, visibleWindowLaunchOptions, waitForBrowserProcessExit, withAppleEventsJsEnabled } from '../test-dependencies.js';
 import { CAPTCHA_RESOLVE_CHALLENGE_SELECTORS } from '../test-dependencies.js';
+import { isLoginPageCopyAntiBot } from '../../electron/ipc/accounts.js';
 import { shouldAutoCloseCaptchaResolveWithoutExtractor } from '../test-dependencies.js';
 // Imported at the source: the shared test-dependencies barrel is edited by
 // other areas, and this helper is only exercised here.
@@ -1101,8 +1102,61 @@ export default [
     },
   },
 {
+    // Indeed's account-settings page needs a step-up sign-in that lapses about
+    // 2h15 after login; from then on it sends a still-signed-in user (in real
+    // Chrome too) to the email-code page, so checking it reported a live login
+    // as lost. The check page must need only the ordinary session.
+    name: 'Indeed login check uses a page that needs only the ordinary session, not the step-up settings page',
+    run: () => {
+      const cfg = getJobLoginConfig('indeed');
+      const urls = Array.isArray(cfg?.verifyUrls) ? cfg.verifyUrls : [cfg?.verifyUrl].filter(Boolean);
+      assert(urls.length > 0, 'Indeed must have a verify URL');
+      assert(!urls.some(u => /secure\.indeed\.com\/settings/i.test(u)),
+        `Indeed verify must not use the step-up settings page (got ${JSON.stringify(urls)})`);
+      assert(typeof cfg.connectedFinalUrlMustContain === 'string'
+        && urls.every(u => u.toLowerCase().includes(cfg.connectedFinalUrlMustContain.toLowerCase())),
+        'a signed-in visit must be recognised by staying on the verify page');
+      // Observed 2026-11-18: a signed-out visitor is redirected here.
+      const signedOut = 'https://secure.indeed.com/auth?continue=https%3A%2F%2Fmyjobs.indeed.com%2Fsaved&co=CA&hl=en_CA';
+      assert(isLoginUrlPath(signedOut.toLowerCase())
+        || !signedOut.toLowerCase().startsWith(urls[0].toLowerCase()),
+        'the signed-out redirect must not read as connected');
+      // The step-up redirect must never count as the authenticated page.
+      const stepUp = classifyIndeedSessionPreflight({
+        hasPPID: false, authenticatedUrl: false,
+        landedUrl: 'https://secure.indeed.com/account/login/emailtwofactorauth', challengeReason: null,
+      });
+      assert(stepUp.status === 'needs-login', `email-code page without PPID is needs-login (got ${stepUp.status})`);
+      return { ok: true };
+    },
+  },
+{
+    name: 'Indeed login window sends a signed-in user to saved jobs, and sign-in page text is not an anti-bot wall',
+    run: () => {
+      const login = new URL(PLATFORM_LOGIN_URLS.indeed);
+      assert(login.searchParams.get('continue') === 'https://myjobs.indeed.com/saved',
+        `Indeed login must continue to saved jobs, not the step-up settings page (got ${login.searchParams.get('continue')})`);
+      assert(isNativeLoginSuccess('indeed', PLATFORM_LOGIN_URLS.indeed, 'Sign In | Indeed Accounts') === false,
+        'the login URL itself is never a completed login');
+      assert(isNativeLoginSuccess('indeed', 'https://myjobs.indeed.com/saved', 'My jobs | Indeed') === true,
+        'landing on saved jobs is a completed login');
+      assert(isNativeLoginSuccess('indeed', 'https://secure.indeed.com/account/login/emailtwofactorauth?continue=https%3A%2F%2Fmyjobs.indeed.com%2Fsaved', 'Sign In | Indeed Accounts') === false,
+        'the email-code page is not a completed login');
+      const emailCode = 'https://secure.indeed.com/account/login/emailtwofactorauth';
+      assert(isLoginPageCopyAntiBot('rate-limited', emailCode) === true
+        && isLoginPageCopyAntiBot('sign-in-wall', 'https://secure.indeed.com/auth?continue=x') === true,
+        'text-only codes on a sign-in page are the sign-in redirect, not an anti-bot wall');
+      assert(isLoginPageCopyAntiBot('captcha-presented', emailCode) === false
+        && isLoginPageCopyAntiBot('cloudflare-challenge', emailCode) === false,
+        'a real challenge on a sign-in page stays an anti-bot wall');
+      assert(isLoginPageCopyAntiBot('rate-limited', 'https://myjobs.indeed.com/saved') === false,
+        'a rate-limit page that is not a sign-in page stays an anti-bot wall');
+      return { ok: true };
+    },
+  },
+{
     // BUG 1 regression: the preflight navigates to the auth-gated
-    // secure.indeed.com/settings/account on purpose, so a logged-out user's
+    // myjobs.indeed.com/saved on purpose, so a logged-out user's
     // redirect to Indeed's OWN sign-in page (getChallengeSignals'
     // "indeed-login-wall") is the ORDINARY logged-out signal, not a bot wall.
     // Before the fix, classifyIndeedSessionPreflight checked challengeReason
@@ -1924,6 +1978,33 @@ export default [
         'the Google login window opens the sign-in form, not myaccount (signed out, that lands on a marketing page with no form)');
       assert(googleLogin.searchParams.get('continue') === 'https://myaccount.google.com/',
         'a completed Google sign-in must land on the page the logged-in check accepts');
+      // Google rejects sign-in in a CDP-controlled Chrome ("This browser or app
+      // may not be secure"), so its login window must be the native one.
+      assert(NATIVE_LOGIN_PLATFORMS.has('google'), 'google must be a native (non-CDP) login platform');
+      assert(isNativeLoginSuccess('google', 'https://myaccount.google.com/?pli=1', 'Google Account') === true,
+        'reaching myaccount.google.com closes the native Google login window');
+      assert(isNativeLoginSuccess('google', PLATFORM_LOGIN_URLS.google, 'Sign in - Google Accounts') === false,
+        'the sign-in form is not a completed login');
+      assert(isNativeLoginSuccess('google', 'https://accounts.google.com/v3/signin/rejected?continue=https%3A%2F%2Fmyaccount.google.com%2F', "Couldn't sign you in") === false,
+        'the rejected page is not a completed login');
+      assert(isNativeLoginSuccess('google', 'https://www.google.com/account/about/?continue=https://myaccount.google.com/', 'Google Account') === false,
+        'the signed-out landing page naming myaccount in its query is not a completed login');
+      // Every browser on the shared profile starts with Chrome's browser sign-in
+      // off; a browser without it signed the Google web login out on launch.
+      assert(BROWSER_SIGNIN_OFF_ARGS.includes('--allow-browser-signin=false'), 'the launch switch turns browser sign-in off');
+      assert(withBrowserSigninOffArgs(['--no-sandbox']).join(' ') === '--no-sandbox --allow-browser-signin=false', 'the switch is added to a launch');
+      assert(withBrowserSigninOffArgs(undefined).length === 1, 'a launch with no args still gets the switch');
+      assert(withBrowserSigninOffArgs(['--allow-browser-signin=false']).length === 1, 'the switch is not added twice');
+      // The Google window runs in the scraper's own browser build: a session made
+      // in real Chrome did not survive being used from Chrome for Testing.
+      assert(nativeLoginUsesScraperBuild('google') === true, 'google signs in inside the scraping browser build');
+      assert(nativeLoginUsesScraperBuild('indeed') === false && nativeLoginUsesScraperBuild('mercari') === false,
+        'other native logins stay on real Chrome');
+      assert(nativeLoginAppleScriptTarget('/Users/x/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing')
+        === '/Users/x/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app',
+        'the tab poll addresses the browser the window actually runs in');
+      assert(nativeLoginAppleScriptTarget('/usr/bin/google-chrome') === 'Google Chrome', 'a non-bundle path falls back to the app name');
+      assert(nativeLoginAppleScriptTarget('/tmp/a"b.app/Contents/MacOS/x') === 'Google Chrome', 'a path that would break the script is not used');
       return { ok: true };
     },
   }

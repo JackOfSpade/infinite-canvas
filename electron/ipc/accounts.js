@@ -21,7 +21,7 @@ import {
   getBrowserSessionResetBlocker,
 } from './stealthBrowser.js';
 import { detectAntiBotSignal } from './antiBotDetector.js';
-import { PLATFORM_AUTH_COOKIES, isInlineLoginPlatform, NATIVE_LOGIN_PLATFORMS, isLoginUrlPath } from './browser/authWindows.js';
+import { PLATFORM_AUTH_COOKIES, isInlineLoginPlatform, NATIVE_LOGIN_PLATFORMS, isLoginUrlPath, nativeLoginNeedsHttpReverify } from './browser/authWindows.js';
 import { shouldUseNativeRead } from './browser/nativeChromeReader.js';
 import { tryGetStore } from './settings.js';
 import { withSharedProfileLock } from './sharedProfileLock.js';
@@ -174,6 +174,13 @@ export function isConfirmedDisconnectedVerdict(verdict) {
  * Inconclusive transport failures are explicitly not confirmed disconnects;
  * callers should use isConfirmedDisconnectedVerdict before gating work.
  */
+// Anti-bot codes raised from page text alone that a real sign-in page also
+// matches. See the use in verifySellMonitorLogin.
+const LOGIN_PAGE_COPY_ANTIBOT_CODES = new Set(['rate-limited', 'sign-in-wall']);
+export function isLoginPageCopyAntiBot(antiBotCode, finalUrl) {
+  return LOGIN_PAGE_COPY_ANTIBOT_CODES.has(String(antiBotCode || '')) && isLoginUrlPath(String(finalUrl || '').toLowerCase());
+}
+
 export async function verifySellMonitorLogin(platformId, { signal = null } = {}) {
   // Outer try/catch so any unforeseen exception (Chrome failed to launch,
   // module import error, network stack panic) becomes a verdict instead
@@ -314,7 +321,15 @@ export async function verifySellMonitorLogin(platformId, { signal = null } = {})
       // logged-in platform to "needs login"; the caller keeps prior status. We still
       // do NOT assert connected off stale cookies — inconclusive only PRESERVES, never
       // upgrades. A plain 401/403 with NO challenge signal is still a genuine auth wall.
-      if (antiBot) {
+      // A redirect to the platform's own sign-in page is the ordinary signed-out
+      // answer, and such a page naturally carries sign-in copy and often
+      // rate-limit strings in its scripts. Those two text-only codes must not
+      // turn it into an "anti-bot wall": Indeed's email-code page was reported as
+      // "Anti-bot wall (rate-limited)" and the stale connected status was kept.
+      // Every other signal (challenge URLs, captcha, Cloudflare, HTTP status)
+      // still wins on a login page.
+      const loginPageCopyOnly = !!antiBot && isLoginPageCopyAntiBot(antiBot.code, finalUrlLower);
+      if (antiBot && !loginPageCopyOnly) {
         const session = signal?.aborted
           ? { connected: false, cookieCount: 0 }
           : await getSessionStatus(platformId).catch(() => ({ connected: false, cookieCount: 0 }));
@@ -496,6 +511,9 @@ export function clearAllSessionStatusCache() {
 
 export function isTrustedNativeLoginResult(platformId, result) {
   if (!result?.nativeChrome || result?.result !== 'auto-detected') return false;
+  // Google: the landed URL alone is not cached as connected; the HTTP verify
+  // proves the scraping browser can read the session the native window wrote.
+  if (nativeLoginNeedsHttpReverify(platformId)) return false;
   // Inline-login platforms (mercari) serve the login FORM at the same URL as the
   // success marker, so historically a native auto-detect couldn't be trusted (a
   // title-render race could fire 'auto-detected' on the logged-out inline form) and we
