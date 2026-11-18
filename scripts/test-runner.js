@@ -184,7 +184,6 @@ import job_continuation_authority_contract from './tests/job-continuation-author
 import career_canvas_file_import from './tests/career-canvas-file-import.js';
 import job_board_canvas_career_drop from './tests/job-board-canvas-career-drop.js';
 import career_text_files from './tests/career-text-files.js';
-import career_file_to_text from './tests/career-file-to-text.js';
 import career_profile_compilation from './tests/career-profile-compilation.js';
 import career_incremental_compilation from './tests/career-incremental-compilation.js';
 import career_clean_layer from './tests/career-clean-layer.js';
@@ -238,66 +237,7 @@ import application_authority_workflow from './tests/application-authority-workfl
 import one_card_live_acceptance from './tests/one-card-live-acceptance.js';
 import pointer_occlusion_probe from './tests/pointer-occlusion-probe.js';
 import test_runner_watchdog from './tests/test-runner-watchdog.js';
-import interview_helper from './tests/interview-helper.js';
-import interview_helper_canvas_career_drop from './tests/interview-helper-canvas-career-drop.js';
-import interview_helper_privacy from './tests/interview-helper-privacy.js';
-import interview_helper_render from './tests/interview-helper-render.js';
-import interview_private_store_filesystem from './tests/interview-private-store-filesystem.js';
-import interview_typed_job from './tests/interview-typed-job.js';
-import interview_preparation from './tests/interview-preparation.js';
-import interview_snapshot_readonly from './tests/interview-snapshot-readonly.js';
-import interview_answer_bank from './tests/interview-answer-bank.js';
-import interview_answer_preparation from './tests/interview-answer-preparation.js';
-import interview_answer_live from './tests/interview-answer-live.js';
-import interview_ai_matcher from './tests/interview-ai-matcher.js';
-import interview_ai_window from './tests/interview-ai-window.js';
-import interview_speculative_matcher from './tests/interview-speculative-matcher.js';
-import interview_speculative_pool from './tests/interview-speculative-pool.js';
-import interview_speculative_replay from './tests/interview-speculative-replay.js';
-import interview_answer_extensions from './tests/interview-answer-extensions.js';
-import interview_qa_card_preview_render from './tests/interview-qa-card-preview-render.js';
-import interview_answer_entailment from './tests/interview-answer-entailment.js';
-import interview_spoken_claims from './tests/interview-spoken-claims.js';
-import interview_question_fit from './tests/interview-question-fit.js';
-import interview_resume_coverage from './tests/interview-resume-coverage.js';
-import interview_required_fallback from './tests/interview-required-fallback.js';
-import interview_spoken_replay from './tests/interview-spoken-replay.js';
-import interview_v5_replay from './tests/interview-v5-replay.js';
-import interview_matching_regressions from './tests/interview-matching-regressions.js';
-import interview_match_benchmark from './tests/interview-match-benchmark.js';
-import interview_practice_call_prompt from './tests/interview-practice-call-prompt.js';
-import interview_practice_audio from './tests/interview-practice-audio.js';
-import interview_practice_call_engine from './tests/interview-practice-call-engine.js';
-import interview_practice_call_simulation from './tests/interview-practice-call-simulation.js';
-import practice_call_audio from './tests/practice-call-audio.js';
-import practice_call_call_sound from './tests/practice-call-call-sound.js';
-import practice_call_call_codec from './tests/practice-call-call-codec.js';
-import practice_call_models from './tests/practice-call-models.js';
-import practice_call_eleven from './tests/practice-call-eleven.js';
-import practice_call_panel_voice from './tests/practice-call-panel-voice.js';
-import practice_call_service from './tests/practice-call-service.js';
-import practice_call_render from './tests/practice-call-render.js';
-import practice_call_window from './tests/practice-call-window.js';
-import practice_call_analysis from './tests/practice-call-analysis.js';
-import practice_call_planner from './tests/practice-call-planner.js';
-import interview_practice_benchmark from './tests/interview-practice-benchmark.js';
-import interview_preload from './tests/interview-preload.js';
-import interview_app from './tests/interview-app.js';
-import interview_window from './tests/interview-window.js';
-import interview_window_e2e from './tests/interview-window-e2e.js';
-import interview_call_audio from './tests/interview-call-audio.js';
-import interview_call_question_detector from './tests/interview-call-question-detector.js';
-import interview_call_audio_debug from './tests/interview-call-audio-debug.js';
-import interview_call_speech_replay from './tests/interview-call-speech-replay.js';
-import interview_application_folders from './tests/interview-application-folders.js';
 import career_writing_core from './tests/career-writing-core.js';
-import interview_cue_card_log from './tests/interview-cue-card-log.js';
-import interview_cue_card_render from './tests/interview-cue-card-render.js';
-import interview_approach_reminders from './tests/interview-approach-reminders.js';
-import interview_talking_points from './tests/interview-talking-points.js';
-import interview_glance_cues from './tests/interview-glance-cues.js';
-import interview_qa from './tests/interview-qa.js';
-import interview_practice from './tests/interview-practice.js';
 import career_recovery_resume from './tests/career-recovery-resume.js';
 import adaptability_skills from './tests/adaptability-skills.js';
 import adaptability_metrics from './tests/adaptability-metrics.js';
@@ -526,7 +466,6 @@ const testGroups = [
   ['career-canvas-file-import.js', career_canvas_file_import],
   ['job-board-canvas-career-drop.js', job_board_canvas_career_drop],
   ['career-text-files.js', career_text_files],
-  ['career-file-to-text.js', career_file_to_text],
   ['career-profile-compilation.js', career_profile_compilation],
   ['career-incremental-compilation.js', career_incremental_compilation],
   ['career-clean-layer.js', career_clean_layer],
@@ -580,66 +519,7 @@ const testGroups = [
   ['one-card-live-acceptance.js', one_card_live_acceptance],
   ['pointer-occlusion-probe.js', pointer_occlusion_probe],
   ['test-runner-watchdog.js', test_runner_watchdog],
-  ['interview-helper.js', interview_helper],
-  ['interview-helper-canvas-career-drop.js', interview_helper_canvas_career_drop],
-  ['interview-helper-privacy.js', interview_helper_privacy],
-  ['interview-helper-render.js', interview_helper_render],
-  ['interview-private-store-filesystem.js', interview_private_store_filesystem],
-  ['interview-typed-job.js', interview_typed_job],
-  ['interview-preparation.js', interview_preparation],
-  ['interview-snapshot-readonly.js', interview_snapshot_readonly],
-  ['interview-answer-bank.js', interview_answer_bank],
-  ['interview-answer-preparation.js', interview_answer_preparation],
-  ['interview-answer-live.js', interview_answer_live],
-  ['interview-ai-matcher.js', interview_ai_matcher],
-  ['interview-ai-window.js', interview_ai_window],
-  ['interview-speculative-matcher.js', interview_speculative_matcher],
-  ['interview-speculative-pool.js', interview_speculative_pool],
-  ['interview-speculative-replay.js', interview_speculative_replay],
-  ['interview-answer-extensions.js', interview_answer_extensions],
-  ['interview-qa-card-preview-render.js', interview_qa_card_preview_render],
-  ['interview-answer-entailment.js', interview_answer_entailment],
-  ['interview-spoken-claims.js', interview_spoken_claims],
-  ['interview-question-fit.js', interview_question_fit],
-  ['interview-resume-coverage.js', interview_resume_coverage],
-  ['interview-required-fallback.js', interview_required_fallback],
-  ['interview-spoken-replay.js', interview_spoken_replay],
-  ['interview-v5-replay.js', interview_v5_replay],
-  ['interview-matching-regressions.js', interview_matching_regressions],
-  ['interview-match-benchmark.js', interview_match_benchmark],
-  ['interview-practice-call-prompt.js', interview_practice_call_prompt],
-  ['interview-practice-audio.js', interview_practice_audio],
-  ['interview-practice-call-engine.js', interview_practice_call_engine],
-  ['interview-practice-call-simulation.js', interview_practice_call_simulation],
-  ['practice-call-audio.js', practice_call_audio],
-  ['practice-call-call-sound.js', practice_call_call_sound],
-  ['practice-call-call-codec.js', practice_call_call_codec],
-  ['practice-call-models.js', practice_call_models],
-  ['practice-call-eleven.js', practice_call_eleven],
-  ['practice-call-panel-voice.js', practice_call_panel_voice],
-  ['practice-call-service.js', practice_call_service],
-  ['practice-call-render.js', practice_call_render],
-  ['practice-call-window.js', practice_call_window],
-  ['practice-call-analysis.js', practice_call_analysis],
-  ['practice-call-planner.js', practice_call_planner],
-  ['interview-practice-benchmark.js', interview_practice_benchmark],
-  ['interview-preload.js', interview_preload],
-  ['interview-app.js', interview_app],
-  ['interview-window.js', interview_window],
-  ['interview-window-e2e.js', interview_window_e2e],
-  ['interview-call-audio.js', interview_call_audio],
-  ['interview-call-question-detector.js', interview_call_question_detector],
-  ['interview-call-audio-debug.js', interview_call_audio_debug],
-  ['interview-call-speech-replay.js', interview_call_speech_replay],
-  ['interview-application-folders.js', interview_application_folders],
   ['career-writing-core.js', career_writing_core],
-  ['interview-cue-card-log.js', interview_cue_card_log],
-  ['interview-cue-card-render.js', interview_cue_card_render],
-  ['interview-approach-reminders.js', interview_approach_reminders],
-  ['interview-talking-points.js', interview_talking_points],
-  ['interview-glance-cues.js', interview_glance_cues],
-  ['interview-qa.js', interview_qa],
-  ['interview-practice.js', interview_practice],
   ['career-recovery-resume.js', career_recovery_resume],
   ['adaptability-skills.js', adaptability_skills],
   ['adaptability-metrics.js', adaptability_metrics],

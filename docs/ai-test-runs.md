@@ -4,6 +4,8 @@ Written by the test tools themselves while they run (`scripts/ai-test-journal.mj
 
 These are raw results, kept whether or not a decision was made. Conclusions go in `ai-model-selection.md`, which should cite the run here. Only counts and costs are written; prompts and answers stay in each run's private out dir (default under `~/Library/Application Support/infinite-canvas/ai-test-runs/`).
 
+Interview and practice-call runs in this log (stages `qa-*`, `typed-job-*`, `career-file-to-text`, `practice-call-plan`, the Listen matcher and the practice call) were run against code that moved to the separate Interview Helper repository on 2026-11-18. They are kept as history.
+
 <!-- ai-test-run:backfill-ladder-control-a2 -->
 ### 2026-11-10 00:31 UTC · live bundle harness · application bundles · production (no stage overrides), noise-floor run A
 

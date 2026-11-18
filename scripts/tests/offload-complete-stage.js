@@ -10,7 +10,7 @@ import { handoffMessages, offloadTextCall } from '../../electron/ipc/offloadText
 import {
   AI_CALL_PROVIDERS, OFFLOAD_REASONING_LEVELS, applicationStageProviders, offloadReasoning, offloadStagesDisabled, routedCall, taskEntry,
 } from '../../electron/ipc/aiCallProviders.js';
-import { APPLICATION_STAGE_PROFILES, CAREER_WRITING_DEFAULT_PROFILE, INTERVIEW_QA_STAGE_PROFILES } from '../../electron/ipc/careerWritingCore.js';
+import { APPLICATION_STAGE_PROFILES, CAREER_WRITING_DEFAULT_PROFILE } from '../../electron/ipc/careerWritingCore.js';
 import { CLAUDE_TASK_PROFILES } from '../../electron/ipc/claudeTaskProfiles.js';
 
 const OK = (text, extra = {}) => JSON.stringify({
@@ -331,8 +331,8 @@ export default [
     name: 'aiCallProviders: every application entry names route, reasoning, Claude fallback, date and rationale',
     async run() {
       const keys = Object.keys(AI_CALL_PROVIDERS);
-      assert.deepEqual(keys, ['application:requirements-audit', 'task:job-gap-review', 'qa:qa-practice-order', 'task:job-role-audit', 'task:job-location-consolidation-confirmation']);
-      const reasoning = { 'application:requirements-audit': 'off', 'task:job-gap-review': 'low', 'qa:qa-practice-order': 'low', 'task:job-role-audit': 'low', 'task:job-location-consolidation-confirmation': 'low' };
+      assert.deepEqual(keys, ['application:requirements-audit', 'task:job-gap-review', 'task:job-role-audit', 'task:job-location-consolidation-confirmation']);
+      const reasoning = { 'application:requirements-audit': 'off', 'task:job-gap-review': 'low', 'task:job-role-audit': 'low', 'task:job-location-consolidation-confirmation': 'low' };
       for (const key of keys) {
         const entry = AI_CALL_PROVIDERS[key];
         assert.equal(entry.provider, 'offload', key);
@@ -348,7 +348,6 @@ export default [
       // The gap review's Claude fallback is its own task profile, and its entry carries its own decision date.
       assert.deepEqual(AI_CALL_PROVIDERS['task:job-gap-review'].claude, CLAUDE_TASK_PROFILES['job-gap-review']);
       assert.equal(AI_CALL_PROVIDERS['task:job-gap-review'].decided, '2026-11-15');
-      assert.deepEqual(AI_CALL_PROVIDERS['qa:qa-practice-order'].claude, INTERVIEW_QA_STAGE_PROFILES['qa-practice-order']);
       for (const task of ['job-role-audit', 'job-location-consolidation-confirmation']) {
         assert.deepEqual(AI_CALL_PROVIDERS[`task:${task}`].claude, CLAUDE_TASK_PROFILES[task], task);
         assert.equal(CLAUDE_TASK_PROFILES[task].tools, '', `${task}: only a task with no tools can be answered off Claude`);

@@ -198,29 +198,18 @@ const SENSITIVE_DOTENV_PATTERNS = ['/.env/', '/.env.'];
 // external drives). Credential patterns above still apply within them.
 const SENSITIVE_EXACT_PATHS = new Set(['/users/shared', '/volumes']);
 
-// Interview Helper keeps verified application material and main-process-issued
-// prepared briefs under these app-private directory components. The workspace
-// writer also keeps its crash-recovery payloads in a host-only store. A
-// renderer can otherwise name an arbitrary path through generic canvas file
+// Host-private stores live under app-private directory components. The
+// workspace writer also keeps its crash-recovery payloads in a host-only store.
+// A renderer can otherwise name an arbitrary path through generic canvas file
 // IPC, so treating each *component* (rather than one installation-specific
 // absolute path) as sensitive keeps those authority records private across
 // user-data roots and test installations. `verificationPath` below is padded
 // with separators, which deliberately matches the directory itself and
-// descendants but not an ordinary filename such as
-// `my-interview-helper-artifacts.json`.
-// The one list of host-private store directory names. Interview and career
-// modules import the named constants below, and filesystem.js imports the list.
-export const INTERVIEW_ARTIFACT_STORE_DIR = 'interview-helper-artifacts';
-export const INTERVIEW_PREPARED_BRIEF_STORE_DIR = 'interview-helper-prepared-briefs';
-export const INTERVIEW_ANSWER_BANK_STORE_DIR = 'interview-helper-answer-banks';
-export const INTERVIEW_ANSWER_BINDING_STORE_DIR = 'interview-helper-answer-bindings';
+// descendants but not an ordinary filename that merely contains the name.
+// The one list of host-private store directory names; filesystem.js imports it.
 export const RENDERER_PRIVATE_STORE_DIRECTORY_NAMES = Object.freeze([
-  INTERVIEW_ARTIFACT_STORE_DIR,
-  INTERVIEW_PREPARED_BRIEF_STORE_DIR,
-  INTERVIEW_ANSWER_BANK_STORE_DIR,
-  INTERVIEW_ANSWER_BINDING_STORE_DIR,
-  // Host-owned career inputs/snapshots contain the same source material that
-  // Interview Helper consumes. They must not become renderer-readable merely
+  // Host-owned career inputs/snapshots hold the candidate's source material.
+  // They must not become renderer-readable merely
   // because a canvas supplies a userData-looking absolute pathname.
   'career-input-staging',
   'career-snapshot-store',

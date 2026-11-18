@@ -94,6 +94,3 @@ Thumbs.db
 .envrc
 
 /artifacts/macos-package.json
-dist-interview
-dist-electron-interview
-release-interview/

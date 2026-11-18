@@ -1,5 +1,5 @@
 // One stateless text call through the local `offload complete` CLI (DeepSeek).
-// Workers and interview Q&A resend their whole message list on every call, so
+// Workers resend their whole message list on every call, so
 // no session file is kept. Failures throw the same ClaudeRunnerError codes the
 // stage runner uses (OFFLOAD_*), which callers treat as "fall back to Claude".
 import childProcess from 'node:child_process';

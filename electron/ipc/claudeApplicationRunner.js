@@ -28,8 +28,7 @@ import { loadEditorialPlan, saveEditorialPlan } from './applicationEditorialPlan
 
 // Claude Code's aliases for the newest model in each line, so a new Sonnet or
 // Opus release is used without a code change. The answer is checked by family.
-// Stage model profiles live in the shared career writing core so application
-// and interview Q&A generation run on one tested model split.
+// Stage model profiles live in the shared career writing core.
 export { CLAUDE_SONNET_MODEL, CLAUDE_OPUS_MODEL };
 // The default profile, for any stage the table does not name.
 const CLAUDE_APPLICATION_MODEL = CLAUDE_SONNET_MODEL;

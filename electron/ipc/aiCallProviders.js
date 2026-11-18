@@ -1,10 +1,10 @@
 // The single place naming every AI call routed off Claude. Keys are
-// `application:<stage>`, `task:<worker task id>` and `qa:<interview stage>`.
+// `application:<stage>` and `task:<worker task id>`.
 // No routed call falls back to Claude (the owner's rule, 2026-11-15). DeepSeek credit exhaustion pauses the
-// task worker with queued work kept; an application stage or an interview call fails with the OFFLOAD_* code
+// task worker with queued work kept; an application stage fails with the OFFLOAD_* code
 // and is retried on DeepSeek; any other DeepSeek failure is shown and retried on DeepSeek. The `claude` field
 // records the setting a call ran on before it was routed (and what runs when INFINITE_CANVAS_OFFLOAD_STAGES=off).
-import { APPLICATION_STAGE_PROFILES, CAREER_WRITING_DEFAULT_PROFILE, INTERVIEW_QA_STAGE_PROFILES } from './careerWritingCore.js';
+import { APPLICATION_STAGE_PROFILES, CAREER_WRITING_DEFAULT_PROFILE } from './careerWritingCore.js';
 import { CLAUDE_TASK_PROFILES, claudeTaskProfile } from './claudeTaskProfiles.js';
 
 export const OFFLOAD_REASONING_LEVELS = Object.freeze(['off', 'low', 'medium', 'high', 'max']);
@@ -29,16 +29,6 @@ const applicationEntry = (stage, route = 'deepseek-flash', reasoning = 'high', w
   decided: DECIDED,
   why,
   ...(options?.maxRejections !== undefined ? { maxRejections: options.maxRejections } : {}),
-});
-
-/** A `qa:<interview stage>` entry. `claude` is the stage's own interview profile, kept for the record: a routed interview call never falls back to it. */
-const qaEntry = (stage, route = 'deepseek-flash', reasoning = 'high', why = WHY, options = {}) => Object.freeze({
-  provider: 'offload',
-  route,
-  reasoning,
-  claude: INTERVIEW_QA_STAGE_PROFILES[stage] || CAREER_WRITING_DEFAULT_PROFILE,
-  decided: options?.decided || DECIDED,
-  why,
 });
 
 /**
@@ -82,9 +72,6 @@ export const AI_CALL_PROVIDERS = Object.freeze({
   // liveness, taxonomy plan, preference interpretation and preference-research assessment stay on Claude (see that file).
   'task:job-gap-review': taskEntry('job-gap-review', 'deepseek-flash', 'low',
     'Real prompts 18/18 rows agreeing with production (Haiku high 18/18), 4/4 valid; planted softer-wording, overlooked-evidence, duplicate and near-miss rows 8/8 caught with 0 false alarms in 18 clean rows, 8/8 valid; $0.001-0.003 vs $0.010 per call. Reasoning off missed one planted duplicate; high had one invalid answer.',
-    { decided: '2026-11-15' }),
-  'qa:qa-practice-order': qaEntry('qa-practice-order', 'deepseek-flash', 'low',
-    'The one real 26-question prompt x 2 runs, blind-judged against its ordering rules: 9 and 9 (production Opus low 8; Flash high 9 and 8; Pro low and high 8 and 9); reasoning off repeated a question once; $0.001 vs $0.014 per call.',
     { decided: '2026-11-15' }),
   'task:job-role-audit': taskEntry('job-role-audit', 'deepseek-flash', 'low',
     'Four real audits of 2026-11-12 to 11-15 x 2 runs: 97.8% agreement with production on kept, removed and added titles (a Haiku high rerun 95.6%), 8/8 valid; on the 2026-11-10 audits the same title, removal and addition overlap as Haiku high (0.986, 0.875, 1.0); $0.0015 vs $0.0044 per call.',

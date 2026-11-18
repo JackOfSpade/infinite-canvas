@@ -1,6 +1,5 @@
 /**
- * Career-grounded writing core shared by application bundle generation and the
- * Interview Helper Q&A. Quality for "is this first-person career claim
+ * Career-grounded writing core for application bundle generation. Quality for "is this first-person career claim
  * supported by its cited quotes" is tested once, here.
  *
  * - Stage model profiles (Claude CLI aliases resolve to the newest release).
@@ -9,7 +8,7 @@
  * - The fact-correction round transition.
  *
  * Callers supply document-specific unit text through a `unitText(id)` lookup,
- * so résumé/letter units and interview card claims share one validator.
+ * so résumé and letter units share one validator.
  * Application prompts and error strings are pinned byte-for-byte by
  * scripts/tests/career-writing-core.js against a pre-extraction golden capture.
  */
@@ -42,51 +41,6 @@ export const APPLICATION_STAGE_PROFILES = Object.freeze({
 // 6.17 for Sonnet high) at $0.44 vs $0.38 a call. One job only; the owner chose medium on that evidence. Re-test when
 // 3 or more cover-only jobs exist (docs/ai-model-selection.md).
 export const COVER_ONLY_WRITE_PROFILE = Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' });
-// Interview Q&A. qa-research, 2026-11-09: Opus high scored within the run-to-run noise of
-// Opus xhigh in blind judging on three postings at 18-47% less cost; every low and medium
-// setting lost real content (docs/ai-model-selection.md).
-export const INTERVIEW_QA_STAGE_PROFILES = Object.freeze({
-  'qa-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  // qa-brief, 2026-11-10: Opus low scored within the noise of an Opus medium rerun in blind judging of 4 real Prepare briefs (7.5 vs 8.0; two production runs differ by 0.75) at 39% less cost; Sonnet medium and Haiku medium scored 7.0 (docs/ai-model-selection.md).
-  'qa-brief': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
-  // qa-disclosures, 2026-11-12: Sonnet low matched Opus low's extraction and mapping answers on 2 real prompts x 2 runs at about 43% less; Haiku dropped extracted questions (docs/ai-model-selection.md).
-  'qa-disclosures': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
-  // qa-practice-order, 2026-11-12: Blind judge gave Opus low reruns 10 and 10, production 9; every Sonnet and Haiku setting scored 2-8, and one Haiku answer repeated a question (docs/ai-model-selection.md).
-  'qa-practice-order': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
-  // qa-answer-entailment, 2026-11-12: The only setting that caught every claim production flagged on 3 real prompts; Opus low/medium and Sonnet missed some (docs/ai-model-selection.md).
-  'qa-answer-entailment': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  // qa-card-repair, 2026-11-12: Blind judge over 2 real repair prompts gave Opus low 9 and 8, production 8 and 9, at 34% less; Sonnet medium added unsupported claims and Haiku high broke sentences (docs/ai-model-selection.md).
-  'qa-card-repair': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
-  'qa-write': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // Post-call review of an in-app practice call (judgement and writing, one call per practice): Opus medium, not yet tested (needs a recorded practice call; docs/ai-model-selection.md).
-  'qa-practice-review': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // Planning of an in-app practice call (cast, questions, time, probes and prepared problems, one call per practice): Opus high, not yet tested (docs/ai-model-selection.md).
-  'practice-call-plan': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  // qa-glance-cues (short reminders for the live card, one call per Prepare): Opus low, not yet tested. Chosen by analogy with qa-card-repair, where Sonnet added unsupported wording and Haiku broke lines (docs/ai-model-selection.md).
-  'qa-glance-cues': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'low' }),
-  // qa-approach-reminders (general good-practice reminders for how-do-you-work questions, one call per Prepare): Opus medium, not yet tested. The advice itself is the output, so it gets more thought than a cue (docs/ai-model-selection.md).
-  'qa-approach-reminders': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // Typed-job stages (a typed link, or a company and role, turned into a job for Prepare; electron/ipc/interviewTypedJob.js). All four are chosen by analogy and need a test (docs/ai-model-selection.md).
-  // typed-job-intake: short-text understanding into JSON, like job-preference-interpretation, where Haiku medium was judged best.
-  'typed-job-intake': Object.freeze({ model: CLAUDE_HAIKU_MODEL, effort: 'medium' }),
-  // typed-job-posting: reads a whole fetched page and copies the posting text out; like qa-disclosures extraction, where Sonnet low kept everything and Haiku dropped content.
-  'typed-job-posting': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
-  // typed-job-research: Parallel web research about one company; same task shape as qa-research (Opus high, within noise of xhigh).
-  'typed-job-research': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'high' }),
-  // typed-job-listing: realistic stand-in posting written from research alone; like qa-write, where cheaper settings invented specifics.
-  'typed-job-listing': Object.freeze({ model: CLAUDE_OPUS_MODEL, effort: 'medium' }),
-  // career-file-to-text: Claude reads one dropped image (or document) and copies its text out verbatim, in reading order, with [unreadable] for a part it cannot read (electron/ipc/interviewCareerFileConversion.js). Sonnet low, not yet tested; chosen by analogy with typed-job-posting and qa-disclosures extraction, where Sonnet low kept everything and Haiku dropped content (docs/ai-model-selection.md).
-  'career-file-to-text': Object.freeze({ model: CLAUDE_SONNET_MODEL, effort: 'low' }),
-  'qa-fact-check': APPLICATION_STAGE_PROFILES['fact-check'],
-  'qa-fact-correction': APPLICATION_STAGE_PROFILES['fact-correction'],
-  'qa-fact-recheck': APPLICATION_STAGE_PROFILES['fact-recheck'],
-});
-export const CAREER_WRITING_STAGE_PROFILES = Object.freeze({ ...APPLICATION_STAGE_PROFILES, ...INTERVIEW_QA_STAGE_PROFILES });
-
-export function careerWritingStageProfile(stage) {
-  return CAREER_WRITING_STAGE_PROFILES[stage] || CAREER_WRITING_DEFAULT_PROFILE;
-}
-
 /**
  * The inflation taxonomy a fact checker applies to first-person career claims.
  * `target` is the already-quoted employer name (or a descriptive phrase) the

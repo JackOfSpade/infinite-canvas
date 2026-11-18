@@ -11,8 +11,6 @@ import {
   mergeNonRestorableNodeDataFromLive,
 } from '../utils/undoNonRestorableState';
 import { isTextEditingTarget, shouldUseNativeTextUndo } from '../utils/nativeTextUndo';
-import { cancelNodeTasksRecursively } from '../utils/canvasInteractions';
-import { removedInterviewHelperNodes } from '../utils/interviewHelper';
 import { matchesRedoShortcut, matchesShortcut, matchesStandardRedoShortcut } from '../utils/keyboardShortcuts';
 import { useModalStackCount } from '../components/modalStack';
 
@@ -183,12 +181,6 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
       restoredNodes,
       currentState.nodes,
     );
-    // Undoing a helper's creation (or redoing its deletion) removes the node
-    // without the deletion path's post-commit sweep. Retire its owner-scoped
-    // companion window the same way, or the window outlives the node.
-    if (window.electronAPI?.cancelNodeTask) {
-      cancelNodeTasksRecursively(removedInterviewHelperNodes(currentState.nodes, restoredNodes));
-    }
     // History invariant (see takeSnapshot): while the canvas is clean, the TOP of
     // pastRef is the live state. Keep the state we just landed on (as committed,
     // i.e. after the live-merge) on top instead of dropping it, so the next
@@ -247,12 +239,6 @@ export function useUndoRedo({ nodes, edges, drawings, setNodes, setEdges, setDra
 
     EventLogger.log('redo');
     isRestoringRef.current = true;
-    // Undoing a helper's creation (or redoing its deletion) removes the node
-    // without the deletion path's post-commit sweep. Retire its owner-scoped
-    // companion window the same way, or the window outlives the node.
-    if (window.electronAPI?.cancelNodeTask) {
-      cancelNodeTasksRecursively(removedInterviewHelperNodes(currentState.nodes, restoredNodes));
-    }
     // Same invariant as undo: the redone state becomes the top of history. The
     // pre-redo state is normally already the top (it was clean); push it only
     // when it is not, so nothing is duplicated and nothing is lost.

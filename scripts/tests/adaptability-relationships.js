@@ -11,7 +11,6 @@
 //     -> vettedCareerSkillInventory / projectApprovedCareerSnapshotForApplication
 //     -> approvedCareerEvidenceCatalog / buildApplicationCareerAuthority
 //     -> snapshot skill evidence -> validateStructuredApplicationResume
-//     (plus, in one isolated test, the interview-helper projection and extractor)
 //
 // THE ONE TEST-SIDE STAND-IN. Production deliberately leaves the *semantic*
 // reading of a sentence ("evaluated" vs "operated", "owns" vs "uses") to the
@@ -1521,30 +1520,6 @@ export default [
         assertRefused(qualified, profile.label, `${profile.key}/qualified-both`);
         assert(qualified.profile.skills.length === 1 && qualified.profile.skills[0].supportMode === 'relationship-qualified' && qualified.profile.skills[0].roleIds.length === 2,
           `${profile.key}: two qualified uses merge into one qualified row`);
-      }
-    },
-  },
-  {
-    // Isolated on purpose: the interview helper is a separate feature, and its modules are loaded
-    // dynamically so that a problem there fails only this test, never the whole family.
-    name: 'adaptability/relationships: interview-helper evidence never offers a non-candidate or relationship-qualified technology as the candidate\'s skill',
-    async run() {
-      const { projectInterviewHelperCareerSnapshot } = await import('../../electron/ipc/interviewHelper.js');
-      const { extractInterviewProfileEvidence } = await import('../../src/utils/interviewHelper.js');
-      for (const profile of PROFILES) {
-        for (const kind of ['operated', 'directPlusEither', 'evaluated', 'employerUses', 'vendor', 'either', 'optionalUse']) {
-          const spec = KIND_SPECS[kind];
-          const compiled = await compile(careerText(profile, [spec.line(profile)]));
-          const skillCues = input => extractInterviewProfileEvidence(input).filter(item => item.entityType === 'skill').map(item => item.cue);
-          // Two independent layers: the main-process projection (central inventory) and the renderer
-          // extractor, which is also handed the unfiltered approved profile and must refuse on its own.
-          const projection = projectInterviewHelperCareerSnapshot(compiled.snapshot);
-          for (const label of spec.refused(profile)) assert(!hasName(projection.profile.skills.map(skill => skill.name), label), `${profile.key}/${kind}/projection: "${label}" must not cross the renderer boundary as a skill row`);
-          for (const [layer, cues] of [['projection', skillCues(projection)], ['extractor', skillCues(compiled.snapshot)]]) {
-            for (const label of spec.accepted(profile)) assert(hasName(cues, label), `${profile.key}/${kind}/${layer}: "${label}" is a direct skill and must be retrievable`);
-            for (const label of spec.refused(profile)) assert(!hasName(cues, label), `${profile.key}/${kind}/${layer}: "${label}" must not be offered as a skill cue`);
-          }
-        }
       }
     },
   },

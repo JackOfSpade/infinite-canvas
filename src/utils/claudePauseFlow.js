@@ -16,7 +16,6 @@ function setFlow(key, flow) {
 
 export const claudeNodePauseKey = nodeId => `node:${nodeId}`;
 export const claudeApplicationPauseKey = jobId => `application:${jobId}`;
-export const claudeInterviewPauseKey = runId => `interview:${runId}`;
 
 export function getClaudePauseFlow(key) { return flows.get(key) || IDLE; }
 

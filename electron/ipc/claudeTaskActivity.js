@@ -1,5 +1,5 @@
-// What Claude is doing right now, for every panel that shows it: handoff tasks,
-// application bundles and interview preparation. Holds described events only
+// What Claude is doing right now, for every panel that shows it: handoff tasks
+// and application bundles. Holds described events only
 // (see describeClaudeSdkMessage): no prompt, thinking or answer text, and
 // nothing here is logged or saved.
 import { isParallelToolName } from './parallelSearch.js';

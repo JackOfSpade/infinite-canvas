@@ -4,7 +4,7 @@ import { validateGapReviewSubmission as gapValidator, w4Lines as lines, __reject
 import {
   assert, w4Jobs as jobs, w4Preferences as prefs,
   w4Taxonomy as taxonomy, w4Location as location, w4Consolidation as consolidation,
-  w4Interview as interview, w4Marketplace as market, w4Hub as hub,
+  w4Marketplace as market, w4Hub as hub,
 } from '../test-dependencies.js';
 
 const A = 'a'.repeat(24), B = 'b'.repeat(24), C = 'c'.repeat(24);
@@ -36,10 +36,8 @@ export const w4ReproCases = [
   { name: 'compensation coverage', repro: 'R6', minimum: 1, call: () => jobs.validateCompensationEvidenceBatchSubmission({ cohorts: [{ researchId: A, assessments: [] }, { researchId: B, assessments: [{ index: 0, comparableRanges: [] }] }] }, requests, sections) },
   { name: 'ladder single', minimum: 2, call: () => jobs.validateRoleFamilyExperienceBandsSubmission(ladder(A), 'ZQX-SENTINEL-ROLE', source) },
   { name: 'ladder batch', minimum: 2, call: () => jobs.validateRoleFamilyExperienceBandsBatchSubmission({ ladders: [ladder(A), ladder(B)] }, [{ researchId: A, role: 'Synthetic role' }, { researchId: B, role: 'Synthetic role' }], sections) },
-  { name: 'interview', minimum: 2, call: () => interview.validateInterviewBriefAssessment({ companyFacts: [{ fact: 'invented', evidenceQuote: '', sourceUrl: '', sourceDate: '' }, { fact: 'invented too', evidenceQuote: '', sourceUrl: '', sourceDate: '' }], recentContext: [], applicationPositioning: [{ documentKind: 'resume', point: 'invented', evidenceQuote: '' }] }, { rawResearch: source, bundle: { job: {}, listingText: '', digests: {}, applicationPositioning: { resume: 'ZQX-SENTINEL-APPLICATION' } }, snapshotId: 'x', canonicalJobUrl: 'https://example.test/job', bundleArtifactId: 'b', createdAt: '2026-01-01' }) },
   { name: 'price', minimum: 2, call: () => market.validateBatchPriceSynthesisSubmission({ items: priceItems.map(row => badPrice(row.itemId)) }, priceItems) },
   { name: 'hub', minimum: 2, call: () => hub.validateHubScanBatchSubmission({ platforms: [{ scanId: 'wrong', attention: [] }, { scanId: A, attention: 'bad' }] }, expectedHub) },
-  { name: 'interview text', minimum: 1, call: () => interview.validateGroundedResearchText('') },
   { name: 'compensation sections', minimum: 2, call: () => jobs.parseCompensationResearchSections('Unwanted preface\nBEGIN COMPENSATION RESEARCH malformed', [A, B]) },
   { name: 'preference sections', minimum: 2, call: () => prefs.parseJobPreferenceResearchSections(`BEGIN RESEARCH foreign\ntext\nEND RESEARCH foreign`, [A, B]) },
   { name: 'lookup sections', minimum: 2, call: () => location.parseJobLocationLookupSections('Unwanted preface\nBEGIN JOB LOCATION LOOKUP malformed', [A, B]) },

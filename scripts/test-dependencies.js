@@ -164,7 +164,6 @@ export * as w4Preferences from '../electron/ipc/jobPreferences.js';
 export * as w4Taxonomy from '../electron/ipc/jobTaxonomy.js';
 export * as w4Location from '../electron/ipc/jobLocationLookup.js';
 export * as w4Consolidation from '../electron/ipc/jobLocationConsolidation.js';
-export * as w4Interview from '../electron/ipc/interviewPreparation.js';
 export * as w4Marketplace from '../electron/ipc/marketplace.js';
 export * as w4Hub from '../electron/ipc/listingStatusCheck.js';
 export { withSharedProfileLock, getSharedProfileLockSnapshot } from '../electron/ipc/sharedProfileLock.js';

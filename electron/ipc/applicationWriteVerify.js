@@ -338,7 +338,7 @@ export function writeVerifyUnitListing(documents) {
   }).filter(Boolean).join('\n');
 }
 
-// The finding contract is shared with interview Q&A through careerWritingCore.
+// The finding contract lives in careerWritingCore.
 export function writeVerifyFactFindingErrors(findings, documents) {
   return careerFactFindingErrors(findings, id => writeVerifyUnitText(documents, id));
 }

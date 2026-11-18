@@ -111,8 +111,6 @@ export const VALIDATION_TEMPLATES = Object.freeze({
   "rolefam.id": "researchIds {ids} are unknown or repeated; first offending value {value}",
   "rolefam.role-mismatch": "roleFamily does not match the role family requested for researchIds {ids}; copy it exactly as shown in the request; first returned {value}",
   "rolefam.cached-not-inert": "cached identities {ids} must return empty reusedFrom, bands, sources, evidenceQuote and sourceDate",
-  "text.empty": "the response is empty; return the full research text",
-  "text.too-long": "the response has {raw} characters and at most {max} are allowed; return a shorter answer that keeps the facts, direct URLs and quotes",
   "locconf.rows": "confirmations has {raw} entries for {total} pairs; return one confirmation per pairId",
   "locconf.pair-unknown": "pairIds {ids} are not supplied pair ids; first returned {value}",
   "locconf.pair-duplicate": "pairIds {ids} appear more than once",
@@ -131,14 +129,6 @@ export const VALIDATION_TEMPLATES = Object.freeze({
   "liveness.quote-in-description": "quotes for rows {ids} occur in description text; use page status evidence outside the description",
   "liveness.open-mismatch": "open rows {ids} refer to a redirected or title-mismatched page; use unclear unless a gone-job quote proves closed",
   "liveness.unclear-quote": "unclear rows {ids} must have an empty quote",
-  "interview.not-object": "the answer is not a JSON object; return the brief object defined by the response schema",
-  "interview.fact": "fact must be non-blank text copied exactly from RAW RESEARCH at {ids}",
-  "interview.quote": "evidenceQuote must be non-blank text copied exactly from RAW RESEARCH at {ids}",
-  "interview.url": "sourceUrl must be an http(s) URL copied exactly from RAW RESEARCH at {ids}",
-  "interview.date": "sourceDate must be exactly unknown, or date text of at most 80 characters copied exactly from RAW RESEARCH and never a URL, at {ids}",
-  "interview.positioning-kind": "documentKind must be resume or coverLetter at {ids}",
-  "interview.positioning-point": "point must be text copied exactly from the APPLICATION POSITIONING of the same documentKind at {ids}",
-  "interview.positioning-quote": "evidenceQuote must be text copied exactly from the APPLICATION POSITIONING of the same documentKind at {ids}",
   "price.rows": "items has {raw} rows for {total} requested itemIds; return exactly one row per itemId",
   "price.item-unknown": "itemIds {ids} are not requested ids; first returned {value}",
   "price.item-duplicate": "itemIds {ids} appear more than once",
@@ -161,7 +151,6 @@ export function templatesFor(...prefixes) {
   return Object.freeze(Object.fromEntries(Object.entries(VALIDATION_TEMPLATES).filter(([id]) => prefixes.some(prefix => id.startsWith(prefix)))));
 }
 export const SECTION_CORRECTION_TEMPLATES = templatesFor('sections.');
-export const TEXT_CORRECTION_TEMPLATES = templatesFor('text.');
 
 export function quoted(value, max = 80) {
   let text = String(value ?? '').replace(/\p{Cc}/gu, ' ').replace(/\s+/gu, ' ').trim().replace(/'/g, String.fromCharCode(8217));

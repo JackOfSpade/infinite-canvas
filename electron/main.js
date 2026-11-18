@@ -1328,7 +1328,6 @@ if (!gotTheLock) {
 
     registerFilesystemHandlers();
     registerJobsHandlers();
-    // Interview Helper is its own app now (electron/interviewApp/main.js).
     registerJobApplicationHandlers();
     registerLocalAiApplicationHandlers();
     try {

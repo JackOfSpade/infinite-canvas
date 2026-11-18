@@ -600,7 +600,7 @@ export function migrateUnscoredPlaceholderStatus(nodes) {
 /**
  * Drop Interview Helper nodes (v12).
  *
- * Interview Helper moved into its own app (see electron/interviewApp). Its
+ * Interview Helper moved into its own app (a separate repository). Its
  * prepared briefs, answer banks and Q&A live in the app data folder, not in the
  * canvas, and the standalone app imports a node's settings from the canvas file
  * before this runs on a saved canvas. A canvas has no component for the node

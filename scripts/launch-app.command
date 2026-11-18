@@ -5,10 +5,6 @@
 # is built from differ from the hash recorded after the last SUCCESSFUL build.
 # Unchanged launches are instant; a real rebuild can take a few minutes.
 #
-# The other app in this repo has its own launcher, build command, release
-# folder, build stamp and lock. An edit to a file only that app is built from
-# does not rebuild this one. A file both apps bundle rebuilds both.
-#
 # This is the canonical, version-controlled launcher. "~/Desktop/Infinite
 # Canvas.command" is a thin wrapper that exec's this file — edit THIS one.
 # Double-clicking this file directly works too.
@@ -56,8 +52,8 @@ notify() {
 # Prints a sha256 over the files Infinite Canvas is built from, paths and bytes.
 # With an inputs list ($1, written by the last build) that is the modules the
 # build read plus the build configuration and the folders packaged beside the
-# bundle, so an edit that only concerns the other app does not rebuild this
-# one. Without a list (first build) it is the whole tracked/untracked-but-not-
+# bundle, so an edit to a file the build never read does not rebuild.
+# Without a list (first build) it is the whole tracked/untracked-but-not-
 # ignored source tree. A same-size edit with a restored mtime still requires a
 # rebuild; Info.plist's mtime can also survive an interrupted codesign pass.
 source_manifest() {

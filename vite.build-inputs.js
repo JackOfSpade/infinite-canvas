@@ -1,6 +1,6 @@
 // Records which project files a build actually read, as a sorted JSON list.
-// Each app's launcher rebuilds that app only when one of the listed files
-// changes, so an edit that concerns only the other app does not rebuild it.
+// The launcher rebuilds only when one of the listed files changes, so an edit
+// to a file the build never read does not trigger a rebuild.
 import fs from 'node:fs'
 import path from 'node:path'
 import process from 'node:process'

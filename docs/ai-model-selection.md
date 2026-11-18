@@ -5,9 +5,9 @@ This file is the record of which model and effort each Claude call uses, why, an
 Settings live in code:
 
 - Background tasks: `electron/ipc/claudeTaskProfiles.js` (`CLAUDE_TASK_PROFILES`).
-- Application and interview stages: `electron/ipc/careerWritingCore.js` (`APPLICATION_STAGE_PROFILES`, `INTERVIEW_QA_STAGE_PROFILES`, which also holds the four `typed-job-*` stages); stages not listed there default to Sonnet high (`CLAUDE_APPLICATION_MODEL`/`EFFORT` in `claudeApplicationRunner.js`). Every call names its own stage: a call that borrows another stage's profile is not proven by that stage's test (found 2026-11-12, when four interview calls ran on `qa-brief` or `qa-fact-*` without a test of their own).
-- Live calls: `electron/interviewAiMatcher.js` (Listen matcher) and `electron/practiceCall/callService.js` (practice call opener, main reply, classifier).
-- DeepSeek routing: `electron/ipc/aiCallProviders.js` (`application:`, `task:` and `qa:` keys). The 2026-11-07 measurements are in `docs/application-improvement-sessions.md` (Hard rules); the 2026-11-15 ones are in this file's rows.
+- Application stages: `electron/ipc/careerWritingCore.js` (`APPLICATION_STAGE_PROFILES`); stages not listed there default to Sonnet high (`CLAUDE_APPLICATION_MODEL`/`EFFORT` in `claudeApplicationRunner.js`). Every call names its own stage: a call that borrows another stage's profile is not proven by that stage's test (found 2026-11-12, when four interview calls ran on `qa-brief` or `qa-fact-*` without a test of their own).
+- Interview Helper stages, live calls and the practice call (`qa-*`, `typed-job-*`, `career-file-to-text`, `practice-call-plan`, the Listen matcher and the practice call opener, main reply and classifier): moved to the separate Interview Helper repository on 2026-11-18. Their rows and measured results below are kept as history; their profiles and code no longer live here.
+- DeepSeek routing: `electron/ipc/aiCallProviders.js` (`application:` and `task:` keys; the one `qa:` entry moved with Interview Helper). The 2026-11-07 measurements are in `docs/application-improvement-sessions.md` (Hard rules); the 2026-11-15 ones are in this file's rows.
 
 ## Policy
 
@@ -168,6 +168,8 @@ The 2026-11-01 entry in `docs/application-improvement-sessions.md` holds the sta
 
 ### Interview helper (not live)
 
+*These stages moved to the separate Interview Helper repository on 2026-11-18; the rows are kept as history.*
+
 Cost bound for the interview stages (2026-11-09): the Q&A has run 4 preparations in total, each a few Opus calls costing well under $1, so qa-brief, qa-write and qa-practice-review together cost a few dollars a year. That is below the price of a ladder. Since 2026-11-09 each attempt is recorded in `ai-replay-samples/` and `claude-task-usage.jsonl`. Re-check with the spend report if interview prep becomes a daily habit.
 
 | Stage | Current | Status | Evidence |
@@ -192,6 +194,8 @@ Cost bound for the interview stages (2026-11-09): the Q&A has run 4 preparations
 | `qa-fact-check` / `-correction` / `-recheck` | Opus high | Proven by sharing | Same prompts and code as the application fact stages (`interviewQaFactCheck.js`, the inflation check). The entailment review and card repair used to run on these stages too; they now have their own rows above. |
 
 ### Live calls (fastest that meets the quality floor)
+
+*The Listen matcher and the practice call moved to the separate Interview Helper repository on 2026-11-18; the rows are kept as history.*
 
 | Call | Current | Status | Evidence |
 |---|---|---|---|

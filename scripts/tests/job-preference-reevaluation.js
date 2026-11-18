@@ -504,13 +504,8 @@ export default [
     },
   },
   {
-    name: 'Interview Helper: the live Claude status lives in the Modules running panel, not the node',
+    name: 'Modules running panel: a status entry that carries a Claude request id shows that request\'s live progress',
     run: () => {
-      const node = fs.readFileSync(new URL('../../src/interview-app/InterviewHelperPanel.jsx', import.meta.url), 'utf8');
-      assert.doesNotMatch(node, /ClaudeTaskProgress/);
-      assert.doesNotMatch(node, /ClaudePauseControl/);
-      assert.match(node, /usePublishJobRunStatus\(id, locallyPreparing \? \{ label: 'Interview Helper', headline: 'Preparing interview brief', claudeRequestId: claudeInterviewPauseKey\(data\.interviewHelperPreparationRunId\), pauseKeys: \[claudeInterviewPauseKey\(data\.interviewHelperPreparationRunId\)\], pauseWithoutSave: true \} : null\);/);
-      assert.match(node, /locallyPreparing \? 'Preparing…'/);
       const card = fs.readFileSync(new URL('../../src/components/ClaudeRunStatus.jsx', import.meta.url), 'utf8');
       assert.match(card, /if \(entry\.claudeRequestId\) \{\n {4}return <ClaudeTaskProgress requestId=\{entry\.claudeRequestId\} contextPrefix=\{entry\.label\} region=\{`\$\{entry\.label\} status`\} footer=\{pauseFooter\} \/>;/);
       assert.match(card, /onSave=\{entry\.pauseWithoutSave && !entry\.onPause \? null :/);

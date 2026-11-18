@@ -79,11 +79,6 @@
       "reason": "COMPENSATION_ROLE_FAMILY_EVIDENCE_NOT_GROUNDED"
     }
   },
-  "interview": {
-    "message": "invalid research provenance: companyFacts[0].fact must be text copied exactly from RAW RESEARCH",
-    "code": null,
-    "diagnostic": null
-  },
   "price": {
     "message": "Price synthesis batch returned comp provenance from another item or an unknown source.",
     "code": null,
@@ -91,16 +86,6 @@
   },
   "hub": {
     "message": "Marketplace hub batch returned an unknown, duplicate, or malformed platform scan identity.",
-    "code": null,
-    "diagnostic": null
-  },
-  "grounded text": {
-    "message": "Grounded research must be non-empty text.",
-    "code": "VALIDATION_FAILED",
-    "diagnostic": null
-  },
-  "interview text": {
-    "message": "Interview research could not be validated.",
     "code": null,
     "diagnostic": null
   },

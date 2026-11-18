@@ -477,13 +477,6 @@ export function registerJobsHandlers() {
   return registerJobsHandlersWithDependencies();
 }
 
-// The career compile handlers alone, for the standalone Interview Helper app.
-// They stay defined in the shared registration below so both apps run one copy.
-const CAREER_DATA_CHANNELS = new Set(['parse-career-data', 'inspect-career-compile-resume']);
-export function registerCareerDataHandlers() {
-  return registerJobsHandlersWithDependencies({ onlyChannels: CAREER_DATA_CHANNELS });
-}
-
 // Registration is the only test seam. Nothing supplied here is reachable from
 // preload IPC, and production always receives the native implementations.
 // Keeping the pause points at operation boundaries lets race regressions avoid
@@ -495,12 +488,8 @@ export function __registerJobsHandlersForTests(dependencies = {}) {
 
 
 function registerJobsHandlersWithDependencies(dependencies = {}) {
-  const onlyChannels = dependencies.onlyChannels instanceof Set ? dependencies.onlyChannels : null;
-  // Shadows the shared registrar so a caller can register a named subset.
-  const handleSafe = onlyChannels
-    ? (channel, ...rest) => (onlyChannels.has(channel) ? registerIpcHandler(channel, ...rest) : undefined)
-    : registerIpcHandler;
-  const ipcMain = onlyChannels ? { handle() {} } : electronIpcMain;
+  const handleSafe = registerIpcHandler;
+  const ipcMain = electronIpcMain;
   const compileCareerSnapshot = dependencies.compileCareerSnapshot || compileAuditedCareerSnapshot;
   const resolvePinnedScoringInputForHandler = dependencies.resolvePinnedScoringInput || resolvePinnedScoringInput;
   const resolveRequiredPinnedCareerInputForHandler = dependencies.resolveRequiredPinnedCareerInput || resolveRequiredPinnedCareerInput;
@@ -614,7 +603,7 @@ function registerJobsHandlersWithDependencies(dependencies = {}) {
       boardClosedDrops: [...officialClosedDrops, ...settled.dropped.map(entry => ({ kept: null, dropped: entry.row,
         reason: entry.disposition, stage: 'board-closed', retire: entry.disposition !== 'deferred-unchecked' }))] };
   };
-  if (!onlyChannels) void pruneStaleUnsavedAnalysisArtifacts();
+  void pruneStaleUnsavedAnalysisArtifacts();
   void pruneStaleCareerInputStages();
   const ctx = { handleSafe, ipcMain, resolveRequiredPinnedCareerInputForHandler, runHttpSources, beforeSearchStageWrite, afterSearchProviderResult, retryIndeedDescriptions, retryGoogleApplyLinks, settleScrapedRowsForScoring, compileCareerSnapshot, dependencies, resolvePinnedScoringInputForHandler, beforeScoreSideEffect, runScoreBatch, reuseStoreDeps, runGapReview, runBoardTaxonomy, resolveBoardCompensationCareerInputs, callListingLiveness, listingLivenessCalibrationStore, settleBoardClosedRowsForHandler };
   registerCoreHandlers(ctx);

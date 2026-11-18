@@ -3,8 +3,7 @@ import fs from 'node:fs';
 import * as writeVerify from '../../electron/ipc/applicationWriteVerify.js';
 import { claudeCliArgs, claudeStageProfile, CLAUDE_STAGE_PROFILES } from '../../electron/ipc/claudeApplicationRunner.js';
 import {
-  APPLICATION_STAGE_PROFILES, careerChangedFindingErrors, careerFactFindingErrors, careerInflationRules, careerWritingStageProfile,
-  INTERVIEW_QA_STAGE_PROFILES,
+  APPLICATION_STAGE_PROFILES, careerChangedFindingErrors, careerFactFindingErrors, careerInflationRules,
 } from '../../electron/ipc/careerWritingCore.js';
 import { goldenDocuments, goldenFindings, goldenListing, goldenState } from '../fixtures/career-writing-core-golden-source.mjs';
 
@@ -55,28 +54,8 @@ export default [
     assert.deepEqual(researchOn.slice(researchOn.indexOf('--tools'), researchOn.indexOf('--tools') + 4), ['--tools', 'Read,Grep,Workflow', '--allowedTools', 'Read,Grep,Workflow'], 'an explicit opt-in adds the setting and Workflow to the research tools');
     assert.equal(golden.cliArgs[golden.cliArgs.indexOf('--allowedTools') + 1], 'Workflow', 'application runs allow only the Workflow tool');
     assert.equal(CLAUDE_STAGE_PROFILES, APPLICATION_STAGE_PROFILES, 'the application runner reads the shared table');
-    assert.deepEqual(careerWritingStageProfile('qa-write'), { model: 'opus', effort: 'medium' });
-    assert.equal(careerWritingStageProfile('qa-fact-check'), careerWritingStageProfile('fact-check'), 'Q&A checks use the application fact-check profile object');
-    assert.deepEqual(careerWritingStageProfile('qa-fact-correction'), careerWritingStageProfile('fact-correction'));
-    assert.deepEqual(careerWritingStageProfile('qa-disclosures'), { model: 'sonnet', effort: 'low' });
-    assert.deepEqual(careerWritingStageProfile('qa-practice-order'), { model: 'opus', effort: 'low' });
-    assert.deepEqual(careerWritingStageProfile('qa-answer-entailment'), { model: 'opus', effort: 'high' });
-    assert.deepEqual(careerWritingStageProfile('qa-card-repair'), { model: 'opus', effort: 'low' });
-    assert.deepEqual(careerWritingStageProfile('typed-job-intake'), { model: 'haiku', effort: 'medium' });
-    assert.deepEqual(careerWritingStageProfile('typed-job-posting'), { model: 'sonnet', effort: 'low' });
-    assert.deepEqual(careerWritingStageProfile('typed-job-research'), { model: 'opus', effort: 'high' });
-    assert.deepEqual(careerWritingStageProfile('typed-job-listing'), { model: 'opus', effort: 'medium' });
-    assert.deepEqual(careerWritingStageProfile('career-file-to-text'), { model: 'sonnet', effort: 'low' });
-    assert.equal(Object.hasOwn(INTERVIEW_QA_STAGE_PROFILES, 'career-file-to-text'), true, 'career-file-to-text is an explicit stage entry, not the Sonnet-high default');
-    for (const stage of ['typed-job-intake', 'typed-job-posting', 'typed-job-research', 'typed-job-listing', 'career-file-to-text']) {
-      assert.notEqual(careerWritingStageProfile(stage).effort, 'max', `${stage} never uses max effort`);
-    }
-    for (const stage of ['qa-disclosures', 'qa-practice-order', 'qa-answer-entailment', 'qa-card-repair', 'typed-job-intake', 'typed-job-posting', 'typed-job-research', 'typed-job-listing']) {
-      assert.equal(Object.hasOwn(INTERVIEW_QA_STAGE_PROFILES, stage), true, `${stage} is an explicit Q&A stage entry`);
-      assert.notDeepEqual(careerWritingStageProfile(stage), { model: 'sonnet', effort: 'high' }, `${stage} does not fall back to the Sonnet-high default`);
-    }
   } },
-  { name: 'career writing core: the shared finding contract works over any unit text lookup (interview card claims)', run() {
+  { name: 'career writing core: the shared finding contract works over any unit text lookup (claims from any document)', run() {
     const units = { 'cards[0].headline': 'I built the hub with React and Django.', 'cards[0].bullets[0]': 'We migrated the data over three months.' };
     const unitText = id => (typeof id === 'string' && Object.hasOwn(units, id) ? units[id] : null);
     assert.deepEqual(careerFactFindingErrors([], unitText), []);

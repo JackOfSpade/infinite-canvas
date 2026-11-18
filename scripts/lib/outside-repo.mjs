@@ -10,23 +10,7 @@ export function isPathInside(child, parent) {
   return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
-/** The real path of `target`, with a not-yet-existing tail kept as written. Async; other errors than ENOENT are thrown. */
-export async function resolveThroughExistingParent(target) {
-  let probe = path.resolve(target);
-  const rest = [];
-  for (;;) {
-    try { probe = await fs.promises.realpath(probe); break; }
-    catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      const parent = path.dirname(probe);
-      if (parent === probe) break;
-      rest.unshift(path.basename(probe)); probe = parent;
-    }
-  }
-  return path.join(probe, ...rest);
-}
-
-/** Sync twin: a path that cannot be resolved is returned as plain `path.resolve` output. */
+/** The real path of `target`, with a not-yet-existing tail kept as written; a path that cannot be resolved is returned as plain `path.resolve` output. */
 export function resolveThroughExistingParentSync(target) {
   const resolved = path.resolve(target);
   let current = resolved;

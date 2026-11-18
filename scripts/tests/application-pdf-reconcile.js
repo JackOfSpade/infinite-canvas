@@ -24,7 +24,7 @@ import {
   reconcileApplicationHtmlFromPdf,
   reconcileApplicationHtmlFromPdfBlocks,
 } from '../../electron/ipc/applicationPdfReconcile.js';
-import { captureInterviewPreparationBundle } from '../../electron/ipc/interviewPreparation.js';
+import { readBundleContract } from './fixtures/bundleReaderContract.js';
 import { logger } from '../../electron/logger.js';
 
 async function textPdf(lines) {
@@ -205,8 +205,8 @@ function wrappedContactParagraphText(paragraph) {
 // The saved page POSTs action:'reconcile' on every open. When that rewrites
 // Application.html (a PDF edited outside Sync, or a shared paper-variant import)
 // the durable receipt that fingerprints the bundle must follow in the same
-// transaction, exactly as Sync does; otherwise the Interview Helper reads the
-// bundle as hash-mismatch and drops the audit identity.
+// transaction, exactly as Sync does; otherwise an outside reader (the Interview Helper app)
+// sees the bundle as hash-mismatch and drops the audit identity.
 const auditDigest = value => crypto.createHash('sha256')
   .update(typeof value === 'string' ? Buffer.from(value, 'utf8') : Buffer.from(value)).digest('hex');
 
@@ -223,13 +223,12 @@ function auditCoverLines(body) {
 
 // Builds a complete saved bundle with a REAL Generation Audit.json receipt whose
 // savedArtifacts bind the exact files on disk, registers it with Sync, and
-// returns helpers that read the verdict from the real Interview Preparation
-// verifier. auditText: 'valid' (default), '' (legacy bundle with no receipt) or
+// returns helpers that read the verdict through the reader contract fixture
+// (fixtures/bundleReaderContract.js). auditText: 'valid' (default), '' (legacy bundle with no receipt) or
 // raw receipt text written verbatim.
 async function auditedReconcileBundle({ dual = false, auditText = 'valid', tokenDigit = '3' } = {}) {
   await __resetApplicationSyncWorkspacesForTests();
   const root = await fs.promises.realpath(await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-audit-'));
-  const userDataPath = await fs.promises.mkdtemp('/tmp/infinite-canvas-pdf-audit-ud-');
   const token = tokenDigit.repeat(64);
   let resumePdf = await textPdf(AUDIT_RESUME_LINES('Maya Chen Resume baseline.'));
   let coverPdf = await textPdf(auditCoverLines('Maya builds reliable systems.'));
@@ -283,13 +282,12 @@ async function auditedReconcileBundle({ dual = false, auditText = 'valid', token
     read: name => fs.promises.readFile(path.join(root, name), 'utf8'),
     write: (name, data) => fs.promises.writeFile(path.join(root, name), data),
     readAudit: async () => JSON.parse(await fs.promises.readFile(path.join(root, 'Generation Audit.json'), 'utf8')),
-    status: async () => (await captureInterviewPreparationBundle({ directory: root, userDataPath })).verification.status,
+    status: async () => readBundleContract({ directory: root }).verification.status,
     reconcile: () => __reconcileApplicationSyncWorkspaceForTests({ token, action: 'reconcile' }),
     cleanup: async () => {
       await __resetApplicationSyncWorkspacesForTests();
       await fs.promises.unlink(__applicationSyncStatePathForTests()).catch(() => {});
       await fs.promises.rm(root, { recursive: true, force: true });
-      await fs.promises.rm(userDataPath, { recursive: true, force: true });
     },
   };
 }

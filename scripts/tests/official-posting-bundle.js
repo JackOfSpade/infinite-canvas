@@ -9,7 +9,7 @@ import { buildResumeDocument, normaliseResumeDownloadBundle } from '../../electr
 import { normalizeOfficialPosting, officialPostingLookupStatus } from '../../electron/ipc/officialPostingFields.js';
 import { OFFICIAL_POSTING_NEGATIVE_PROOF_TRAIL } from '../../electron/ipc/officialPostingNegativePolicy.js';
 import { officialPostingDisplay } from '../../src/utils/officialPostingDisplay.js';
-import { captureInterviewPreparationBundle } from '../../electron/ipc/interviewPreparation.js';
+import { readBundleContract } from './fixtures/bundleReaderContract.js';
 import { applicationDockRequest, brokenApplicationDockRequest, workingApplicationDockRequest } from '../../src/utils/applicationHandoffDock.js';
 
 const job = {
@@ -292,15 +292,15 @@ export default [
     },
   },
   {
-    name: 'Official posting bundle: interview reader still derives employer identity from the legacy header rather than poster provenance',
+    name: 'Official posting bundle: the saved-bundle reader contract still derives employer identity from the legacy header rather than poster provenance',
     async run() {
-      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-bundle-interview-'));
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'official-bundle-reader-'));
       try {
         for (const [name, input] of [['known', job], ['unknown', { ...job, company: '', officialPosting: { ...job.officialPosting, level: 'L6', employer: '' } }]]) {
           const directory = path.join(root, name); await fs.mkdir(directory);
           await fs.writeFile(path.join(directory, 'Application.html'), '<html><body><main>Synthetic application copy.</main></body></html>');
           await fs.writeFile(path.join(directory, 'Original Job Listing.md'), formatOriginalJobListingMarkdown(input, { audience: 'bundle' }));
-          const artifact = await captureInterviewPreparationBundle({ directory, userDataPath: root });
+          const artifact = readBundleContract({ directory });
           assert.equal(artifact.job.title, input.title); assert.equal(artifact.job.company, input.company);
           assert.equal(artifact.job.location, input.location); assert.equal(artifact.verification.status, 'legacy-unverified');
         }

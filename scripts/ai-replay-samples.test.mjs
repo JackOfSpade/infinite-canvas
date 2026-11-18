@@ -1,6 +1,6 @@
 // Recording that lets every Claude call be re-measured offline later: the
-// sample module's file layout and limits, the task worker's and interview
-// transport's per-attempt samples, and the spend report's annualization.
+// sample module's file layout and limits, the task worker's
+// per-attempt samples, and the spend report's annualization.
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -9,7 +9,6 @@ import path from 'node:path';
 import test from 'node:test';
 import { configureAiRecording, recordAiReplaySample, recordAiUsage } from '../electron/ipc/aiReplaySamples.js';
 import { createClaudeTaskWorker } from '../electron/ipc/claudeTaskWorker.js';
-import { createInterviewClaudeTransport } from '../electron/ipc/interviewClaudeTransport.js';
 import { summarizeAiSpend } from './ai-spend-report.mjs';
 
 const sampleHash = (text, systemAppend) => crypto.createHash('sha256')
@@ -201,71 +200,6 @@ test('claude task worker: records the exact request and the submit outcome after
   assert.equal(sample.outcome, 'rejected', 'the submit outcome is recorded');
   assert.equal(sample.validationCode, 'SCHEMA_REJECTED');
   assert.match(name, /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z-[0-9a-f]{12}\.json$/u);
-});
-
-test('interview transport: records a sample and a usage row for every Claude attempt', async () => {
-  const samples = [];
-  const usages = [];
-  const stages = [];
-  const replies = [
-    { text: 'not json', model: 'claude-resolved-x', usage: { input_tokens: 3 }, costUsd: 0.02, durationMs: 5 },
-    { text: '{"ok":true}', model: 'claude-resolved-y', usage: { input_tokens: 4 }, costUsd: 0.03, durationMs: 6 },
-  ];
-  const profile = (await import('../electron/ipc/careerWritingCore.js')).careerWritingStageProfile('qa-brief');
-  const transport = createInterviewClaudeTransport({
-    runStage: async (options) => { stages.push(options); return replies[stages.length - 1]; },
-    resolveBinary: () => '/usr/local/bin/claude',
-    env: {},
-    cwd: '/tmp',
-    routeFor: () => null,
-    shadow: { enabled: false, measure: () => {} },
-    now: () => Date.parse('2026-02-01T00:00:00.000Z'),
-    recordSample: sample => samples.push(sample),
-    recordUsage: row => usages.push(row),
-  });
-  const value = await transport.callText('PROMPT ONE', { task: 'interview-brief-assessment' });
-  assert.deepEqual(value, { ok: true });
-  assert.equal(samples.length, 2, 'one sample per Claude attempt');
-  assert.equal(usages.length, 2, 'one usage row per Claude attempt');
-  assert.equal(samples[0].task, 'interview-brief-assessment');
-  assert.equal(samples[0].stage, 'qa-brief');
-  assert.equal(samples[0].attempt, 0);
-  assert.equal(samples[0].text, 'PROMPT ONE');
-  assert.equal(samples[0].systemAppend, '');
-  assert.equal(samples[0].model, 'claude-resolved-x');
-  assert.equal(samples[0].requestedModel, profile.model);
-  assert.equal(samples[0].effort, profile.effort);
-  assert.equal(samples[0].tools, null);
-  assert.equal(samples[0].costUsd, 0.02);
-  assert.deepEqual(samples[0].usage, { input_tokens: 3 });
-  assert.equal(samples[0].answer, 'not json');
-  assert.equal(samples[0].outcome, 'rejected');
-  assert.equal(samples[0].validationCode, 'invalid');
-  assert.equal(samples[1].attempt, 1);
-  assert.equal(samples[1].text, stages[1].text, 'the retry sample holds the correction text Claude received');
-  assert.equal(samples[1].answer, '{"ok":true}');
-  assert.equal(samples[1].outcome, 'accepted');
-  assert.equal(samples[1].validationCode, null);
-  assert.deepEqual(usages[0], {
-    at: '2026-02-01T00:00:00.000Z',
-    task: 'interview-brief-assessment',
-    stage: 'qa-brief',
-    model: 'claude-resolved-x',
-    effort: profile.effort,
-    usage: { input_tokens: 3 },
-    costUsd: 0.02,
-    provider: 'claude',
-  });
-  assert.deepEqual(usages[1], {
-    at: '2026-02-01T00:00:00.000Z',
-    task: 'interview-brief-assessment',
-    stage: 'qa-brief',
-    model: 'claude-resolved-y',
-    effort: profile.effort,
-    usage: { input_tokens: 4 },
-    costUsd: 0.03,
-    provider: 'claude',
-  });
 });
 
 test('spend report: annualizes each call over the shared window of its log', () => {
